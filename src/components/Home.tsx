@@ -3,7 +3,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 
 interface InstallInfo {
-  found: boolean;
   path: string;
   source: string;
 }
@@ -14,15 +13,15 @@ interface Props {
 }
 
 export function Home({ gamePath, setGamePath }: Props) {
-  const [info, setInfo] = useState<InstallInfo | null>(null);
+  const [info, setInfo] = useState<InstallInfo | null | undefined>(undefined);
   const [detecting, setDetecting] = useState(false);
 
   async function detect() {
     setDetecting(true);
     try {
-      const result = await invoke<InstallInfo>("detect_install_path");
+      const result = await invoke<InstallInfo | null>("detect_install_path");
       setInfo(result);
-      if (result.found) setGamePath(result.path);
+      if (result) setGamePath(result.path);
     } catch (e) {
       console.error(e);
     } finally {
@@ -44,10 +43,13 @@ export function Home({ gamePath, setGamePath }: Props) {
       <h2 className="panel-title">Installation</h2>
 
       {info && (
-        <div className={`status-badge ${info.found ? "ok" : "warn"}`}>
-          {info.found
-            ? `✓ Found via ${info.source}`
-            : "✗ Auto-detection failed — set path manually"}
+        <div className={`status-badge ok`}>
+          {`✓ Found via ${info.source}`}
+        </div>
+      )}
+      {info === null && (
+        <div className="status-badge warn">
+          ✗ Auto-detection failed — set path manually
         </div>
       )}
 
