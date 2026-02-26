@@ -12,9 +12,11 @@
   "app": {
     "windows": [
       {
-        "title": "oinkers-editor",
-        "width": 800,
-        "height": 600
+        "title": "Oinkers Editor",
+        "width": 1100,
+        "height": 720,
+        "minWidth": 900,
+        "minHeight": 600
       }
     ],
     "security": {

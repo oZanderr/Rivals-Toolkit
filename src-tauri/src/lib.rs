@@ -1,5 +1,6 @@
 mod commands;
 mod detect;
+mod pak;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -8,6 +9,11 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             commands::detect_install_path,
+            commands::list_pak_files,
+            commands::list_pak_contents,
+            commands::unpack_pak,
+            commands::extract_single_file,
+            commands::repack_pak,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

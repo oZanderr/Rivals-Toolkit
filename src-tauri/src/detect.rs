@@ -20,8 +20,8 @@ pub(crate) enum InstallSource {
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct InstallInfo {
-    pub path: String,
-    pub source: InstallSource,
+    pub(crate) path: String,
+    pub(crate) source: InstallSource,
 }
 
 impl InstallInfo {
