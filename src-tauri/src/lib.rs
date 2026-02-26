@@ -15,6 +15,7 @@ pub fn run() {
             commands::extract_single_file,
             commands::repack_pak,
             commands::get_mods_status,
+            commands::install_signature_bypass,
             commands::open_mods_folder
         ])
         .run(tauri::generate_context!())

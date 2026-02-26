@@ -110,6 +110,37 @@ pub(crate) fn get_mods_status(game_root: String) -> ModsStatus {
 }
 
 #[tauri::command]
+pub(crate) fn install_signature_bypass(game_root: String) -> Result<String, String> {
+    // Validate that the bundled DLL is a real PE binary (MZ header), not a placeholder.
+    if !BYPASS_DSOUND.starts_with(b"MZ") {
+        return Err(
+            "Bundled dsound.dll is a placeholder. \
+             Replace src-tauri/resources/bypass/dsound.dll with the real file \
+             from the Nexusmods bypass mod and rebuild the app."
+                .to_string(),
+        );
+    }
+
+    let bin_dir = binaries_dir(&game_root);
+    if !bin_dir.exists() {
+        return Err(format!(
+            "Binaries directory not found: {}\nMake sure the game root path is correct.",
+            bin_dir.display()
+        ));
+    }
+
+    fs::write(bin_dir.join("dsound.dll"), BYPASS_DSOUND).map_err(|e| e.to_string())?;
+
+    let plugins_dir = bin_dir.join("plugins");
+    fs::create_dir_all(&plugins_dir).map_err(|e| e.to_string())?;
+    fs::write(plugins_dir.join("MarvelRivalsUTOCSignatureBypass.asi"), BYPASS_ASI).map_err(|e| e.to_string())?;
+
+    fs::create_dir_all(mods_dir(&game_root)).map_err(|e| e.to_string())?;
+
+    Ok(format!("Bypass installed to {}", bin_dir.display()))
+}
+
+#[tauri::command]
 pub(crate) fn open_mods_folder(game_root: String) -> Result<(), String> {
     let mods = mods_dir(&game_root);
     if !mods.exists() {
