@@ -1,13 +1,15 @@
 import { useState, type ReactNode } from "react";
-import { House } from "lucide-react";
+import { House, Package } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Home } from "./components/Home";
+import { PakManager } from "./components/PakManager";
 import { Separator } from "@/components/ui/separator";
 
-type Tab = "home";
+type Tab = "home" | "pak-manager";
 
 const TABS: { id: Tab; label: string; icon: ReactNode }[] = [
   { id: "home", label: "Home", icon: <House size={15} /> },
+  { id: "pak-manager", label: "PAK Manager (Expert)", icon: <Package size={15} /> },
 ];
 
 function App() {
@@ -59,9 +61,14 @@ function App() {
       </nav>
 
       {/* Content */}
-      <main className="flex-1 overflow-y-auto p-6 bg-background">
+      <main className="flex min-h-0 flex-1 flex-col overflow-hidden p-6 bg-background">
         {activeTab === "home" && (
-          <Home gamePath={gamePath} setGamePath={setGamePath} />
+          <div className="h-full overflow-y-auto">
+            <Home gamePath={gamePath} setGamePath={setGamePath} />
+          </div>
+        )}
+        {activeTab === "pak-manager" && (
+          <PakManager gamePath={gamePath} />
         )}
       </main>
     </div>

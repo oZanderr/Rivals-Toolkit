@@ -28,6 +28,14 @@
   --color-warn: oklch(0.83 0.18  90);
   --color-err:  oklch(0.70 0.19  18);
   --color-info: oklch(0.78 0.10 243);
+  --blue-accent:            oklch(0.28 0.07 240);
+  --blue-accent-hover:      oklch(0.34 0.09 240);
+  --blue-accent-foreground: oklch(0.81 0.10 218);
+  --blue-accent-border:     oklch(0.49 0.19 264 / 27%);
+  --green-accent:            oklch(0.25 0.07 155);
+  --green-accent-hover:      oklch(0.31 0.09 155);
+  --green-accent-foreground: oklch(0.80 0.14 148);
+  --green-accent-border:     oklch(0.50 0.18 148 / 27%);
 }
 
 .dark {
@@ -53,6 +61,14 @@
   --color-warn: oklch(0.83 0.18  90);
   --color-err:  oklch(0.70 0.19  18);
   --color-info: oklch(0.78 0.10 243);
+  --blue-accent:            oklch(0.28 0.07 240);
+  --blue-accent-hover:      oklch(0.34 0.09 240);
+  --blue-accent-foreground: oklch(0.81 0.10 218);
+  --blue-accent-border:     oklch(0.49 0.19 264 / 27%);
+  --green-accent:            oklch(0.25 0.07 155);
+  --green-accent-hover:      oklch(0.31 0.09 155);
+  --green-accent-foreground: oklch(0.80 0.14 148);
+  --green-accent-border:     oklch(0.50 0.18 148 / 27%);
 }
 
 @theme inline {
@@ -78,6 +94,14 @@
   --color-warn: var(--color-warn);
   --color-err:  var(--color-err);
   --color-info: var(--color-info);
+  --color-blue-accent:            var(--blue-accent);
+  --color-blue-accent-hover:      var(--blue-accent-hover);
+  --color-blue-accent-foreground: var(--blue-accent-foreground);
+  --color-blue-accent-border:     var(--blue-accent-border);
+  --color-green-accent:            var(--green-accent);
+  --color-green-accent-hover:      var(--green-accent-hover);
+  --color-green-accent-foreground: var(--green-accent-foreground);
+  --color-green-accent-border:     var(--green-accent-border);
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);

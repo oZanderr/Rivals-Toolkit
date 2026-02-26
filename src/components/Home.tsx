@@ -53,7 +53,7 @@ export function Home({ gamePath, setGamePath }: Props) {
   }, []);
 
   return (
-    <div className="flex max-w-2xl flex-col gap-5">
+    <div className="flex w-full max-w-4xl flex-col gap-6">
       <div className="flex items-center gap-3">
         <h2 className="text-xl font-bold">Installation</h2>
         {showBadge && info && (
@@ -82,11 +82,11 @@ export function Home({ gamePath, setGamePath }: Props) {
             title={gamePath}
             className="flex-1 font-mono text-xs"
           />
-          <Button variant="secondary" onClick={browse} className="shrink-0">
+          <Button variant="outline" onClick={browse} className="shrink-0">
             <FolderOpen size={15} />
             Browse
           </Button>
-          <Button onClick={detect} disabled={detecting} className="shrink-0 bg-[oklch(0.55_0.220_22)] text-white hover:bg-[oklch(0.50_0.220_22)]">
+          <Button onClick={detect} disabled={detecting} variant="blue" className="shrink-0">
             <RefreshCw size={15} className={cn(detecting && "animate-spin")} />
             Redetect
           </Button>
@@ -94,12 +94,12 @@ export function Home({ gamePath, setGamePath }: Props) {
       </div>
 
       {gamePath && (
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid gap-3 sm:grid-cols-2">
           <Card className="bg-card">
-            <div className="flex flex-col gap-2 p-3">
+            <div className="flex flex-col gap-2 p-4">
               <div className="flex items-center justify-between">
                 <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Paks Folder</span>
-                <Button variant="ghost" size="icon" className="h-5 w-5 text-muted-foreground hover:text-foreground" onClick={() => openPath(`${gamePath}\\MarvelGame\\Marvel\\Content\\Paks`).catch(console.error)}>
+                <Button variant="ghost" size="icon" className="h-5 w-5 text-muted-foreground hover:text-foreground" onClick={() => openPath(`${gamePath}\\MarvelGame\\Marvel\\Content\\Paks`)}>
                   <FolderOpen size={12} />
                 </Button>
               </div>
@@ -109,10 +109,10 @@ export function Home({ gamePath, setGamePath }: Props) {
             </div>
           </Card>
           <Card className="bg-card">
-            <div className="flex flex-col gap-2 p-3">
+            <div className="flex flex-col gap-2 p-4">
               <div className="flex items-center justify-between">
                 <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Mods Folder</span>
-                <Button variant="ghost" size="icon" className="h-5 w-5 text-muted-foreground hover:text-foreground" onClick={() => openPath(`${gamePath}\\MarvelGame\\Marvel\\Content\\Paks\\~mods`).catch(console.error)}>
+                <Button variant="ghost" size="icon" className="h-5 w-5 text-muted-foreground hover:text-foreground" onClick={() => openPath(`${gamePath}\\MarvelGame\\Marvel\\Content\\Paks\\~mods`)}>
                   <FolderOpen size={12} />
                 </Button>
               </div>
