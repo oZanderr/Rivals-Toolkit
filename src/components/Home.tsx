@@ -1,6 +1,12 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+import { openPath } from "@tauri-apps/plugin-opener";
+import { FolderOpen, RefreshCw, CheckCircle2, XCircle } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Card } from "@/components/ui/card";
+import { cn } from "@/lib/utils";
 
 interface InstallInfo {
   path: string;
@@ -15,13 +21,21 @@ interface Props {
 export function Home({ gamePath, setGamePath }: Props) {
   const [info, setInfo] = useState<InstallInfo | null | undefined>(undefined);
   const [detecting, setDetecting] = useState(false);
+  const [showBadge, setShowBadge] = useState(false);
+  const badgeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   async function detect() {
+    if (badgeTimer.current) clearTimeout(badgeTimer.current);
     setDetecting(true);
+    setShowBadge(false);
     try {
       const result = await invoke<InstallInfo | null>("detect_install_path");
       setInfo(result);
-      if (result) setGamePath(result.path);
+      if (result) {
+        setGamePath(result.path);
+        setShowBadge(true);
+        badgeTimer.current = setTimeout(() => setShowBadge(false), 4000);
+      }
     } catch (e) {
       console.error(e);
     } finally {
@@ -39,51 +53,74 @@ export function Home({ gamePath, setGamePath }: Props) {
   }, []);
 
   return (
-    <div className="panel">
-      <h2 className="panel-title">Installation</h2>
+    <div className="flex max-w-2xl flex-col gap-5">
+      <div className="flex items-center gap-3">
+        <h2 className="text-xl font-bold">Installation</h2>
+        {showBadge && info && (
+          <span className="flex items-center gap-1.5 text-[12px] font-medium text-[var(--color-ok)]">
+            <CheckCircle2 size={14} strokeWidth={2.5} />
+            Found via {info.source}
+          </span>
+        )}
+        {info === null && (
+          <span className="flex items-center gap-1.5 text-[12px] font-medium text-[var(--color-warn)]">
+            <XCircle size={14} strokeWidth={2.5} />
+            Not detected
+          </span>
+        )}
+      </div>
 
-      {info && (
-        <div className={`status-badge ok`}>
-          {`✓ Found via ${info.source}`}
-        </div>
-      )}
-      {info === null && (
-        <div className="status-badge warn">
-          ✗ Auto-detection failed — set path manually
-        </div>
-      )}
-
-      <div className="field-row">
-        <label>Game Root</label>
-        <div className="path-row">
-          <input
-            className="path-input"
+      <div className="flex flex-col gap-1.5">
+        <label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+          Game Root
+        </label>
+        <div className="flex gap-2">
+          <Input
             value={gamePath}
             onChange={(e) => setGamePath(e.target.value)}
-            placeholder="e.g. C:\Program Files (x86)\Steam\steamapps\common\MarvelRivals"
+            placeholder={`e.g. C:\\Program Files (x86)\\Steam\\steamapps\\common\\MarvelRivals`}
+            title={gamePath}
+            className="flex-1 font-mono text-xs"
           />
-          <button onClick={browse} className="btn-secondary">Browse…</button>
+          <Button variant="secondary" onClick={browse} className="shrink-0">
+            <FolderOpen size={15} />
+            Browse
+          </Button>
+          <Button onClick={detect} disabled={detecting} className="shrink-0 bg-[oklch(0.55_0.220_22)] text-white hover:bg-[oklch(0.50_0.220_22)]">
+            <RefreshCw size={15} className={cn(detecting && "animate-spin")} />
+            Redetect
+          </Button>
         </div>
       </div>
 
-      <button onClick={detect} className="btn-primary" disabled={detecting}>
-        {detecting ? "Detecting…" : "Re-detect Installation"}
-      </button>
-
       {gamePath && (
-        <div className="info-grid">
-          <div className="info-card">
-            <span className="info-label">Paks Folder</span>
-            <span className="info-value path-chip">
-              {gamePath}\MarvelGame\Marvel\Content\Paks
-            </span>
-          </div>
-          <div className="info-card">
-            <span className="info-label">Mods Folder</span>
-            <span className="info-value path-chip">
-              {gamePath}\MarvelGame\Marvel\Content\Paks\~mods
-            </span>
-          </div>
+        <div className="grid grid-cols-2 gap-3">
+          <Card className="bg-card">
+            <div className="flex flex-col gap-2 p-3">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Paks Folder</span>
+                <Button variant="ghost" size="icon" className="h-5 w-5 text-muted-foreground hover:text-foreground" onClick={() => openPath(`${gamePath}\\MarvelGame\\Marvel\\Content\\Paks`).catch(console.error)}>
+                  <FolderOpen size={12} />
+                </Button>
+              </div>
+              <code className="break-all text-[11px] text-foreground">
+                {gamePath}\MarvelGame\Marvel\Content\Paks
+              </code>
+            </div>
+          </Card>
+          <Card className="bg-card">
+            <div className="flex flex-col gap-2 p-3">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Mods Folder</span>
+                <Button variant="ghost" size="icon" className="h-5 w-5 text-muted-foreground hover:text-foreground" onClick={() => openPath(`${gamePath}\\MarvelGame\\Marvel\\Content\\Paks\\~mods`).catch(console.error)}>
+                  <FolderOpen size={12} />
+                </Button>
+              </div>
+              <code className="break-all text-[11px] text-foreground">
+                {gamePath}\MarvelGame\Marvel\Content\Paks\~mods
+              </code>
+            </div>
+          </Card>
         </div>
       )}
     </div>
