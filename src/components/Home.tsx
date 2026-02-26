@@ -99,7 +99,7 @@ export function Home({ gamePath, setGamePath }: Props) {
             <div className="flex flex-col gap-2 p-3">
               <div className="flex items-center justify-between">
                 <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Paks Folder</span>
-                <Button variant="ghost" size="icon" className="h-5 w-5 text-muted-foreground hover:text-foreground" onClick={() => openPath(`${gamePath}\\MarvelGame\\Marvel\\Content\\Paks`).catch(console.error)}>
+                <Button variant="ghost" size="icon" className="h-5 w-5 text-muted-foreground hover:text-foreground" onClick={() => openPath(`${gamePath}\\MarvelGame\\Marvel\\Content\\Paks`)}>
                   <FolderOpen size={12} />
                 </Button>
               </div>
@@ -112,7 +112,7 @@ export function Home({ gamePath, setGamePath }: Props) {
             <div className="flex flex-col gap-2 p-3">
               <div className="flex items-center justify-between">
                 <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Mods Folder</span>
-                <Button variant="ghost" size="icon" className="h-5 w-5 text-muted-foreground hover:text-foreground" onClick={() => openPath(`${gamePath}\\MarvelGame\\Marvel\\Content\\Paks\\~mods`).catch(console.error)}>
+                <Button variant="ghost" size="icon" className="h-5 w-5 text-muted-foreground hover:text-foreground" onClick={() => openPath(`${gamePath}\\MarvelGame\\Marvel\\Content\\Paks\\~mods`)}>
                   <FolderOpen size={12} />
                 </Button>
               </div>
