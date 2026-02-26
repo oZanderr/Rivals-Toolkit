@@ -8,6 +8,14 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+// Bypass files bundled at compile time.
+// Place the real files at:
+//   src-tauri/resources/bypass/dsound.dll
+//   src-tauri/resources/bypass/plugins/bypass.asi
+// before building. The install command validates the DLL header at runtime.
+static BYPASS_DSOUND: &[u8] = include_bytes!("../resources/bypass/dsound.dll");
+static BYPASS_ASI: &[u8] = include_bytes!("../resources/bypass/plugins/MarvelRivalsUTOCSignatureBypass.asi");
+
 fn paks_dir(game_root: &str) -> PathBuf {
     PathBuf::from(game_root).join("MarvelGame\\Marvel\\Content\\Paks")
 }
