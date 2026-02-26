@@ -27,7 +27,6 @@ repak = { git = "https://github.com/natimerry/repak-rivals", branch = "master" }
 aes = "0.8.4"
 hex = "0.4"
 walkdir = "2"
-dirs = "5"
 winreg = "0.52"
 
 [profile.release]
