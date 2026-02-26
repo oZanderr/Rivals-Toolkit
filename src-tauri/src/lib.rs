@@ -14,6 +14,8 @@ pub fn run() {
             commands::unpack_pak,
             commands::extract_single_file,
             commands::repack_pak,
+            commands::get_mods_status,
+            commands::open_mods_folder
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

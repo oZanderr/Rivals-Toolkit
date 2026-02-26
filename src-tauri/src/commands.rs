@@ -1,5 +1,33 @@
 use crate::{detect, pak};
 
+use std::{
+    fs,
+    io::{BufReader, BufWriter},
+    path::{Path, PathBuf},
+};
+
+use serde::{Deserialize, Serialize};
+
+fn paks_dir(game_root: &str) -> PathBuf {
+    PathBuf::from(game_root).join("MarvelGame\\Marvel\\Content\\Paks")
+}
+
+fn mods_dir(game_root: &str) -> PathBuf {
+    paks_dir(game_root).join("~mods")
+}
+
+fn binaries_dir(game_root: &str) -> PathBuf {
+    PathBuf::from(game_root).join("MarvelGame\\Marvel\\Binaries\\Win64")
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct ModsStatus {
+    pub mods_folder_exists: bool,
+    pub mods_folder_path: String,
+    pub sig_bypass_installed: bool,
+    pub mod_paks: Vec<String>,
+}
+
 #[tauri::command]
 pub(crate) fn detect_install_path() -> Option<detect::InstallInfo> {
     detect::detect_game_install()
@@ -47,3 +75,42 @@ pub(crate) async fn repack_pak(input_dir: String, output_pak: String) -> Result<
         .map_err(|e| e.to_string())?
 }
 
+#[tauri::command]
+pub(crate) fn get_mods_status(game_root: String) -> ModsStatus {
+    let mods = mods_dir(&game_root);
+    let exists = mods.exists();
+    let sig_bypass_installed = binaries_dir(&game_root).join("dsound.dll").exists();
+
+    let mod_paks = if exists {
+        fs::read_dir(&mods)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("pak"))
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    ModsStatus {
+        mods_folder_exists: exists,
+        mods_folder_path: mods.to_string_lossy().into_owned(),
+        sig_bypass_installed,
+        mod_paks,
+    }
+}
+
+#[tauri::command]
+pub(crate) fn open_mods_folder(game_root: String) -> Result<(), String> {
+    let mods = mods_dir(&game_root);
+    if !mods.exists() {
+        return Err("~mods folder does not exist — install the bypass first.".to_string());
+    }
+    #[cfg(target_os = "windows")]
+    std::process::Command::new("explorer")
+        .arg(mods.to_string_lossy().as_ref())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
