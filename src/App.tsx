@@ -1,16 +1,18 @@
 import { useState, type ReactNode } from "react";
-import { House, Package, Wrench } from "lucide-react";
+import { House, Package, Settings, Wrench } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Home } from "./components/Home";
 import { PakManager } from "./components/PakManager";
 import { ModTools } from "./components/ModTools";
+import { ScalabilityEditor } from "./components/ScalabilityEditor";
 import { Separator } from "@/components/ui/separator";
 
-type Tab = "home" | "mod-tools" | "pak-manager";
+type Tab = "home" | "mod-tools" | "pak-manager" | "scalability";
 
 const TABS: { id: Tab; label: string; icon: ReactNode }[] = [
   { id: "home", label: "Home", icon: <House size={15} /> },
   { id: "mod-tools", label: "Mod Tools", icon: <Wrench size={15} /> },
+  { id: "scalability", label: "Scalability Editor", icon: <Settings size={15} /> },
   { id: "pak-manager", label: "PAK Manager (Expert)", icon: <Package size={15} /> },
 ];
 
@@ -76,6 +78,11 @@ function App() {
         )}
         {activeTab === "pak-manager" && (
           <PakManager gamePath={gamePath} />
+        )}
+        {activeTab === "scalability" && (
+          <div className="h-full overflow-y-auto">
+            <ScalabilityEditor />
+          </div>
         )}
       </main>
     </div>
