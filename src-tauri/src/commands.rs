@@ -1,4 +1,4 @@
-use crate::{detect, mods, pak, scalability};
+use crate::{detect, mods, pak, pak_tweaks, scalability};
 
 #[tauri::command]
 pub(crate) fn get_scalability_path() -> Result<String, String> {
@@ -75,4 +75,50 @@ pub(crate) fn install_signature_bypass(game_root: String) -> Result<String, Stri
 #[tauri::command]
 pub(crate) fn open_mods_folder(game_root: String) -> Result<(), String> {
     mods::open_mods_folder(&game_root)
+}
+
+#[tauri::command]
+pub(crate) fn get_tweak_definitions() -> Vec<scalability::TweakDefinition> {
+    scalability::get_tweak_definitions()
+}
+
+#[tauri::command]
+pub(crate) fn detect_tweaks(content: String) -> Vec<scalability::TweakState> {
+    scalability::detect_tweaks(&content)
+}
+
+#[tauri::command]
+pub(crate) fn apply_tweaks(
+    content: String,
+    settings: Vec<scalability::TweakSetting>,
+) -> String {
+    scalability::apply_tweaks(&content, &settings)
+}
+
+#[tauri::command]
+pub(crate) async fn scan_mod_paks_for_ini(
+    game_root: String,
+) -> Result<Vec<pak_tweaks::PakIniInfo>, String> {
+    tauri::async_runtime::spawn_blocking(move || pak_tweaks::scan_mod_paks(&game_root))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub(crate) async fn read_pak_tweak_values(
+    pak_path: String,
+) -> Result<Vec<pak_tweaks::PakTweakState>, String> {
+    tauri::async_runtime::spawn_blocking(move || pak_tweaks::read_pak_tweaks(&pak_path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub(crate) async fn apply_pak_tweak_edits(
+    pak_path: String,
+    edits: Vec<pak_tweaks::PakTweakEdit>,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || pak_tweaks::apply_pak_tweaks(&pak_path, &edits))
+        .await
+        .map_err(|e| e.to_string())?
 }
