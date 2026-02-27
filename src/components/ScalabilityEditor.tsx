@@ -1,18 +1,21 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { FileText, FolderOpen, RefreshCw, Save } from "lucide-react";
+import { FileText, FolderOpen, RefreshCw, Save, SlidersHorizontal } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
+import { ScalabilitySettings } from "./ScalabilitySettings";
 
 type StatusType = "ok" | "err" | "info";
+type SubTab = "quick" | "raw";
 
 export function ScalabilityEditor() {
   const [filePath, setFilePath] = useState("");
   const [content, setContent] = useState("");
   const [saved, setSaved] = useState(true);
+  const [subTab, setSubTab] = useState<SubTab>("quick");
   const [status, setStatus] = useState<{ msg: string; type: StatusType } | null>(null);
 
   const showStatus = (msg: string, type: StatusType = "info") =>
@@ -98,30 +101,72 @@ export function ScalabilityEditor() {
         </div>
       </Card>
 
-      {/* Editor */}
-      <Card className="flex flex-col gap-3 p-4 bg-card">
-        <div className="flex items-center justify-between">
-          <h3 className="flex items-center gap-1.5 text-sm font-semibold">
-            <FileText size={14} />
-            Scalability.ini
-          </h3>
-          {!saved && (
-            <span className="text-[11px] text-[var(--color-warn)]">Unsaved changes</span>
+      {/* Sub-tab bar */}
+      <div className="flex gap-1 rounded-md bg-muted p-1">
+        <button
+          onClick={() => setSubTab("quick")}
+          className={cn(
+            "flex items-center gap-1.5 rounded-sm px-3 py-1.5 text-[12px] font-medium transition-colors",
+            subTab === "quick"
+              ? "bg-background text-foreground shadow-sm"
+              : "text-muted-foreground hover:text-foreground",
           )}
-        </div>
-        <textarea
-          className="h-96 w-full resize-y rounded-md border border-border bg-background px-3 py-2 font-mono text-[12px] leading-relaxed text-foreground outline-none focus:ring-1 focus:ring-ring"
-          value={content}
-          onChange={(e) => { setContent(e.target.value); setSaved(false); }}
-          spellCheck={false}
+        >
+          <SlidersHorizontal size={13} />
+          Quick Settings
+        </button>
+        <button
+          onClick={() => setSubTab("raw")}
+          className={cn(
+            "flex items-center gap-1.5 rounded-sm px-3 py-1.5 text-[12px] font-medium transition-colors",
+            subTab === "raw"
+              ? "bg-background text-foreground shadow-sm"
+              : "text-muted-foreground hover:text-foreground",
+          )}
+        >
+          <FileText size={13} />
+          Raw Editor
+        </button>
+      </div>
+
+      {/* Quick Settings view */}
+      {subTab === "quick" && (
+        <ScalabilitySettings
+          filePath={filePath}
+          content={content}
+          setContent={setContent}
+          onSaved={() => setSaved(true)}
         />
-        <div className="flex justify-end">
-          <Button variant="green" size="sm" onClick={save} disabled={saved}>
-            <Save size={14} />
-            {saved ? "Saved" : "Save Changes"}
-          </Button>
-        </div>
-      </Card>
+      )}
+
+      {/* Raw Editor view */}
+      {subTab === "raw" && (
+        <>
+          <Card className="flex flex-col gap-3 p-4 bg-card">
+            <div className="flex items-center justify-between">
+              <h3 className="flex items-center gap-1.5 text-sm font-semibold">
+                <FileText size={14} />
+                Scalability.ini
+              </h3>
+              {!saved && (
+                <span className="text-[11px] text-[var(--color-warn)]">Unsaved changes</span>
+              )}
+            </div>
+            <textarea
+              className="h-96 w-full resize-y rounded-md border border-border bg-background px-3 py-2 font-mono text-[12px] leading-relaxed text-foreground outline-none focus:ring-1 focus:ring-ring"
+              value={content}
+              onChange={(e) => { setContent(e.target.value); setSaved(false); }}
+              spellCheck={false}
+            />
+            <div className="flex justify-end">
+              <Button variant="green" size="sm" onClick={save} disabled={saved}>
+                <Save size={14} />
+                {saved ? "Saved" : "Save Changes"}
+              </Button>
+            </div>
+          </Card>
+        </>
+      )}
 
       {/* Status */}
       {status && (
