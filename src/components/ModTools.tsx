@@ -10,10 +10,13 @@ import {
   Package,
   CheckCircle2,
   XCircle,
+  SlidersHorizontal,
+  Wrench,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
+import { PakTweaks } from "./PakTweaks";
 
 interface ModsStatus {
   mods_folder_exists: boolean;
@@ -27,8 +30,10 @@ interface Props {
 }
 
 type StatusType = "ok" | "err" | "info";
+type SubTab = "general" | "pak-config";
 
 export function ModTools({ gamePath }: Props) {
+  const [subTab, setSubTab] = useState<SubTab>("general");
   const [modsStatus, setModsStatus] = useState<ModsStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<{ msg: string; type: StatusType } | null>(null);
@@ -101,6 +106,36 @@ export function ModTools({ gamePath }: Props) {
           </span>
         )}
       </div>
+
+      {/* Sub-tabs */}
+      <div className="flex gap-1 rounded-md border border-border bg-card p-1">
+        <button
+          onClick={() => setSubTab("general")}
+          className={cn(
+            "flex items-center gap-1.5 rounded-sm px-3 py-1.5 text-[13px] text-muted-foreground transition-colors hover:text-foreground",
+            subTab === "general" && "bg-secondary font-semibold text-foreground",
+          )}
+        >
+          <Wrench size={13} />
+          General
+        </button>
+        <button
+          onClick={() => setSubTab("pak-config")}
+          className={cn(
+            "flex items-center gap-1.5 rounded-sm px-3 py-1.5 text-[13px] text-muted-foreground transition-colors hover:text-foreground",
+            subTab === "pak-config" && "bg-secondary font-semibold text-foreground",
+          )}
+        >
+          <SlidersHorizontal size={13} />
+          PAK Config Editor
+        </button>
+      </div>
+
+      {subTab === "pak-config" && (
+        <PakTweaks gamePath={gamePath} />
+      )}
+
+      {subTab === "general" && (<>
 
       {/* Status cards */}
       <div className="grid gap-3 sm:grid-cols-3">
@@ -215,6 +250,8 @@ export function ModTools({ gamePath }: Props) {
           {status.msg}
         </p>
       )}
+
+      </>)}
     </div>
   );
 }
