@@ -28,6 +28,7 @@ aes = "0.8.4"
 hex = "0.4"
 walkdir = "2"
 winreg = "0.52"
+dirs = "5"
 
 [profile.release]
 opt-level = 3
