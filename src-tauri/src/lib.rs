@@ -1,5 +1,6 @@
 mod commands;
 mod detect;
+mod mods;
 mod pak;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
