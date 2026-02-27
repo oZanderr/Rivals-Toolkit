@@ -1,4 +1,19 @@
-use crate::{detect, mods, pak};
+use crate::{detect, mods, pak, scalability};
+
+#[tauri::command]
+pub(crate) fn get_scalability_path() -> Result<String, String> {
+    scalability::get_scalability_path()
+}
+
+#[tauri::command]
+pub(crate) fn read_scalability(path: String) -> Result<String, String> {
+    scalability::read_scalability(&path)
+}
+
+#[tauri::command]
+pub(crate) fn write_scalability(path: String, content: String) -> Result<(), String> {
+    scalability::write_scalability(&path, &content)
+}
 
 #[tauri::command]
 pub(crate) fn detect_install_path() -> Option<detect::InstallInfo> {

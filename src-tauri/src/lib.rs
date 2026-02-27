@@ -2,6 +2,7 @@ mod commands;
 mod detect;
 mod mods;
 mod pak;
+mod scalability;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -17,7 +18,10 @@ pub fn run() {
             commands::repack_pak,
             commands::get_mods_status,
             commands::install_signature_bypass,
-            commands::open_mods_folder
+            commands::open_mods_folder,
+            commands::get_scalability_path,
+            commands::read_scalability,
+            commands::write_scalability
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
