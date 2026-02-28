@@ -139,7 +139,9 @@ export function ScalabilitySettings({ filePath, content, setContent, onSaved }: 
     <div className="flex flex-col gap-5">
       {Object.entries(categories).map(([category, tweaks]) => (
         <Card key={category} className="flex flex-col gap-4 bg-card p-4">
-          <h3 className="text-sm font-semibold">{category}</h3>
+          <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+            {category}
+          </span>
           <div className="flex flex-col gap-3">
             {tweaks.map((tweak) => (
               <TweakRow
@@ -159,11 +161,11 @@ export function ScalabilitySettings({ filePath, content, setContent, onSaved }: 
       <div className="flex items-center gap-3">
         <Button variant="green" size="sm" onClick={applyAndSave} disabled={!dirty}>
           <Save size={14} />
-          {dirty ? "Apply & Save" : "Up to date"}
+          {dirty ? "Apply & Save" : "Up to Date"}
         </Button>
         <Button variant="ghost" size="sm" onClick={() => detectTweaks(content)}>
           <RefreshCw size={14} />
-          Re-detect
+          Reset
         </Button>
         {status && (
           <span

@@ -70,8 +70,6 @@ interface SliderTweak extends TweakBase {
 
 type TweakDefinition = RemoveLinesTweak | ToggleTweak | SliderTweak;
 
-type StatusType = "ok" | "err" | "info";
-
 interface Props {
   gamePath: string;
 }
@@ -85,7 +83,6 @@ export function PakTweaks({ gamePath }: Props) {
   const [loading, setLoading] = useState(false);
   const [applying, setApplying] = useState(false);
   const [dirty, setDirty] = useState(false);
-  const [status, setStatus] = useState<{ msg: string; type: StatusType } | null>(null);
   const [showBadge, setShowBadge] = useState(false);
   const [badgeMsg, setBadgeMsg] = useState("");
   const badgeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -94,10 +91,6 @@ export function PakTweaks({ gamePath }: Props) {
   const [definitions, setDefinitions] = useState<TweakDefinition[]>([]);
   const [tweakEnabled, setTweakEnabled] = useState<Record<string, boolean>>({});
   const [tweakValues, setTweakValues] = useState<Record<string, string>>({});
-  const [showQuick, setShowQuick] = useState(true);
-
-  const showStatus = (msg: string, type: StatusType = "info") =>
-    setStatus({ msg, type });
 
   const flashBadge = (msg: string) => {
     if (badgeTimer.current) clearTimeout(badgeTimer.current);
@@ -208,24 +201,30 @@ export function PakTweaks({ gamePath }: Props) {
   async function scan() {
     if (!gamePath) return;
     setScanning(true);
-    setStatus(null);
     try {
       const results = await invoke<PakIniInfo[]>("scan_mod_paks_for_ini", {
         gameRoot: gamePath,
       });
       setPaks(results);
       if (results.length === 0) {
-        showStatus("No mod paks with INI config files found in ~mods.", "info");
-      }
-      // If previously selected pak is gone, deselect
-      if (selectedPak && !results.find((p) => p.pak_path === selectedPak.pak_path)) {
         setSelectedPak(null);
         setTweaks([]);
         setEdits([]);
         setDirty(false);
+      } else if (results.length === 1) {
+        // Auto-select the only available pak
+        await selectPak(results[0]);
+      } else {
+        // If previously selected pak is gone, deselect
+        if (selectedPak && !results.find((p) => p.pak_path === selectedPak.pak_path)) {
+          setSelectedPak(null);
+          setTweaks([]);
+          setEdits([]);
+          setDirty(false);
+        }
       }
     } catch (e: any) {
-      showStatus(String(e), "err");
+      console.error("Scan failed:", e);
     } finally {
       setScanning(false);
     }
@@ -234,7 +233,6 @@ export function PakTweaks({ gamePath }: Props) {
   async function selectPak(pak: PakIniInfo) {
     setSelectedPak(pak);
     setLoading(true);
-    setStatus(null);
     try {
       const states = await invoke<PakTweakState[]>("read_pak_tweak_values", {
         pakPath: pak.pak_path,
@@ -242,12 +240,8 @@ export function PakTweaks({ gamePath }: Props) {
       setTweaks(states);
       setEdits([]);
       setDirty(false);
-      showStatus(
-        `Loaded ${states.length} variable(s) from ${pak.has_device_profiles ? "DefaultDeviceProfiles.ini" : "DefaultEngine.ini"}`,
-        "ok",
-      );
     } catch (e: any) {
-      showStatus(String(e), "err");
+      console.error("Load failed:", e);
       setTweaks([]);
     } finally {
       setLoading(false);
@@ -280,7 +274,7 @@ export function PakTweaks({ gamePath }: Props) {
       // Reload to reflect changes
       await selectPak(selectedPak);
     } catch (e: any) {
-      showStatus(String(e), "err");
+      console.error("Apply failed:", e);
     } finally {
       setApplying(false);
     }
@@ -288,27 +282,18 @@ export function PakTweaks({ gamePath }: Props) {
 
   return (
     <div className="flex w-full max-w-4xl flex-col gap-5">
-      {/* Header */}
-      <div className="flex items-center gap-3">
-        <h3 className="text-base font-semibold">PAK Config Editor</h3>
-        {showBadge && (
-          <span className="flex items-center gap-1.5 text-[12px] font-medium text-[var(--color-ok)]">
-            <CheckCircle2 size={14} strokeWidth={2.5} />
-            {badgeMsg}
-          </span>
-        )}
-      </div>
-
-      <p className="text-[12px] leading-relaxed text-muted-foreground">
-        Edit console variables inside mod PAK files that contain{" "}
-        <Code>DefaultDeviceProfiles.ini</Code> or <Code>DefaultEngine.ini</Code>. The pak will be
-        extracted, modified, and repacked automatically.
-      </p>
-
       {/* Pak list */}
       <Card className="flex flex-col gap-3 bg-card p-4">
         <div className="flex items-center justify-between">
-          <h4 className="text-sm font-semibold">Config Mods</h4>
+          <div className="flex items-center gap-2">
+            <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Config Mods</span>
+            {showBadge && (
+              <span className="flex items-center gap-1.5 text-[12px] font-medium text-[var(--color-ok)]">
+                <CheckCircle2 size={14} strokeWidth={2.5} />
+                {badgeMsg}
+              </span>
+            )}
+          </div>
           <Button variant="ghost" size="sm" onClick={scan} disabled={scanning || !gamePath}>
             <RefreshCw size={14} className={cn(scanning && "animate-spin")} />
             Scan
@@ -329,7 +314,24 @@ export function PakTweaks({ gamePath }: Props) {
           </span>
         )}
 
-        {paks.length > 0 && (
+        {/* Single pak — show inline, no list needed */}
+        {paks.length === 1 && selectedPak && (
+          <div className="flex items-center gap-2">
+            <Package size={13} className="shrink-0 text-muted-foreground" />
+            <span className="flex-1 truncate font-mono text-[12px]">{selectedPak.pak_name}</span>
+            <div className="flex gap-1">
+              {selectedPak.has_device_profiles && (
+                <Badge variant="secondary" className="text-[9px] px-1.5 py-0">DeviceProfiles</Badge>
+              )}
+              {selectedPak.has_engine_ini && (
+                <Badge variant="outline" className="text-[9px] px-1.5 py-0">Engine</Badge>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Multiple paks — show selectable list */}
+        {paks.length > 1 && (
           <ul className="flex flex-col divide-y divide-border/50 rounded-md border border-border bg-background">
             {paks.map((pak) => (
               <li key={pak.pak_path}>
@@ -337,24 +339,17 @@ export function PakTweaks({ gamePath }: Props) {
                   onClick={() => selectPak(pak)}
                   className={cn(
                     "flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-secondary",
-                    selectedPak?.pak_path === pak.pak_path &&
-                      "bg-secondary font-medium",
+                    selectedPak?.pak_path === pak.pak_path && "bg-secondary font-medium",
                   )}
                 >
                   <Package size={13} className="shrink-0 text-muted-foreground" />
-                  <span className="flex-1 truncate font-mono text-[12px]">
-                    {pak.pak_name}
-                  </span>
+                  <span className="flex-1 truncate font-mono text-[12px]">{pak.pak_name}</span>
                   <div className="flex gap-1">
                     {pak.has_device_profiles && (
-                      <Badge variant="secondary" className="text-[9px] px-1.5 py-0">
-                        DeviceProfiles
-                      </Badge>
+                      <Badge variant="secondary" className="text-[9px] px-1.5 py-0">DeviceProfiles</Badge>
                     )}
                     {pak.has_engine_ini && (
-                      <Badge variant="outline" className="text-[9px] px-1.5 py-0">
-                        Engine
-                      </Badge>
+                      <Badge variant="outline" className="text-[9px] px-1.5 py-0">Engine</Badge>
                     )}
                   </div>
                 </button>
@@ -367,54 +362,40 @@ export function PakTweaks({ gamePath }: Props) {
       {/* Selected pak editor */}
       {selectedPak && (
         <>
-        {/* Quick Settings */}
-        <Card className="flex flex-col gap-4 bg-card p-4">
-          <div className="flex items-center justify-between">
-            <h4 className="text-sm font-semibold">Quick Settings</h4>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => setShowQuick((v) => !v)}
-              className="text-[12px]"
-            >
-              {showQuick ? "Collapse" : "Expand"}
-            </Button>
-          </div>
+        {/* Settings grouped by category */}
+        {!loading && (() => {
+          const categories = definitions.reduce<Record<string, TweakDefinition[]>>((acc, def) => {
+            (acc[def.category] ??= []).push(def);
+            return acc;
+          }, {});
 
-          {showQuick && !loading && (() => {
-            const categories = definitions.reduce<Record<string, TweakDefinition[]>>((acc, def) => {
-              (acc[def.category] ??= []).push(def);
-              return acc;
-            }, {});
-
-            return (
-              <div className="flex flex-col gap-4">
-                {Object.entries(categories).map(([category, defs]) => (
-                  <div key={category} className="flex flex-col gap-2">
-                    <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                      {category}
-                    </span>
-                    <div className="flex flex-col gap-2">
-                      {defs.map((tweak) => (
-                        <QuickTweakRow
-                          key={tweak.id}
-                          tweak={tweak}
-                          isEnabled={tweakEnabled[tweak.id] ?? false}
-                          currentValue={tweakValues[tweak.id]}
-                          onToggle={() => toggleQuickTweak(tweak.id)}
-                          onValueChange={(val) => setQuickTweakValue(tweak.id, val)}
-                        />
-                      ))}
-                    </div>
+          return (
+            <>
+              {Object.entries(categories).map(([category, defs]) => (
+                <Card key={category} className="flex flex-col gap-3 bg-card p-4">
+                  <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                    {category}
+                  </span>
+                  <div className="flex flex-col gap-2">
+                    {defs.map((tweak) => (
+                      <QuickTweakRow
+                        key={tweak.id}
+                        tweak={tweak}
+                        isEnabled={tweakEnabled[tweak.id] ?? false}
+                        currentValue={tweakValues[tweak.id]}
+                        onToggle={() => toggleQuickTweak(tweak.id)}
+                        onValueChange={(val) => setQuickTweakValue(tweak.id, val)}
+                      />
+                    ))}
                   </div>
-                ))}
-              </div>
-            );
-          })()}
-        </Card>
+                </Card>
+              ))}
+            </>
+          );
+        })()}
 
         {/* Pending Changes & Apply */}
-        <Card className="flex flex-col gap-4 bg-card p-4">
+        <div className="flex flex-col gap-4">
               {/* Pending edits summary */}
               {edits.length > 0 && (
                 <div className="flex flex-col gap-1.5">
@@ -448,7 +429,7 @@ export function PakTweaks({ gamePath }: Props) {
                   ) : (
                     <Save size={14} />
                   )}
-                  {applying ? "Repacking…" : dirty ? "Apply & Repack" : "Up to date"}
+                  {applying ? "Repacking…" : dirty ? "Apply & Repack" : "Up to Date"}
                 </Button>
                 <Button
                   variant="ghost"
@@ -460,34 +441,11 @@ export function PakTweaks({ gamePath }: Props) {
                   Reload
                 </Button>
               </div>
-        </Card>
+        </div>
         </>
       )}
 
-      {/* Status bar */}
-      {status && !showBadge && (
-        <p
-          className={cn(
-            "text-[12px]",
-            status.type === "ok"
-              ? "text-[var(--color-ok)]"
-              : status.type === "err"
-                ? "text-[var(--color-err)]"
-                : "text-muted-foreground",
-          )}
-        >
-          {status.msg}
-        </p>
-      )}
     </div>
-  );
-}
-
-function Code({ children }: { children: React.ReactNode }) {
-  return (
-    <code className="rounded bg-muted px-1 py-0.5 font-mono text-[11px] text-foreground">
-      {children}
-    </code>
   );
 }
 

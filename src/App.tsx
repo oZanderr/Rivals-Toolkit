@@ -4,15 +4,15 @@ import { cn } from "@/lib/utils";
 import { Home } from "./components/Home";
 import { PakManager } from "./components/PakManager";
 import { ModTools } from "./components/ModTools";
-import { ScalabilityEditor } from "./components/ScalabilityEditor";
+import { SettingsEditor } from "./components/SettingsEditor";
 import { Separator } from "@/components/ui/separator";
 
-type Tab = "home" | "mod-tools" | "pak-manager" | "scalability";
+type Tab = "home" | "mod-tools" | "pak-manager" | "settings";
 
 const TABS: { id: Tab; label: string; icon: ReactNode }[] = [
   { id: "home", label: "Home", icon: <House size={15} /> },
   { id: "mod-tools", label: "Mod Tools", icon: <Wrench size={15} /> },
-  { id: "scalability", label: "Scalability Editor", icon: <Settings size={15} /> },
+  { id: "settings", label: "Quick Settings", icon: <Settings size={15} /> },
   { id: "pak-manager", label: "PAK Manager (Expert)", icon: <Package size={15} /> },
 ];
 
@@ -79,9 +79,9 @@ function App() {
         {activeTab === "pak-manager" && (
           <PakManager gamePath={gamePath} />
         )}
-        {activeTab === "scalability" && (
+        {activeTab === "settings" && (
           <div className="h-full overflow-y-auto">
-            <ScalabilityEditor />
+            <SettingsEditor gamePath={gamePath} />
           </div>
         )}
       </main>
