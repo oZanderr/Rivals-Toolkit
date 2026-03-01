@@ -4,15 +4,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub(crate) enum TweakKind {
-    /// Fix toggle: ON = problematic lines removed, OFF = lines re-added.
     RemoveLines { lines: Vec<String> },
-    /// Toggle a key between two explicit values.
     Toggle {
         key: String,
         on_value: String,
         off_value: String,
     },
-    /// Adjustable numeric value with a slider.
     Slider {
         key: String,
         min: f64,
@@ -31,6 +28,8 @@ pub(crate) struct TweakDefinition {
     pub description: String,
     #[serde(default)]
     pub pak_only: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_section: Option<String>,
     #[serde(flatten)]
     pub kind: TweakKind,
 }
@@ -40,7 +39,6 @@ pub(crate) struct TweakDefinition {
 pub(crate) struct TweakState {
     pub id: String,
     pub active: bool,
-    /// Current value for Toggle / Slider tweaks (`None` for RemoveLines).
     pub current_value: Option<String>,
 }
 
@@ -49,14 +47,12 @@ pub(crate) struct TweakState {
 pub(crate) struct TweakSetting {
     pub id: String,
     pub enabled: bool,
-    /// For Slider tweaks, the chosen value. Ignored for other kinds.
     pub value: Option<String>,
 }
 
 /// Build the full catalogue of available tweaks.
 pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
     vec![
-        // ── Gameplay Fixes ─────────────────────────────────────────────
         TweakDefinition {
             id: "fix_abilities".into(),
             label: "Fix Chronovision / Punisher / Hela Walls".into(),
@@ -66,6 +62,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                            r.CustomDepth and r.LightTile.Enable only take effect in pak mods."
                 .into(),
             pak_only: false,
+            engine_section: None,
             kind: TweakKind::RemoveLines {
                 lines: vec![
                     "r.PostProcessing.DisableMaterials=1".into(),
@@ -82,6 +79,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                            resolution in Doom Match."
                 .into(),
             pak_only: false,
+            engine_section: None,
             kind: TweakKind::RemoveLines {
                 lines: vec!["m.Portal.ScreenPercentageLowerLimit=1".into()],
             },
@@ -94,6 +92,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                            bodies clipping through the floor. Only effective as a pak mod."
                 .into(),
             pak_only: true,
+            engine_section: None,
             kind: TweakKind::RemoveLines {
                 lines: vec!["p.SimCollisionEnabled=0".into()],
             },
@@ -106,11 +105,11 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                            by re-enabling Niagara sprite rendering. Only effective as a pak mod."
                 .into(),
             pak_only: true,
+            engine_section: None,
             kind: TweakKind::RemoveLines {
                 lines: vec!["fx.EnableNiagaraSpriteRendering=0".into()],
             },
         },
-        // ── Lighting & Color ───────────────────────────────────────────
         TweakDefinition {
             id: "fix_dark_maps".into(),
             label: "Fix Dark Maps".into(),
@@ -119,6 +118,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                            too dark."
                 .into(),
             pak_only: false,
+            engine_section: None,
             kind: TweakKind::RemoveLines {
                 lines: vec![
                     "r.LightMaxDrawDistanceScale=0.00000001".into(),
@@ -135,6 +135,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                            Higher values = brighter."
                 .into(),
             pak_only: false,
+            engine_section: None,
             kind: TweakKind::Slider {
                 key: "r.TonemapperGamma".into(),
                 min: 0.0,
@@ -152,6 +153,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                  Especially recommended when using the Quake Environments mod."
                     .into(),
             pak_only: false,
+            engine_section: None,
             kind: TweakKind::RemoveLines {
                 lines: vec!["r.SceneColorFormat=0".into()],
             },
@@ -164,6 +166,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                            incorrectly dark."
                 .into(),
             pak_only: false,
+            engine_section: None,
             kind: TweakKind::RemoveLines {
                 lines: vec!["r.PostProcessing.EnableEyeAdaptation=0".into()],
             },
@@ -176,11 +179,11 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                            appear unsaturated."
                 .into(),
             pak_only: false,
+            engine_section: None,
             kind: TweakKind::RemoveLines {
                 lines: vec!["r.SeparateTranslucency=0".into()],
             },
         },
-        // ── Sharpness & Textures ───────────────────────────────────────
         TweakDefinition {
             id: "cas_sharpening".into(),
             label: "CAS Sharpening".into(),
@@ -189,6 +192,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                            enable for a sharper image."
                 .into(),
             pak_only: false,
+            engine_section: None,
             kind: TweakKind::Toggle {
                 key: "r.PostProcessing.EnableCAS".into(),
                 on_value: "1".into(),
@@ -203,6 +207,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                            have black hair."
                 .into(),
             pak_only: false,
+            engine_section: None,
             kind: TweakKind::RemoveLines {
                 lines: vec![
                     "r.AnisotropicMaterials=0".into(),
@@ -218,6 +223,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             category: "Sharpness & Textures".into(),
             description: "Removes high MipMap LOD bias that degrades texture quality.".into(),
             pak_only: false,
+            engine_section: None,
             kind: TweakKind::RemoveLines {
                 lines: vec!["r.MipMapLODBias=15".into()],
             },
@@ -228,6 +234,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             category: "Sharpness & Textures".into(),
             description: "Removes streaming mip bias that can cause blurry textures.".into(),
             pak_only: false,
+            engine_section: None,
             kind: TweakKind::RemoveLines {
                 lines: vec!["r.Streaming.MipBias=2".into()],
             },
@@ -240,11 +247,11 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                            Disable this fix to keep the line for Quake Environments mod compatibility."
                 .into(),
             pak_only: false,
+            engine_section: None,
             kind: TweakKind::RemoveLines {
                 lines: vec!["r.Streaming.PoolSize=1".into()],
             },
         },
-        // ── Display ────────────────────────────────────────────────────
         TweakDefinition {
             id: "application_scale".into(),
             label: "Application Scale".into(),
@@ -254,6 +261,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                            Only effective as a pak mod (DefaultEngine.ini)."
                 .into(),
             pak_only: true,
+            engine_section: Some("Script/Engine.UserInterfaceSettings".into()),
             kind: TweakKind::Slider {
                 key: "ApplicationScale".into(),
                 min: 0.5,
@@ -268,6 +276,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             category: "Display".into(),
             description: "Toggles anti-aliasing on UI text / fonts. Only effective as a pak mod.".into(),
             pak_only: true,
+            engine_section: None,
             kind: TweakKind::Toggle {
                 key: "Slate.EnableFontAntiAliasing".into(),
                 on_value: "1".into(),

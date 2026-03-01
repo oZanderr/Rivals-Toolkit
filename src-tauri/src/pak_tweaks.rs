@@ -11,17 +11,11 @@ use crate::pak::crypto::{make_aes_key, open_pak};
 /// Describes which INI files exist inside a given pak mod.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct PakIniInfo {
-    /// Display name of the pak file (just the filename).
     pub pak_name: String,
-    /// Full path to the pak file.
     pub pak_path: String,
-    /// Whether DefaultDeviceProfiles.ini exists inside the pak.
     pub has_device_profiles: bool,
-    /// Whether DefaultEngine.ini exists inside the pak.
     pub has_engine_ini: bool,
-    /// The entry path for DefaultDeviceProfiles.ini inside the pak (if present).
     pub device_profiles_entry: Option<String>,
-    /// The entry path for DefaultEngine.ini inside the pak (if present).
     pub engine_ini_entry: Option<String>,
 }
 
@@ -30,7 +24,6 @@ pub(crate) struct PakIniInfo {
 pub(crate) struct PakTweakState {
     pub key: String,
     pub value: String,
-    /// Which file this came from.
     pub source: String,
 }
 
@@ -38,8 +31,9 @@ pub(crate) struct PakTweakState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct PakTweakEdit {
     pub key: String,
-    /// `None` means remove the key.
     pub value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_section: Option<String>,
 }
 
 /// Scan all pak mods in ~mods and report which ones contain INI config files.
@@ -58,8 +52,8 @@ pub(crate) fn scan_mod_paks(game_root: &str) -> Result<Vec<PakIniInfo>, String> 
         }
         match inspect_pak_for_ini(&path) {
             Ok(Some(info)) => results.push(info),
-            Ok(None) => {} // No INI files, skip
-            Err(_) => {}   // Can't read pak, skip silently
+            Ok(None) => {}
+            Err(_) => {}
         }
     }
     results.sort_by(|a, b| a.pak_name.cmp(&b.pak_name));
@@ -67,23 +61,46 @@ pub(crate) fn scan_mod_paks(game_root: &str) -> Result<Vec<PakIniInfo>, String> 
 }
 
 /// Read current console variables from a pak mod's INI files.
+///
+/// When both DefaultEngine.ini and DefaultDeviceProfiles.ini exist, both are
+/// read and merged: Engine.ini provides the base set of CVars, then
+/// DeviceProfiles.ini layered on top (its values win for any shared keys).
+/// Keys that only exist in Engine.ini are still included — they take effect
+/// even when DeviceProfiles.ini is present, as long as DeviceProfiles does
+/// not explicitly define the same key.
 pub(crate) fn read_pak_tweaks(pak_path: &str) -> Result<Vec<PakTweakState>, String> {
     let pak_path = Path::new(pak_path);
     let info = inspect_pak_for_ini(pak_path)?
         .ok_or_else(|| "No INI config files found in this pak.".to_string())?;
 
-    // DeviceProfiles takes priority
-    let (entry, source) = if let Some(ref dp) = info.device_profiles_entry {
-        (dp.clone(), "DefaultDeviceProfiles.ini")
-    } else if let Some(ref eng) = info.engine_ini_entry {
-        (eng.clone(), "DefaultEngine.ini")
+    // Start with Engine.ini as the base (lower priority).
+    let mut merged: Vec<PakTweakState> = if let Some(ref eng) = info.engine_ini_entry {
+        let content = extract_file_to_string(pak_path, eng)?;
+        parse_console_vars(&content, "DefaultEngine.ini")
     } else {
-        return Ok(Vec::new());
+        Vec::new()
     };
 
-    let content = extract_file_to_string(pak_path, &entry)?;
-    let vars = parse_console_vars(&content, source);
-    Ok(vars)
+    // Layer DeviceProfiles on top: its values override Engine for shared keys,
+    // and any keys unique to Engine are preserved as-is.
+    if let Some(ref dp) = info.device_profiles_entry {
+        let content = extract_file_to_string(pak_path, dp)?;
+        let dp_vars = parse_console_vars(&content, "DefaultDeviceProfiles.ini");
+
+        for dp_var in dp_vars {
+            let key_lower = dp_var.key.to_ascii_lowercase();
+            if let Some(existing) = merged
+                .iter_mut()
+                .find(|v| v.key.to_ascii_lowercase() == key_lower)
+            {
+                *existing = dp_var;
+            } else {
+                merged.push(dp_var);
+            }
+        }
+    }
+
+    Ok(merged)
 }
 
 /// Apply tweaks to a pak mod: extract → edit INI → repack in place.
@@ -99,7 +116,6 @@ pub(crate) fn apply_pak_tweaks(
     let info = inspect_pak_for_ini(pak)?
         .ok_or_else(|| "No INI config files found in this pak.".to_string())?;
 
-    // Determine temp directory next to the pak
     let stem = pak
         .file_stem()
         .unwrap_or_default()
@@ -110,50 +126,74 @@ pub(crate) fn apply_pak_tweaks(
         .unwrap_or_else(|| Path::new("."))
         .join(format!(".{}_temp", stem));
 
-    // Clean up any previous temp
     let _ = fs::remove_dir_all(&temp_dir);
 
     // 1. Extract entire pak to temp dir
     unpack_to_dir(pak, &temp_dir)?;
 
-    // 2. Determine which INI file to edit (DeviceProfiles takes priority)
-    let (entry, ini_type) = if info.has_device_profiles {
-        (
-            info.device_profiles_entry.as_ref().unwrap(),
-            IniType::DeviceProfiles,
-        )
+    // 2. Apply edits.
+    //
+    // When both files coexist:
+    //   • Set/add edits  → DeviceProfiles only (it overrides Engine for those keys).
+    //   • Remove edits   → DeviceProfiles AND Engine.ini, because the key might
+    //                       live only in Engine.ini and needs to be wiped there too.
+    //
+    // When only one file exists: apply all edits to that file.
+
+    if info.has_device_profiles {
+        let dp_entry = info.device_profiles_entry.as_ref().unwrap();
+        let dp_rel = dp_entry
+            .trim_start_matches("../../../")
+            .trim_start_matches('/');
+        let dp_file = temp_dir.join(dp_rel);
+
+        let content = fs::read_to_string(&dp_file).map_err(|e| {
+            format!("Failed to read extracted DeviceProfiles INI {}: {}", dp_file.display(), e)
+        })?;
+        let modified = apply_edits_to_ini(&content, edits, IniType::DeviceProfiles);
+        fs::write(&dp_file, &modified).map_err(|e| {
+            format!("Failed to write modified DeviceProfiles INI {}: {}", dp_file.display(), e)
+        })?;
+
+        // Also scrub any remove-edits from Engine.ini so Engine-only keys are
+        // actually cleared (DeviceProfiles presence alone doesn't nullify them).
+        if let Some(ref eng_entry) = info.engine_ini_entry {
+            let remove_edits: Vec<PakTweakEdit> = edits
+                .iter()
+                .filter(|e| e.value.is_none())
+                .cloned()
+                .collect();
+
+            if !remove_edits.is_empty() {
+                let eng_rel = eng_entry
+                    .trim_start_matches("../../../")
+                    .trim_start_matches('/');
+                let eng_file = temp_dir.join(eng_rel);
+
+                if let Ok(content) = fs::read_to_string(&eng_file) {
+                    let modified = apply_edits_to_ini(&content, &remove_edits, IniType::Engine);
+                    let _ = fs::write(&eng_file, &modified);
+                }
+            }
+        }
     } else {
-        (
-            info.engine_ini_entry.as_ref().unwrap(),
-            IniType::Engine,
-        )
-    };
+        // Only Engine.ini present.
+        let eng_entry = info.engine_ini_entry.as_ref().unwrap();
+        let eng_rel = eng_entry
+            .trim_start_matches("../../../")
+            .trim_start_matches('/');
+        let eng_file = temp_dir.join(eng_rel);
 
-    // Convert pak entry path to filesystem path inside temp dir
-    let rel = entry
-        .trim_start_matches("../../../")
-        .trim_start_matches('/');
-    let ini_file = temp_dir.join(rel);
+        let content = fs::read_to_string(&eng_file).map_err(|e| {
+            format!("Failed to read extracted Engine INI {}: {}", eng_file.display(), e)
+        })?;
+        let modified = apply_edits_to_ini(&content, edits, IniType::Engine);
+        fs::write(&eng_file, &modified).map_err(|e| {
+            format!("Failed to write modified Engine INI {}: {}", eng_file.display(), e)
+        })?;
+    }
 
-    // 3. Read, modify, write the INI
-    let content = fs::read_to_string(&ini_file).map_err(|e| {
-        format!(
-            "Failed to read extracted INI {}: {}",
-            ini_file.display(),
-            e
-        )
-    })?;
-
-    let modified = apply_edits_to_ini(&content, edits, ini_type);
-    fs::write(&ini_file, &modified).map_err(|e| {
-        format!(
-            "Failed to write modified INI {}: {}",
-            ini_file.display(),
-            e
-        )
-    })?;
-
-    // 4. Repack to a temp pak, then replace the original
+    // 3. Repack to a temp pak, then replace the original
     let temp_pak = pak
         .parent()
         .unwrap_or_else(|| Path::new("."))
@@ -161,12 +201,12 @@ pub(crate) fn apply_pak_tweaks(
 
     repack_dir_to_pak(&temp_dir, &temp_pak)?;
 
-    // 5. Replace original with repacked
+    // 4. Replace original with repacked
     fs::remove_file(pak).map_err(|e| format!("Failed to remove original pak: {}", e))?;
     fs::rename(&temp_pak, pak)
         .map_err(|e| format!("Failed to replace pak with repacked version: {}", e))?;
 
-    // 6. Cleanup
+    // 5. Cleanup
     let _ = fs::remove_dir_all(&temp_dir);
 
     Ok(format!(
@@ -175,8 +215,6 @@ pub(crate) fn apply_pak_tweaks(
         info.pak_name
     ))
 }
-
-// ── Internal Helpers ───────────────────────────────────────────────────────
 
 #[derive(Clone, Copy)]
 enum IniType {
@@ -326,17 +364,21 @@ fn parse_console_vars(content: &str, source: &str) -> Vec<PakTweakState> {
             }
         }
     } else {
-        // DefaultEngine.ini: parse [ConsoleVariables] section
-        let mut in_section = false;
+        // DefaultEngine.ini: scan ALL sections for key=value pairs.
+        //
+        // Some keys (e.g. ApplicationScale) live in object-settings sections like
+        // [Script/Engine.UserInterfaceSettings] rather than [ConsoleVariables].
+        // Reading every section ensures we catch them all regardless of where they sit.
+        let mut in_any_section = false;
         for line in content.lines() {
             let trimmed = line.trim();
 
             if trimmed.starts_with('[') {
-                in_section = trimmed.eq_ignore_ascii_case("[ConsoleVariables]");
+                in_any_section = true;
                 continue;
             }
 
-            if !in_section || trimmed.is_empty() || trimmed.starts_with(';') {
+            if !in_any_section || trimmed.is_empty() || trimmed.starts_with(';') {
                 continue;
             }
 
@@ -463,50 +505,28 @@ fn apply_device_profiles_edits(lines: &mut Vec<String>, edits: &[PakTweakEdit]) 
     }
 }
 
-/// Apply edits to DefaultEngine.ini under [ConsoleVariables].
+/// Apply edits to DefaultEngine.ini.
+///
+/// For each edit:
+/// 1. Search the **entire file** for an existing line with that key (any section).
+///    If found, update or remove it in-place — preserving its original section.
+/// 2. If the key is not found and we're inserting a value, use the edit's
+///    `engine_section` hint to find (or create) the right `[Section]` header,
+///    then insert the line there.  Falls back to `[ConsoleVariables]`.
 fn apply_engine_edits(lines: &mut Vec<String>, edits: &[PakTweakEdit]) {
-    // Find [ConsoleVariables] section
-    let mut section_start: Option<usize> = None;
-
-    for (i, line) in lines.iter().enumerate() {
-        let trimmed = line.trim();
-        if trimmed.eq_ignore_ascii_case("[ConsoleVariables]") {
-            section_start = Some(i);
-            break;
-        }
-    }
-
-    // If [ConsoleVariables] doesn't exist, create it at the end
-    if section_start.is_none() {
-        // Check if there are edits that need adding (value = Some)
-        let has_additions = edits.iter().any(|e| e.value.is_some());
-        if !has_additions {
-            return; // Nothing to add, nothing to remove, nothing to do
-        }
-        // Add blank line + section header at the end
-        if !lines.last().is_some_and(|l| l.trim().is_empty()) {
-            lines.push(String::new());
-        }
-        lines.push("[ConsoleVariables]".to_string());
-        section_start = Some(lines.len() - 1);
-    }
-
-    let start = section_start.unwrap();
-
     for edit in edits {
         let key_lower = edit.key.to_ascii_lowercase();
 
-        // Recalculate section end since lines may have shifted
-        let current_end = find_section_end(lines, start);
-
-        // Find existing line
-        let mut found_idx = None;
-        for i in (start + 1)..current_end {
-            let trimmed = lines[i].trim();
+        // ── Step 1: find the key anywhere in the file ─────────────────
+        let mut in_section = false;
+        let mut found_idx: Option<usize> = None;
+        for (i, line) in lines.iter().enumerate() {
+            let trimmed = line.trim();
             if trimmed.starts_with('[') {
-                break;
+                in_section = true;
+                continue;
             }
-            if trimmed.is_empty() || trimmed.starts_with(';') {
+            if !in_section || trimmed.is_empty() || trimmed.starts_with(';') {
                 continue;
             }
             if let Some((k, _)) = parse_cvar_line(trimmed) {
@@ -518,17 +538,45 @@ fn apply_engine_edits(lines: &mut Vec<String>, edits: &[PakTweakEdit]) {
         }
 
         match (&edit.value, found_idx) {
+            // ── Update in-place ────────────────────────────────────────
             (Some(val), Some(idx)) => {
                 lines[idx] = format!("{}={}", edit.key, val);
             }
-            (Some(val), None) => {
-                let insert_at = find_section_insert_point(lines, start);
-                lines.insert(insert_at, format!("{}={}", edit.key, val));
-            }
+            // ── Remove in-place ────────────────────────────────────────
             (None, Some(idx)) => {
                 lines.remove(idx);
             }
+            // ── Nothing to remove ──────────────────────────────────────
             (None, None) => {}
+            // ── Insert into the correct section ────────────────────────
+            (Some(val), None) => {
+                // Determine the target section header string.
+                let target_header = edit
+                    .engine_section
+                    .as_deref()
+                    .map(|s| format!("[{}]", s))
+                    .unwrap_or_else(|| "[ConsoleVariables]".to_string());
+
+                // Find that section in the file.
+                let section_start = lines.iter().position(|l| {
+                    l.trim().eq_ignore_ascii_case(&target_header)
+                });
+
+                let section_start = match section_start {
+                    Some(idx) => idx,
+                    None => {
+                        // Section doesn't exist — create it at the end.
+                        if !lines.last().is_some_and(|l| l.trim().is_empty()) {
+                            lines.push(String::new());
+                        }
+                        lines.push(target_header);
+                        lines.len() - 1
+                    }
+                };
+
+                let insert_at = find_section_insert_point(lines, section_start);
+                lines.insert(insert_at, format!("{}={}", edit.key, val));
+            }
         }
     }
 }

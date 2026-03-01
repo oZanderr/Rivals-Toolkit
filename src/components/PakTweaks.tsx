@@ -35,6 +35,7 @@ interface PakTweakState {
 interface PakTweakEdit {
   key: string;
   value: string | null;
+  engine_section?: string;
 }
 
 // ── Tweak definition types (matching Rust backend) ───────────────────
@@ -45,6 +46,7 @@ interface TweakBase {
   category: string;
   description: string;
   pak_only: boolean;
+  engine_section?: string;
 }
 
 interface RemoveLinesTweak extends TweakBase {
@@ -178,14 +180,14 @@ export function PakTweaks({ gamePath }: Props) {
         }
         break;
       case "Toggle":
-        queueEdit(def.key, newEnabled ? def.on_value : def.off_value);
+        queueEdit(def.key, newEnabled ? def.on_value : def.off_value, def.engine_section);
         break;
       case "Slider":
         if (newEnabled) {
           const val = tweakValues[id] ?? String(def.default_value);
-          queueEdit(def.key, val);
+          queueEdit(def.key, val, def.engine_section);
         } else {
-          queueEdit(def.key, null);
+          queueEdit(def.key, null, def.engine_section);
         }
         break;
     }
@@ -195,7 +197,7 @@ export function PakTweaks({ gamePath }: Props) {
     const def = definitions.find((d) => d.id === id);
     if (!def || def.kind !== "Slider") return;
     setTweakValues((prev) => ({ ...prev, [id]: val }));
-    queueEdit((def as SliderTweak).key, val);
+    queueEdit((def as SliderTweak).key, val, def.engine_section);
   }
 
   async function scan() {
@@ -248,15 +250,15 @@ export function PakTweaks({ gamePath }: Props) {
     }
   }
 
-  function queueEdit(key: string, value: string | null) {
+  function queueEdit(key: string, value: string | null, engineSection?: string) {
     setEdits((prev) => {
       const existing = prev.findIndex((e) => e.key.toLowerCase() === key.toLowerCase());
       if (existing >= 0) {
         const updated = [...prev];
-        updated[existing] = { key, value };
+        updated[existing] = { key, value, engine_section: engineSection };
         return updated;
       }
-      return [...prev, { key, value }];
+      return [...prev, { key, value, engine_section: engineSection }];
     });
     setDirty(true);
   }
@@ -294,7 +296,7 @@ export function PakTweaks({ gamePath }: Props) {
               </span>
             )}
           </div>
-          <Button variant="ghost" size="sm" onClick={scan} disabled={scanning || !gamePath}>
+          <Button variant="blue" size="sm" onClick={scan} disabled={scanning || !gamePath}>
             <RefreshCw size={14} className={cn(scanning && "animate-spin")} />
             Scan
           </Button>
@@ -377,16 +379,21 @@ export function PakTweaks({ gamePath }: Props) {
                     {category}
                   </span>
                   <div className="flex flex-col gap-2">
-                    {defs.map((tweak) => (
-                      <QuickTweakRow
-                        key={tweak.id}
-                        tweak={tweak}
-                        isEnabled={tweakEnabled[tweak.id] ?? false}
-                        currentValue={tweakValues[tweak.id]}
-                        onToggle={() => toggleQuickTweak(tweak.id)}
-                        onValueChange={(val) => setQuickTweakValue(tweak.id, val)}
-                      />
-                    ))}
+                    {defs.map((tweak) => {
+                        const engineOnly = !!tweak.engine_section;
+                        const disabled = engineOnly && !selectedPak.has_engine_ini;
+                        return (
+                          <QuickTweakRow
+                            key={tweak.id}
+                            tweak={tweak}
+                            isEnabled={tweakEnabled[tweak.id] ?? false}
+                            currentValue={tweakValues[tweak.id]}
+                            disabled={disabled}
+                            onToggle={() => toggleQuickTweak(tweak.id)}
+                            onValueChange={(val) => setQuickTweakValue(tweak.id, val)}
+                          />
+                        );
+                      })}
                   </div>
                 </Card>
               ))}
@@ -455,20 +462,25 @@ function QuickTweakRow({
   tweak,
   isEnabled,
   currentValue,
+  disabled,
   onToggle,
   onValueChange,
 }: {
   tweak: TweakDefinition;
   isEnabled: boolean;
   currentValue: string | undefined;
+  disabled?: boolean;
   onToggle: () => void;
   onValueChange: (val: string) => void;
 }) {
   return (
-    <div className="flex flex-col gap-2 rounded-md border border-border/50 bg-background px-4 py-3">
+    <div className={cn(
+      "flex flex-col gap-2 rounded-md border border-border/50 bg-background px-4 py-3",
+      disabled && "opacity-50",
+    )}>
       <div className="flex items-start justify-between gap-4">
         <div className="flex flex-col gap-0.5">
-          <Label htmlFor={`pak-${tweak.id}`} className="text-[13px] font-medium cursor-pointer">
+          <Label htmlFor={`pak-${tweak.id}`} className={cn("text-[13px] font-medium", !disabled && "cursor-pointer")}>
             {tweak.label}
             {tweak.pak_only && (
               <Badge variant="outline" className="ml-2 text-[9px] px-1.5 py-0 align-middle">
@@ -479,17 +491,22 @@ function QuickTweakRow({
           <span className="text-[11px] leading-snug text-muted-foreground">
             {tweak.description}
           </span>
+          {disabled && (
+            <span className="text-[11px] leading-snug text-[var(--color-warn)] mt-0.5">
+              Requires DefaultEngine.ini in this pak mod
+            </span>
+          )}
           <div className="mt-1 flex flex-wrap gap-1">
             <QuickTweakCodes tweak={tweak} />
           </div>
         </div>
-        <Switch id={`pak-${tweak.id}`} checked={isEnabled} onCheckedChange={onToggle} />
+        <Switch id={`pak-${tweak.id}`} checked={isEnabled} onCheckedChange={onToggle} disabled={disabled} />
       </div>
 
       {tweak.kind === "Slider" && (
         <QuickSliderControl
           tweak={tweak}
-          isEnabled={isEnabled}
+          isEnabled={isEnabled && !disabled}
           currentValue={currentValue}
           onValueChange={onValueChange}
         />

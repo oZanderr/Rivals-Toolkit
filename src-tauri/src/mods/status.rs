@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 
 use super::paths::{binaries_dir, mods_dir};
 
-// Reference copies for status checks — same bytes as bypass.rs.
 static BYPASS_DSOUND: &[u8] = include_bytes!("../../resources/bypass/dsound.dll");
 static BYPASS_ASI: &[u8] =
     include_bytes!("../../resources/bypass/plugins/MarvelRivalsUTOCSignatureBypass.asi");

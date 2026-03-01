@@ -11,7 +11,6 @@ pub(crate) fn detect_active_tweaks(
 fn detect_one(content: &str, tweak: &TweakDefinition) -> TweakState {
     match &tweak.kind {
         TweakKind::RemoveLines { lines } => {
-            // Active (fix ON) = NONE of the problematic lines are present.
             let any_found = lines.iter().any(|pattern| {
                 content.lines().any(|line| {
                     let t = line.trim();
@@ -66,10 +65,8 @@ pub(crate) fn apply_tweaks(
                 lines: patterns, ..
             } => {
                 if setting.enabled {
-                    // Fix ON → remove problematic lines
                     remove_matching_lines(&mut lines, patterns);
                 } else {
-                    // Fix OFF → re-add problematic lines (if absent)
                     add_lines_if_absent(&mut lines, patterns);
                 }
             }
@@ -102,8 +99,6 @@ pub(crate) fn apply_tweaks(
     }
     result
 }
-
-// ── Helpers ────────────────────────────────────────────────────────────────
 
 /// Check if a line matches a pattern, also considering `+CVars=` prefix.
 fn matches_pattern(trimmed_line: &str, pattern: &str) -> bool {
