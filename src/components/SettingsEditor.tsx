@@ -36,11 +36,12 @@ export function SettingsEditor({ gamePath }: Props) {
     setDetectBadge(null);
     try {
       const p = await invoke<string>("get_scalability_path");
+      const hadPath = filePath !== "";
       const pathChanged = p !== filePath;
       setFilePath(p);
       if (pathChanged) {
         await loadFile(p);
-        showDetectBadge("Path updated");
+        if (hadPath) showDetectBadge("Path updated");
       } else {
         showDetectBadge("Path unchanged");
       }

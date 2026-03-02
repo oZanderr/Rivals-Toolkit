@@ -229,7 +229,7 @@ export function PakManager({ gamePath }: Props) {
         <Card className="flex w-[300px] shrink-0 min-h-0 flex-col gap-3 p-3 bg-card">
           <div className="flex shrink-0 items-center justify-between">
             <h3 className="text-sm font-semibold">Game PAKs</h3>
-            <Button variant="blue" size="sm" onClick={listPaks} disabled={busy}>
+            <Button variant="outline" size="sm" onClick={listPaks} disabled={busy}>
               <List size={14} />
               List Game PAKs
             </Button>

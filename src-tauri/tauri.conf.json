@@ -13,8 +13,8 @@
     "windows": [
       {
         "title": "Oinkers Editor",
-        "width": 1200,
-        "height": 750,
+        "width": 1120,
+        "height": 820,
         "minWidth": 950,
         "minHeight": 620
       }
