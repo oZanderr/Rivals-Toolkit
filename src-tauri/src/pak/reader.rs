@@ -1,32 +1,30 @@
 use std::{
     fs,
     io::BufReader,
-    path::{Path, PathBuf},
+    path::Path,
 };
 
 use walkdir::WalkDir;
 
 use super::crypto::open_pak;
+use crate::paths::paks_dir;
 
-pub(super) fn paks_dir(game_root: &str) -> PathBuf {
-    PathBuf::from(game_root).join("MarvelGame\\Marvel\\Content\\Paks")
-}
-
-/// Walks the game's Paks directory and returns the absolute paths of every pak file found
+/// Walks the game's Paks directory and returns the absolute paths of every pak file found.
+/// Mod paks from the ~mods subdirectory are included and sorted after game paks.
 pub(super) fn list_pak_files(game_root: &str) -> Result<Vec<String>, String> {
     let dir = paks_dir(game_root);
     if !dir.is_dir() {
         return Err(format!("Paks directory not found: {}", dir.display()));
     }
 
-    let mut paks: Vec<String> = WalkDir::new(&dir)
+    // Game paks (exclude ~-prefixed subdirs like ~mods)
+    let mut game_paks: Vec<String> = WalkDir::new(&dir)
         .max_depth(2)
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
         .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("pak"))
         .filter(|e| {
-            // Exclude files nested under any ~-prefixed subdirectory (e.g. ~mods)
             let Ok(rel) = e.path().strip_prefix(&dir) else { return false };
             !rel.parent()
                 .and_then(|p| p.iter().next())
@@ -34,9 +32,26 @@ pub(super) fn list_pak_files(game_root: &str) -> Result<Vec<String>, String> {
         })
         .map(|e| e.path().to_string_lossy().into_owned())
         .collect();
+    game_paks.sort();
 
-    paks.sort();
-    Ok(paks)
+    // Mod paks from ~mods subdirectory
+    let mods_dir = dir.join("~mods");
+    let mut mod_paks: Vec<String> = if mods_dir.is_dir() {
+        WalkDir::new(&mods_dir)
+            .max_depth(1)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+            .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("pak"))
+            .map(|e| e.path().to_string_lossy().into_owned())
+            .collect()
+    } else {
+        vec![]
+    };
+    mod_paks.sort();
+
+    game_paks.extend(mod_paks);
+    Ok(game_paks)
 }
 
 pub(super) fn list_pak_contents(pak_path: &str) -> Result<Vec<String>, String> {

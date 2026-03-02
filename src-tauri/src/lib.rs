@@ -1,6 +1,10 @@
 mod commands;
 mod detect;
+mod mods;
 mod pak;
+mod pak_tweaks;
+mod paths;
+mod scalability;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -14,6 +18,18 @@ pub fn run() {
             commands::unpack_pak,
             commands::extract_single_file,
             commands::repack_pak,
+            commands::get_mods_status,
+            commands::install_signature_bypass,
+            commands::open_mods_folder,
+            commands::get_scalability_path,
+            commands::read_scalability,
+            commands::write_scalability,
+            commands::get_tweak_definitions,
+            commands::detect_tweaks,
+            commands::apply_tweaks,
+            commands::scan_mod_paks_for_ini,
+            commands::detect_pak_tweaks,
+            commands::apply_pak_tweak_edits
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

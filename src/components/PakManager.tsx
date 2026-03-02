@@ -238,6 +238,10 @@ export function PakManager({ gamePath }: Props) {
               <ul>
                 {pakList.map((p) => {
                   const isSelected = selectedPak === p;
+                  const isMod = /[/\\]~mods[/\\]/i.test(p);
+                  const displayName = isMod
+                    ? `~mods/${p.split(/[/\\]/).pop()}`
+                    : p.split(/[/\\]/).pop();
                   return (
                     <li
                       key={p}
@@ -248,8 +252,11 @@ export function PakManager({ gamePath }: Props) {
                       onClick={() => inspectPak(p)}
                       title={p}
                     >
-                      <Package size={14} className="shrink-0 text-muted-foreground" />
-                      <span className="truncate text-[12px]">{p.split(/[/\\]/).pop()}</span>
+                      <Package
+                        size={14}
+                        className={cn("shrink-0", isMod ? "text-amber-400" : "text-muted-foreground")}
+                      />
+                      <span className="truncate text-[12px]">{displayName}</span>
                     </li>
                   );
                 })}

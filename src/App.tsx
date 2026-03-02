@@ -1,14 +1,18 @@
 import { useState, type ReactNode } from "react";
-import { House, Package } from "lucide-react";
+import { House, Package, Settings, Wrench } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Home } from "./components/Home";
 import { PakManager } from "./components/PakManager";
+import { ModTools } from "./components/ModTools";
+import { SettingsEditor } from "./components/SettingsEditor";
 import { Separator } from "@/components/ui/separator";
 
-type Tab = "home" | "pak-manager";
+type Tab = "home" | "mod-tools" | "pak-manager" | "settings";
 
 const TABS: { id: Tab; label: string; icon: ReactNode }[] = [
   { id: "home", label: "Home", icon: <House size={15} /> },
+  { id: "mod-tools", label: "Mod Tools", icon: <Wrench size={15} /> },
+  { id: "settings", label: "Quick Settings", icon: <Settings size={15} /> },
   { id: "pak-manager", label: "PAK Manager (Expert)", icon: <Package size={15} /> },
 ];
 
@@ -67,8 +71,18 @@ function App() {
             <Home gamePath={gamePath} setGamePath={setGamePath} />
           </div>
         )}
+        {activeTab === "mod-tools" && (
+          <div className="h-full overflow-y-auto">
+            <ModTools gamePath={gamePath} />
+          </div>
+        )}
         {activeTab === "pak-manager" && (
           <PakManager gamePath={gamePath} />
+        )}
+        {activeTab === "settings" && (
+          <div className="h-full overflow-y-auto">
+            <SettingsEditor gamePath={gamePath} />
+          </div>
         )}
       </main>
     </div>
