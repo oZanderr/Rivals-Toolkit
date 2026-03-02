@@ -13,10 +13,10 @@
     "windows": [
       {
         "title": "Oinkers Editor",
-        "width": 1100,
-        "height": 720,
-        "minWidth": 900,
-        "minHeight": 600
+        "width": 1200,
+        "height": 750,
+        "minWidth": 950,
+        "minHeight": 620
       }
     ],
     "security": {
