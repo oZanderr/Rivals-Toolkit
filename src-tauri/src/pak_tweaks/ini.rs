@@ -299,10 +299,12 @@ fn apply_engine_edits(lines: &mut Vec<String>, edits: &[PakTweakEdit]) {
                     .map(|s| format!("[{}]", s))
                     .unwrap_or_else(|| "[ConsoleVariables]".to_string());
 
-                // Find that section in the file.
+                // Find the LAST occurrence of that section in the file.
+                // Engine.ini often has multiple [ConsoleVariables] blocks; inserting
+                // into the last one matches how UE4 itself appends overrides.
                 let section_start = lines
                     .iter()
-                    .position(|l| l.trim().eq_ignore_ascii_case(&target_header));
+                    .rposition(|l| l.trim().eq_ignore_ascii_case(&target_header));
 
                 let section_start = match section_start {
                     Some(idx) => idx,
