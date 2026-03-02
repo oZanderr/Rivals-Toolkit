@@ -4,6 +4,7 @@ import {
   Package,
   RefreshCw,
   Save,
+  Search,
   CheckCircle2,
   XCircle,
 } from "lucide-react";
@@ -90,7 +91,6 @@ export function PakTweaks({ gamePath }: Props) {
   const [showBadge, setShowBadge] = useState(false);
   const [badgeMsg, setBadgeMsg] = useState("");
   const badgeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
   // Tweak definitions (for rendering controls)
   const [definitions, setDefinitions] = useState<TweakDefinition[]>([]);
 
@@ -159,6 +159,7 @@ export function PakTweaks({ gamePath }: Props) {
     queueEdit((def as SliderTweak).key, val, def.engine_section);
   }
 
+  /** Scan the mods folder for pak files — only updates the list, preserves current selection and edits */
   async function scan() {
     if (!gamePath) return;
     setScanning(true);
@@ -172,18 +173,19 @@ export function PakTweaks({ gamePath }: Props) {
         setTweakStates([]);
         setEdits([]);
         setDirty(false);
-      } else if (results.length === 1) {
-        // Auto-select the only available pak
-        await selectPak(results[0]);
-      } else {
-        // If previously selected pak is gone, deselect
-        if (selectedPak && !results.find((p) => p.pak_path === selectedPak.pak_path)) {
-          setSelectedPak(null);
-          setTweakStates([]);
-          setEdits([]);
-          setDirty(false);
+      } else if (!selectedPak) {
+        // Nothing selected yet — auto-select if only one
+        if (results.length === 1) {
+          await selectPak(results[0]);
         }
+      } else if (!results.find((p) => p.pak_path === selectedPak.pak_path)) {
+        // Previously selected pak is gone — deselect
+        setSelectedPak(null);
+        setTweakStates([]);
+        setEdits([]);
+        setDirty(false);
       }
+      // Otherwise: selected pak still exists — keep current state untouched
     } catch (e: any) {
       console.error("Scan failed:", e);
     } finally {
@@ -204,6 +206,23 @@ export function PakTweaks({ gamePath }: Props) {
     } catch (e: any) {
       console.error("Load failed:", e);
       setTweakStates([]);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  /** Reload tweak states for the already-selected pak — full remount via loading gate */
+  async function refreshTweaks(pak: PakIniInfo) {
+    setLoading(true);
+    try {
+      const states = await invoke<TweakState[]>("detect_pak_tweaks", {
+        pakPath: pak.pak_path,
+      });
+      setTweakStates(states);
+      setEdits([]);
+      setDirty(false);
+    } catch (e: any) {
+      console.error("Refresh failed:", e);
     } finally {
       setLoading(false);
     }
@@ -256,7 +275,7 @@ export function PakTweaks({ gamePath }: Props) {
             )}
           </div>
           <Button variant="blue" size="sm" onClick={scan} disabled={scanning || !gamePath}>
-            <RefreshCw size={14} className={cn(scanning && "animate-spin")} />
+            <Search size={14} className={cn(scanning && "animate-pulse")} />
             Scan
           </Button>
         </div>
@@ -400,8 +419,8 @@ export function PakTweaks({ gamePath }: Props) {
                 <Button
                   variant="ghost"
                   size="sm"
-                  onClick={() => selectedPak && selectPak(selectedPak)}
-                  disabled={loading}
+                  onClick={() => selectedPak && refreshTweaks(selectedPak)}
+                  disabled={!dirty || loading}
                 >
                   <RefreshCw size={14} />
                   Reload

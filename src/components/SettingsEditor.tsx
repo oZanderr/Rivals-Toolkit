@@ -1,8 +1,8 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
-import { FileText, FolderOpen, Package, RotateCcw } from "lucide-react";
+import { CheckCircle2, FileText, FolderOpen, Package, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -22,19 +22,45 @@ export function SettingsEditor({ gamePath }: Props) {
   const [filePath, setFilePath] = useState("");
   const [content, setContent] = useState("");
   const [reloadKey, setReloadKey] = useState(0);
+  const [detecting, setDetecting] = useState(false);
+  const [detectBadge, setDetectBadge] = useState<string | null>(null);
+  const detectBadgeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    autoLoad();
+    detectPath();
   }, []);
 
-  async function autoLoad() {
+  /** Re-detect the Scalability.ini path only — does not reset tweak states */
+  async function detectPath() {
+    setDetecting(true);
+    setDetectBadge(null);
     try {
       const p = await invoke<string>("get_scalability_path");
+      const pathChanged = p !== filePath;
       setFilePath(p);
-      await loadFile(p);
+      if (pathChanged) {
+        await loadFile(p);
+        showDetectBadge("Path updated");
+      } else {
+        showDetectBadge("Path unchanged");
+      }
     } catch {
-      // Path detection failed — user can browse manually
+      showDetectBadge("Not found");
+    } finally {
+      setDetecting(false);
     }
+  }
+
+  function showDetectBadge(msg: string) {
+    if (detectBadgeTimer.current) clearTimeout(detectBadgeTimer.current);
+    setDetectBadge(msg);
+    detectBadgeTimer.current = setTimeout(() => setDetectBadge(null), 4000);
+  }
+
+  /** Re-read file from disk and remount ScalabilitySettings to refresh tweak states */
+  async function reloadContent() {
+    await loadFile(filePath);
+    setReloadKey((k) => k + 1);
   }
 
   async function browse() {
@@ -94,7 +120,18 @@ export function SettingsEditor({ gamePath }: Props) {
           <div className="flex flex-col gap-6">
           <Card className="flex flex-col gap-3 p-4 bg-card">
             <div className="flex items-center justify-between">
-              <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Config File</span>
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Config File</span>
+                {detectBadge && (
+                  <span className={cn(
+                    "flex items-center gap-1 text-[12px] font-medium",
+                    detectBadge === "Not found" ? "text-[var(--color-warn)]" : "text-[var(--color-ok)]",
+                  )}>
+                    <CheckCircle2 size={13} strokeWidth={2.5} />
+                    {detectBadge}
+                  </span>
+                )}
+              </div>
               <Button
                 variant="ghost"
                 size="sm"
@@ -116,8 +153,8 @@ export function SettingsEditor({ gamePath }: Props) {
                 <FolderOpen size={14} />
                 Browse
               </Button>
-              <Button variant="blue" size="sm" onClick={autoLoad}>
-                <RotateCcw size={14} />
+              <Button variant="blue" size="sm" onClick={detectPath} disabled={detecting}>
+                <Search size={14} className={cn(detecting && "animate-pulse")} />
                 Re-detect
               </Button>
             </div>
@@ -130,7 +167,7 @@ export function SettingsEditor({ gamePath }: Props) {
             content={content}
             setContent={setContent}
             onSaved={() => {}}
-            onReload={async () => { await loadFile(filePath); setReloadKey((k) => k + 1); }}
+            onReload={reloadContent}
           />
           </div>
       </div>
