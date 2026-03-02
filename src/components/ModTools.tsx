@@ -84,7 +84,7 @@ export function ModTools({ gamePath }: Props) {
   }
 
   return (
-    <div className="flex w-full max-w-4xl flex-col gap-6">
+    <div className="flex w-full flex-col gap-6">
       {/* Header */}
       <div className="flex items-center gap-3">
         <h2 className="text-xl font-bold">Mod Tools</h2>

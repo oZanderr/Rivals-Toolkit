@@ -242,7 +242,7 @@ export function PakTweaks({ gamePath }: Props) {
   }
 
   return (
-    <div className="flex w-full max-w-4xl flex-col gap-5">
+    <div className="flex w-full flex-col gap-5">
       {/* Pak list */}
       <Card className="flex flex-col gap-3 bg-card p-4">
         <div className="flex items-center justify-between">
@@ -331,7 +331,7 @@ export function PakTweaks({ gamePath }: Props) {
           }, {});
 
           return (
-            <>
+            <div className="grid gap-5 xl:grid-cols-2">
               {Object.entries(categories).map(([category, defs]) => (
                 <Card key={category} className="flex flex-col gap-3 bg-card p-4">
                   <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
@@ -356,7 +356,7 @@ export function PakTweaks({ gamePath }: Props) {
                   </div>
                 </Card>
               ))}
-            </>
+            </div>
           );
         })()}
 

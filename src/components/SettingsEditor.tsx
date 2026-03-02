@@ -21,6 +21,7 @@ export function SettingsEditor({ gamePath }: Props) {
 
   const [filePath, setFilePath] = useState("");
   const [content, setContent] = useState("");
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     autoLoad();
@@ -62,7 +63,7 @@ export function SettingsEditor({ gamePath }: Props) {
   ];
 
   return (
-    <div className="flex w-full max-w-4xl flex-col gap-6">
+    <div className="flex w-full flex-col gap-6">
       {/* Header */}
       <div>
         <h2 className="text-xl font-bold">Quick Settings</h2>
@@ -124,10 +125,12 @@ export function SettingsEditor({ gamePath }: Props) {
 
           {/* Quick settings */}
           <ScalabilitySettings
+            key={reloadKey}
             filePath={filePath}
             content={content}
             setContent={setContent}
             onSaved={() => {}}
+            onReload={async () => { await loadFile(filePath); setReloadKey((k) => k + 1); }}
           />
           </div>
       </div>

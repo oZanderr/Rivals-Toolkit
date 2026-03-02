@@ -61,9 +61,10 @@ interface Props {
   content: string;
   setContent: (c: string) => void;
   onSaved: () => void;
+  onReload: () => void;
 }
 
-export function ScalabilitySettings({ filePath, content, setContent, onSaved }: Props) {
+export function ScalabilitySettings({ filePath, content, setContent, onSaved, onReload }: Props) {
   const [definitions, setDefinitions] = useState<TweakDefinition[]>([]);
   const [enabled, setEnabled] = useState<Record<string, boolean>>({});
   const [values, setValues] = useState<Record<string, string>>({});
@@ -138,6 +139,7 @@ export function ScalabilitySettings({ filePath, content, setContent, onSaved }: 
 
   return (
     <div className="flex flex-col gap-5">
+      <div className="grid gap-5 xl:grid-cols-2 2xl:grid-cols-3">
       {Object.entries(categories).map(([category, tweaks]) => (
         <Card key={category} className="flex flex-col gap-4 bg-card p-4">
           <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
@@ -157,6 +159,7 @@ export function ScalabilitySettings({ filePath, content, setContent, onSaved }: 
           </div>
         </Card>
       ))}
+      </div>
 
       {/* Apply bar */}
       <div className="flex items-center gap-3">
@@ -164,9 +167,9 @@ export function ScalabilitySettings({ filePath, content, setContent, onSaved }: 
           <Save size={14} />
           {dirty ? "Apply & Save" : "Up to Date"}
         </Button>
-        <Button variant="ghost" size="sm" onClick={() => detectTweaks(content)}>
+        <Button variant="ghost" size="sm" onClick={onReload}>
           <RefreshCw size={14} />
-          Reset
+          Reload
         </Button>
         {status && (
           <span

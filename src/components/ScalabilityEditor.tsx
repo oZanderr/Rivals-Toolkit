@@ -17,6 +17,7 @@ export function ScalabilityEditor() {
   const [saved, setSaved] = useState(true);
   const [subTab, setSubTab] = useState<SubTab>("quick");
   const [status, setStatus] = useState<{ msg: string; type: StatusType } | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
 
   const showStatus = (msg: string, type: StatusType = "info") =>
     setStatus({ msg, type });
@@ -70,7 +71,7 @@ export function ScalabilityEditor() {
   }
 
   return (
-    <div className="flex w-full max-w-4xl flex-col gap-6">
+    <div className="flex w-full flex-col gap-6">
       {/* Header */}
       <div>
         <h2 className="text-xl font-bold">Scalability Editor</h2>
@@ -132,10 +133,12 @@ export function ScalabilityEditor() {
       {/* Quick Settings view */}
       {subTab === "quick" && (
         <ScalabilitySettings
+          key={reloadKey}
           filePath={filePath}
           content={content}
           setContent={setContent}
           onSaved={() => setSaved(true)}
+          onReload={async () => { await loadFile(filePath); setReloadKey((k) => k + 1); }}
         />
       )}
 
@@ -153,7 +156,7 @@ export function ScalabilityEditor() {
               )}
             </div>
             <textarea
-              className="h-96 w-full resize-y rounded-md border border-border bg-background px-3 py-2 font-mono text-[12px] leading-relaxed text-foreground outline-none focus:ring-1 focus:ring-ring"
+              className="min-h-[16rem] h-[calc(100vh-420px)] w-full resize-y rounded-md border border-border bg-background px-3 py-2 font-mono text-[12px] leading-relaxed text-foreground outline-none focus:ring-1 focus:ring-ring"
               value={content}
               onChange={(e) => { setContent(e.target.value); setSaved(false); }}
               spellCheck={false}
