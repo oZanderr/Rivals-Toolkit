@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Card } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
@@ -6,6 +6,7 @@ import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
 import { Button } from "@/components/ui/button";
 import { Save, RefreshCw, CheckCircle2 } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 
 // ── Types matching Rust backend (serde tag="kind" + flatten) ─────────
@@ -68,11 +69,16 @@ export function ScalabilitySettings({ filePath, content, setContent, onSaved, on
   const [definitions, setDefinitions] = useState<TweakDefinition[]>([]);
   const [enabled, setEnabled] = useState<Record<string, boolean>>({});
   const [values, setValues] = useState<Record<string, string>>({});
-  const [dirty, setDirty] = useState(false);
+  const [savedEnabled, setSavedEnabled] = useState<Record<string, boolean>>({});
+  const [savedValues, setSavedValues] = useState<Record<string, string>>({});
   const [status, setStatus] = useState<{ msg: string; type: StatusType } | null>(null);
+  const statusTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const showStatus = (msg: string, type: StatusType = "info") =>
+  const showStatus = (msg: string, type: StatusType = "info") => {
+    if (statusTimer.current) clearTimeout(statusTimer.current);
     setStatus({ msg, type });
+    statusTimer.current = setTimeout(() => setStatus(null), 4000);
+  };
 
   // Load tweak definitions once
   useEffect(() => {
@@ -92,7 +98,8 @@ export function ScalabilitySettings({ filePath, content, setContent, onSaved, on
       }
       setEnabled(enabledMap);
       setValues(valuesMap);
-      setDirty(false);
+      setSavedEnabled(enabledMap);
+      setSavedValues(valuesMap);
     } catch (e: any) {
       showStatus(String(e), "err");
     }
@@ -104,12 +111,10 @@ export function ScalabilitySettings({ filePath, content, setContent, onSaved, on
 
   function toggleEnabled(id: string) {
     setEnabled((prev) => ({ ...prev, [id]: !prev[id] }));
-    setDirty(true);
   }
 
   function setValue(id: string, val: string) {
     setValues((prev) => ({ ...prev, [id]: val }));
-    setDirty(true);
   }
 
   async function applyAndSave() {
@@ -117,12 +122,13 @@ export function ScalabilitySettings({ filePath, content, setContent, onSaved, on
       const settings: TweakSetting[] = definitions.filter((d) => !d.pak_only).map((def) => ({
         id: def.id,
         enabled: enabled[def.id] ?? false,
-        value: values[def.id] ?? null,
+        value: def.kind === "Slider"
+          ? String(values[def.id] != null ? values[def.id] : def.default_value)
+          : (values[def.id] ?? null),
       }));
       const modified = await invoke<string>("apply_tweaks", { content, settings });
       setContent(modified);
       await invoke("write_scalability", { path: filePath, content: modified });
-      setDirty(false);
       showStatus("Settings applied and saved.", "ok");
       onSaved();
     } catch (e: any) {
@@ -132,6 +138,51 @@ export function ScalabilitySettings({ filePath, content, setContent, onSaved, on
 
   // Group definitions by category (exclude pak-only tweaks)
   const scalabilityDefs = definitions.filter((d) => !d.pak_only);
+
+  // Compute pending changes vs saved baseline — show actual variables like Pak Config
+  interface PendingChange { id: string; kind: "set" | "remove"; display: string; }
+  const pendingChanges: PendingChange[] = scalabilityDefs.flatMap((def) => {
+    const changes: PendingChange[] = [];
+    const isEnabled = enabled[def.id] ?? false;
+    const wasEnabled = savedEnabled[def.id] ?? false;
+    const toggleChanged = isEnabled !== wasEnabled;
+
+    if (def.kind === "RemoveLines") {
+      if (toggleChanged) {
+        // Each line pattern is being added or removed
+        def.lines.forEach((line, i) => {
+          changes.push({
+            id: `${def.id}_line${i}`,
+            kind: isEnabled ? "remove" : "set",
+            display: line.pattern,
+          });
+        });
+      }
+    } else if (def.kind === "Toggle") {
+      if (toggleChanged) {
+        changes.push({
+          id: def.id,
+          kind: "set",
+          display: `${def.key}=${isEnabled ? def.on_value : def.off_value}`,
+        });
+      }
+    } else if (def.kind === "Slider") {
+      const cur = values[def.id];
+      const prev = savedValues[def.id];
+      const valueChanged = cur !== undefined && cur !== prev;
+      if (toggleChanged && !isEnabled) {
+        // Tweak turned off — line is removed
+        changes.push({ id: def.id, kind: "remove", display: def.key });
+      } else if (isEnabled && (toggleChanged || valueChanged)) {
+        // Turned on or value changed while on
+        const displayVal = cur ?? String(def.default_value);
+        changes.push({ id: def.id, kind: "set", display: `${def.key}=${displayVal}` });
+      }
+    }
+
+    return changes;
+  });
+  const dirty = pendingChanges.length > 0;
   const categories = scalabilityDefs.reduce<Record<string, TweakDefinition[]>>((acc, def) => {
     (acc[def.category] ??= []).push(def);
     return acc;
@@ -161,8 +212,27 @@ export function ScalabilitySettings({ filePath, content, setContent, onSaved, on
       ))}
       </div>
 
-      {/* Apply bar */}
-      <div className="flex items-center gap-3">
+      {/* Pending changes + apply bar */}
+      <div className="flex flex-col gap-4">
+        {pendingChanges.length > 0 && (
+          <div className="flex flex-col gap-1.5">
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+              Pending Changes ({pendingChanges.length})
+            </span>
+            <div className="flex flex-wrap gap-1">
+              {pendingChanges.map((c) => (
+                <Badge
+                  key={c.id}
+                  variant={c.kind === "remove" ? "destructive" : "secondary"}
+                  className="text-[10px] font-mono px-1.5 py-0"
+                >
+                  {c.kind === "remove" ? `- ${c.display}` : c.display}
+                </Badge>
+              ))}
+            </div>
+          </div>
+        )}
+        <div className="flex items-center gap-3">
         <Button variant="green" size="sm" onClick={applyAndSave} disabled={!dirty}>
           <Save size={14} />
           {dirty ? "Apply & Save" : "Up to Date"}
@@ -186,6 +256,7 @@ export function ScalabilitySettings({ filePath, content, setContent, onSaved, on
             {status.msg}
           </span>
         )}
+        </div>
       </div>
     </div>
   );
