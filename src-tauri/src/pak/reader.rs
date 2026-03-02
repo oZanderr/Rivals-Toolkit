@@ -1,16 +1,13 @@
 use std::{
     fs,
     io::BufReader,
-    path::{Path, PathBuf},
+    path::Path,
 };
 
 use walkdir::WalkDir;
 
 use super::crypto::open_pak;
-
-pub(super) fn paks_dir(game_root: &str) -> PathBuf {
-    PathBuf::from(game_root).join("MarvelGame\\Marvel\\Content\\Paks")
-}
+use crate::paths::paks_dir;
 
 /// Walks the game's Paks directory and returns the absolute paths of every pak file found.
 /// Mod paks from the ~mods subdirectory are included and sorted after game paks.

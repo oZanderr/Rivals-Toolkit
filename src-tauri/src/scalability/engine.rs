@@ -11,10 +11,10 @@ pub(crate) fn detect_active_tweaks(
 fn detect_one(content: &str, tweak: &TweakDefinition) -> TweakState {
     match &tweak.kind {
         TweakKind::RemoveLines { lines } => {
-            let any_found = lines.iter().any(|pattern| {
+            let any_found = lines.iter().any(|entry| {
                 content.lines().any(|line| {
                     let t = line.trim();
-                    !t.starts_with(';') && matches_pattern(t, pattern)
+                    !t.starts_with(';') && matches_pattern(t, &entry.pattern)
                 })
             });
             TweakState {
@@ -27,9 +27,14 @@ fn detect_one(content: &str, tweak: &TweakDefinition) -> TweakState {
             key,
             on_value,
             off_value: _,
+            default_enabled,
+            section: _,
         } => {
             let current = find_key_value(content, key);
-            let active = current.as_deref() == Some(on_value.as_str());
+            let active = match current.as_deref() {
+                Some(v) => v == on_value.as_str(),
+                None => *default_enabled,
+            };
             TweakState {
                 id: tweak.id.clone(),
                 active,
@@ -61,30 +66,36 @@ pub(crate) fn apply_tweaks(
         };
 
         match &tweak.kind {
-            TweakKind::RemoveLines {
-                lines: patterns, ..
-            } => {
+            TweakKind::RemoveLines { lines: entries } => {
                 if setting.enabled {
-                    remove_matching_lines(&mut lines, patterns);
+                    remove_matching_lines(&mut lines, entries);
                 } else {
-                    add_lines_if_absent(&mut lines, patterns);
+                    add_lines_if_absent(&mut lines, entries);
                 }
             }
             TweakKind::Toggle {
                 key,
                 on_value,
                 off_value,
+                default_enabled,
+                section,
             } => {
                 let value = if setting.enabled { on_value } else { off_value };
-                if !upsert_key_value(&mut lines, key, value) {
-                    lines.push(format!("{}={}", key, value));
+                // Only write if the key already exists in the file OR the user
+                // wants a non-default value. Avoids polluting a clean file with
+                // redundant lines that match the engine default.
+                let key_in_file = find_key_value(content, key).is_some();
+                if key_in_file {
+                    upsert_key_value(&mut lines, key, value);
+                } else if setting.enabled != *default_enabled {
+                    insert_into_section(&mut lines, section, format!("{}={}", key, value));
                 }
             }
-            TweakKind::Slider { key, .. } => {
+            TweakKind::Slider { key, section, .. } => {
                 if setting.enabled {
                     let value = setting.value.as_deref().unwrap_or("0");
                     if !upsert_key_value(&mut lines, key, value) {
-                        lines.push(format!("{}={}", key, value));
+                        insert_into_section(&mut lines, section, format!("{}={}", key, value));
                     }
                 } else {
                     remove_key(&mut lines, key);
@@ -132,27 +143,58 @@ fn find_key_value(content: &str, key: &str) -> Option<String> {
 }
 
 /// Remove all lines that match any of the given patterns (+ CVars forms).
-fn remove_matching_lines(lines: &mut Vec<String>, patterns: &[String]) {
+fn remove_matching_lines(lines: &mut Vec<String>, entries: &[super::tweaks::ScalabilityLine]) {
     lines.retain(|line| {
         let t = line.trim();
         if t.starts_with(';') {
             return true;
         }
-        !patterns.iter().any(|p| matches_pattern(t, p))
+        !entries.iter().any(|e| matches_pattern(t, &e.pattern))
     });
 }
 
-/// Add lines that aren't already present in the content.
-fn add_lines_if_absent(lines: &mut Vec<String>, patterns: &[String]) {
-    for pattern in patterns {
+/// Add lines that aren't already present, each inserted under its own section.
+fn add_lines_if_absent(lines: &mut Vec<String>, entries: &[super::tweaks::ScalabilityLine]) {
+    for entry in entries {
         let already = lines.iter().any(|line| {
             let t = line.trim();
-            !t.starts_with(';') && matches_pattern(t, pattern)
+            !t.starts_with(';') && matches_pattern(t, &entry.pattern)
         });
         if !already {
-            lines.push(pattern.clone());
+            insert_into_section(lines, &entry.section, entry.pattern.clone());
         }
     }
+}
+
+/// Insert `new_line` into the named `[section]` block.
+/// Lines are placed just before the next section header (or at end of section).
+/// If the section header is absent it is appended together with the new line.
+fn insert_into_section(lines: &mut Vec<String>, section: &str, new_line: String) {
+    let header = format!("[{}]", section);
+    let header_lower = header.to_ascii_lowercase();
+
+    let section_start = lines.iter().position(|l| {
+        l.trim().to_ascii_lowercase() == header_lower
+    });
+
+    let insert_at = if let Some(start) = section_start {
+        // Find the first line after the header that starts a new section.
+        let end = lines[start + 1..]
+            .iter()
+            .position(|l| {
+                let t = l.trim();
+                t.starts_with('[') && t.ends_with(']')
+            })
+            .map(|rel| start + 1 + rel)
+            .unwrap_or(lines.len());
+        end
+    } else {
+        // Section missing — append header then fall through to push below.
+        lines.push(header);
+        lines.len() // position after the newly pushed header
+    };
+
+    lines.insert(insert_at, new_line);
 }
 
 /// Update all occurrences of `key=...` to `key=value` (case-insensitive key).

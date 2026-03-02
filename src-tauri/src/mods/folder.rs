@@ -1,4 +1,4 @@
-use super::paths::mods_dir;
+use crate::paths::mods_dir;
 
 pub(crate) fn open_mods_folder(game_root: &str) -> Result<(), String> {
     let mods = mods_dir(game_root);

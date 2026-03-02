@@ -3,6 +3,7 @@ mod detect;
 mod mods;
 mod pak;
 mod pak_tweaks;
+mod paths;
 mod scalability;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -27,7 +28,7 @@ pub fn run() {
             commands::detect_tweaks,
             commands::apply_tweaks,
             commands::scan_mod_paks_for_ini,
-            commands::read_pak_tweak_values,
+            commands::detect_pak_tweaks,
             commands::apply_pak_tweak_edits
         ])
         .run(tauri::generate_context!())

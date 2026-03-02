@@ -1,14 +1,39 @@
 use serde::{Deserialize, Serialize};
 
+fn default_cv_section() -> String {
+    "ConsoleVariables".to_string()
+}
+
+/// A single pattern for a `RemoveLines` tweak, paired with the scalability
+/// section it must live under to be effective.
+/// For pak/engine INI writes the section is ignored — CVars go flat.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ScalabilityLine {
+    pub pattern: String,
+    /// Scalability-file section bracket, e.g. `"PostProcessQuality@0"`.
+    /// Ignored when writing to DeviceProfiles or DefaultEngine.ini.
+    #[serde(default = "default_cv_section")]
+    pub section: String,
+}
+
 /// Describes what kind of tweak this is and how to apply/detect it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub(crate) enum TweakKind {
-    RemoveLines { lines: Vec<String> },
+    RemoveLines { lines: Vec<ScalabilityLine> },
     Toggle {
         key: String,
         on_value: String,
         off_value: String,
+        /// What `active` should report when the key is absent from the INI
+        /// (i.e. the engine default). `true` = feature is ON by default
+        /// (e.g. CAS Sharpening, Font AA); `false` = OFF.
+        #[serde(default)]
+        default_enabled: bool,
+        /// Scalability-file section new keys are inserted under.
+        /// Ignored when writing to DeviceProfiles or DefaultEngine.ini.
+        #[serde(default = "default_cv_section")]
+        section: String,
     },
     Slider {
         key: String,
@@ -16,6 +41,10 @@ pub(crate) enum TweakKind {
         max: f64,
         step: f64,
         default_value: f64,
+        /// Scalability-file section new keys are inserted under.
+        /// Ignored when writing to DeviceProfiles or DefaultEngine.ini.
+        #[serde(default = "default_cv_section")]
+        section: String,
     },
 }
 
@@ -28,6 +57,9 @@ pub(crate) struct TweakDefinition {
     pub description: String,
     #[serde(default)]
     pub pak_only: bool,
+    /// For pak-only tweaks that live in a non-`[ConsoleVariables]` section of
+    /// DefaultEngine.ini (e.g. `"Script/Engine.UserInterfaceSettings"`).
+    /// `None` means the standard `[ConsoleVariables]` section.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_section: Option<String>,
     #[serde(flatten)]
@@ -53,6 +85,7 @@ pub(crate) struct TweakSetting {
 /// Build the full catalogue of available tweaks.
 pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
     vec![
+        // Gameplay Fixes
         TweakDefinition {
             id: "fix_abilities".into(),
             label: "Fix Chronovision / Punisher / Hela Walls".into(),
@@ -65,9 +98,9 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             engine_section: None,
             kind: TweakKind::RemoveLines {
                 lines: vec![
-                    "r.PostProcessing.DisableMaterials=1".into(),
-                    "r.CustomDepth=0".into(),
-                    "r.LightTile.Enable=0".into(),
+                    ScalabilityLine { pattern: "r.PostProcessing.DisableMaterials=1".into(), section: "PostProcessQuality@0".into() },
+                    ScalabilityLine { pattern: "r.CustomDepth=0".into(),                     section: "ConsoleVariables".into() },
+                    ScalabilityLine { pattern: "r.LightTile.Enable=0".into(),                section: "ConsoleVariables".into() },
                 ],
             },
         },
@@ -81,7 +114,9 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             pak_only: false,
             engine_section: None,
             kind: TweakKind::RemoveLines {
-                lines: vec!["m.Portal.ScreenPercentageLowerLimit=1".into()],
+                lines: vec![
+                    ScalabilityLine { pattern: "m.Portal.ScreenPercentageLowerLimit=1".into(), section: "EffectsQuality@0".into() },
+                ],
             },
         },
         TweakDefinition {
@@ -94,7 +129,9 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             pak_only: true,
             engine_section: None,
             kind: TweakKind::RemoveLines {
-                lines: vec!["p.SimCollisionEnabled=0".into()],
+                lines: vec![
+                    ScalabilityLine { pattern: "p.SimCollisionEnabled=0".into(), section: "ConsoleVariables".into() },
+                ],
             },
         },
         TweakDefinition {
@@ -107,9 +144,12 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             pak_only: true,
             engine_section: None,
             kind: TweakKind::RemoveLines {
-                lines: vec!["fx.EnableNiagaraSpriteRendering=0".into()],
+                lines: vec![
+                    ScalabilityLine { pattern: "fx.EnableNiagaraSpriteRendering=0".into(), section: "ConsoleVariables".into() },
+                ],
             },
         },
+        // Lighting & Color
         TweakDefinition {
             id: "fix_dark_maps".into(),
             label: "Fix Dark Maps".into(),
@@ -121,9 +161,9 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             engine_section: None,
             kind: TweakKind::RemoveLines {
                 lines: vec![
-                    "r.LightMaxDrawDistanceScale=0.00000001".into(),
-                    "r.LightFadeDistance=1".into(),
-                    "r.LightCullingDistance=1".into(),
+                    ScalabilityLine { pattern: "r.LightMaxDrawDistanceScale=0.00000001".into(), section: "ShadowQuality@0".into() },
+                    ScalabilityLine { pattern: "r.LightFadeDistance=1".into(),                  section: "GlobalIlluminationQuality@0".into() },
+                    ScalabilityLine { pattern: "r.LightCullingDistance=1".into(),               section: "GlobalIlluminationQuality@0".into() },
                 ],
             },
         },
@@ -142,20 +182,22 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                 max: 5.0,
                 step: 0.1,
                 default_value: 2.2,
+                section: "PostProcessQuality@0".into(),
             },
         },
         TweakDefinition {
             id: "fix_color_banding".into(),
             label: "Fix Color Banding".into(),
             category: "Lighting & Color".into(),
-            description:
-                "Removes the scene color format override that causes visible color banding. \
-                 Especially recommended when using the Quake Environments mod."
-                    .into(),
+            description: "Removes the scene color format override that causes visible color \
+                           banding. Especially recommended when using the Quake Environments mod."
+                .into(),
             pak_only: false,
             engine_section: None,
             kind: TweakKind::RemoveLines {
-                lines: vec!["r.SceneColorFormat=0".into()],
+                lines: vec![
+                    ScalabilityLine { pattern: "r.SceneColorFormat=0".into(), section: "EffectsQuality@0".into() },
+                ],
             },
         },
         TweakDefinition {
@@ -168,7 +210,9 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             pak_only: false,
             engine_section: None,
             kind: TweakKind::RemoveLines {
-                lines: vec!["r.PostProcessing.EnableEyeAdaptation=0".into()],
+                lines: vec![
+                    ScalabilityLine { pattern: "r.PostProcessing.EnableEyeAdaptation=0".into(), section: "PostProcessQuality@0".into() },
+                ],
             },
         },
         TweakDefinition {
@@ -181,9 +225,12 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             pak_only: false,
             engine_section: None,
             kind: TweakKind::RemoveLines {
-                lines: vec!["r.SeparateTranslucency=0".into()],
+                lines: vec![
+                    ScalabilityLine { pattern: "r.SeparateTranslucency=0".into(), section: "PostProcessQuality@0".into() },
+                ],
             },
         },
+        // Sharpness & Textures
         TweakDefinition {
             id: "cas_sharpening".into(),
             label: "CAS Sharpening".into(),
@@ -197,6 +244,8 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                 key: "r.PostProcessing.EnableCAS".into(),
                 on_value: "1".into(),
                 off_value: "0".into(),
+                default_enabled: true,
+                section: "PostProcessQuality@0".into(),
             },
         },
         TweakDefinition {
@@ -210,10 +259,10 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             engine_section: None,
             kind: TweakKind::RemoveLines {
                 lines: vec![
-                    "r.AnisotropicMaterials=0".into(),
-                    "r.VT.AnisotropicMaterials=0".into(),
-                    "r.VT.MaxAnisotropy=0".into(),
-                    "r.MaxAnisotropy=0".into(),
+                    ScalabilityLine { pattern: "r.AnisotropicMaterials=0".into(),    section: "ShadingQuality@0".into() },
+                    ScalabilityLine { pattern: "r.VT.AnisotropicMaterials=0".into(), section: "TextureQuality@0".into() },
+                    ScalabilityLine { pattern: "r.VT.MaxAnisotropy=0".into(),        section: "TextureQuality@0".into() },
+                    ScalabilityLine { pattern: "r.MaxAnisotropy=0".into(),           section: "TextureQuality@0".into() },
                 ],
             },
         },
@@ -225,7 +274,9 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             pak_only: false,
             engine_section: None,
             kind: TweakKind::RemoveLines {
-                lines: vec!["r.MipMapLODBias=15".into()],
+                lines: vec![
+                    ScalabilityLine { pattern: "r.MipMapLODBias=15".into(), section: "TextureQuality@0".into() },
+                ],
             },
         },
         TweakDefinition {
@@ -236,7 +287,9 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             pak_only: false,
             engine_section: None,
             kind: TweakKind::RemoveLines {
-                lines: vec!["r.Streaming.MipBias=2".into()],
+                lines: vec![
+                    ScalabilityLine { pattern: "r.Streaming.MipBias=2".into(), section: "TextureQuality@0".into() },
+                ],
             },
         },
         TweakDefinition {
@@ -249,9 +302,12 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             pak_only: false,
             engine_section: None,
             kind: TweakKind::RemoveLines {
-                lines: vec!["r.Streaming.PoolSize=1".into()],
+                lines: vec![
+                    ScalabilityLine { pattern: "r.Streaming.PoolSize=1".into(), section: "TextureQuality@0".into() },
+                ],
             },
         },
+        // Display
         TweakDefinition {
             id: "application_scale".into(),
             label: "Application Scale".into(),
@@ -261,13 +317,14 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                            Only effective as a pak mod (DefaultEngine.ini)."
                 .into(),
             pak_only: true,
-            engine_section: Some("Script/Engine.UserInterfaceSettings".into()),
+            engine_section: Some("/Script/Engine.UserInterfaceSettings".into()),
             kind: TweakKind::Slider {
                 key: "ApplicationScale".into(),
                 min: 0.5,
                 max: 2.0,
                 step: 0.05,
                 default_value: 1.0,
+                section: "ConsoleVariables".into(), // pak-only; section unused for engine writes
             },
         },
         TweakDefinition {
@@ -281,6 +338,8 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                 key: "Slate.EnableFontAntiAliasing".into(),
                 on_value: "1".into(),
                 off_value: "0".into(),
+                default_enabled: true,
+                section: "ConsoleVariables".into(), // pak-only; section unused for engine writes
             },
         },
     ]

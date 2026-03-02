@@ -20,7 +20,7 @@ interface TweakBase {
 
 interface RemoveLinesTweak extends TweakBase {
   kind: "RemoveLines";
-  lines: string[];
+  lines: { pattern: string; section: string }[];
 }
 
 interface ToggleTweak extends TweakBase {
@@ -28,6 +28,7 @@ interface ToggleTweak extends TweakBase {
   key: string;
   on_value: string;
   off_value: string;
+  default_enabled: boolean;
 }
 
 interface SliderTweak extends TweakBase {
@@ -112,7 +113,7 @@ export function ScalabilitySettings({ filePath, content, setContent, onSaved }: 
 
   async function applyAndSave() {
     try {
-      const settings: TweakSetting[] = definitions.map((def) => ({
+      const settings: TweakSetting[] = definitions.filter((d) => !d.pak_only).map((def) => ({
         id: def.id,
         enabled: enabled[def.id] ?? false,
         value: values[def.id] ?? null,
@@ -239,7 +240,7 @@ function TweakCodes({ tweak }: { tweak: TweakDefinition }) {
     case "RemoveLines":
       return tweak.lines.map((line, i) => (
         <code key={i} className={codeClass}>
-          {line}
+          {line.pattern}
         </code>
       ));
     case "Toggle":

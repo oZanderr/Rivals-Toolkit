@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Package,
@@ -26,16 +26,17 @@ interface PakIniInfo {
   engine_ini_entry: string | null;
 }
 
-interface PakTweakState {
-  key: string;
-  value: string;
-  source: string;
-}
-
 interface PakTweakEdit {
   key: string;
   value: string | null;
   engine_section?: string;
+}
+
+// Matches scalability::TweakState on the Rust side
+interface TweakState {
+  id: string;
+  active: boolean;
+  current_value: string | null;
 }
 
 // ── Tweak definition types (matching Rust backend) ───────────────────
@@ -51,7 +52,7 @@ interface TweakBase {
 
 interface RemoveLinesTweak extends TweakBase {
   kind: "RemoveLines";
-  lines: string[];
+  lines: { pattern: string; section: string }[];
 }
 
 interface ToggleTweak extends TweakBase {
@@ -59,6 +60,7 @@ interface ToggleTweak extends TweakBase {
   key: string;
   on_value: string;
   off_value: string;
+  default_enabled: boolean;
 }
 
 interface SliderTweak extends TweakBase {
@@ -79,7 +81,7 @@ interface Props {
 export function PakTweaks({ gamePath }: Props) {
   const [paks, setPaks] = useState<PakIniInfo[]>([]);
   const [selectedPak, setSelectedPak] = useState<PakIniInfo | null>(null);
-  const [tweaks, setTweaks] = useState<PakTweakState[]>([]);
+  const [tweakStates, setTweakStates] = useState<TweakState[]>([]);
   const [edits, setEdits] = useState<PakTweakEdit[]>([]);
   const [scanning, setScanning] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -89,10 +91,8 @@ export function PakTweaks({ gamePath }: Props) {
   const [badgeMsg, setBadgeMsg] = useState("");
   const badgeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Quick settings state
+  // Tweak definitions (for rendering controls)
   const [definitions, setDefinitions] = useState<TweakDefinition[]>([]);
-  const [tweakEnabled, setTweakEnabled] = useState<Record<string, boolean>>({});
-  const [tweakValues, setTweakValues] = useState<Record<string, string>>({});
 
   const flashBadge = (msg: string) => {
     if (badgeTimer.current) clearTimeout(badgeTimer.current);
@@ -110,93 +110,52 @@ export function PakTweaks({ gamePath }: Props) {
     invoke<TweakDefinition[]>("get_tweak_definitions").then(setDefinitions);
   }, []);
 
-  // Detect quick tweak states when raw CVars change
-  const detectQuickStates = useCallback(() => {
-    if (definitions.length === 0) return;
-    const cvarMap = new Map<string, string>();
-    for (const t of tweaks) {
-      cvarMap.set(t.key.toLowerCase(), t.value);
-    }
-
-    const enabledMap: Record<string, boolean> = {};
-    const valuesMap: Record<string, string> = {};
-
-    for (const def of definitions) {
-      switch (def.kind) {
-        case "RemoveLines": {
-          const anyFound = def.lines.some((line) => {
-            const eqIdx = line.indexOf("=");
-            if (eqIdx < 0) return cvarMap.has(line.toLowerCase());
-            const key = line.substring(0, eqIdx).toLowerCase();
-            const val = line.substring(eqIdx + 1);
-            const current = cvarMap.get(key);
-            return current !== undefined && current === val;
-          });
-          enabledMap[def.id] = !anyFound;
-          break;
-        }
-        case "Toggle": {
-          const current = cvarMap.get(def.key.toLowerCase());
-          // If key not found, the engine default is active → assume enabled
-          enabledMap[def.id] = current !== undefined ? current === def.on_value : true;
-          if (current !== undefined) valuesMap[def.id] = current;
-          break;
-        }
-        case "Slider": {
-          const current = cvarMap.get(def.key.toLowerCase());
-          enabledMap[def.id] = current !== undefined;
-          if (current !== undefined) valuesMap[def.id] = current;
-          break;
-        }
-      }
-    }
-
-    setTweakEnabled(enabledMap);
-    setTweakValues(valuesMap);
-  }, [tweaks, definitions]);
-
-  useEffect(() => {
-    detectQuickStates();
-  }, [detectQuickStates]);
-
   function toggleQuickTweak(id: string) {
     const def = definitions.find((d) => d.id === id);
     if (!def) return;
 
-    const newEnabled = !tweakEnabled[id];
-    setTweakEnabled((prev) => ({ ...prev, [id]: newEnabled }));
+    const currentState = tweakStates.find((s) => s.id === id);
+    const newEnabled = !(currentState?.active ?? false);
+
+    // Optimistically update local state so the UI responds immediately
+    setTweakStates((prev) =>
+      prev.map((s) => (s.id === id ? { ...s, active: newEnabled } : s)),
+    );
 
     switch (def.kind) {
       case "RemoveLines":
         for (const line of def.lines) {
-          const eqIdx = line.indexOf("=");
-          const key = eqIdx >= 0 ? line.substring(0, eqIdx) : line;
-          const val = eqIdx >= 0 ? line.substring(eqIdx + 1) : "0";
+          const eqIdx = line.pattern.indexOf("=");
+          const key = eqIdx >= 0 ? line.pattern.substring(0, eqIdx) : line.pattern;
+          const val = eqIdx >= 0 ? line.pattern.substring(eqIdx + 1) : "0";
           if (newEnabled) {
-            queueEdit(key, null); // Fix ON → remove key
+            queueEdit(key, null);
           } else {
-            queueEdit(key, val); // Fix OFF → add key=value
+            queueEdit(key, val);
           }
         }
         break;
       case "Toggle":
         queueEdit(def.key, newEnabled ? def.on_value : def.off_value, def.engine_section);
         break;
-      case "Slider":
+      case "Slider": {
+        const currentVal = currentState?.current_value ?? String((def as SliderTweak).default_value);
         if (newEnabled) {
-          const val = tweakValues[id] ?? String(def.default_value);
-          queueEdit(def.key, val, def.engine_section);
+          queueEdit(def.key, currentVal, def.engine_section);
         } else {
           queueEdit(def.key, null, def.engine_section);
         }
         break;
+      }
     }
   }
 
   function setQuickTweakValue(id: string, val: string) {
     const def = definitions.find((d) => d.id === id);
     if (!def || def.kind !== "Slider") return;
-    setTweakValues((prev) => ({ ...prev, [id]: val }));
+    setTweakStates((prev) =>
+      prev.map((s) => (s.id === id ? { ...s, current_value: val } : s)),
+    );
     queueEdit((def as SliderTweak).key, val, def.engine_section);
   }
 
@@ -210,7 +169,7 @@ export function PakTweaks({ gamePath }: Props) {
       setPaks(results);
       if (results.length === 0) {
         setSelectedPak(null);
-        setTweaks([]);
+        setTweakStates([]);
         setEdits([]);
         setDirty(false);
       } else if (results.length === 1) {
@@ -220,7 +179,7 @@ export function PakTweaks({ gamePath }: Props) {
         // If previously selected pak is gone, deselect
         if (selectedPak && !results.find((p) => p.pak_path === selectedPak.pak_path)) {
           setSelectedPak(null);
-          setTweaks([]);
+          setTweakStates([]);
           setEdits([]);
           setDirty(false);
         }
@@ -236,15 +195,15 @@ export function PakTweaks({ gamePath }: Props) {
     setSelectedPak(pak);
     setLoading(true);
     try {
-      const states = await invoke<PakTweakState[]>("read_pak_tweak_values", {
+      const states = await invoke<TweakState[]>("detect_pak_tweaks", {
         pakPath: pak.pak_path,
       });
-      setTweaks(states);
+      setTweakStates(states);
       setEdits([]);
       setDirty(false);
     } catch (e: any) {
       console.error("Load failed:", e);
-      setTweaks([]);
+      setTweakStates([]);
     } finally {
       setLoading(false);
     }
@@ -383,11 +342,11 @@ export function PakTweaks({ gamePath }: Props) {
                         const engineOnly = !!tweak.engine_section;
                         const disabled = engineOnly && !selectedPak.has_engine_ini;
                         return (
-                          <QuickTweakRow
+                      <QuickTweakRow
                             key={tweak.id}
                             tweak={tweak}
-                            isEnabled={tweakEnabled[tweak.id] ?? false}
-                            currentValue={tweakValues[tweak.id]}
+                            isEnabled={tweakStates.find((s) => s.id === tweak.id)?.active ?? false}
+                            currentValue={tweakStates.find((s) => s.id === tweak.id)?.current_value ?? undefined}
                             disabled={disabled}
                             onToggle={() => toggleQuickTweak(tweak.id)}
                             onValueChange={(val) => setQuickTweakValue(tweak.id, val)}
@@ -523,7 +482,7 @@ function QuickTweakCodes({ tweak }: { tweak: TweakDefinition }) {
     case "RemoveLines":
       return tweak.lines.map((line, i) => (
         <code key={i} className={codeClass}>
-          {line}
+          {line.pattern}
         </code>
       ));
     case "Toggle":

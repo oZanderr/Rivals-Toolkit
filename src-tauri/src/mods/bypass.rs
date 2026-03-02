@@ -1,18 +1,8 @@
 use std::fs;
 
-use super::paths::{binaries_dir, mods_dir};
+use crate::paths::{binaries_dir, mods_dir};
 
-// Bypass files bundled at compile time.
-static BYPASS_DSOUND: &[u8] = include_bytes!("../../resources/bypass/dsound.dll");
-static BYPASS_ASI: &[u8] =
-    include_bytes!("../../resources/bypass/plugins/MarvelRivalsUTOCSignatureBypass.asi");
-
-/// Returns `true` if the file exists and its contents are byte-identical
-fn file_matches(path: &std::path::Path, expected: &[u8]) -> bool {
-    fs::read(path)
-        .map(|data| data == expected)
-        .unwrap_or(false)
-}
+use super::{BYPASS_ASI, BYPASS_DSOUND, file_matches};
 
 pub(crate) fn install_signature_bypass(game_root: &str) -> Result<String, String> {
     // Validate that the bundled DLL is a real PE binary (MZ header), not a placeholder.

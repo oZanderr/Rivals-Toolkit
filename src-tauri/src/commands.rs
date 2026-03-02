@@ -105,10 +105,10 @@ pub(crate) async fn scan_mod_paks_for_ini(
 }
 
 #[tauri::command]
-pub(crate) async fn read_pak_tweak_values(
+pub(crate) async fn detect_pak_tweaks(
     pak_path: String,
-) -> Result<Vec<pak_tweaks::PakTweakState>, String> {
-    tauri::async_runtime::spawn_blocking(move || pak_tweaks::read_pak_tweaks(&pak_path))
+) -> Result<Vec<scalability::TweakState>, String> {
+    tauri::async_runtime::spawn_blocking(move || pak_tweaks::detect_pak_tweaks(&pak_path))
         .await
         .map_err(|e| e.to_string())?
 }

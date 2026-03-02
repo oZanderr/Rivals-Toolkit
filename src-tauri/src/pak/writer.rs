@@ -14,6 +14,9 @@ pub(super) fn repack_pak(input_dir: &str, output_pak: &str) -> Result<(), String
     }
 
     let out_file = fs::File::create(output_pak).map_err(|e| e.to_string())?;
+    // Canonicalize after creation so we can skip it during the directory walk
+    // (relevant when the output pak is saved inside the input directory).
+    let output_canonical = Path::new(output_pak).canonicalize().ok();
     let mut pak_writer = repak::PakBuilder::new()
         .key(make_aes_key()?)
         .compression([repak::Compression::Oodle])
@@ -29,6 +32,12 @@ pub(super) fn repack_pak(input_dir: &str, output_pak: &str) -> Result<(), String
         let path = entry.path();
         if !path.is_file() {
             continue;
+        }
+        // Skip the output pak itself if it lives inside the input directory.
+        if let Some(ref canon_out) = output_canonical {
+            if path.canonicalize().ok().as_ref() == Some(canon_out) {
+                continue;
+            }
         }
         let rel = path
             .strip_prefix(input)
