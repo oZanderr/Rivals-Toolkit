@@ -124,14 +124,19 @@ export function PakManager({ gamePath }: Props) {
     if (!selectedPak) return;
     const dir = await open({ directory: true, multiple: false });
     if (!dir || typeof dir !== "string") return;
+
+    // Auto-create a subfolder named after the pak (without extension)
+    const pakBaseName = selectedPak.replace(/\\/g, "/").split("/").pop()?.replace(/\.pak$/i, "") ?? "output";
+    const outputDir = `${dir}\\${pakBaseName}`;
+
     setBusy(true);
     showStatus("Unpacking…", "info");
     try {
       const files = await invoke<string[]>("unpack_pak", {
         pakPath: selectedPak,
-        outputDir: dir,
+        outputDir,
       });
-      showStatus(`Extracted ${files.length} file(s) to ${dir}`, "ok");
+      showStatus(`Extracted ${files.length} file(s) to ${outputDir}`, "ok");
     } catch (e: any) {
       showStatus(String(e), "err");
     } finally {
@@ -160,8 +165,18 @@ export function PakManager({ gamePath }: Props) {
   async function openAndRepack() {
     const inputDir = await open({ directory: true, multiple: false });
     if (!inputDir || typeof inputDir !== "string") return;
+
+    // Derive default pak name from folder name
+    const folderName = inputDir.replace(/\\/g, "/").split("/").pop() ?? "mod_output";
+    const baseName = folderName.replace(/_9999999_P$/i, "");
+    const defaultPakName = `${baseName}_9999999_P.pak`;
+
+    // Default save location: mods folder
+    const modsDir = `${gamePath}\\MarvelGame\\Marvel\\Content\\Paks\\~mods`;
+    const defaultPath = `${modsDir}\\${defaultPakName}`;
+
     const outputPak = await save({
-      defaultPath: "mod_output.pak",
+      defaultPath,
       filters: [{ name: "PAK files", extensions: ["pak"] }],
     });
     if (!outputPak) return;
