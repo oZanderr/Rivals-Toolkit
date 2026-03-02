@@ -65,22 +65,24 @@ function App() {
       </nav>
 
       {/* Content */}
-      <main className="flex min-h-0 flex-1 flex-col overflow-hidden p-6 bg-background">
+      <main className="flex min-h-0 flex-1 flex-col overflow-hidden bg-background">
         {activeTab === "home" && (
-          <div className="h-full overflow-y-auto">
+          <div className="h-full overflow-y-auto p-6">
             <Home gamePath={gamePath} setGamePath={setGamePath} />
           </div>
         )}
         {activeTab === "mod-tools" && (
-          <div className="h-full overflow-y-auto">
+          <div className="h-full overflow-y-auto p-6">
             <ModTools gamePath={gamePath} />
           </div>
         )}
         {activeTab === "pak-manager" && (
-          <PakManager gamePath={gamePath} />
+          <div className="h-full overflow-hidden p-6">
+            <PakManager gamePath={gamePath} />
+          </div>
         )}
         {activeTab === "settings" && (
-          <div className="h-full overflow-y-auto">
+          <div className="h-full overflow-y-auto p-6">
             <SettingsEditor gamePath={gamePath} />
           </div>
         )}
