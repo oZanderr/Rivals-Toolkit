@@ -83,11 +83,11 @@ export function PakTweaks({ gamePath }: Props) {
   const [paks, setPaks] = useState<PakIniInfo[]>([]);
   const [selectedPak, setSelectedPak] = useState<PakIniInfo | null>(null);
   const [tweakStates, setTweakStates] = useState<TweakState[]>([]);
+  const [savedTweakStates, setSavedTweakStates] = useState<TweakState[]>([]);
   const [edits, setEdits] = useState<PakTweakEdit[]>([]);
   const [scanning, setScanning] = useState(false);
   const [loading, setLoading] = useState(false);
   const [applying, setApplying] = useState(false);
-  const [dirty, setDirty] = useState(false);
   const [showBadge, setShowBadge] = useState(false);
   const [badgeMsg, setBadgeMsg] = useState("");
   const badgeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -102,7 +102,7 @@ export function PakTweaks({ gamePath }: Props) {
   };
 
   useEffect(() => {
-    if (gamePath) scan();
+    if (gamePath) scan(true);
   }, [gamePath]);
 
   // Load tweak definitions once
@@ -115,6 +115,7 @@ export function PakTweaks({ gamePath }: Props) {
     if (!def) return;
 
     const currentState = tweakStates.find((s) => s.id === id);
+    const savedState = savedTweakStates.find((s) => s.id === id);
     const newEnabled = !(currentState?.active ?? false);
 
     // Optimistically update local state so the UI responds immediately
@@ -128,23 +129,22 @@ export function PakTweaks({ gamePath }: Props) {
           const eqIdx = line.pattern.indexOf("=");
           const key = eqIdx >= 0 ? line.pattern.substring(0, eqIdx) : line.pattern;
           const val = eqIdx >= 0 ? line.pattern.substring(eqIdx + 1) : "0";
-          if (newEnabled) {
-            queueEdit(key, null);
-          } else {
-            queueEdit(key, val);
-          }
+          // Original: null if tweak was active (line removed), val if inactive
+          const originalVal = (savedState?.active ?? false) ? null : val;
+          queueEdit(key, newEnabled ? null : val, originalVal);
         }
         break;
-      case "Toggle":
-        queueEdit(def.key, newEnabled ? def.on_value : def.off_value, def.engine_section);
+      case "Toggle": {
+        const originalVal = (savedState?.active ?? false) ? def.on_value : def.off_value;
+        queueEdit(def.key, newEnabled ? def.on_value : def.off_value, originalVal, def.engine_section);
         break;
+      }
       case "Slider": {
         const currentVal = currentState?.current_value ?? String((def as SliderTweak).default_value);
-        if (newEnabled) {
-          queueEdit(def.key, currentVal, def.engine_section);
-        } else {
-          queueEdit(def.key, null, def.engine_section);
-        }
+        const originalVal = (savedState?.active ?? false)
+          ? (savedState?.current_value ?? String((def as SliderTweak).default_value))
+          : null;
+        queueEdit(def.key, newEnabled ? currentVal : null, originalVal, def.engine_section);
         break;
       }
     }
@@ -153,14 +153,18 @@ export function PakTweaks({ gamePath }: Props) {
   function setQuickTweakValue(id: string, val: string) {
     const def = definitions.find((d) => d.id === id);
     if (!def || def.kind !== "Slider") return;
+    const savedState = savedTweakStates.find((s) => s.id === id);
+    const originalVal = (savedState?.active ?? false)
+      ? (savedState?.current_value ?? String((def as SliderTweak).default_value))
+      : null;
     setTweakStates((prev) =>
       prev.map((s) => (s.id === id ? { ...s, current_value: val } : s)),
     );
-    queueEdit((def as SliderTweak).key, val, def.engine_section);
+    queueEdit((def as SliderTweak).key, val, originalVal, def.engine_section);
   }
 
   /** Scan the mods folder for pak files — only updates the list, preserves current selection and edits */
-  async function scan() {
+  async function scan(silent = false) {
     if (!gamePath) return;
     setScanning(true);
     try {
@@ -171,21 +175,25 @@ export function PakTweaks({ gamePath }: Props) {
       if (results.length === 0) {
         setSelectedPak(null);
         setTweakStates([]);
+        setSavedTweakStates([]);
         setEdits([]);
-        setDirty(false);
+        if (!silent) flashBadge("No config mods found");
       } else if (!selectedPak) {
         // Nothing selected yet — auto-select if only one
         if (results.length === 1) {
           await selectPak(results[0]);
         }
+        if (!silent) flashBadge(`Found ${results.length} mod${results.length !== 1 ? "s" : ""}`);
       } else if (!results.find((p) => p.pak_path === selectedPak.pak_path)) {
         // Previously selected pak is gone — deselect
         setSelectedPak(null);
         setTweakStates([]);
+        setSavedTweakStates([]);
         setEdits([]);
-        setDirty(false);
+        if (!silent) flashBadge(`Found ${results.length} mod${results.length !== 1 ? "s" : ""}`);
+      } else {
+        if (!silent) flashBadge(`Found ${results.length} mod${results.length !== 1 ? "s" : ""}`);
       }
-      // Otherwise: selected pak still exists — keep current state untouched
     } catch (e: any) {
       console.error("Scan failed:", e);
     } finally {
@@ -201,11 +209,12 @@ export function PakTweaks({ gamePath }: Props) {
         pakPath: pak.pak_path,
       });
       setTweakStates(states);
+      setSavedTweakStates(states);
       setEdits([]);
-      setDirty(false);
     } catch (e: any) {
       console.error("Load failed:", e);
       setTweakStates([]);
+      setSavedTweakStates([]);
     } finally {
       setLoading(false);
     }
@@ -219,8 +228,8 @@ export function PakTweaks({ gamePath }: Props) {
         pakPath: pak.pak_path,
       });
       setTweakStates(states);
+      setSavedTweakStates(states);
       setEdits([]);
-      setDirty(false);
     } catch (e: any) {
       console.error("Refresh failed:", e);
     } finally {
@@ -228,9 +237,18 @@ export function PakTweaks({ gamePath }: Props) {
     }
   }
 
-  function queueEdit(key: string, value: string | null, engineSection?: string) {
+  function queueEdit(key: string, value: string | null, originalValue: string | null | undefined, engineSection?: string) {
     setEdits((prev) => {
       const existing = prev.findIndex((e) => e.key.toLowerCase() === key.toLowerCase());
+      // If the new value restores to original, cancel out this edit
+      if (originalValue !== undefined && value === originalValue) {
+        if (existing >= 0) {
+          const updated = [...prev];
+          updated.splice(existing, 1);
+          return updated;
+        }
+        return prev;
+      }
       if (existing >= 0) {
         const updated = [...prev];
         updated[existing] = { key, value, engine_section: engineSection };
@@ -238,7 +256,6 @@ export function PakTweaks({ gamePath }: Props) {
       }
       return [...prev, { key, value, engine_section: engineSection }];
     });
-    setDirty(true);
   }
 
   async function applyEdits() {
@@ -250,7 +267,6 @@ export function PakTweaks({ gamePath }: Props) {
         edits,
       });
       flashBadge(msg);
-      setDirty(false);
       // Reload to reflect changes
       await selectPak(selectedPak);
     } catch (e: any) {
@@ -259,6 +275,8 @@ export function PakTweaks({ gamePath }: Props) {
       setApplying(false);
     }
   }
+
+  const dirty = edits.length > 0;
 
   return (
     <div className="flex w-full flex-col gap-5">
@@ -274,7 +292,7 @@ export function PakTweaks({ gamePath }: Props) {
               </span>
             )}
           </div>
-          <Button variant="blue" size="sm" onClick={scan} disabled={scanning || !gamePath}>
+          <Button variant="blue" size="sm" onClick={() => scan()} disabled={scanning || !gamePath}>
             <Search size={14} className={cn(scanning && "animate-pulse")} />
             Scan
           </Button>
@@ -420,7 +438,7 @@ export function PakTweaks({ gamePath }: Props) {
                   variant="ghost"
                   size="sm"
                   onClick={() => selectedPak && refreshTweaks(selectedPak)}
-                  disabled={!dirty || loading}
+                  disabled={loading}
                 >
                   <RefreshCw size={14} />
                   Reload
