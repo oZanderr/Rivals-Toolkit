@@ -7,7 +7,6 @@ import {
   Shield,
   ShieldCheck,
   ShieldX,
-  Package,
   CheckCircle2,
   XCircle,
 } from "lucide-react";
@@ -30,7 +29,6 @@ type StatusType = "ok" | "err" | "info";
 
 export function ModTools({ gamePath }: Props) {
   const [modsStatus, setModsStatus] = useState<ModsStatus | null>(null);
-  const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<{ msg: string; type: StatusType } | null>(null);
   const [showBadge, setShowBadge] = useState(false);
   const [badgeMsg, setBadgeMsg] = useState("");
@@ -47,14 +45,15 @@ export function ModTools({ gamePath }: Props) {
   };
 
   useEffect(() => {
-    if (gamePath) refresh();
+    if (gamePath) refresh(true);
   }, [gamePath]);
 
-  async function refresh() {
+  async function refresh(silent = false) {
     if (!gamePath) return;
     try {
       const s = await invoke<ModsStatus>("get_mods_status", { gameRoot: gamePath });
       setModsStatus(s);
+      if (!silent) flashBadge("Status refreshed");
     } catch (e: any) {
       showStatus(String(e), "err");
     }
@@ -62,15 +61,12 @@ export function ModTools({ gamePath }: Props) {
 
   async function installBypass() {
     if (!gamePath) return showStatus("Set game root on the Home tab first.", "err");
-    setBusy(true);
     try {
       const msg = await invoke<string>("install_signature_bypass", { gameRoot: gamePath });
       flashBadge(msg);
-      await refresh();
+      await refresh(true);
     } catch (e: any) {
       showStatus(String(e), "err");
-    } finally {
-      setBusy(false);
     }
   }
 
@@ -152,7 +148,7 @@ export function ModTools({ gamePath }: Props) {
             <FolderOpen size={14} />
             Open Mods Folder
           </Button>
-          <Button variant="ghost" size="sm" onClick={refresh} disabled={!gamePath}>
+          <Button variant="ghost" size="sm" onClick={() => refresh()} disabled={!gamePath}>
             <RefreshCw size={14} />
             Refresh
           </Button>
