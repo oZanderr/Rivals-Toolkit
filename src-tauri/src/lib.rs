@@ -29,7 +29,9 @@ pub fn run() {
             commands::apply_tweaks,
             commands::scan_mod_paks_for_ini,
             commands::detect_pak_tweaks,
-            commands::apply_pak_tweak_edits
+            commands::apply_pak_tweak_edits,
+            commands::clear_shader_cache,
+            commands::launch_game
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

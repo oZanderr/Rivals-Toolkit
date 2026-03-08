@@ -58,7 +58,11 @@ pub(crate) fn apply_tweaks(
     catalogue: &[TweakDefinition],
     settings: &[TweakSetting],
 ) -> String {
-    let mut lines: Vec<String> = content.lines().map(String::from).collect();
+    let mut lines: Vec<String> = if content.trim().is_empty() {
+        vec!["[ScalabilitySettings]".to_string()]
+    } else {
+        content.lines().map(String::from).collect()
+    };
 
     for setting in settings {
         let Some(tweak) = catalogue.iter().find(|t| t.id == setting.id) else {

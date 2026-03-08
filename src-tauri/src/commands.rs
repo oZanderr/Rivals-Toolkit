@@ -122,3 +122,13 @@ pub(crate) async fn apply_pak_tweak_edits(
         .await
         .map_err(|e| e.to_string())?
 }
+
+#[tauri::command]
+pub(crate) fn clear_shader_cache() -> Result<String, String> {
+    scalability::clear_shader_cache()
+}
+
+#[tauri::command]
+pub(crate) fn launch_game(install_info: detect::InstallInfo) -> Result<(), String> {
+    install_info.launch_game()
+}
