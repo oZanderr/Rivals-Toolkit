@@ -1,7 +1,7 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { FileText, FolderOpen, RefreshCw, Save, SlidersHorizontal } from "lucide-react";
+import { CheckCircle2, FileText, FolderOpen, RefreshCw, Save, SlidersHorizontal, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -18,9 +18,29 @@ export function ScalabilityEditor() {
   const [subTab, setSubTab] = useState<SubTab>("quick");
   const [status, setStatus] = useState<{ msg: string; type: StatusType } | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
+  const [clearingCache, setClearingCache] = useState(false);
+  const [cacheMsg, setCacheMsg] = useState<string | null>(null);
+  const cacheMsgTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const showStatus = (msg: string, type: StatusType = "info") =>
     setStatus({ msg, type });
+
+  async function clearShaderCache() {
+    if (cacheMsgTimer.current) clearTimeout(cacheMsgTimer.current);
+    setClearingCache(true);
+    setCacheMsg(null);
+    try {
+      const msg = await invoke<string>("clear_shader_cache");
+      setCacheMsg(msg);
+      cacheMsgTimer.current = setTimeout(() => setCacheMsg(null), 4000);
+    } catch (e) {
+      setCacheMsg("Failed to clear shader cache");
+      cacheMsgTimer.current = setTimeout(() => setCacheMsg(null), 4000);
+      console.error(e);
+    } finally {
+      setClearingCache(false);
+    }
+  }
 
   useEffect(() => {
     autoLoad();
@@ -170,6 +190,35 @@ export function ScalabilityEditor() {
           </Card>
         </>
       )}
+
+      {/* Quick Actions */}
+      <div className="flex flex-col gap-2">
+        <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+          Quick Actions
+        </span>
+        <div className="flex flex-wrap gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={clearShaderCache}
+            disabled={clearingCache}
+            title="Deletes pipeline cache files from %LOCALAPPDATA%\Marvel\Saved"
+          >
+            {clearingCache ? (
+              <RefreshCw size={14} className="animate-spin" />
+            ) : (
+              <Trash2 size={14} />
+            )}
+            Clear Shader Cache
+          </Button>
+          {cacheMsg && (
+            <span className="flex items-center gap-1.5 text-[12px] font-medium text-[var(--color-ok)]">
+              <CheckCircle2 size={14} strokeWidth={2.5} />
+              {cacheMsg}
+            </span>
+          )}
+        </div>
+      </div>
 
       {/* Status */}
       {status && (

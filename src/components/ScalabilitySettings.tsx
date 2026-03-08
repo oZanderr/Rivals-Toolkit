@@ -87,7 +87,6 @@ export function ScalabilitySettings({ filePath, content, setContent, onSaved, on
 
   // Detect active tweaks whenever content changes
   const detectTweaks = useCallback(async (text: string) => {
-    if (!text) return;
     try {
       const states = await invoke<TweakState[]>("detect_tweaks", { content: text });
       const enabledMap: Record<string, boolean> = {};

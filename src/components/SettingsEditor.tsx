@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
-import { CheckCircle2, FileText, FolderOpen, Package, Search } from "lucide-react";
+import { CheckCircle2, FileText, FolderOpen, Info, Package, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -21,6 +21,7 @@ export function SettingsEditor({ gamePath }: Props) {
 
   const [filePath, setFilePath] = useState("");
   const [content, setContent] = useState("");
+  const [fileExists, setFileExists] = useState<boolean | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const [detecting, setDetecting] = useState(false);
   const [detectBadge, setDetectBadge] = useState<string | null>(null);
@@ -39,8 +40,8 @@ export function SettingsEditor({ gamePath }: Props) {
       const hadPath = filePath !== "";
       const pathChanged = p !== filePath;
       setFilePath(p);
+      await loadFile(p);
       if (pathChanged) {
-        await loadFile(p);
         if (hadPath) showDetectBadge("Path updated");
       } else {
         showDetectBadge("Path unchanged");
@@ -79,8 +80,10 @@ export function SettingsEditor({ gamePath }: Props) {
     try {
       const text = await invoke<string>("read_scalability", { path });
       setContent(text);
+      setFileExists(true);
     } catch {
       setContent("");
+      setFileExists(false);
     }
   }
 
@@ -162,12 +165,21 @@ export function SettingsEditor({ gamePath }: Props) {
           </Card>
 
           {/* Quick settings */}
+          {fileExists === false && (
+            <div className="flex items-start gap-2.5 rounded-md border border-border bg-muted/40 px-4 py-3 text-[12px] text-muted-foreground">
+              <Info size={14} className="mt-0.5 shrink-0" />
+              <span>
+                <strong className="font-semibold text-foreground">No Scalability.ini found.</strong>{" "}
+                You can still configure tweaks here, the file will be created automatically when you save.
+              </span>
+            </div>
+          )}
           <ScalabilitySettings
             key={reloadKey}
             filePath={filePath}
             content={content}
             setContent={setContent}
-            onSaved={() => {}}
+            onSaved={() => setFileExists(true)}
             onReload={reloadContent}
           />
           </div>

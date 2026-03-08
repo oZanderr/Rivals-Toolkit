@@ -9,6 +9,11 @@ import { Separator } from "@/components/ui/separator";
 
 type Tab = "home" | "mod-tools" | "pak-manager" | "settings";
 
+interface InstallInfo {
+  path: string;
+  source: string;
+}
+
 const TABS: { id: Tab; label: string; icon: ReactNode }[] = [
   { id: "home", label: "Home", icon: <House size={15} /> },
   { id: "mod-tools", label: "Mod Tools", icon: <Wrench size={15} /> },
@@ -19,6 +24,7 @@ const TABS: { id: Tab; label: string; icon: ReactNode }[] = [
 function App() {
   const [activeTab, setActiveTab] = useState<Tab>("home");
   const [gamePath, setGamePath] = useState("");
+  const [installInfo, setInstallInfo] = useState<InstallInfo | null | undefined>(undefined);
 
   return (
     <div className="flex h-screen overflow-hidden bg-background text-foreground">
@@ -27,8 +33,8 @@ function App() {
         <div className="flex items-center gap-2.5 px-4 pb-4">
           <span className="text-3xl leading-none">🐽</span>
           <div>
-            <div className="text-[15px] font-bold">Oinkers Editor</div>
-            <div className="text-[11px] text-muted-foreground">Marvel Rivals Mod Tool</div>
+            <div className="text-[15px] font-bold">Oinkers Toolkit</div>
+            <div className="text-[11px] text-muted-foreground">Marvel Rivals Mod Suite</div>
           </div>
         </div>
 
@@ -68,7 +74,7 @@ function App() {
       <main className="flex min-h-0 flex-1 flex-col overflow-hidden bg-background">
         {activeTab === "home" && (
           <div className="h-full overflow-y-auto p-6">
-            <Home gamePath={gamePath} setGamePath={setGamePath} />
+            <Home gamePath={gamePath} setGamePath={setGamePath} setActiveTab={setActiveTab} installInfo={installInfo} setInstallInfo={setInstallInfo} />
           </div>
         )}
         {activeTab === "mod-tools" && (

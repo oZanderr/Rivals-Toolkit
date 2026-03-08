@@ -7,6 +7,7 @@ import {
   Search,
   CheckCircle2,
   XCircle,
+  Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -88,6 +89,7 @@ export function PakTweaks({ gamePath }: Props) {
   const [scanning, setScanning] = useState(false);
   const [loading, setLoading] = useState(false);
   const [applying, setApplying] = useState(false);
+  const [clearingCache, setClearingCache] = useState(false);
   const [showBadge, setShowBadge] = useState(false);
   const [badgeMsg, setBadgeMsg] = useState("");
   const badgeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -276,6 +278,19 @@ export function PakTweaks({ gamePath }: Props) {
     }
   }
 
+  async function clearShaderCache() {
+    setClearingCache(true);
+    try {
+      const msg = await invoke<string>("clear_shader_cache");
+      flashBadge(msg);
+    } catch (e: any) {
+      flashBadge("Failed to clear shader cache");
+      console.error("Clear shader cache failed:", e);
+    } finally {
+      setClearingCache(false);
+    }
+  }
+
   const dirty = edits.length > 0;
 
   return (
@@ -433,6 +448,20 @@ export function PakTweaks({ gamePath }: Props) {
                     <Save size={14} />
                   )}
                   {applying ? "Repacking…" : dirty ? "Apply & Repack" : "Up to Date"}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={clearShaderCache}
+                  disabled={clearingCache}
+                  title="Delete pipeline cache files from %LOCALAPPDATA%\Marvel\Saved"
+                >
+                  {clearingCache ? (
+                    <RefreshCw size={14} className="animate-spin" />
+                  ) : (
+                    <Trash2 size={14} />
+                  )}
+                  Clear Shader Cache
                 </Button>
                 <Button
                   variant="ghost"
