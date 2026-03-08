@@ -172,7 +172,7 @@ fn add_lines_if_absent(lines: &mut Vec<String>, entries: &[super::tweaks::Scalab
 
 /// Insert `new_line` into the named `[section]` block.
 /// Lines are placed just before the next section header (or at end of section).
-/// If the section header is absent it is appended together with the new line.
+/// If the section header is absent it is appended (with a preceding blank line) together with the new line.
 fn insert_into_section(lines: &mut Vec<String>, section: &str, new_line: String) {
     let header = format!("[{}]", section);
     let header_lower = header.to_ascii_lowercase();
@@ -183,6 +183,7 @@ fn insert_into_section(lines: &mut Vec<String>, section: &str, new_line: String)
 
     let insert_at = if let Some(start) = section_start {
         // Find the first line after the header that starts a new section.
+        // Insert before it, but after any trailing blank lines that belong to this section.
         let end = lines[start + 1..]
             .iter()
             .position(|l| {
@@ -191,9 +192,17 @@ fn insert_into_section(lines: &mut Vec<String>, section: &str, new_line: String)
             })
             .map(|rel| start + 1 + rel)
             .unwrap_or(lines.len());
-        end
+        // Walk back over trailing blank lines so the new line sits inside the section
+        let mut pos = end;
+        while pos > start + 1 && lines[pos - 1].trim().is_empty() {
+            pos -= 1;
+        }
+        pos
     } else {
-        // Section missing — append header then fall through to push below.
+        // Section missing — append a blank separator, then the header.
+        if lines.last().map(|l| !l.trim().is_empty()).unwrap_or(false) {
+            lines.push(String::new());
+        }
         lines.push(header);
         lines.len() // position after the newly pushed header
     };
