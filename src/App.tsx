@@ -12,6 +12,7 @@ type Tab = "home" | "mod-tools" | "pak-manager" | "settings";
 interface InstallInfo {
   path: string;
   source: string;
+  launch_url: string;
 }
 
 const TABS: { id: Tab; label: string; icon: ReactNode }[] = [

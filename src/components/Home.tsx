@@ -21,6 +21,7 @@ import { cn } from "@/lib/utils";
 interface InstallInfo {
   path: string;
   source: string;
+  launch_url: string;
 }
 
 interface ModsStatus {
@@ -84,7 +85,7 @@ export function Home({ gamePath, setGamePath, setActiveTab, installInfo: info, s
     setLaunching(true);
     setLaunchMsg(null);
     try {
-      await invoke("launch_game", { source: info.source });
+      await invoke("launch_game", { installInfo: info });
       setLaunchMsg("Launching…");
       launchMsgTimer.current = setTimeout(() => setLaunchMsg(null), 4000);
     } catch (e) {

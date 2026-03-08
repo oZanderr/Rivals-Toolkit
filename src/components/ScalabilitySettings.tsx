@@ -5,7 +5,7 @@ import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
 import { Button } from "@/components/ui/button";
-import { Save, RefreshCw, CheckCircle2 } from "lucide-react";
+import { Save, RefreshCw, CheckCircle2, Trash2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 
@@ -73,6 +73,7 @@ export function ScalabilitySettings({ filePath, content, setContent, onSaved, on
   const [savedValues, setSavedValues] = useState<Record<string, string>>({});
   const [status, setStatus] = useState<{ msg: string; type: StatusType } | null>(null);
   const statusTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [clearingCache, setClearingCache] = useState(false);
 
   const showStatus = (msg: string, type: StatusType = "info") => {
     if (statusTimer.current) clearTimeout(statusTimer.current);
@@ -132,6 +133,18 @@ export function ScalabilitySettings({ filePath, content, setContent, onSaved, on
       onSaved();
     } catch (e: any) {
       showStatus(String(e), "err");
+    }
+  }
+
+  async function clearShaderCache() {
+    setClearingCache(true);
+    try {
+      const msg = await invoke<string>("clear_shader_cache");
+      showStatus(msg, "ok");
+    } catch (e: any) {
+      showStatus(String(e), "err");
+    } finally {
+      setClearingCache(false);
     }
   }
 
@@ -235,6 +248,10 @@ export function ScalabilitySettings({ filePath, content, setContent, onSaved, on
         <Button variant="green" size="sm" onClick={applyAndSave} disabled={!dirty}>
           <Save size={14} />
           {dirty ? "Apply & Save" : "Up to Date"}
+        </Button>
+        <Button variant="outline" size="sm" onClick={clearShaderCache} disabled={clearingCache}>
+          <Trash2 size={14} />
+          {clearingCache ? "Clearing…" : "Clear Shader Cache"}
         </Button>
         <Button variant="ghost" size="sm" onClick={onReload}>
           <RefreshCw size={14} />
