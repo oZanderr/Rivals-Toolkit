@@ -46,7 +46,6 @@ export function Home({ gamePath, setGamePath, setActiveTab, installInfo: info, s
   const [showBadge, setShowBadge] = useState(false);
   const [modsStatus, setModsStatus] = useState<ModsStatus | null>(null);
   const [statusRefreshing, setStatusRefreshing] = useState(false);
-  const [activeTweaks, setActiveTweaks] = useState<number | "missing" | null>(null);
   const [clearingCache, setClearingCache] = useState(false);
   const [cacheMsg, setCacheMsg] = useState<string | null>(null);
   const cacheMsgTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -126,27 +125,8 @@ export function Home({ gamePath, setGamePath, setActiveTab, installInfo: info, s
     }
   }
 
-  async function fetchActiveTweaks() {
-    try {
-      const path = await invoke<string>("get_scalability_path");
-      let content: string;
-      try {
-        content = await invoke<string>("read_scalability", { path });
-      } catch {
-        // File doesn't exist yet — normal for a fresh install
-        setActiveTweaks("missing");
-        return;
-      }
-      const states = await invoke<{ id: string; active: boolean }[]>("detect_tweaks", { content });
-      setActiveTweaks(states.filter((s) => s.active).length);
-    } catch {
-      setActiveTweaks(null);
-    }
-  }
-
   useEffect(() => {
     if (!gamePath) detect();
-    fetchActiveTweaks();
   }, []);
 
   useEffect(() => {
@@ -177,7 +157,7 @@ export function Home({ gamePath, setGamePath, setActiveTab, installInfo: info, s
     : [];
 
   return (
-    <div className="flex w-full flex-col gap-6">
+    <div className="flex w-full flex-col gap-4">
       {/* ── Game path ── */}
       <div className="flex items-center gap-3">
         <h2 className="text-xl font-bold">Installation</h2>
@@ -220,7 +200,7 @@ export function Home({ gamePath, setGamePath, setActiveTab, installInfo: info, s
 
       {/* ── Mod setup status ── */}
       {gamePath && (
-        <Card className="flex flex-col gap-4 bg-card p-4">
+        <Card className="flex flex-col gap-3 bg-card p-3">
           <div className="flex items-center justify-between">
             <h3 className="text-sm font-semibold">Mod Setup</h3>
             <Button
@@ -235,7 +215,7 @@ export function Home({ gamePath, setGamePath, setActiveTab, installInfo: info, s
           </div>
 
           {/* Checklist */}
-          <ol className="flex flex-col gap-2">
+          <ol className="flex flex-col gap-1.5">
             {setupSteps.map((step, i) => (
               <li key={i} className="flex items-start gap-2.5">
                 <span
@@ -264,11 +244,11 @@ export function Home({ gamePath, setGamePath, setActiveTab, installInfo: info, s
           </ol>
 
           {/* Navigate to Mod Tools */}
-          <div className="flex items-center justify-between rounded-md border border-border bg-background px-4 py-3">
+          <div className="flex items-center justify-between rounded-md border border-border bg-background px-3 py-2">
             <div className="flex items-center gap-2 text-[13px] text-muted-foreground">
               <Wrench size={14} />
               {allDone
-                ? "All set — manage mods and bypass on the Mod Tools page."
+                ? "All done! Manage mods and signature bypass on the Mod Tools page."
                 : "Complete setup and manage mods on the Mod Tools page."}
             </div>
             <Button variant="outline" size="sm" onClick={() => setActiveTab("mod-tools")}>
@@ -284,19 +264,13 @@ export function Home({ gamePath, setGamePath, setActiveTab, installInfo: info, s
           icon={<Wrench size={16} />}
           title="Mod Tools"
           description="Install the signature bypass and manage your mods folder."
-          stat={modsStatus ? `${modsStatus.mod_paks.length} active mod${modsStatus.mod_paks.length !== 1 ? "s" : ""}` : undefined}
+        stat={modsStatus && modsStatus.mod_paks.length > 0 ? `${modsStatus.mod_paks.length} active mod${modsStatus.mod_paks.length !== 1 ? "s" : ""}` : undefined}
           onClick={() => setActiveTab("mod-tools")}
         />
         <FeatureCard
           icon={<Settings size={16} />}
           title="Quick Settings"
           description="Tweak graphics scalability and PAK-based config settings."
-          stat={
-            activeTweaks === null ? undefined
-            : activeTweaks === "missing" ? "no file yet"
-            : `${activeTweaks} tweak${activeTweaks !== 1 ? "s" : ""} active`
-          }
-          statDim={activeTweaks === "missing"}
           onClick={() => setActiveTab("settings")}
         />
         <FeatureCard
@@ -366,14 +340,12 @@ function FeatureCard({
   title,
   description,
   stat,
-  statDim,
   onClick,
 }: {
   icon: React.ReactNode;
   title: string;
   description: string;
   stat?: string;
-  statDim?: boolean;
   onClick: () => void;
 }) {
   return (
@@ -390,12 +362,7 @@ function FeatureCard({
       </div>
       <p className="text-[11px] leading-relaxed text-muted-foreground">{description}</p>
       {stat !== undefined && (
-        <span
-          className={cn(
-            "text-[11px] font-medium",
-            statDim ? "text-muted-foreground" : "text-[var(--color-ok)]",
-          )}
-        >
+        <span className="text-[11px] font-medium text-[var(--color-ok)]">
           {stat}
         </span>
       )}
