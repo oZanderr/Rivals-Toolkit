@@ -324,12 +324,17 @@ export function PakTweaks({ gamePath }: Props) {
 
   function removePak(pakPath: string) {
     const wasSelected = selectedPak?.pak_path === pakPath;
-    setPaks((prev) => prev.filter((p) => p.pak_path !== pakPath));
+    const remaining = paks.filter((p) => p.pak_path !== pakPath);
+    setPaks(remaining);
     if (wasSelected) {
-      setSelectedPak(null);
-      setTweakStates([]);
-      setSavedTweakStates([]);
-      setEdits([]);
+      if (remaining.length === 1) {
+        selectPak(remaining[0]);
+      } else {
+        setSelectedPak(null);
+        setTweakStates([]);
+        setSavedTweakStates([]);
+        setEdits([]);
+      }
     }
   }
 
