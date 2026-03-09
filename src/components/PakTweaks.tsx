@@ -179,7 +179,7 @@ export function PakTweaks({ gamePath }: Props) {
   async function browse() {
     const selected = await open({
       multiple: false,
-      filters: [{ name: "PAK files", extensions: ["pak"] }],
+      filters: [{ name: "Pak files", extensions: ["pak"] }],
     });
     if (typeof selected !== "string") return;
     try {

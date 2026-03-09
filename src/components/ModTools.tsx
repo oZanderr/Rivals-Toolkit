@@ -177,7 +177,7 @@ export function ModTools({ gamePath }: Props) {
           </span>
           <span className="text-2xl font-bold">{modsStatus ? enabledCount : "—"}</span>
           <span className="text-[11px] text-muted-foreground">
-            {modsStatus ? `of ${totalCount} installed` : "PAK files in ~mods"}
+            {modsStatus ? `of ${totalCount} installed` : "pak files in ~mods"}
           </span>
         </Card>
       </div>
@@ -189,7 +189,7 @@ export function ModTools({ gamePath }: Props) {
           <p className="mt-1 text-[12px] text-muted-foreground">
             Installs <Code>dsound.dll</Code> (ASI loader) and the bypass plugin into{" "}
             <Code>MarvelGame\Marvel\Binaries\Win64</Code>, and creates the <Code>~mods</Code> folder
-            so the game loads unsigned PAKs.
+            so the game loads unsigned pak files.
           </p>
         </div>
         <div className="flex flex-wrap gap-2">

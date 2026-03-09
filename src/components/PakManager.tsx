@@ -112,7 +112,7 @@ export function PakManager({ gamePath }: Props) {
   async function openPak() {
     const selected = await open({
       multiple: false,
-      filters: [{ name: "PAK files", extensions: ["pak"] }],
+      filters: [{ name: "Pak files", extensions: ["pak"] }],
     });
     if (typeof selected === "string") {
       setPakList((prev) => (prev.includes(selected) ? prev : [selected, ...prev]));
@@ -177,7 +177,7 @@ export function PakManager({ gamePath }: Props) {
 
     const outputPak = await save({
       defaultPath,
-      filters: [{ name: "PAK files", extensions: ["pak"] }],
+      filters: [{ name: "Pak files", extensions: ["pak"] }],
     });
     if (!outputPak) return;
     setBusy(true);
@@ -198,11 +198,11 @@ export function PakManager({ gamePath }: Props) {
     <div className="flex h-full flex-col gap-4">
       <div className="flex shrink-0 flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-3">
-          <h2 className="text-xl font-bold">PAK Manager</h2>
+          <h2 className="text-xl font-bold">Pak Manager</h2>
           {showPaksBadge && (
             <span className="flex items-center gap-1.5 text-[12px] font-medium text-[var(--color-ok)]">
               <CheckCircle2 size={14} strokeWidth={2.5} />
-              {paksFoundCount} PAK{paksFoundCount !== 1 ? "s" : ""} found
+              {paksFoundCount} pak{paksFoundCount !== 1 ? "s" : ""} found
             </span>
           )}
           {listError && (
@@ -216,11 +216,11 @@ export function PakManager({ gamePath }: Props) {
         <div className="flex flex-wrap items-center gap-2">
           <Button variant="outline" size="sm" onClick={openPak} disabled={busy}>
             <Package size={15} />
-            Open PAK
+            Open Pak
           </Button>
           <Button variant="blue" size="sm" onClick={openAndRepack} disabled={busy}>
             <PackageOpen size={15} />
-            Repack Folder → PAK
+            Repack Folder → Pak
           </Button>
         </div>
       </div>
@@ -228,25 +228,25 @@ export function PakManager({ gamePath }: Props) {
       <div className="flex min-h-0 flex-1 gap-4">
         <Card className="flex w-[300px] shrink-0 min-h-0 flex-col gap-3 p-3 bg-card">
           <div className="flex shrink-0 items-center justify-between">
-            <h3 className="text-sm font-semibold">Game PAKs</h3>
+            <h3 className="text-sm font-semibold">Game Paks</h3>
             <Button variant="outline" size="sm" onClick={listPaks} disabled={busy}>
               <List size={14} />
-              List Game PAKs
+              List Game Paks
             </Button>
           </div>
 
           <p className="shrink-0 text-[11px] text-muted-foreground">
-            {gamePath ? "Reads Marvel Rivals Paks folder from your game root." : "Set game root on Home tab to list game PAKs."}
+            {gamePath ? "Reads Marvel Rivals Paks folder from your game root." : "Set game root on Home tab to list game paks."}
           </p>
 
           <div className="min-h-0 flex-1 overflow-y-auto rounded-md border border-border bg-background">
             {pakList.length === 0 ? (
               <div className="flex h-full flex-col items-center justify-center gap-2 p-4 text-center">
                 <FolderOpen size={28} className="text-muted-foreground/40" />
-                <p className="text-sm text-muted-foreground">No PAKs loaded yet.</p>
+                <p className="text-sm text-muted-foreground">No paks loaded yet.</p>
                 <Button variant="outline" size="sm" onClick={openPak} disabled={busy}>
                   <Package size={14} />
-                  Open PAK Manually…
+                  Open Pak Manually…
                 </Button>
               </div>
             ) : (
@@ -320,7 +320,7 @@ export function PakManager({ gamePath }: Props) {
             {!selectedPak ? (
               <div className="flex h-full flex-col items-center justify-center gap-2 p-4 text-center">
                 <PackageOpen size={28} className="text-muted-foreground/40" />
-                <p className="text-sm text-muted-foreground">Select a PAK from the left, or open one manually.</p>
+                <p className="text-sm text-muted-foreground">Select a pak from the left, or open one manually.</p>
               </div>
             ) : visible.length === 0 ? (
               <p className="p-4 text-center text-sm text-muted-foreground">

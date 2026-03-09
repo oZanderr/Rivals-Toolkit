@@ -290,13 +290,13 @@ export function Home({ gamePath, setGamePath, setActiveTab, installInfo: info, s
         <FeatureCard
           icon={<Settings size={16} />}
           title="Quick Settings"
-          description="Tweak graphics scalability and PAK-based config settings."
+          description="Tweak graphics scalability and pak-based config settings."
           onClick={() => setActiveTab("settings")}
         />
         <FeatureCard
           icon={<Package size={16} />}
-          title="PAK Manager"
-          description="Inspect game and mod PAK files, extract assets, and repack folders."
+          title="Pak Manager"
+          description="Inspect game and mod pak files, extract assets, and repack folders."
           onClick={() => setActiveTab("pak-manager")}
         />
       </div>

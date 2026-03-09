@@ -19,7 +19,7 @@ const TABS: { id: Tab; label: string; icon: ReactNode }[] = [
   { id: "home", label: "Home", icon: <House size={15} /> },
   { id: "mod-tools", label: "Mod Tools", icon: <Wrench size={15} /> },
   { id: "settings", label: "Quick Settings", icon: <Settings size={15} /> },
-  { id: "pak-manager", label: "PAK Manager (Expert)", icon: <Package size={15} /> },
+  { id: "pak-manager", label: "Pak Manager (Expert)", icon: <Package size={15} /> },
 ];
 
 function App() {
