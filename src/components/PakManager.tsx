@@ -22,15 +22,22 @@ export function PakManager({ gamePath }: Props) {
   const [selectedPak, setSelectedPak] = useState<string>("");
   const [pakContents, setPakContents] = useState<string[]>([]);
   const [filterText, setFilterText] = useState("");
-  const [status, setStatus] = useState<{ msg: string; type: StatusType } | null>(null);
+  const [notice, setNotice] = useState<{ msg: string; type: StatusType } | null>(null);
   const [busy, setBusy] = useState(false);
-  const [showPaksBadge, setShowPaksBadge] = useState(false);
-  const [paksFoundCount, setPaksFoundCount] = useState(0);
-  const [listError, setListError] = useState<string | null>(null);
   const [debouncedFilter, setDebouncedFilter] = useState("");
-  const paksBadgeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const filterTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const contentsScrollRef = useRef<HTMLDivElement>(null);
+
+  const showNotice = (msg: string, type: StatusType, duration = 6000) => {
+    // Strip any trailing path from error messages
+    const clean = type === "err"
+      ? msg.replace(/:\s*[A-Za-z]:\\[^\r\n]*|:\s*\/[^\r\n]*/g, "").trim()
+      : msg;
+    if (noticeTimer.current) clearTimeout(noticeTimer.current);
+    setNotice({ msg: clean, type });
+    noticeTimer.current = setTimeout(() => setNotice(null), duration);
+  };
 
   // Pre-compute lowercase file names once when pakContents changes
   const pakContentsLower = useMemo(
@@ -60,16 +67,12 @@ export function PakManager({ gamePath }: Props) {
     overscan: 20,
   });
 
-  const showStatus = (msg: string, type: StatusType = "info") =>
-    setStatus({ msg, type });
-
   async function listPaks() {
-    if (paksBadgeTimer.current) clearTimeout(paksBadgeTimer.current);
-    setShowPaksBadge(false);
-    setListError(null);
+    setNotice(null);
+    if (noticeTimer.current) clearTimeout(noticeTimer.current);
 
     if (!gamePath) {
-      setListError("Set game root on Home tab first.");
+      showNotice("Set game root on Home tab first.", "err");
       return;
     }
 
@@ -81,14 +84,12 @@ export function PakManager({ gamePath }: Props) {
       if (paks.length === 0) {
         setSelectedPak("");
         setPakContents([]);
-        setListError("No .pak files found.");
+        showNotice("No .pak files found.", "err");
       } else {
-        setPaksFoundCount(paks.length);
-        setShowPaksBadge(true);
-        paksBadgeTimer.current = setTimeout(() => setShowPaksBadge(false), 4000);
+        showNotice(`${paks.length} pak${paks.length !== 1 ? "s" : ""} found`, "ok", 4000);
       }
     } catch (e: any) {
-      setListError(String(e));
+      showNotice(String(e), "err");
     } finally {
       setBusy(false);
     }
@@ -101,9 +102,9 @@ export function PakManager({ gamePath }: Props) {
     try {
       const files = await invoke<string[]>("list_pak_contents", { pakPath: pak });
       setPakContents(files);
-      showStatus(`${files.length} file(s) inside ${pak.split(/[/\\]/).pop()}`, "ok");
+      showNotice(`${files.length} file(s) inside ${pak.split(/[/\\]/).pop()}`, "ok");
     } catch (e: any) {
-      showStatus(String(e), "err");
+      showNotice(String(e), "err");
     } finally {
       setBusy(false);
     }
@@ -130,15 +131,15 @@ export function PakManager({ gamePath }: Props) {
     const outputDir = `${dir}\\${pakBaseName}`;
 
     setBusy(true);
-    showStatus("Unpacking…", "info");
+    showNotice("Unpacking\u2026", "info");
     try {
       const files = await invoke<string[]>("unpack_pak", {
         pakPath: selectedPak,
         outputDir,
       });
-      showStatus(`Extracted ${files.length} file(s) to ${outputDir}`, "ok");
+      showNotice(`Extracted ${files.length} file(s) to ${outputDir}`, "ok");
     } catch (e: any) {
-      showStatus(String(e), "err");
+      showNotice(String(e), "err");
     } finally {
       setBusy(false);
     }
@@ -154,9 +155,9 @@ export function PakManager({ gamePath }: Props) {
         fileName: filePath,
         outputPath: outPath,
       });
-      showStatus(`Extracted: ${outPath}`, "ok");
+      showNotice(`Extracted: ${outPath}`, "ok");
     } catch (e: any) {
-      showStatus(String(e), "err");
+      showNotice(String(e), "err");
     } finally {
       setBusy(false);
     }
@@ -181,12 +182,12 @@ export function PakManager({ gamePath }: Props) {
     });
     if (!outputPak) return;
     setBusy(true);
-    showStatus("Repacking…", "info");
+    showNotice("Repacking\u2026", "info");
     try {
       await invoke("repack_pak", { inputDir, outputPak });
-      showStatus(`Repacked to: ${outputPak}`, "ok");
+      showNotice(`Repacked to: ${outputPak}`, "ok");
     } catch (e: any) {
-      showStatus(String(e), "err");
+      showNotice(String(e), "err");
     } finally {
       setBusy(false);
     }
@@ -199,16 +200,23 @@ export function PakManager({ gamePath }: Props) {
       <div className="flex shrink-0 flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-3">
           <h2 className="text-xl font-bold">Pak Manager</h2>
-          {showPaksBadge && (
-            <span className="flex items-center gap-1.5 text-[12px] font-medium text-[var(--color-ok)]">
-              <CheckCircle2 size={14} strokeWidth={2.5} />
-              {paksFoundCount} pak{paksFoundCount !== 1 ? "s" : ""} found
-            </span>
-          )}
-          {listError && (
-            <span className="flex items-center gap-1.5 text-[12px] font-medium text-[var(--color-err)]">
-              <XCircle size={14} strokeWidth={2.5} />
-              {listError}
+          {notice && (
+            <span
+              className={cn(
+                "flex items-center gap-1.5 text-[12px] font-medium",
+                notice.type === "ok"
+                  ? "text-[var(--color-ok)]"
+                  : notice.type === "err"
+                    ? "text-[var(--color-err)]"
+                    : "text-muted-foreground",
+              )}
+            >
+              {notice.type === "ok" ? (
+                <CheckCircle2 size={14} strokeWidth={2.5} />
+              ) : notice.type === "err" ? (
+                <XCircle size={14} strokeWidth={2.5} />
+              ) : null}
+              {notice.msg}
             </span>
           )}
         </div>
@@ -356,16 +364,16 @@ export function PakManager({ gamePath }: Props) {
           <p className={cn(
             "shrink-0 text-[11px]",
             !selectedPak ? "text-muted-foreground" :
-            status ? (
-              status.type === "ok" ? "text-[var(--color-ok)]" :
-              status.type === "err" ? "text-[var(--color-err)]" :
+            notice ? (
+              notice.type === "ok" ? "text-[var(--color-ok)]" :
+              notice.type === "err" ? "text-[var(--color-err)]" :
               "text-muted-foreground"
             ) : "text-muted-foreground"
           )}>
             {!selectedPak
               ? "\u00A0"
-              : status
-                ? status.msg
+              : notice
+                ? notice.msg
                 : `${visible.length} of ${pakContents.length} file(s) — double-click a file to extract it`}
           </p>
         </Card>

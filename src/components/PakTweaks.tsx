@@ -100,18 +100,16 @@ export function PakTweaks({ gamePath }: Props) {
   const [loading, setLoading] = useState(false);
   const [applying, setApplying] = useState(false);
   const [clearingCache, setClearingCache] = useState(false);
-  const [showBadge, setShowBadge] = useState(false);
-  const [badgeMsg, setBadgeMsg] = useState("");
-  const badgeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [notice, setNotice] = useState<{ msg: string; type: "ok" | "err" | "info" } | null>(null);
+  const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pakCache = useRef<Map<string, PakCacheEntry>>(new Map());
   // Tweak definitions (for rendering controls)
   const [definitions, setDefinitions] = useState<TweakDefinition[]>([]);
 
-  const flashBadge = (msg: string) => {
-    if (badgeTimer.current) clearTimeout(badgeTimer.current);
-    setBadgeMsg(msg);
-    setShowBadge(true);
-    badgeTimer.current = setTimeout(() => setShowBadge(false), 4000);
+  const showNotice = (msg: string, type: "ok" | "err" | "info", duration = 4000) => {
+    if (noticeTimer.current) clearTimeout(noticeTimer.current);
+    setNotice({ msg, type });
+    noticeTimer.current = setTimeout(() => setNotice(null), duration);
   };
 
   useEffect(() => {
@@ -185,14 +183,14 @@ export function PakTweaks({ gamePath }: Props) {
     try {
       const info = await invoke<PakIniInfo | null>("inspect_pak_path", { pakPath: selected });
       if (!info) {
-        flashBadge("No tweakable INI found in that pak");
+        showNotice("No tweakable INI found in that pak", "err");
         return;
       }
       // Add to list if not already present, then select it
       setPaks((prev) => prev.find((p) => p.pak_path === info.pak_path) ? prev : [...prev, info]);
       await selectPak(info);
     } catch (e: any) {
-      flashBadge("Failed to read pak");
+      showNotice("Failed to read pak", "err");
       console.error(e);
     }
   }
@@ -216,22 +214,22 @@ export function PakTweaks({ gamePath }: Props) {
         setTweakStates([]);
         setSavedTweakStates([]);
         setEdits([]);
-        if (!silent) flashBadge("No config mods found");
+        if (!silent) showNotice("No config mods found", "info");
       } else if (!selectedPak) {
         // Nothing selected yet — auto-select if only one
         if (merged.length === 1) {
           await selectPak(merged[0]);
         }
-        if (!silent) flashBadge(`Found ${merged.length} mod${merged.length !== 1 ? "s" : ""}`);
+        if (!silent) showNotice(`Found ${merged.length} mod${merged.length !== 1 ? "s" : ""}`, "ok");
       } else if (!merged.find((p) => p.pak_path === selectedPak.pak_path)) {
         // Previously selected pak is gone — deselect
         setSelectedPak(null);
         setTweakStates([]);
         setSavedTweakStates([]);
         setEdits([]);
-        if (!silent) flashBadge(`Found ${merged.length} mod${merged.length !== 1 ? "s" : ""}`);
+        if (!silent) showNotice(`Found ${merged.length} mod${merged.length !== 1 ? "s" : ""}`, "ok");
       } else {
-        if (!silent) flashBadge(`Found ${merged.length} mod${merged.length !== 1 ? "s" : ""}`);
+        if (!silent) showNotice(`Found ${merged.length} mod${merged.length !== 1 ? "s" : ""}`, "ok");
       }
     } catch (e: any) {
       console.error("Scan failed:", e);
@@ -320,10 +318,10 @@ export function PakTweaks({ gamePath }: Props) {
         pakPath: selectedPak.pak_path,
         edits,
       });
-      flashBadge(msg);
-      // Force reload so we see the freshly-repacked pak's state
+      showNotice(msg, "ok");
       await forceReloadPak(selectedPak);
     } catch (e: any) {
+      showNotice(String(e), "err");
       console.error("Apply failed:", e);
     } finally {
       setApplying(false);
@@ -334,9 +332,9 @@ export function PakTweaks({ gamePath }: Props) {
     setClearingCache(true);
     try {
       const msg = await invoke<string>("clear_shader_cache");
-      flashBadge(msg);
+      showNotice(msg, "ok");
     } catch (e: any) {
-      flashBadge("Failed to clear shader cache");
+      showNotice("Failed to clear shader cache", "err");
       console.error("Clear shader cache failed:", e);
     } finally {
       setClearingCache(false);
@@ -369,10 +367,23 @@ export function PakTweaks({ gamePath }: Props) {
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Config Mods</span>
-            {showBadge && (
-              <span className="flex items-center gap-1.5 text-[12px] font-medium text-[var(--color-ok)]">
-                <CheckCircle2 size={14} strokeWidth={2.5} />
-                {badgeMsg}
+            {notice && (
+              <span
+                className={cn(
+                  "flex items-center gap-1.5 text-[12px] font-medium",
+                  notice.type === "ok"
+                    ? "text-[var(--color-ok)]"
+                    : notice.type === "err"
+                      ? "text-[var(--color-err)]"
+                      : "text-muted-foreground",
+                )}
+              >
+                {notice.type === "ok" ? (
+                  <CheckCircle2 size={14} strokeWidth={2.5} />
+                ) : notice.type === "err" ? (
+                  <XCircle size={14} strokeWidth={2.5} />
+                ) : null}
+                {notice.msg}
               </span>
             )}
           </div>

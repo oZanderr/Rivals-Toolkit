@@ -39,20 +39,14 @@ type StatusType = "ok" | "err" | "info";
 
 export function ModTools({ gamePath }: Props) {
   const [modsStatus, setModsStatus] = useState<ModsStatus | null>(null);
-  const [status, setStatus] = useState<{ msg: string; type: StatusType } | null>(null);
-  const [showBadge, setShowBadge] = useState(false);
-  const [badgeMsg, setBadgeMsg] = useState("");
+  const [notice, setNotice] = useState<{ msg: string; type: StatusType } | null>(null);
   const [busyMods, setBusyMods] = useState<Set<string>>(new Set());
-  const badgeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const showStatus = (msg: string, type: StatusType = "info") =>
-    setStatus({ msg, type });
-
-  const flashBadge = (msg: string) => {
-    if (badgeTimer.current) clearTimeout(badgeTimer.current);
-    setBadgeMsg(msg);
-    setShowBadge(true);
-    badgeTimer.current = setTimeout(() => setShowBadge(false), 4000);
+  const showNotice = (msg: string, type: StatusType, duration = 6000) => {
+    if (noticeTimer.current) clearTimeout(noticeTimer.current);
+    setNotice({ msg, type });
+    noticeTimer.current = setTimeout(() => setNotice(null), duration);
   };
 
   useEffect(() => {
@@ -64,20 +58,20 @@ export function ModTools({ gamePath }: Props) {
     try {
       const s = await invoke<ModsStatus>("get_mods_status", { gameRoot: gamePath });
       setModsStatus(s);
-      if (!silent) flashBadge("Status refreshed");
+      if (!silent) showNotice("Status refreshed", "ok", 4000);
     } catch (e: any) {
-      showStatus(String(e), "err");
+      showNotice(String(e), "err");
     }
   }
 
   async function installBypass() {
-    if (!gamePath) return showStatus("Set game root on the Home tab first.", "err");
+    if (!gamePath) return showNotice("Set game root on the Home tab first.", "err");
     try {
       const msg = await invoke<string>("install_signature_bypass", { gameRoot: gamePath });
-      flashBadge(msg);
+      showNotice(msg, "ok", 4000);
       await refresh(true);
     } catch (e: any) {
-      showStatus(String(e), "err");
+      showNotice(String(e), "err");
     }
   }
 
@@ -86,7 +80,7 @@ export function ModTools({ gamePath }: Props) {
     try {
       await invoke("open_mods_folder", { gameRoot: gamePath });
     } catch (e: any) {
-      showStatus(String(e), "err");
+      showNotice(String(e), "err");
     }
   }
 
@@ -101,7 +95,7 @@ export function ModTools({ gamePath }: Props) {
       });
       await refresh(true);
     } catch (e: any) {
-      showStatus(String(e), "err");
+      showNotice(String(e), "err");
     } finally {
       setBusyMods((prev) => {
         const next = new Set(prev);
@@ -123,9 +117,9 @@ export function ModTools({ gamePath }: Props) {
         modsFolder: modsStatus.mods_folder_path,
         destPath,
       });
-      flashBadge(msg);
+      showNotice(msg, "ok", 4000);
     } catch (e: any) {
-      showStatus(String(e), "err");
+      showNotice(String(e), "err");
     }
   }
 
@@ -137,10 +131,23 @@ export function ModTools({ gamePath }: Props) {
       {/* Header */}
       <div className="flex items-center gap-3">
         <h2 className="text-xl font-bold">Mod Tools</h2>
-        {showBadge && (
-          <span className="flex items-center gap-1.5 text-[12px] font-medium text-[var(--color-ok)]">
-            <CheckCircle2 size={14} strokeWidth={2.5} />
-            {badgeMsg}
+        {notice && (
+          <span
+            className={cn(
+              "flex items-center gap-1.5 text-[12px] font-medium",
+              notice.type === "ok"
+                ? "text-[var(--color-ok)]"
+                : notice.type === "err"
+                  ? "text-[var(--color-err)]"
+                  : "text-muted-foreground",
+            )}
+          >
+            {notice.type === "ok" ? (
+              <CheckCircle2 size={14} strokeWidth={2.5} />
+            ) : notice.type === "err" ? (
+              <XCircle size={14} strokeWidth={2.5} />
+            ) : null}
+            {notice.msg}
           </span>
         )}
         {!gamePath && (
@@ -298,22 +305,6 @@ export function ModTools({ gamePath }: Props) {
           ))}
         </ol>
       </Card>
-      )}
-
-      {/* Status bar */}
-      {status && (
-        <p
-          className={cn(
-            "text-[12px]",
-            status.type === "ok"
-              ? "text-[var(--color-ok)]"
-              : status.type === "err"
-                ? "text-[var(--color-err)]"
-                : "text-muted-foreground",
-          )}
-        >
-          {status.msg}
-        </p>
       )}
     </div>
   );

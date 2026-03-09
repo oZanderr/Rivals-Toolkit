@@ -45,6 +45,8 @@ interface Props {
 export function Home({ gamePath, setGamePath, setActiveTab, installInfo: info, setInstallInfo: setInfo, isActive }: Props) {
   const [detecting, setDetecting] = useState(false);
   const [showBadge, setShowBadge] = useState(false);
+  const [detectError, setDetectError] = useState<string | null>(null);
+  const detectErrTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [modsStatus, setModsStatus] = useState<ModsStatus | null>(null);
   const [statusRefreshing, setStatusRefreshing] = useState(false);
   const [showRefreshBadge, setShowRefreshBadge] = useState(false);
@@ -59,8 +61,10 @@ export function Home({ gamePath, setGamePath, setActiveTab, installInfo: info, s
 
   async function detect() {
     if (badgeTimer.current) clearTimeout(badgeTimer.current);
+    if (detectErrTimer.current) clearTimeout(detectErrTimer.current);
     setDetecting(true);
     setShowBadge(false);
+    setDetectError(null);
     try {
       const result = await invoke<InstallInfo | null>("detect_install_path");
       setInfo(result);
@@ -70,6 +74,8 @@ export function Home({ gamePath, setGamePath, setActiveTab, installInfo: info, s
         badgeTimer.current = setTimeout(() => setShowBadge(false), 4000);
       }
     } catch (e) {
+      setDetectError("Detection failed");
+      detectErrTimer.current = setTimeout(() => setDetectError(null), 6000);
       console.error(e);
     } finally {
       setDetecting(false);
@@ -177,6 +183,12 @@ export function Home({ gamePath, setGamePath, setActiveTab, installInfo: info, s
           <span className="flex items-center gap-1.5 text-[12px] font-medium text-[var(--color-ok)]">
             <CheckCircle2 size={14} strokeWidth={2.5} />
             Found via {info.source}
+          </span>
+        )}
+        {!showBadge && detectError && (
+          <span className="flex items-center gap-1.5 text-[12px] font-medium text-[var(--color-err)]">
+            <XCircle size={14} strokeWidth={2.5} />
+            {detectError}
           </span>
         )}
         {info === null && (
