@@ -82,12 +82,12 @@ function App() {
       {/* Content — lazy-mount & keep-mounted to preserve state across tab switches */}
       <main className="flex min-h-0 flex-1 flex-col overflow-hidden bg-background">
         {mountedTabs.has("home") && (
-          <div className={cn("h-full overflow-y-auto p-6", activeTab !== "home" && "hidden")}>
+          <div className={cn("h-full overflow-y-auto [scrollbar-gutter:stable] p-6", activeTab !== "home" && "hidden")}>
             <Home gamePath={gamePath} setGamePath={setGamePath} setActiveTab={setActiveTab} installInfo={installInfo} setInstallInfo={setInstallInfo} />
           </div>
         )}
         {mountedTabs.has("mod-tools") && (
-          <div className={cn("h-full overflow-y-auto p-6", activeTab !== "mod-tools" && "hidden")}>
+          <div className={cn("h-full overflow-y-auto [scrollbar-gutter:stable] p-6", activeTab !== "mod-tools" && "hidden")}>
             <ModTools gamePath={gamePath} />
           </div>
         )}
@@ -97,7 +97,7 @@ function App() {
           </div>
         )}
         {mountedTabs.has("settings") && (
-          <div className={cn("h-full overflow-y-auto p-6", activeTab !== "settings" && "hidden")}>
+          <div className={cn("h-full overflow-y-auto [scrollbar-gutter:stable] p-6", activeTab !== "settings" && "hidden")}>
             <QuickSettings gamePath={gamePath} />
           </div>
         )}

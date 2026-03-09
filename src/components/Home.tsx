@@ -214,7 +214,7 @@ export function Home({ gamePath, setGamePath, setActiveTab, installInfo: info, s
               {showRefreshBadge && (
                 <span className="flex items-center gap-1 text-[12px] font-medium text-[var(--color-ok)]">
                   <CheckCircle2 size={13} strokeWidth={2.5} />
-                  Status updated
+                  Status refreshed
                 </span>
               )}
             </div>

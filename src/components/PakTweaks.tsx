@@ -79,6 +79,13 @@ interface SliderTweak extends TweakBase {
 
 type TweakDefinition = RemoveLinesTweak | ToggleTweak | SliderTweak;
 
+// Per-pak state cache — preserves tweak states and unsaved edits when switching between paks
+interface PakCacheEntry {
+  tweakStates: TweakState[];
+  savedTweakStates: TweakState[];
+  edits: PakTweakEdit[];
+}
+
 interface Props {
   gamePath: string;
 }
@@ -96,6 +103,7 @@ export function PakTweaks({ gamePath }: Props) {
   const [showBadge, setShowBadge] = useState(false);
   const [badgeMsg, setBadgeMsg] = useState("");
   const badgeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pakCache = useRef<Map<string, PakCacheEntry>>(new Map());
   // Tweak definitions (for rendering controls)
   const [definitions, setDefinitions] = useState<TweakDefinition[]>([]);
 
@@ -233,36 +241,51 @@ export function PakTweaks({ gamePath }: Props) {
   }
 
   async function selectPak(pak: PakIniInfo) {
+    // Save current state before switching so we can restore it if user comes back
+    if (selectedPak && selectedPak.pak_path !== pak.pak_path) {
+      pakCache.current.set(selectedPak.pak_path, { tweakStates, savedTweakStates, edits });
+    }
+
+    const cached = pakCache.current.get(pak.pak_path);
+    if (cached) {
+      setSelectedPak(pak);
+      setTweakStates(cached.tweakStates);
+      setSavedTweakStates(cached.savedTweakStates);
+      setEdits(cached.edits);
+      return;
+    }
+
+    // Cache miss — fetch from backend
     setSelectedPak(pak);
+    setTweakStates([]);
+    setSavedTweakStates([]);
+    setEdits([]);
     setLoading(true);
     try {
-      const states = await invoke<TweakState[]>("detect_pak_tweaks", {
-        pakPath: pak.pak_path,
-      });
+      const states = await invoke<TweakState[]>("detect_pak_tweaks", { pakPath: pak.pak_path });
       setTweakStates(states);
       setSavedTweakStates(states);
       setEdits([]);
+      pakCache.current.set(pak.pak_path, { tweakStates: states, savedTweakStates: states, edits: [] });
     } catch (e: any) {
       console.error("Load failed:", e);
-      setTweakStates([]);
-      setSavedTweakStates([]);
     } finally {
       setLoading(false);
     }
   }
 
-  /** Reload tweak states for the already-selected pak — full remount via loading gate */
-  async function refreshTweaks(pak: PakIniInfo) {
+  /** Force a fresh reload from disk, bypassing and updating the cache */
+  async function forceReloadPak(pak: PakIniInfo) {
+    pakCache.current.delete(pak.pak_path);
     setLoading(true);
     try {
-      const states = await invoke<TweakState[]>("detect_pak_tweaks", {
-        pakPath: pak.pak_path,
-      });
+      const states = await invoke<TweakState[]>("detect_pak_tweaks", { pakPath: pak.pak_path });
       setTweakStates(states);
       setSavedTweakStates(states);
       setEdits([]);
+      pakCache.current.set(pak.pak_path, { tweakStates: states, savedTweakStates: states, edits: [] });
     } catch (e: any) {
-      console.error("Refresh failed:", e);
+      console.error("Reload failed:", e);
     } finally {
       setLoading(false);
     }
@@ -298,8 +321,8 @@ export function PakTweaks({ gamePath }: Props) {
         edits,
       });
       flashBadge(msg);
-      // Reload to reflect changes
-      await selectPak(selectedPak);
+      // Force reload so we see the freshly-repacked pak's state
+      await forceReloadPak(selectedPak);
     } catch (e: any) {
       console.error("Apply failed:", e);
     } finally {
@@ -323,6 +346,7 @@ export function PakTweaks({ gamePath }: Props) {
   const dirty = edits.length > 0;
 
   function removePak(pakPath: string) {
+    pakCache.current.delete(pakPath);
     const wasSelected = selectedPak?.pak_path === pakPath;
     const remaining = paks.filter((p) => p.pak_path !== pakPath);
     setPaks(remaining);
@@ -444,10 +468,10 @@ export function PakTweaks({ gamePath }: Props) {
       </Card>
 
       {/* Selected pak editor */}
-      {selectedPak && (
+      {selectedPak && !loading && (
         <>
         {/* Settings grouped by category */}
-        {!loading && (() => {
+        {(() => {
           const categories = definitions.reduce<Record<string, TweakDefinition[]>>((acc, def) => {
             (acc[def.category] ??= []).push(def);
             return acc;
@@ -537,7 +561,7 @@ export function PakTweaks({ gamePath }: Props) {
                 <Button
                   variant="ghost"
                   size="sm"
-                  onClick={() => selectedPak && refreshTweaks(selectedPak)}
+                  onClick={() => selectedPak && forceReloadPak(selectedPak)}
                   disabled={loading}
                 >
                   <RefreshCw size={14} />
