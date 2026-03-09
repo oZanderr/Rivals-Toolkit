@@ -409,17 +409,17 @@ export function PakTweaks({ gamePath }: Props) {
             <span className="flex-1 truncate font-mono text-[12px]">{selectedPak.pak_name}</span>
             <div className="flex items-center gap-1">
               {selectedPak.has_device_profiles && (
-                <Badge variant="secondary" className="text-[9px] px-1.5 py-0">DeviceProfiles</Badge>
+                <Badge variant="outline" className="text-[10px] px-2 py-0.5">DeviceProfiles</Badge>
               )}
               {selectedPak.has_engine_ini && (
-                <Badge variant="outline" className="text-[9px] px-1.5 py-0">Engine</Badge>
+                <Badge variant="outline" className="text-[10px] px-2 py-0.5">Engine</Badge>
               )}
               <button
                 onClick={() => removePak(selectedPak.pak_path)}
-                className="ml-1 rounded p-0.5 text-muted-foreground/60 transition-colors hover:bg-destructive/15 hover:text-destructive"
+                className="ml-1 rounded p-1.5 text-muted-foreground/60 transition-colors hover:bg-destructive/15 hover:text-destructive"
                 title="Remove from list"
               >
-                <X size={12} />
+                <X size={14} />
               </button>
             </div>
           </div>
@@ -447,19 +447,19 @@ export function PakTweaks({ gamePath }: Props) {
                   <span className="flex-1 truncate font-mono text-[12px]">{pak.pak_name}</span>
                   <div className="flex gap-1">
                     {pak.has_device_profiles && (
-                      <Badge variant="secondary" className="text-[9px] px-1.5 py-0">DeviceProfiles</Badge>
+                      <Badge variant="outline" className="text-[10px] px-2 py-0.5">DeviceProfiles</Badge>
                     )}
                     {pak.has_engine_ini && (
-                      <Badge variant="outline" className="text-[9px] px-1.5 py-0">Engine</Badge>
+                      <Badge variant="outline" className="text-[10px] px-2 py-0.5">Engine</Badge>
                     )}
                   </div>
                 </button>
                 <button
                   onClick={() => removePak(pak.pak_path)}
-                  className="mr-2 shrink-0 rounded p-1 text-muted-foreground/60 transition-colors hover:bg-destructive/15 hover:text-destructive"
+                  className="mr-2 shrink-0 rounded p-1.5 text-muted-foreground/60 transition-colors hover:bg-destructive/15 hover:text-destructive"
                   title="Remove from list"
                 >
-                  <X size={12} />
+                  <X size={14} />
                 </button>
               </li>
             ))}
