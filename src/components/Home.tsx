@@ -46,6 +46,8 @@ export function Home({ gamePath, setGamePath, setActiveTab, installInfo: info, s
   const [showBadge, setShowBadge] = useState(false);
   const [modsStatus, setModsStatus] = useState<ModsStatus | null>(null);
   const [statusRefreshing, setStatusRefreshing] = useState(false);
+  const [showRefreshBadge, setShowRefreshBadge] = useState(false);
+  const refreshBadgeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [clearingCache, setClearingCache] = useState(false);
   const [cacheMsg, setCacheMsg] = useState<string | null>(null);
   const cacheMsgTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -113,11 +115,16 @@ export function Home({ gamePath, setGamePath, setActiveTab, installInfo: info, s
     }
   }
 
-  async function refreshModsStatus(path: string) {
+  async function refreshModsStatus(path: string, showBadge = false) {
     setStatusRefreshing(true);
     try {
       const s = await invoke<ModsStatus>("get_mods_status", { gameRoot: path });
       setModsStatus(s);
+      if (showBadge) {
+        if (refreshBadgeTimer.current) clearTimeout(refreshBadgeTimer.current);
+        setShowRefreshBadge(true);
+        refreshBadgeTimer.current = setTimeout(() => setShowRefreshBadge(false), 4000);
+      }
     } catch (e) {
       console.error(e);
     } finally {
@@ -202,11 +209,19 @@ export function Home({ gamePath, setGamePath, setActiveTab, installInfo: info, s
       {gamePath && (
         <Card className="flex flex-col gap-3 bg-card p-3">
           <div className="flex items-center justify-between">
-            <h3 className="text-sm font-semibold">Mod Setup</h3>
+            <div className="flex items-center gap-2">
+              <h3 className="text-sm font-semibold">Mod Setup</h3>
+              {showRefreshBadge && (
+                <span className="flex items-center gap-1 text-[12px] font-medium text-[var(--color-ok)]">
+                  <CheckCircle2 size={13} strokeWidth={2.5} />
+                  Status updated
+                </span>
+              )}
+            </div>
             <Button
               variant="ghost"
               size="sm"
-              onClick={() => refreshModsStatus(gamePath)}
+              onClick={() => refreshModsStatus(gamePath, true)}
               disabled={statusRefreshing}
             >
               <RefreshCw size={13} className={cn(statusRefreshing && "animate-spin")} />
