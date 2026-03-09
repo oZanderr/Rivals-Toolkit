@@ -83,11 +83,11 @@ function App() {
       <main className="flex min-h-0 flex-1 flex-col overflow-hidden bg-background">
         {mountedTabs.has("home") && (
           <div className={cn("h-full overflow-y-auto [scrollbar-gutter:stable] p-6", activeTab !== "home" && "hidden")}>
-            <Home gamePath={gamePath} setGamePath={setGamePath} setActiveTab={setActiveTab} installInfo={installInfo} setInstallInfo={setInstallInfo} />
+            <Home gamePath={gamePath} setGamePath={setGamePath} setActiveTab={setActiveTab} installInfo={installInfo} setInstallInfo={setInstallInfo} isActive={activeTab === "home"} />
           </div>
         )}
         {mountedTabs.has("mod-tools") && (
-          <div className={cn("h-full overflow-y-auto [scrollbar-gutter:stable] p-6", activeTab !== "mod-tools" && "hidden")}>
+          <div className={cn("h-full overflow-hidden p-6", activeTab !== "mod-tools" && "hidden")}>
             <ModTools gamePath={gamePath} />
           </div>
         )}

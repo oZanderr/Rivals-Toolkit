@@ -141,3 +141,22 @@ pub(crate) fn clear_shader_cache() -> Result<String, String> {
 pub(crate) fn launch_game(install_info: detect::InstallInfo) -> Result<(), String> {
     install_info.launch_game()
 }
+
+#[tauri::command]
+pub(crate) fn toggle_mod_enabled(
+    mods_folder: String,
+    full_name: String,
+    enabled: bool,
+) -> Result<(), String> {
+    mods::toggle_mod_enabled(&mods_folder, &full_name, enabled)
+}
+
+#[tauri::command]
+pub(crate) async fn export_mods_zip(
+    mods_folder: String,
+    dest_path: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || mods::export_mods_zip(&mods_folder, &dest_path))
+        .await
+        .map_err(|e| e.to_string())?
+}

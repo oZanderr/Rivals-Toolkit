@@ -1,7 +1,9 @@
 import * as React from "react";
 import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { save } from "@tauri-apps/plugin-dialog";
 import {
+  Archive,
   FolderOpen,
   RefreshCw,
   Shield,
@@ -12,13 +14,21 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
+
+interface ModEntry {
+  full_name: string;
+  display_name: string;
+  enabled: boolean;
+  has_companions: boolean;
+}
 
 interface ModsStatus {
   mods_folder_exists: boolean;
   mods_folder_path: string;
   sig_bypass_installed: boolean;
-  mod_paks: string[];
+  mod_entries: ModEntry[];
 }
 
 interface Props {
@@ -32,6 +42,7 @@ export function ModTools({ gamePath }: Props) {
   const [status, setStatus] = useState<{ msg: string; type: StatusType } | null>(null);
   const [showBadge, setShowBadge] = useState(false);
   const [badgeMsg, setBadgeMsg] = useState("");
+  const [busyMods, setBusyMods] = useState<Set<string>>(new Set());
   const badgeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const showStatus = (msg: string, type: StatusType = "info") =>
@@ -79,8 +90,50 @@ export function ModTools({ gamePath }: Props) {
     }
   }
 
+  async function toggleMod(entry: ModEntry) {
+    if (!modsStatus) return;
+    setBusyMods((prev) => new Set(prev).add(entry.full_name));
+    try {
+      await invoke("toggle_mod_enabled", {
+        modsFolder: modsStatus.mods_folder_path,
+        fullName: entry.full_name,
+        enabled: !entry.enabled,
+      });
+      await refresh(true);
+    } catch (e: any) {
+      showStatus(String(e), "err");
+    } finally {
+      setBusyMods((prev) => {
+        const next = new Set(prev);
+        next.delete(entry.full_name);
+        return next;
+      });
+    }
+  }
+
+  async function exportZip() {
+    if (!modsStatus) return;
+    try {
+      const destPath = await save({
+        defaultPath: "mods.zip",
+        filters: [{ name: "Zip Archive", extensions: ["zip"] }],
+      });
+      if (!destPath) return;
+      const msg = await invoke<string>("export_mods_zip", {
+        modsFolder: modsStatus.mods_folder_path,
+        destPath,
+      });
+      flashBadge(msg);
+    } catch (e: any) {
+      showStatus(String(e), "err");
+    }
+  }
+
+  const enabledCount = modsStatus?.mod_entries.filter((m) => m.enabled).length ?? 0;
+  const totalCount = modsStatus?.mod_entries.length ?? 0;
+
   return (
-    <div className="flex w-full flex-col gap-6">
+    <div className="flex h-full w-full flex-col gap-6 overflow-hidden">
       {/* Header */}
       <div className="flex items-center gap-3">
         <h2 className="text-xl font-bold">Mod Tools</h2>
@@ -122,10 +175,10 @@ export function ModTools({ gamePath }: Props) {
           <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
             Active Mods
           </span>
-          <span className="text-2xl font-bold">
-            {modsStatus ? modsStatus.mod_paks.length : "—"}
+          <span className="text-2xl font-bold">{modsStatus ? enabledCount : "—"}</span>
+          <span className="text-[11px] text-muted-foreground">
+            {modsStatus ? `of ${totalCount} installed` : "PAK files in ~mods"}
           </span>
-          <span className="text-[11px] text-muted-foreground">PAK files in ~mods</span>
         </Card>
       </div>
 
@@ -155,7 +208,72 @@ export function ModTools({ gamePath }: Props) {
         </div>
       </Card>
 
+      {/* Mod list */}
+      {modsStatus && totalCount > 0 && (
+      <Card className="flex min-h-0 flex-1 flex-col gap-4 p-4 bg-card">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <h3 className="text-sm font-semibold">Installed Mods</h3>
+            {totalCount > 0 && (
+              <span className="rounded-full bg-secondary px-2 py-0.5 text-[11px] font-medium text-foreground">
+                {totalCount}
+              </span>
+            )}
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={exportZip}
+            disabled={enabledCount === 0}
+            title={enabledCount === 0 ? "No enabled mods to export" : "Export enabled mods as zip"}
+          >
+            <Archive size={14} />
+            Export Zip
+          </Button>
+        </div>
+
+        {totalCount === 0 ? (
+          <p className="text-[12px] text-muted-foreground">
+            No mods found in the ~mods folder. Copy <Code>.pak</Code> files there to get started.
+          </p>
+        ) : (
+          <div className="min-h-0 flex-1 overflow-y-auto rounded-md border border-border bg-background [scrollbar-gutter:stable]">
+            <ul>
+            {modsStatus.mod_entries.map((entry) => {
+              const busy = busyMods.has(entry.full_name);
+              return (
+                <li
+                  key={entry.full_name}
+                  className="flex items-center gap-3 border-b border-border/50 px-3 py-2 last:border-none hover:bg-secondary/50"
+                >
+                  <span
+                    className={cn(
+                      "flex-1 truncate font-mono text-[12px]",
+                      !entry.enabled && "text-muted-foreground opacity-50",
+                    )}
+                  >
+                    {entry.display_name}
+                  </span>
+                  {entry.has_companions && (
+                    <span className="shrink-0 text-[10px] text-muted-foreground/50">+ucas/utoc</span>
+                  )}
+                  <Switch
+                    checked={entry.enabled}
+                    disabled={busy}
+                    onCheckedChange={() => toggleMod(entry)}
+                    className="shrink-0"
+                  />
+                </li>
+              );
+            })}
+            </ul>
+          </div>
+        )}
+      </Card>
+      )}
+
       {/* How-to */}
+      {(!modsStatus || totalCount === 0) && (
       <Card className="flex flex-col gap-3 p-4 bg-card">
         <h3 className="text-sm font-semibold">How to Install a Mod</h3>
         <ol className="flex flex-col gap-3 text-[12px] text-muted-foreground">
@@ -169,7 +287,7 @@ export function ModTools({ gamePath }: Props) {
               Copy your mod <Code>.pak</Code> into the <Code>~mods</Code> folder. Rename it so it
               ends with <Code>_9999999_P.pak</Code> for correct load priority.
             </>,
-            <>Launch Marvel Rivals — your mods will be active.</>,
+            <>Launch Marvel Rivals, your mods will be active.</>,
           ].map((step, i) => (
             <li key={i} className="flex gap-2.5">
               <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-secondary text-[10px] font-bold text-foreground">
@@ -180,6 +298,7 @@ export function ModTools({ gamePath }: Props) {
           ))}
         </ol>
       </Card>
+      )}
 
       {/* Status bar */}
       {status && (

@@ -28,7 +28,7 @@ interface ModsStatus {
   mods_folder_exists: boolean;
   mods_folder_path: string;
   sig_bypass_installed: boolean;
-  mod_paks: string[];
+  mod_entries: { enabled: boolean }[];
 }
 
 type Tab = "home" | "mod-tools" | "pak-manager" | "settings";
@@ -39,9 +39,10 @@ interface Props {
   setActiveTab: (tab: Tab) => void;
   installInfo: InstallInfo | null | undefined;
   setInstallInfo: (info: InstallInfo | null) => void;
+  isActive: boolean;
 }
 
-export function Home({ gamePath, setGamePath, setActiveTab, installInfo: info, setInstallInfo: setInfo }: Props) {
+export function Home({ gamePath, setGamePath, setActiveTab, installInfo: info, setInstallInfo: setInfo, isActive }: Props) {
   const [detecting, setDetecting] = useState(false);
   const [showBadge, setShowBadge] = useState(false);
   const [modsStatus, setModsStatus] = useState<ModsStatus | null>(null);
@@ -135,6 +136,10 @@ export function Home({ gamePath, setGamePath, setActiveTab, installInfo: info, s
   useEffect(() => {
     if (!gamePath) detect();
   }, []);
+
+  useEffect(() => {
+    if (isActive && gamePath) refreshModsStatus(gamePath);
+  }, [isActive]);
 
   useEffect(() => {
     if (gamePath) refreshModsStatus(gamePath);
@@ -279,7 +284,7 @@ export function Home({ gamePath, setGamePath, setActiveTab, installInfo: info, s
           icon={<Wrench size={16} />}
           title="Mod Tools"
           description="Install the signature bypass and manage your mods folder."
-        stat={modsStatus && modsStatus.mod_paks.length > 0 ? `${modsStatus.mod_paks.length} active mod${modsStatus.mod_paks.length !== 1 ? "s" : ""}` : undefined}
+        stat={modsStatus && modsStatus.mod_entries.filter((m) => m.enabled).length > 0 ? `${modsStatus.mod_entries.filter((m) => m.enabled).length} active mod${modsStatus.mod_entries.filter((m) => m.enabled).length !== 1 ? "s" : ""}` : undefined}
           onClick={() => setActiveTab("mod-tools")}
         />
         <FeatureCard

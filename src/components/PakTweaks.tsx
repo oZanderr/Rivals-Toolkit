@@ -79,7 +79,7 @@ interface SliderTweak extends TweakBase {
 
 type TweakDefinition = RemoveLinesTweak | ToggleTweak | SliderTweak;
 
-// Per-pak state cache — preserves tweak states and unsaved edits when switching between paks
+// Per-pak state cache that preserves tweak states and unsaved edits when switching between paks
 interface PakCacheEntry {
   tweakStates: TweakState[];
   savedTweakStates: TweakState[];
