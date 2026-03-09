@@ -361,7 +361,10 @@ export function PakTweaks({ gamePath }: Props) {
   }
 
   return (
-    <div className="flex w-full flex-col gap-5">
+    <div className="flex w-full flex-1 min-h-0 flex-col">
+      {/* Scrollable content: pak list + tweak cards */}
+      <div className="flex-1 overflow-y-auto pr-6">
+        <div className="flex flex-col gap-5">
       {/* Pak list */}
       <Card className="flex flex-col gap-3 bg-card p-4">
         <div className="flex items-center justify-between">
@@ -478,11 +481,9 @@ export function PakTweaks({ gamePath }: Props) {
         )}
       </Card>
 
-      {/* Selected pak editor */}
-      {selectedPak && !loading && (
-        <>
-        {/* Settings grouped by category */}
-        {(() => {
+      {/* Selected pak editor — tweak cards */}
+      {selectedPak && !loading &&
+        (() => {
           const categories = definitions.reduce<Record<string, TweakDefinition[]>>((acc, def) => {
             (acc[def.category] ??= []).push(def);
             return acc;
@@ -516,10 +517,14 @@ export function PakTweaks({ gamePath }: Props) {
               ))}
             </div>
           );
-        })()}
+        })()
+      }
+      </div>
+      </div>
 
-        {/* Pending Changes & Apply */}
-        <div className="flex flex-col gap-4">
+      {/* Apply bar — fixed footer, outside the scroll area */}
+      {selectedPak && !loading && (
+        <div className="flex flex-col gap-3 border-t border-border pt-3 pb-1 mt-5">
               {/* Pending edits summary */}
               {edits.length > 0 && (
                 <div className="flex flex-col gap-1.5">
@@ -580,7 +585,6 @@ export function PakTweaks({ gamePath }: Props) {
                 </Button>
               </div>
         </div>
-        </>
       )}
 
     </div>

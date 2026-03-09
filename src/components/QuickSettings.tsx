@@ -1,11 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { openPath } from "@tauri-apps/plugin-opener";
-import { CheckCircle2, FileText, FolderOpen, Info, Package, Search } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
+import { FileText, Package } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ScalabilityTweaks } from "./ScalabilityTweaks";
 import { PakTweaks } from "./PakTweaks";
@@ -93,7 +89,7 @@ export function QuickSettings({ gamePath }: Props) {
   ];
 
   return (
-    <div className="flex w-full flex-col gap-6">
+    <div className="flex w-full flex-1 min-h-0 flex-col gap-6">
       {/* Header */}
       <div>
         <h2 className="text-xl font-bold">Quick Settings</h2>
@@ -119,74 +115,25 @@ export function QuickSettings({ gamePath }: Props) {
       </div>
 
       {/* ── Scalability tab ── */}
-      <div className={cn(subTab !== "scalability" && "hidden")}>
-          {/* Config file location */}
-          <div className="flex flex-col gap-6">
-          <Card className="flex flex-col gap-3 p-4 bg-card">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Config File</span>
-                {detectBadge && (
-                  <span className={cn(
-                    "flex items-center gap-1 text-[12px] font-medium",
-                    detectBadge === "Not found" ? "text-[var(--color-warn)]" : "text-[var(--color-ok)]",
-                  )}>
-                    <CheckCircle2 size={13} strokeWidth={2.5} />
-                    {detectBadge}
-                  </span>
-                )}
-              </div>
-              <Button
-                variant="ghost"
-                size="sm"
-                disabled={!filePath}
-                onClick={() => filePath && openPath(filePath.replace(/[/\\][^/\\]+$/, ""))}
-              >
-                <FolderOpen size={14} />
-                Show in Explorer
-              </Button>
-            </div>
-            <div className="flex items-center gap-2">
-              <Input
-                className="h-8 font-mono text-[12px]"
-                value={filePath}
-                onChange={(e) => setFilePath(e.target.value)}
-                placeholder="Path to Scalability.ini…"
-              />
-              <Button variant="outline" size="sm" onClick={browse}>
-                <FolderOpen size={14} />
-                Browse
-              </Button>
-              <Button variant="blue" size="sm" onClick={detectPath} disabled={detecting}>
-                <Search size={14} className={cn(detecting && "animate-pulse")} />
-                Re-detect
-              </Button>
-            </div>
-          </Card>
-
-          {/* Quick settings */}
-          {fileExists === false && (
-            <div className="flex items-start gap-2.5 rounded-md border border-border bg-muted/40 px-4 py-3 text-[12px] text-muted-foreground">
-              <Info size={14} className="mt-0.5 shrink-0" />
-              <span>
-                <strong className="font-semibold text-foreground">No Scalability.ini found.</strong>{" "}
-                You can still configure tweaks here, the file will be created automatically when you save.
-              </span>
-            </div>
-          )}
+      <div className={cn("flex flex-1 min-h-0 flex-col", subTab !== "scalability" && "hidden")}>
           <ScalabilityTweaks
             key={reloadKey}
             filePath={filePath}
+            setFilePath={setFilePath}
+            fileExists={fileExists}
             content={content}
             setContent={setContent}
+            detectBadge={detectBadge}
+            detecting={detecting}
+            onDetect={detectPath}
+            onBrowse={browse}
             onSaved={() => setFileExists(true)}
             onReload={reloadContent}
           />
-          </div>
       </div>
 
       {/* ── Pak Config tab ── */}
-      <div className={cn(subTab !== "pak-config" && "hidden")}>
+      <div className={cn("flex flex-1 min-h-0 flex-col", subTab !== "pak-config" && "hidden")}>
         <PakTweaks gamePath={gamePath} />
       </div>
     </div>
