@@ -65,7 +65,7 @@ interface Props {
   onReload: () => void;
 }
 
-export function ScalabilitySettings({ filePath, content, setContent, onSaved, onReload }: Props) {
+export function ScalabilityTweaks({ filePath, content, setContent, onSaved, onReload }: Props) {
   const [definitions, setDefinitions] = useState<TweakDefinition[]>([]);
   const [defsLoaded, setDefsLoaded] = useState(false);
   const [enabled, setEnabled] = useState<Record<string, boolean>>({});

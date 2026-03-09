@@ -4,7 +4,7 @@ import { cn } from "@/lib/utils";
 import { Home } from "./components/Home";
 import { PakManager } from "./components/PakManager";
 import { ModTools } from "./components/ModTools";
-import { SettingsEditor } from "./components/SettingsEditor";
+import { QuickSettings } from "./components/QuickSettings";
 import { Separator } from "@/components/ui/separator";
 
 type Tab = "home" | "mod-tools" | "pak-manager" | "settings";
@@ -98,7 +98,7 @@ function App() {
         )}
         {mountedTabs.has("settings") && (
           <div className={cn("h-full overflow-y-auto p-6", activeTab !== "settings" && "hidden")}>
-            <SettingsEditor gamePath={gamePath} />
+            <QuickSettings gamePath={gamePath} />
           </div>
         )}
       </main>

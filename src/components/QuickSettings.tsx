@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
-import { ScalabilitySettings } from "./ScalabilitySettings";
+import { ScalabilityTweaks } from "./ScalabilityTweaks";
 import { PakTweaks } from "./PakTweaks";
 
 type SubTab = "scalability" | "pak-config";
@@ -16,7 +16,7 @@ interface Props {
   gamePath: string;
 }
 
-export function SettingsEditor({ gamePath }: Props) {
+export function QuickSettings({ gamePath }: Props) {
   const [subTab, setSubTab] = useState<SubTab>("scalability");
 
   const [filePath, setFilePath] = useState("");
@@ -59,7 +59,7 @@ export function SettingsEditor({ gamePath }: Props) {
     detectBadgeTimer.current = setTimeout(() => setDetectBadge(null), 4000);
   }
 
-  /** Re-read file from disk and remount ScalabilitySettings to refresh tweak states */
+  /** Re-read file from disk and remount ScalabilityTweaks to refresh tweak states */
   async function reloadContent() {
     await loadFile(filePath);
     setReloadKey((k) => k + 1);
@@ -174,7 +174,7 @@ export function SettingsEditor({ gamePath }: Props) {
               </span>
             </div>
           )}
-          <ScalabilitySettings
+          <ScalabilityTweaks
             key={reloadKey}
             filePath={filePath}
             content={content}
