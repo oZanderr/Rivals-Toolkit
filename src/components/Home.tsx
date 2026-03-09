@@ -175,7 +175,7 @@ export function Home({ gamePath, setGamePath, setActiveTab, installInfo: info, s
     : [];
 
   return (
-    <div className="flex w-full flex-col gap-4">
+    <div className="flex h-full w-full flex-col gap-4">
       {/* ── Game path ── */}
       <div className="flex items-center gap-3">
         <h2 className="text-xl font-bold">Installation</h2>
@@ -312,6 +312,8 @@ export function Home({ gamePath, setGamePath, setActiveTab, installInfo: info, s
           onClick={() => setActiveTab("pak-manager")}
         />
       </div>
+
+      <div className="flex-1" />
 
       {/* ── Quick Actions ── */}
       <div className="flex flex-col gap-2">

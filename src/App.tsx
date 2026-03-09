@@ -6,6 +6,7 @@ import { PakManager } from "./components/PakManager";
 import { ModTools } from "./components/ModTools";
 import { QuickSettings } from "./components/QuickSettings";
 import { Separator } from "@/components/ui/separator";
+import { Titlebar } from "./components/Titlebar";
 
 type Tab = "home" | "mod-tools" | "pak-manager" | "settings";
 
@@ -37,9 +38,10 @@ function App() {
 
   return (
     <div className="flex h-screen overflow-hidden bg-background text-foreground">
+      <Titlebar />
       {/* Sidebar */}
       <nav className="flex w-[210px] min-w-[210px] flex-col overflow-y-auto border-r border-border bg-card py-4">
-        <div className="flex items-center gap-2.5 px-4 pb-4">
+        <div data-tauri-drag-region className="flex items-center gap-2.5 px-4 pb-4">
           <span className="text-3xl leading-none">🐽</span>
           <div>
             <div className="text-[15px] font-bold">Oinkers Toolkit</div>

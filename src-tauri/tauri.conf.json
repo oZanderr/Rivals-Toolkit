@@ -13,10 +13,11 @@
     "windows": [
       {
         "title": "Oinkers Toolkit",
-        "width": 980,
-        "height": 700,
-        "minWidth": 760,
-        "minHeight": 500
+        "width": 1000,
+        "height": 720,
+        "resizable": false,
+        "decorations": false,
+        "center": true
       }
     ],
     "security": {

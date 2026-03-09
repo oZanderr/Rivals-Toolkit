@@ -197,40 +197,38 @@ export function PakManager({ gamePath }: Props) {
 
   return (
     <div className="flex h-full flex-col gap-4">
-      <div className="flex shrink-0 flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-3">
-          <h2 className="text-xl font-bold">Pak Manager</h2>
-          {notice && (
-            <span
-              className={cn(
-                "flex items-center gap-1.5 text-[12px] font-medium",
-                notice.type === "ok"
-                  ? "text-[var(--color-ok)]"
-                  : notice.type === "err"
-                    ? "text-[var(--color-err)]"
-                    : "text-muted-foreground",
-              )}
-            >
-              {notice.type === "ok" ? (
-                <CheckCircle2 size={14} strokeWidth={2.5} />
-              ) : notice.type === "err" ? (
-                <XCircle size={14} strokeWidth={2.5} />
-              ) : null}
-              {notice.msg}
-            </span>
-          )}
-        </div>
+      <div className="flex shrink-0 items-center gap-3">
+        <h2 className="text-xl font-bold">Pak Manager</h2>
+        {notice && (
+          <span
+            className={cn(
+              "flex items-center gap-1.5 text-[12px] font-medium",
+              notice.type === "ok"
+                ? "text-[var(--color-ok)]"
+                : notice.type === "err"
+                  ? "text-[var(--color-err)]"
+                  : "text-muted-foreground",
+            )}
+          >
+            {notice.type === "ok" ? (
+              <CheckCircle2 size={14} strokeWidth={2.5} />
+            ) : notice.type === "err" ? (
+              <XCircle size={14} strokeWidth={2.5} />
+            ) : null}
+            {notice.msg}
+          </span>
+        )}
+      </div>
 
-        <div className="flex flex-wrap items-center gap-2">
-          <Button variant="outline" size="sm" onClick={openPak} disabled={busy}>
-            <Package size={15} />
-            Open Pak
-          </Button>
-          <Button variant="blue" size="sm" onClick={openAndRepack} disabled={busy}>
-            <PackageOpen size={15} />
-            Repack Folder → Pak
-          </Button>
-        </div>
+      <div className="flex shrink-0 flex-wrap items-center gap-2">
+        <Button variant="outline" size="sm" onClick={openPak} disabled={busy}>
+          <Package size={15} />
+          Open Pak
+        </Button>
+        <Button variant="blue" size="sm" onClick={openAndRepack} disabled={busy}>
+          <PackageOpen size={15} />
+          Repack Folder → Pak
+        </Button>
       </div>
 
       <div className="flex min-h-0 flex-1 gap-4">
@@ -349,7 +347,7 @@ export function PakManager({ gamePath }: Props) {
                         transform: `translateY(${vRow.start}px)`,
                       }}
                       onDoubleClick={() => extractSingleFile(f)}
-                      title="Double-click to extract"
+                      title={f}
                     >
                       <span className="shrink-0 text-muted-foreground">{fileIcon(f)}</span>
                       <span className="truncate font-mono text-[11px]">{f}</span>
@@ -361,20 +359,10 @@ export function PakManager({ gamePath }: Props) {
           </div>
 
           {/* Footer — always rendered to avoid layout shift */}
-          <p className={cn(
-            "shrink-0 text-[11px]",
-            !selectedPak ? "text-muted-foreground" :
-            notice ? (
-              notice.type === "ok" ? "text-[var(--color-ok)]" :
-              notice.type === "err" ? "text-[var(--color-err)]" :
-              "text-muted-foreground"
-            ) : "text-muted-foreground"
-          )}>
+          <p className="shrink-0 text-[11px] text-muted-foreground">
             {!selectedPak
               ? "\u00A0"
-              : notice
-                ? notice.msg
-                : `${visible.length} of ${pakContents.length} file(s) — double-click a file to extract it`}
+              : `${visible.length} file(s)${visible.length !== pakContents.length ? ` of ${pakContents.length}` : ""} inside ${pakName} — double-click a file to extract`}
           </p>
         </Card>
       </div>
