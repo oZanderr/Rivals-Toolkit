@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useState, useEffect, type ReactNode } from "react";
 import { House, Package, Settings, Wrench } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Home } from "./components/Home";
@@ -26,6 +26,14 @@ function App() {
   const [activeTab, setActiveTab] = useState<Tab>("home");
   const [gamePath, setGamePath] = useState("");
   const [installInfo, setInstallInfo] = useState<InstallInfo | null | undefined>(undefined);
+  const [mountedTabs, setMountedTabs] = useState<Set<Tab>>(() => new Set(["home"]));
+
+  useEffect(() => {
+    setMountedTabs((prev) => {
+      if (prev.has(activeTab)) return prev;
+      return new Set(prev).add(activeTab);
+    });
+  }, [activeTab]);
 
   return (
     <div className="flex h-screen overflow-hidden bg-background text-foreground">
@@ -71,25 +79,25 @@ function App() {
         )}
       </nav>
 
-      {/* Content */}
+      {/* Content — lazy-mount & keep-mounted to preserve state across tab switches */}
       <main className="flex min-h-0 flex-1 flex-col overflow-hidden bg-background">
-        {activeTab === "home" && (
-          <div className="h-full overflow-y-auto p-6">
+        {mountedTabs.has("home") && (
+          <div className={cn("h-full overflow-y-auto p-6", activeTab !== "home" && "hidden")}>
             <Home gamePath={gamePath} setGamePath={setGamePath} setActiveTab={setActiveTab} installInfo={installInfo} setInstallInfo={setInstallInfo} />
           </div>
         )}
-        {activeTab === "mod-tools" && (
-          <div className="h-full overflow-y-auto p-6">
+        {mountedTabs.has("mod-tools") && (
+          <div className={cn("h-full overflow-y-auto p-6", activeTab !== "mod-tools" && "hidden")}>
             <ModTools gamePath={gamePath} />
           </div>
         )}
-        {activeTab === "pak-manager" && (
-          <div className="h-full overflow-hidden p-6">
+        {mountedTabs.has("pak-manager") && (
+          <div className={cn("h-full overflow-hidden p-6", activeTab !== "pak-manager" && "hidden")}>
             <PakManager gamePath={gamePath} />
           </div>
         )}
-        {activeTab === "settings" && (
-          <div className="h-full overflow-y-auto p-6">
+        {mountedTabs.has("settings") && (
+          <div className={cn("h-full overflow-y-auto p-6", activeTab !== "settings" && "hidden")}>
             <SettingsEditor gamePath={gamePath} />
           </div>
         )}
