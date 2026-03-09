@@ -28,6 +28,7 @@ pub fn run() {
             commands::detect_tweaks,
             commands::apply_tweaks,
             commands::scan_mod_paks_for_ini,
+            commands::inspect_pak_path,
             commands::detect_pak_tweaks,
             commands::apply_pak_tweak_edits,
             commands::clear_shader_cache,

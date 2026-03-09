@@ -40,6 +40,11 @@ pub(crate) struct PakTweakEdit {
     pub engine_section: Option<String>,
 }
 
+/// Inspect a single pak file and return its INI metadata, or None if it contains no tweakable INI.
+pub(crate) fn inspect_single_pak(pak_path: &str) -> Result<Option<PakIniInfo>, String> {
+    io::inspect_pak_for_ini(Path::new(pak_path))
+}
+
 /// Scan all pak mods in ~mods and report which ones contain INI config files.
 pub(crate) fn scan_mod_paks(game_root: &str) -> Result<Vec<PakIniInfo>, String> {
     let mods_dir = mods_dir(game_root);

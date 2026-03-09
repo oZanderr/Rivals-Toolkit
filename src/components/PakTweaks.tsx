@@ -1,10 +1,13 @@
 import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 import {
   Package,
   RefreshCw,
   Save,
   Search,
+  FolderOpen,
+  X,
   CheckCircle2,
   XCircle,
   Trash2,
@@ -165,6 +168,27 @@ export function PakTweaks({ gamePath }: Props) {
     queueEdit((def as SliderTweak).key, val, originalVal, def.engine_section);
   }
 
+  async function browse() {
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: "PAK files", extensions: ["pak"] }],
+    });
+    if (typeof selected !== "string") return;
+    try {
+      const info = await invoke<PakIniInfo | null>("inspect_pak_path", { pakPath: selected });
+      if (!info) {
+        flashBadge("No tweakable INI found in that pak");
+        return;
+      }
+      // Add to list if not already present, then select it
+      setPaks((prev) => prev.find((p) => p.pak_path === info.pak_path) ? prev : [...prev, info]);
+      await selectPak(info);
+    } catch (e: any) {
+      flashBadge("Failed to read pak");
+      console.error(e);
+    }
+  }
+
   /** Scan the mods folder for pak files — only updates the list, preserves current selection and edits */
   async function scan(silent = false) {
     if (!gamePath) return;
@@ -173,8 +197,13 @@ export function PakTweaks({ gamePath }: Props) {
       const results = await invoke<PakIniInfo[]>("scan_mod_paks_for_ini", {
         gameRoot: gamePath,
       });
-      setPaks(results);
-      if (results.length === 0) {
+      // Merge: keep any manually-browsed paks that weren't found by the folder scan
+      const merged = [
+        ...results,
+        ...paks.filter((p) => !results.find((r) => r.pak_path === p.pak_path)),
+      ];
+      setPaks(merged);
+      if (merged.length === 0) {
         setSelectedPak(null);
         setTweakStates([]);
         setSavedTweakStates([]);
@@ -182,19 +211,19 @@ export function PakTweaks({ gamePath }: Props) {
         if (!silent) flashBadge("No config mods found");
       } else if (!selectedPak) {
         // Nothing selected yet — auto-select if only one
-        if (results.length === 1) {
-          await selectPak(results[0]);
+        if (merged.length === 1) {
+          await selectPak(merged[0]);
         }
-        if (!silent) flashBadge(`Found ${results.length} mod${results.length !== 1 ? "s" : ""}`);
-      } else if (!results.find((p) => p.pak_path === selectedPak.pak_path)) {
+        if (!silent) flashBadge(`Found ${merged.length} mod${merged.length !== 1 ? "s" : ""}`);
+      } else if (!merged.find((p) => p.pak_path === selectedPak.pak_path)) {
         // Previously selected pak is gone — deselect
         setSelectedPak(null);
         setTweakStates([]);
         setSavedTweakStates([]);
         setEdits([]);
-        if (!silent) flashBadge(`Found ${results.length} mod${results.length !== 1 ? "s" : ""}`);
+        if (!silent) flashBadge(`Found ${merged.length} mod${merged.length !== 1 ? "s" : ""}`);
       } else {
-        if (!silent) flashBadge(`Found ${results.length} mod${results.length !== 1 ? "s" : ""}`);
+        if (!silent) flashBadge(`Found ${merged.length} mod${merged.length !== 1 ? "s" : ""}`);
       }
     } catch (e: any) {
       console.error("Scan failed:", e);
@@ -293,6 +322,17 @@ export function PakTweaks({ gamePath }: Props) {
 
   const dirty = edits.length > 0;
 
+  function removePak(pakPath: string) {
+    const wasSelected = selectedPak?.pak_path === pakPath;
+    setPaks((prev) => prev.filter((p) => p.pak_path !== pakPath));
+    if (wasSelected) {
+      setSelectedPak(null);
+      setTweakStates([]);
+      setSavedTweakStates([]);
+      setEdits([]);
+    }
+  }
+
   return (
     <div className="flex w-full flex-col gap-5">
       {/* Pak list */}
@@ -307,10 +347,16 @@ export function PakTweaks({ gamePath }: Props) {
               </span>
             )}
           </div>
-          <Button variant="blue" size="sm" onClick={() => scan()} disabled={scanning || !gamePath}>
-            <Search size={14} className={cn(scanning && "animate-pulse")} />
-            Scan
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button variant="outline" size="sm" onClick={browse}>
+              <FolderOpen size={14} />
+              Browse
+            </Button>
+            <Button variant="blue" size="sm" onClick={() => scan()} disabled={scanning || !gamePath}>
+              <Search size={14} className={cn(scanning && "animate-pulse")} />
+              Scan
+            </Button>
+          </div>
         </div>
 
         {!gamePath && (
@@ -332,13 +378,20 @@ export function PakTweaks({ gamePath }: Props) {
           <div className="flex items-center gap-2">
             <Package size={13} className="shrink-0 text-muted-foreground" />
             <span className="flex-1 truncate font-mono text-[12px]">{selectedPak.pak_name}</span>
-            <div className="flex gap-1">
+            <div className="flex items-center gap-1">
               {selectedPak.has_device_profiles && (
                 <Badge variant="secondary" className="text-[9px] px-1.5 py-0">DeviceProfiles</Badge>
               )}
               {selectedPak.has_engine_ini && (
                 <Badge variant="outline" className="text-[9px] px-1.5 py-0">Engine</Badge>
               )}
+              <button
+                onClick={() => removePak(selectedPak.pak_path)}
+                className="ml-1 rounded p-0.5 text-muted-foreground/60 transition-colors hover:bg-destructive/15 hover:text-destructive"
+                title="Remove from list"
+              >
+                <X size={12} />
+              </button>
             </div>
           </div>
         )}
@@ -347,12 +400,18 @@ export function PakTweaks({ gamePath }: Props) {
         {paks.length > 1 && (
           <ul className="flex flex-col divide-y divide-border/50 rounded-md border border-border bg-background">
             {paks.map((pak) => (
-              <li key={pak.pak_path}>
+              <li
+                key={pak.pak_path}
+                className={cn(
+                  "flex items-center transition-colors hover:bg-secondary",
+                  selectedPak?.pak_path === pak.pak_path && "bg-secondary",
+                )}
+              >
                 <button
                   onClick={() => selectPak(pak)}
                   className={cn(
-                    "flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-secondary",
-                    selectedPak?.pak_path === pak.pak_path && "bg-secondary font-medium",
+                    "flex flex-1 items-center gap-2 px-3 py-2 text-left",
+                    selectedPak?.pak_path === pak.pak_path && "font-medium",
                   )}
                 >
                   <Package size={13} className="shrink-0 text-muted-foreground" />
@@ -365,6 +424,13 @@ export function PakTweaks({ gamePath }: Props) {
                       <Badge variant="outline" className="text-[9px] px-1.5 py-0">Engine</Badge>
                     )}
                   </div>
+                </button>
+                <button
+                  onClick={() => removePak(pak.pak_path)}
+                  className="mr-2 shrink-0 rounded p-1 text-muted-foreground/60 transition-colors hover:bg-destructive/15 hover:text-destructive"
+                  title="Remove from list"
+                >
+                  <X size={12} />
                 </button>
               </li>
             ))}

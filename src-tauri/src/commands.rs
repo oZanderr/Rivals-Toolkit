@@ -96,6 +96,15 @@ pub(crate) fn apply_tweaks(
 }
 
 #[tauri::command]
+pub(crate) async fn inspect_pak_path(
+    pak_path: String,
+) -> Result<Option<pak_tweaks::PakIniInfo>, String> {
+    tauri::async_runtime::spawn_blocking(move || pak_tweaks::inspect_single_pak(&pak_path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 pub(crate) async fn scan_mod_paks_for_ini(
     game_root: String,
 ) -> Result<Vec<pak_tweaks::PakIniInfo>, String> {
