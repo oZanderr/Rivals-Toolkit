@@ -220,19 +220,20 @@ export function PakManager({ gamePath }: Props) {
         )}
       </div>
 
-      <div className="flex shrink-0 flex-wrap items-center gap-2">
-        <Button variant="outline" size="sm" onClick={openPak} disabled={busy}>
-          <Package size={15} />
-          Open Pak
-        </Button>
-        <Button variant="blue" size="sm" onClick={openAndRepack} disabled={busy}>
-          <PackageOpen size={15} />
-          Repack Folder → Pak
-        </Button>
-      </div>
-
       <div className="flex min-h-0 flex-1 gap-4">
-        <Card className="flex w-[300px] shrink-0 min-h-0 flex-col gap-3 p-3 bg-card">
+        <div className="flex w-[320px] shrink-0 flex-col gap-2 min-h-0">
+          <div className="flex shrink-0 items-center gap-2">
+            <Button className="flex-1" variant="outline" size="sm" onClick={openPak} disabled={busy}>
+              <Package size={15} />
+              Open Pak
+            </Button>
+            <Button className="flex-1" variant="blue" size="sm" onClick={openAndRepack} disabled={busy}>
+              <PackageOpen size={15} />
+              Repack Folder → Pak
+            </Button>
+          </div>
+
+        <Card className="flex min-h-0 flex-1 flex-col gap-3 p-3 bg-card">
           <div className="flex shrink-0 items-center justify-between">
             <h3 className="text-sm font-semibold">Game Paks</h3>
             <Button variant="outline" size="sm" onClick={listPaks} disabled={busy}>
@@ -271,7 +272,7 @@ export function PakManager({ gamePath }: Props) {
                         isSelected ? "bg-secondary text-foreground" : "hover:bg-secondary/50",
                       )}
                       onClick={() => inspectPak(p)}
-                      title={p}
+                      title={displayName}
                     >
                       <Package
                         size={14}
@@ -285,6 +286,7 @@ export function PakManager({ gamePath }: Props) {
             )}
           </div>
         </Card>
+        </div>
 
         <Card className="flex min-h-0 min-w-0 flex-1 flex-col gap-3 p-3 bg-card">
           {/* Header — fixed two-line height so toggling subtitle doesn't shift */}
