@@ -67,6 +67,7 @@ interface Props {
 
 export function ScalabilitySettings({ filePath, content, setContent, onSaved, onReload }: Props) {
   const [definitions, setDefinitions] = useState<TweakDefinition[]>([]);
+  const [defsLoaded, setDefsLoaded] = useState(false);
   const [enabled, setEnabled] = useState<Record<string, boolean>>({});
   const [values, setValues] = useState<Record<string, string>>({});
   const [savedEnabled, setSavedEnabled] = useState<Record<string, boolean>>({});
@@ -83,7 +84,10 @@ export function ScalabilitySettings({ filePath, content, setContent, onSaved, on
 
   // Load tweak definitions once
   useEffect(() => {
-    invoke<TweakDefinition[]>("get_tweak_definitions").then(setDefinitions);
+    invoke<TweakDefinition[]>("get_tweak_definitions").then((defs) => {
+      setDefinitions(defs);
+      setDefsLoaded(true);
+    });
   }, []);
 
   // Detect active tweaks whenever content changes
@@ -199,6 +203,8 @@ export function ScalabilitySettings({ filePath, content, setContent, onSaved, on
     (acc[def.category] ??= []).push(def);
     return acc;
   }, {});
+
+  if (!defsLoaded) return null;
 
   return (
     <div className="flex flex-col gap-5">
