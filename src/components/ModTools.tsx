@@ -11,6 +11,7 @@ import {
   ShieldX,
   CheckCircle2,
   XCircle,
+  Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -41,6 +42,7 @@ export function ModTools({ gamePath }: Props) {
   const [modsStatus, setModsStatus] = useState<ModsStatus | null>(null);
   const [notice, setNotice] = useState<{ msg: string; type: StatusType } | null>(null);
   const [busyMods, setBusyMods] = useState<Set<string>>(new Set());
+  const [pendingDelete, setPendingDelete] = useState<string | null>(null);
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const showNotice = (msg: string, type: StatusType, duration = 6000) => {
@@ -81,6 +83,31 @@ export function ModTools({ gamePath }: Props) {
       await invoke("open_mods_folder", { gameRoot: gamePath });
     } catch (e: any) {
       showNotice(String(e), "err");
+    }
+  }
+
+  async function deleteMod(entry: ModEntry) {
+    if (!modsStatus) return;
+    if (pendingDelete !== entry.full_name) {
+      setPendingDelete(entry.full_name);
+      return;
+    }
+    setPendingDelete(null);
+    setBusyMods((prev) => new Set(prev).add(entry.full_name));
+    try {
+      await invoke("delete_mod", {
+        modsFolder: modsStatus.mods_folder_path,
+        fullName: entry.full_name,
+      });
+      await refresh(true);
+    } catch (e: any) {
+      showNotice(String(e), "err");
+    } finally {
+      setBusyMods((prev) => {
+        const next = new Set(prev);
+        next.delete(entry.full_name);
+        return next;
+      });
     }
   }
 
@@ -264,12 +291,43 @@ export function ModTools({ gamePath }: Props) {
                   {entry.has_companions && (
                     <span className="shrink-0 text-[10px] text-muted-foreground/50">+ucas/utoc</span>
                   )}
-                  <Switch
-                    checked={entry.enabled}
-                    disabled={busy}
-                    onCheckedChange={() => toggleMod(entry)}
-                    className="shrink-0"
-                  />
+                  {pendingDelete === entry.full_name ? (
+                    <div className="flex shrink-0 items-center gap-1">
+                      <span className="text-[11px] font-medium text-[var(--color-err)]">Delete?</span>
+                      <button
+                        title="Confirm delete"
+                        disabled={busy}
+                        onClick={() => deleteMod(entry)}
+                        className="rounded px-1.5 py-0.5 text-[11px] font-semibold bg-[var(--color-err)] text-white hover:opacity-90 transition-opacity"
+                      >
+                        Yes
+                      </button>
+                      <button
+                        title="Cancel"
+                        onClick={() => setPendingDelete(null)}
+                        className="rounded px-1.5 py-0.5 text-[11px] font-semibold border border-border text-muted-foreground hover:bg-secondary transition-colors"
+                      >
+                        No
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      <Switch
+                        checked={entry.enabled}
+                        disabled={busy}
+                        onCheckedChange={() => toggleMod(entry)}
+                        className="shrink-0"
+                      />
+                      <button
+                        title="Delete mod"
+                        disabled={busy}
+                        onClick={() => deleteMod(entry)}
+                        className="shrink-0 rounded p-1 text-muted-foreground/30 transition-colors hover:text-[var(--color-err)] hover:bg-[var(--color-err)]/10"
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </>
+                  )}
                 </li>
               );
             })}

@@ -40,3 +40,7 @@ pub(crate) fn toggle_mod_enabled(
 pub(crate) fn export_mods_zip(mods_folder: &str, dest_path: &str) -> Result<String, String> {
     folder::export_mods_zip(mods_folder, dest_path)
 }
+
+pub(crate) fn delete_mod(mods_folder: &str, full_name: &str) -> Result<(), String> {
+    folder::delete_mod(mods_folder, full_name)
+}

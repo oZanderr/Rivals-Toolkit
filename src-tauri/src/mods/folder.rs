@@ -64,6 +64,36 @@ pub(crate) fn toggle_mod_enabled(
     Ok(())
 }
 
+/// Delete a mod and its companion files (.ucas/.utoc) from the mods folder.
+pub(crate) fn delete_mod(mods_folder: &str, full_name: &str) -> Result<(), String> {
+    let dir = Path::new(mods_folder);
+
+    let stem = if let Some(s) = full_name.strip_suffix(".pak.disabled") {
+        s
+    } else if let Some(s) = full_name.strip_suffix(".pak") {
+        s
+    } else {
+        return Err(format!("Unexpected mod filename: {full_name}"));
+    };
+
+    let candidates = [
+        full_name.to_string(),
+        format!("{stem}.ucas"),
+        format!("{stem}.utoc"),
+        format!("{stem}.ucas.disabled"),
+        format!("{stem}.utoc.disabled"),
+    ];
+
+    for name in &candidates {
+        let path = dir.join(name);
+        if path.exists() {
+            std::fs::remove_file(&path).map_err(|e| format!("Failed to delete {name}: {e}"))?;
+        }
+    }
+
+    Ok(())
+}
+
 /// Zip all enabled `.pak` files (and their `.ucas`/`.utoc` companions) into `dest_path`.
 pub(crate) fn export_mods_zip(mods_folder: &str, dest_path: &str) -> Result<String, String> {
     let dir = Path::new(mods_folder);

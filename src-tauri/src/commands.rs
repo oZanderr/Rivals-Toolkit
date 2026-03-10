@@ -160,3 +160,8 @@ pub(crate) async fn export_mods_zip(
         .await
         .map_err(|e| e.to_string())?
 }
+
+#[tauri::command]
+pub(crate) fn delete_mod(mods_folder: String, full_name: String) -> Result<(), String> {
+    mods::delete_mod(&mods_folder, &full_name)
+}
