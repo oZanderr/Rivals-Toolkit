@@ -25,6 +25,10 @@ pub(crate) fn install_signature_bypass(game_root: &str) -> Result<String, String
     bypass::install_signature_bypass(game_root)
 }
 
+pub(crate) fn remove_signature_bypass(game_root: &str) -> Result<String, String> {
+    bypass::remove_signature_bypass(game_root)
+}
+
 pub(crate) fn open_mods_folder(game_root: &str) -> Result<(), String> {
     folder::open_mods_folder(game_root)
 }

@@ -20,6 +20,7 @@ pub fn run() {
             commands::repack_pak,
             commands::get_mods_status,
             commands::install_signature_bypass,
+            commands::remove_signature_bypass,
             commands::open_mods_folder,
             commands::get_scalability_path,
             commands::read_scalability,

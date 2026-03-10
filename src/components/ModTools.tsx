@@ -8,6 +8,7 @@ import {
   RefreshCw,
   Shield,
   ShieldCheck,
+  ShieldOff,
   ShieldX,
   CheckCircle2,
   XCircle,
@@ -70,6 +71,17 @@ export function ModTools({ gamePath }: Props) {
     if (!gamePath) return showNotice("Set game root on the Home tab first.", "err");
     try {
       const msg = await invoke<string>("install_signature_bypass", { gameRoot: gamePath });
+      showNotice(msg, "ok", 4000);
+      await refresh(true);
+    } catch (e: any) {
+      showNotice(String(e), "err");
+    }
+  }
+
+  async function removeBypass() {
+    if (!gamePath) return showNotice("Set game root on the Home tab first.", "err");
+    try {
+      const msg = await invoke<string>("remove_signature_bypass", { gameRoot: gamePath });
       showNotice(msg, "ok", 4000);
       await refresh(true);
     } catch (e: any) {
@@ -183,6 +195,10 @@ export function ModTools({ gamePath }: Props) {
             Set game root on Home tab first
           </span>
         )}
+        <Button variant="ghost" size="sm" onClick={() => refresh()} disabled={!gamePath} className="ml-auto">
+          <RefreshCw size={14} />
+          Refresh
+        </Button>
       </div>
 
       {/* Status cards */}
@@ -231,13 +247,9 @@ export function ModTools({ gamePath }: Props) {
             <Shield size={14} />
             Install Bypass
           </Button>
-          <Button variant="outline" size="sm" onClick={openFolder} disabled={!gamePath}>
-            <FolderOpen size={14} />
-            Open Mods Folder
-          </Button>
-          <Button variant="ghost" size="sm" onClick={() => refresh()} disabled={!gamePath}>
-            <RefreshCw size={14} />
-            Refresh
+          <Button variant="red" size="sm" onClick={removeBypass} disabled={!gamePath || !modsStatus?.sig_bypass_installed}>
+            <ShieldOff size={14} />
+            Remove Bypass
           </Button>
         </div>
       </Card>
@@ -254,16 +266,22 @@ export function ModTools({ gamePath }: Props) {
               </span>
             )}
           </div>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={exportZip}
-            disabled={enabledCount === 0}
-            title={enabledCount === 0 ? "No enabled mods to export" : "Export enabled mods as zip"}
-          >
-            <Archive size={14} />
-            Export Zip
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button variant="ghost" size="sm" onClick={openFolder} disabled={!gamePath} title="Open ~mods folder in Explorer">
+              <FolderOpen size={14} />
+              Open Folder
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={exportZip}
+              disabled={enabledCount === 0}
+              title={enabledCount === 0 ? "No enabled mods to export" : "Export enabled mods as zip"}
+            >
+              <Archive size={14} />
+              Export Zip
+            </Button>
+          </div>
         </div>
 
         {totalCount === 0 ? (

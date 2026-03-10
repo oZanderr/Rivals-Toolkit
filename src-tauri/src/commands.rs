@@ -73,6 +73,11 @@ pub(crate) fn install_signature_bypass(game_root: String) -> Result<String, Stri
 }
 
 #[tauri::command]
+pub(crate) fn remove_signature_bypass(game_root: String) -> Result<String, String> {
+    mods::remove_signature_bypass(&game_root)
+}
+
+#[tauri::command]
 pub(crate) fn open_mods_folder(game_root: String) -> Result<(), String> {
     mods::open_mods_folder(&game_root)
 }
