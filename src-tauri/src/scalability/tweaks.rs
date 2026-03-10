@@ -14,6 +14,10 @@ pub(crate) struct ScalabilityLine {
     /// Ignored when writing to DeviceProfiles or DefaultEngine.ini.
     #[serde(default = "default_cv_section")]
     pub section: String,
+    /// When `true`, this line is only written when the context is a pak mod INI.
+    /// It is never added to a scalability file.
+    #[serde(default)]
+    pub pak_only: bool,
 }
 
 /// Describes what kind of tweak this is and how to apply/detect it.
@@ -98,9 +102,9 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             engine_section: None,
             kind: TweakKind::RemoveLines {
                 lines: vec![
-                    ScalabilityLine { pattern: "r.PostProcessing.DisableMaterials=1".into(), section: "PostProcessQuality@0".into() },
-                    ScalabilityLine { pattern: "r.CustomDepth=0".into(),                     section: "ConsoleVariables".into() },
-                    ScalabilityLine { pattern: "r.LightTile.Enable=0".into(),                section: "ConsoleVariables".into() },
+                    ScalabilityLine { pattern: "r.PostProcessing.DisableMaterials=1".into(), section: "PostProcessQuality@0".into(), pak_only: false },
+                    ScalabilityLine { pattern: "r.CustomDepth=0".into(),                     section: "ConsoleVariables".into(),    pak_only: true  },
+                    ScalabilityLine { pattern: "r.LightTile.Enable=0".into(),                section: "ConsoleVariables".into(),    pak_only: true  },
                 ],
             },
         },
@@ -115,7 +119,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             engine_section: None,
             kind: TweakKind::RemoveLines {
                 lines: vec![
-                    ScalabilityLine { pattern: "m.Portal.ScreenPercentageLowerLimit=1".into(), section: "EffectsQuality@0".into() },
+                    ScalabilityLine { pattern: "m.Portal.ScreenPercentageLowerLimit=1".into(), section: "EffectsQuality@0".into(), pak_only: false },
                 ],
             },
         },
@@ -130,7 +134,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             engine_section: None,
             kind: TweakKind::RemoveLines {
                 lines: vec![
-                    ScalabilityLine { pattern: "p.SimCollisionEnabled=0".into(), section: "ConsoleVariables".into() },
+                    ScalabilityLine { pattern: "p.SimCollisionEnabled=0".into(), section: "ConsoleVariables".into(), pak_only: false },
                 ],
             },
         },
@@ -145,7 +149,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             engine_section: None,
             kind: TweakKind::RemoveLines {
                 lines: vec![
-                    ScalabilityLine { pattern: "fx.EnableNiagaraSpriteRendering=0".into(), section: "ConsoleVariables".into() },
+                    ScalabilityLine { pattern: "fx.EnableNiagaraSpriteRendering=0".into(), section: "ConsoleVariables".into(), pak_only: false },
                 ],
             },
         },
@@ -161,9 +165,9 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             engine_section: None,
             kind: TweakKind::RemoveLines {
                 lines: vec![
-                    ScalabilityLine { pattern: "r.LightMaxDrawDistanceScale=0.00000001".into(), section: "ShadowQuality@0".into() },
-                    ScalabilityLine { pattern: "r.LightFadeDistance=1".into(),                  section: "GlobalIlluminationQuality@0".into() },
-                    ScalabilityLine { pattern: "r.LightCullingDistance=1".into(),               section: "GlobalIlluminationQuality@0".into() },
+                    ScalabilityLine { pattern: "r.LightMaxDrawDistanceScale=0.00000001".into(), section: "ShadowQuality@0".into(),             pak_only: false },
+                    ScalabilityLine { pattern: "r.LightFadeDistance=1".into(),                  section: "GlobalIlluminationQuality@0".into(), pak_only: false },
+                    ScalabilityLine { pattern: "r.LightCullingDistance=1".into(),               section: "GlobalIlluminationQuality@0".into(), pak_only: false },
                 ],
             },
         },
@@ -196,7 +200,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             engine_section: None,
             kind: TweakKind::RemoveLines {
                 lines: vec![
-                    ScalabilityLine { pattern: "r.SceneColorFormat=0".into(), section: "EffectsQuality@0".into() },
+                    ScalabilityLine { pattern: "r.SceneColorFormat=0".into(), section: "EffectsQuality@0".into(), pak_only: false },
                 ],
             },
         },
@@ -211,7 +215,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             engine_section: None,
             kind: TweakKind::RemoveLines {
                 lines: vec![
-                    ScalabilityLine { pattern: "r.PostProcessing.EnableEyeAdaptation=0".into(), section: "PostProcessQuality@0".into() },
+                    ScalabilityLine { pattern: "r.PostProcessing.EnableEyeAdaptation=0".into(), section: "PostProcessQuality@0".into(), pak_only: false },
                 ],
             },
         },
@@ -226,7 +230,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             engine_section: None,
             kind: TweakKind::RemoveLines {
                 lines: vec![
-                    ScalabilityLine { pattern: "r.SeparateTranslucency=0".into(), section: "PostProcessQuality@0".into() },
+                    ScalabilityLine { pattern: "r.SeparateTranslucency=0".into(), section: "PostProcessQuality@0".into(), pak_only: false },
                 ],
             },
         },
@@ -259,10 +263,10 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             engine_section: None,
             kind: TweakKind::RemoveLines {
                 lines: vec![
-                    ScalabilityLine { pattern: "r.AnisotropicMaterials=0".into(),    section: "ShadingQuality@0".into() },
-                    ScalabilityLine { pattern: "r.VT.AnisotropicMaterials=0".into(), section: "TextureQuality@0".into() },
-                    ScalabilityLine { pattern: "r.VT.MaxAnisotropy=0".into(),        section: "TextureQuality@0".into() },
-                    ScalabilityLine { pattern: "r.MaxAnisotropy=0".into(),           section: "TextureQuality@0".into() },
+                    ScalabilityLine { pattern: "r.AnisotropicMaterials=0".into(),    section: "ShadingQuality@0".into(),   pak_only: false },
+                    ScalabilityLine { pattern: "r.VT.AnisotropicMaterials=0".into(), section: "TextureQuality@0".into(),   pak_only: false },
+                    ScalabilityLine { pattern: "r.VT.MaxAnisotropy=0".into(),        section: "TextureQuality@0".into(),   pak_only: false },
+                    ScalabilityLine { pattern: "r.MaxAnisotropy=0".into(),           section: "TextureQuality@0".into(),   pak_only: false },
                 ],
             },
         },
@@ -275,7 +279,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             engine_section: None,
             kind: TweakKind::RemoveLines {
                 lines: vec![
-                    ScalabilityLine { pattern: "r.MipMapLODBias=15".into(), section: "TextureQuality@0".into() },
+                    ScalabilityLine { pattern: "r.MipMapLODBias=15".into(), section: "TextureQuality@0".into(), pak_only: false },
                 ],
             },
         },
@@ -288,7 +292,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             engine_section: None,
             kind: TweakKind::RemoveLines {
                 lines: vec![
-                    ScalabilityLine { pattern: "r.Streaming.MipBias=2".into(), section: "TextureQuality@0".into() },
+                    ScalabilityLine { pattern: "r.Streaming.MipBias=2".into(), section: "TextureQuality@0".into(), pak_only: false },
                 ],
             },
         },
@@ -303,7 +307,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             engine_section: None,
             kind: TweakKind::RemoveLines {
                 lines: vec![
-                    ScalabilityLine { pattern: "r.Streaming.PoolSize=1".into(), section: "TextureQuality@0".into() },
+                    ScalabilityLine { pattern: "r.Streaming.PoolSize=1".into(), section: "TextureQuality@0".into(), pak_only: false },
                 ],
             },
         },

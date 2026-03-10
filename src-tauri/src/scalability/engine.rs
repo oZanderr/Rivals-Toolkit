@@ -158,8 +158,12 @@ fn remove_matching_lines(lines: &mut Vec<String>, entries: &[super::tweaks::Scal
 }
 
 /// Add lines that aren't already present, each inserted under its own section.
+/// Lines marked `pak_only` are skipped — they must not be written to scalability files.
 fn add_lines_if_absent(lines: &mut Vec<String>, entries: &[super::tweaks::ScalabilityLine]) {
     for entry in entries {
+        if entry.pak_only {
+            continue;
+        }
         let already = lines.iter().any(|line| {
             let t = line.trim();
             !t.starts_with(';') && matches_pattern(t, &entry.pattern)
@@ -204,7 +208,7 @@ fn insert_into_section(lines: &mut Vec<String>, section: &str, new_line: String)
             lines.push(String::new());
         }
         lines.push(header);
-        lines.len() // position after the newly pushed header
+        lines.len()
     };
 
     lines.insert(insert_at, new_line);
