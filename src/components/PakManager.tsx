@@ -198,11 +198,11 @@ export function PakManager({ gamePath }: Props) {
   return (
     <div className="flex flex-1 min-h-0 flex-col gap-4">
       <div className="flex min-h-8 shrink-0 items-center gap-3">
-        <h2 className="text-xl font-bold">Pak Manager</h2>
+        <h2 className="shrink-0 text-xl font-bold">Pak Manager</h2>
         {notice && (
           <span
             className={cn(
-              "flex items-center gap-1.5 text-[12px] font-medium",
+              "flex min-w-0 items-center gap-1.5 truncate text-[12px] font-medium",
               notice.type === "ok"
                 ? "text-[var(--color-ok)]"
                 : notice.type === "err"
@@ -211,14 +211,14 @@ export function PakManager({ gamePath }: Props) {
             )}
           >
             {notice.type === "ok" ? (
-              <CheckCircle2 size={14} strokeWidth={2.5} />
+              <CheckCircle2 className="shrink-0" size={14} strokeWidth={2.5} />
             ) : notice.type === "err" ? (
-              <XCircle size={14} strokeWidth={2.5} />
+              <XCircle className="shrink-0" size={14} strokeWidth={2.5} />
             ) : null}
-            {notice.msg}
+            <span className="truncate">{notice.msg}</span>
           </span>
         )}
-        <div className="ml-auto flex items-center gap-2">
+        <div className="ml-auto flex shrink-0 items-center gap-2">
           <Button variant="outline" size="sm" onClick={openPak} disabled={busy}>
             <Package size={15} />
             Open Pak

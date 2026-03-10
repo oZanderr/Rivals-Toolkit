@@ -169,11 +169,11 @@ export function ModTools({ gamePath }: Props) {
     <div className="flex flex-1 min-h-0 w-full flex-col gap-6 overflow-hidden">
       {/* Header */}
       <div className="flex min-h-8 items-center gap-3">
-        <h2 className="text-xl font-bold">Mod Tools</h2>
+        <h2 className="shrink-0 text-xl font-bold">Mod Tools</h2>
         {notice && (
           <span
             className={cn(
-              "flex items-center gap-1.5 text-[12px] font-medium",
+              "flex min-w-0 items-center gap-1.5 truncate text-[12px] font-medium",
               notice.type === "ok"
                 ? "text-[var(--color-ok)]"
                 : notice.type === "err"
@@ -182,20 +182,20 @@ export function ModTools({ gamePath }: Props) {
             )}
           >
             {notice.type === "ok" ? (
-              <CheckCircle2 size={14} strokeWidth={2.5} />
+              <CheckCircle2 className="shrink-0" size={14} strokeWidth={2.5} />
             ) : notice.type === "err" ? (
-              <XCircle size={14} strokeWidth={2.5} />
+              <XCircle className="shrink-0" size={14} strokeWidth={2.5} />
             ) : null}
-            {notice.msg}
+            <span className="truncate">{notice.msg}</span>
           </span>
         )}
         {!gamePath && (
-          <span className="flex items-center gap-1.5 text-[12px] font-medium text-[var(--color-warn)]">
+          <span className="flex shrink-0 items-center gap-1.5 text-[12px] font-medium text-[var(--color-warn)]">
             <XCircle size={14} strokeWidth={2.5} />
             Set game root on Home tab first
           </span>
         )}
-        <Button variant="ghost" size="sm" onClick={() => refresh()} disabled={!gamePath} className="ml-auto">
+        <Button variant="ghost" size="sm" onClick={() => refresh()} disabled={!gamePath} className="ml-auto shrink-0">
           <RefreshCw size={14} />
           Refresh
         </Button>
