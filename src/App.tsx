@@ -42,17 +42,7 @@ function App() {
       <div className="flex min-h-0 flex-1 overflow-hidden">
       {/* Sidebar */}
       <nav className="flex w-[210px] min-w-[210px] flex-col overflow-y-auto border-r border-border bg-card">
-        <div data-tauri-drag-region className="flex items-center gap-2 px-4 pb-3 pt-5">
-          <span className="text-2xl leading-none">🐽</span>
-          <div>
-            <div className="text-[14px] font-bold">Oinkers Toolkit</div>
-            <div className="text-[10px] text-muted-foreground">Marvel Rivals Mod Suite</div>
-          </div>
-        </div>
-
-        <Separator className="mb-1" />
-
-        <ul className="flex flex-1 flex-col gap-0.5 px-2">
+        <ul className="flex flex-1 flex-col gap-0.5 px-2 pt-2">
           {TABS.map((t) => (
             <li key={t.id}>
               <button

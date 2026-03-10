@@ -247,7 +247,7 @@ export function ModTools({ gamePath }: Props) {
             <Shield size={14} />
             Install Bypass
           </Button>
-          <Button variant="red" size="sm" onClick={removeBypass} disabled={!gamePath || !modsStatus?.sig_bypass_installed}>
+          <Button variant="outline" size="sm" onClick={removeBypass} disabled={!gamePath || !modsStatus?.sig_bypass_installed}>
             <ShieldOff size={14} />
             Remove Bypass
           </Button>
@@ -272,7 +272,7 @@ export function ModTools({ gamePath }: Props) {
               Open Folder
             </Button>
             <Button
-              variant="outline"
+              variant="blue"
               size="sm"
               onClick={exportZip}
               disabled={enabledCount === 0}
