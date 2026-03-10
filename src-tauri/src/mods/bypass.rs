@@ -48,7 +48,7 @@ pub(crate) fn install_signature_bypass(game_root: &str) -> Result<String, String
         fs::create_dir_all(mods_dir(game_root)).map_err(|e| e.to_string())?;
     }
 
-    Ok(format!("Bypass installed to {}", bin_dir.display()))
+    Ok("Bypass installed successfully.".to_string())
 }
 
 pub(crate) fn remove_signature_bypass(game_root: &str) -> Result<String, String> {
@@ -67,6 +67,6 @@ pub(crate) fn remove_signature_bypass(game_root: &str) -> Result<String, String>
     if removed == 0 {
         Ok("Bypass files were not present.".to_string())
     } else {
-        Ok(format!("Removed {removed} bypass file(s) from {}", bin_dir.display()))
+        Ok(format!("Removed {removed} bypass file(s)."))
     }
 }

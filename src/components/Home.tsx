@@ -175,9 +175,9 @@ export function Home({ gamePath, setGamePath, setActiveTab, installInfo: info, s
     : [];
 
   return (
-    <div className="flex h-full w-full flex-col gap-4 overflow-y-auto">
+    <div className="flex flex-1 min-h-0 w-full flex-col gap-4 overflow-y-auto">
       {/* ── Game path ── */}
-      <div className="flex items-center gap-3">
+      <div className="flex min-h-8 items-center gap-3">
         <h2 className="text-xl font-bold">Installation</h2>
         {showBadge && info && (
           <span className="flex items-center gap-1.5 text-[12px] font-medium text-[var(--color-ok)]">

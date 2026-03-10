@@ -7,7 +7,7 @@ export function Titlebar() {
   return (
     <div
       data-tauri-drag-region
-      className="fixed left-0 right-0 top-0 z-50 flex h-[30px] items-center justify-end"
+      className="flex h-[30px] w-full shrink-0 items-center justify-end border-b border-border bg-card"
     >
       <button
         onClick={() => appWindow.minimize()}

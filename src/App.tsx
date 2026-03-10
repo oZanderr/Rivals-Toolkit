@@ -37,19 +37,20 @@ function App() {
   }, [activeTab]);
 
   return (
-    <div className="flex h-screen overflow-hidden bg-background text-foreground">
+    <div className="flex h-screen flex-col overflow-hidden bg-background text-foreground">
       <Titlebar />
+      <div className="flex min-h-0 flex-1 overflow-hidden">
       {/* Sidebar */}
-      <nav className="flex w-[210px] min-w-[210px] flex-col overflow-y-auto border-r border-border bg-card py-4">
-        <div data-tauri-drag-region className="flex items-center gap-2.5 px-4 pb-4">
-          <span className="text-3xl leading-none">🐽</span>
+      <nav className="flex w-[210px] min-w-[210px] flex-col overflow-y-auto border-r border-border bg-card">
+        <div data-tauri-drag-region className="flex items-center gap-2 px-4 pb-3 pt-5">
+          <span className="text-2xl leading-none">🐽</span>
           <div>
-            <div className="text-[15px] font-bold">Oinkers Toolkit</div>
-            <div className="text-[11px] text-muted-foreground">Marvel Rivals Mod Suite</div>
+            <div className="text-[14px] font-bold">Oinkers Toolkit</div>
+            <div className="text-[10px] text-muted-foreground">Marvel Rivals Mod Suite</div>
           </div>
         </div>
 
-        <Separator className="mb-2" />
+        <Separator className="mb-1" />
 
         <ul className="flex flex-1 flex-col gap-0.5 px-2">
           {TABS.map((t) => (
@@ -71,7 +72,7 @@ function App() {
         {gamePath && (
           <>
             <Separator className="mb-3" />
-            <div className="px-4">
+            <div className="px-4 pb-4">
               <span className="block text-[10px] uppercase tracking-widest text-muted-foreground">Game Root</span>
               <span className="block overflow-hidden text-ellipsis whitespace-nowrap text-xs text-foreground" title={gamePath}>
                 {gamePath.split(/[/\\]/).pop()}
@@ -84,26 +85,27 @@ function App() {
       {/* Content — lazy-mount & keep-mounted to preserve state across tab switches */}
       <main className="flex min-h-0 flex-1 flex-col overflow-hidden bg-background">
         {mountedTabs.has("home") && (
-          <div className={cn("h-full overflow-hidden p-6", activeTab !== "home" && "hidden")}>
+          <div className={cn("flex flex-1 min-h-0 flex-col overflow-hidden p-5", activeTab !== "home" && "hidden")}>
             <Home gamePath={gamePath} setGamePath={setGamePath} setActiveTab={setActiveTab} installInfo={installInfo} setInstallInfo={setInstallInfo} isActive={activeTab === "home"} />
           </div>
         )}
         {mountedTabs.has("mod-tools") && (
-          <div className={cn("h-full overflow-hidden p-6", activeTab !== "mod-tools" && "hidden")}>
+          <div className={cn("flex flex-1 min-h-0 flex-col overflow-hidden p-5", activeTab !== "mod-tools" && "hidden")}>
             <ModTools gamePath={gamePath} />
           </div>
         )}
         {mountedTabs.has("pak-manager") && (
-          <div className={cn("h-full overflow-hidden p-6", activeTab !== "pak-manager" && "hidden")}>
+          <div className={cn("flex flex-1 min-h-0 flex-col overflow-hidden p-5", activeTab !== "pak-manager" && "hidden")}>
             <PakManager gamePath={gamePath} />
           </div>
         )}
         {mountedTabs.has("settings") && (
-          <div className={cn("flex h-full flex-col overflow-hidden p-6", activeTab !== "settings" && "hidden")}>
+          <div className={cn("flex flex-1 min-h-0 flex-col overflow-hidden p-5", activeTab !== "settings" && "hidden")}>
             <QuickSettings gamePath={gamePath} />
           </div>
         )}
       </main>
+      </div>
     </div>
   );
 }

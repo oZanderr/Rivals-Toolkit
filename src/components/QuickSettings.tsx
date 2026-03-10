@@ -27,7 +27,7 @@ export function QuickSettings({ gamePath }: Props) {
     detectPath();
   }, []);
 
-  /** Re-detect the Scalability.ini path only — does not reset tweak states */
+  /** Redetect the Scalability.ini path only — does not reset tweak states */
   async function detectPath() {
     setDetecting(true);
     setDetectBadge(null);
@@ -89,9 +89,9 @@ export function QuickSettings({ gamePath }: Props) {
   ];
 
   return (
-    <div className="flex w-full flex-1 min-h-0 flex-col gap-6">
+    <div className="flex flex-1 min-h-0 w-full flex-col gap-6">
       {/* Header */}
-      <div>
+      <div className="flex min-h-8 items-center gap-3">
         <h2 className="text-xl font-bold">Quick Settings</h2>
       </div>
 

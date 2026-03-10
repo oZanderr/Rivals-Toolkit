@@ -166,9 +166,9 @@ export function ModTools({ gamePath }: Props) {
   const totalCount = modsStatus?.mod_entries.length ?? 0;
 
   return (
-    <div className="flex h-full w-full flex-col gap-6 overflow-hidden">
+    <div className="flex flex-1 min-h-0 w-full flex-col gap-6 overflow-hidden">
       {/* Header */}
-      <div className="flex items-center gap-3">
+      <div className="flex min-h-8 items-center gap-3">
         <h2 className="text-xl font-bold">Mod Tools</h2>
         {notice && (
           <span

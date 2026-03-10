@@ -257,7 +257,7 @@ export function ScalabilityTweaks({ filePath, setFilePath, fileExists, content, 
             </Button>
             <Button variant="blue" size="sm" onClick={onDetect} disabled={detecting}>
               <Search size={14} className={cn(detecting && "animate-pulse")} />
-              Re-detect
+              Redetect
             </Button>
           </div>
         </Card>

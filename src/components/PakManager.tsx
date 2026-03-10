@@ -196,8 +196,8 @@ export function PakManager({ gamePath }: Props) {
   const pakName = selectedPak ? selectedPak.split(/[/\\]/).pop() : null;
 
   return (
-    <div className="flex h-full flex-col gap-4">
-      <div className="flex shrink-0 items-center gap-3">
+    <div className="flex flex-1 min-h-0 flex-col gap-4">
+      <div className="flex min-h-8 shrink-0 items-center gap-3">
         <h2 className="text-xl font-bold">Pak Manager</h2>
         {notice && (
           <span
@@ -218,22 +218,21 @@ export function PakManager({ gamePath }: Props) {
             {notice.msg}
           </span>
         )}
+        <div className="ml-auto flex items-center gap-2">
+          <Button variant="outline" size="sm" onClick={openPak} disabled={busy}>
+            <Package size={15} />
+            Open Pak
+          </Button>
+          <Button variant="blue" size="sm" onClick={openAndRepack} disabled={busy}>
+            <PackageOpen size={15} />
+            Repack Folder → Pak
+          </Button>
+        </div>
       </div>
 
       <div className="flex min-h-0 flex-1 gap-4">
-        <div className="flex w-[320px] shrink-0 flex-col gap-2 min-h-0">
-          <div className="flex shrink-0 items-center gap-2">
-            <Button className="flex-1" variant="outline" size="sm" onClick={openPak} disabled={busy}>
-              <Package size={15} />
-              Open Pak
-            </Button>
-            <Button className="flex-1" variant="blue" size="sm" onClick={openAndRepack} disabled={busy}>
-              <PackageOpen size={15} />
-              Repack Folder → Pak
-            </Button>
-          </div>
-
-        <Card className="flex min-h-0 flex-1 flex-col gap-3 p-3 bg-card">
+        <div className="flex w-[320px] shrink-0 flex-col min-h-0">
+          <Card className="flex min-h-0 flex-1 flex-col gap-3 p-3 bg-card">
           <div className="flex shrink-0 items-center justify-between">
             <h3 className="text-sm font-semibold">Game Paks</h3>
             <Button variant="outline" size="sm" onClick={listPaks} disabled={busy}>
