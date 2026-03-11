@@ -3,7 +3,7 @@ import { useState, useRef, useMemo, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { FolderOpen, PackageOpen, Download, Search, Package, List, CheckCircle2, XCircle } from "lucide-react";
+import { FolderOpen, PackageOpen, Download, Search, Package, PackagePlus, List, CheckCircle2, XCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
@@ -24,6 +24,7 @@ export function PakManager({ gamePath }: Props) {
   const [filterText, setFilterText] = useState("");
   const [notice, setNotice] = useState<{ msg: string; type: StatusType } | null>(null);
   const [busy, setBusy] = useState(false);
+  const [manualPaks, setManualPaks] = useState<Set<string>>(new Set());
   const [debouncedFilter, setDebouncedFilter] = useState("");
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const filterTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -96,6 +97,7 @@ export function PakManager({ gamePath }: Props) {
   }
 
   async function inspectPak(pak: string) {
+    if (pak === selectedPak) return;
     setSelectedPak(pak);
     setFilterText("");
     setBusy(true);
@@ -116,10 +118,13 @@ export function PakManager({ gamePath }: Props) {
       filters: [{ name: "Pak files", extensions: ["pak"] }],
     });
     if (typeof selected === "string") {
-      setPakList((prev) => (prev.includes(selected) ? prev : [selected, ...prev]));
+      setPakList((prev) => (prev.includes(selected) ? prev : [...prev, selected]));
+      setManualPaks((prev) => new Set(prev).add(selected));
       await inspectPak(selected);
     }
   }
+
+
 
   async function unpackSelected() {
     if (!selectedPak) return;
@@ -260,6 +265,7 @@ export function PakManager({ gamePath }: Props) {
                 {pakList.map((p) => {
                   const isSelected = selectedPak === p;
                   const isMod = /[/\\]~mods[/\\]/i.test(p);
+                  const isManual = manualPaks.has(p);
                   const displayName = isMod
                     ? `~mods/${p.split(/[/\\]/).pop()}`
                     : p.split(/[/\\]/).pop();
@@ -271,13 +277,13 @@ export function PakManager({ gamePath }: Props) {
                         isSelected ? "bg-secondary text-foreground" : "hover:bg-secondary/50",
                       )}
                       onClick={() => inspectPak(p)}
-                      title={displayName}
+                      title={p.split(/[/\\]/).pop()}
                     >
-                      <Package
-                        size={14}
-                        className={cn("shrink-0", isMod ? "text-amber-400" : "text-muted-foreground")}
-                      />
-                      <span className="truncate text-[12px]">{displayName}</span>
+                      {isManual
+                        ? <PackagePlus size={14} className="shrink-0 text-sky-400" />
+                        : <Package size={14} className={cn("shrink-0", isMod ? "text-amber-400" : "text-muted-foreground")} />
+                      }
+                      <span className="flex-1 truncate text-[12px]">{displayName}</span>
                     </li>
                   );
                 })}
