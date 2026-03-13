@@ -438,10 +438,10 @@ export function PakTweaks({ gamePath }: Props) {
 
         {/* Single pak — show inline, no list needed */}
         {paks.length === 1 && selectedPak && (
-          <div className="flex items-center gap-2">
+          <div className="flex min-w-0 items-center gap-2">
             <Package size={13} className="shrink-0 text-muted-foreground" />
-            <span className="flex-1 truncate font-mono text-[12px]">{selectedPak.pak_name}</span>
-            <div className="flex items-center gap-1">
+            <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{selectedPak.pak_name}</span>
+            <div className="flex shrink-0 items-center gap-1">
               {selectedPak.has_device_profiles && (
                 <Badge variant="outline" className="text-[10px] px-2 py-0.5">DeviceProfiles</Badge>
               )}
@@ -466,20 +466,20 @@ export function PakTweaks({ gamePath }: Props) {
               <li
                 key={pak.pak_path}
                 className={cn(
-                  "flex items-center transition-colors hover:bg-secondary",
+                  "flex min-w-0 items-center transition-colors hover:bg-secondary",
                   selectedPak?.pak_path === pak.pak_path && "bg-secondary",
                 )}
               >
                 <button
                   onClick={() => selectPak(pak)}
                   className={cn(
-                    "flex flex-1 items-center gap-2 px-3 py-2 text-left",
+                    "flex min-w-0 flex-1 items-center gap-2 px-3 py-2 text-left",
                     selectedPak?.pak_path === pak.pak_path && "font-medium",
                   )}
                 >
                   <Package size={13} className="shrink-0 text-muted-foreground" />
-                  <span className="flex-1 truncate font-mono text-[12px]">{pak.pak_name}</span>
-                  <div className="flex gap-1">
+                  <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{pak.pak_name}</span>
+                  <div className="flex shrink-0 gap-1">
                     {pak.has_device_profiles && (
                       <Badge variant="outline" className="text-[10px] px-2 py-0.5">DeviceProfiles</Badge>
                     )}
