@@ -106,6 +106,22 @@ export function PakTweaks({ gamePath }: Props) {
   // Tweak definitions (for rendering controls)
   const [definitions, setDefinitions] = useState<TweakDefinition[]>([]);
 
+  const isPakMissingError = (err: unknown): boolean => {
+    const text = String(err).toLowerCase();
+    return (
+      text.includes("pak file not found") ||
+      text.includes("no such file") ||
+      text.includes("cannot find the file")
+    );
+  };
+
+  const formatModsFoundMessage = (count: number, removedMissing: number): string => {
+    const modsPart = `Found ${count} mod${count !== 1 ? "s" : ""}`;
+    if (removedMissing <= 0) return modsPart;
+    const removedPart = `removed ${removedMissing} missing manual entr${removedMissing === 1 ? "y" : "ies"}`;
+    return `${modsPart} (${removedPart})`;
+  };
+
   const showNotice = (msg: string, type: "ok" | "err" | "info", duration = 4000) => {
     if (noticeTimer.current) clearTimeout(noticeTimer.current);
     setNotice({ msg, type });
@@ -203,10 +219,24 @@ export function PakTweaks({ gamePath }: Props) {
       const results = await invoke<PakIniInfo[]>("scan_mod_paks_for_ini", {
         gameRoot: gamePath,
       });
-      // Merge: keep any manually-browsed paks that weren't found by the folder scan
+      // Keep manually-browsed paks that still exist and still contain tweakable INI entries.
+      const manualOnly = paks.filter((p) => !results.find((r) => r.pak_path === p.pak_path));
+      const inspectedManual = await Promise.all(
+        manualOnly.map(async (pak) => {
+          try {
+            return await invoke<PakIniInfo | null>("inspect_pak_path", { pakPath: pak.pak_path });
+          } catch {
+            return null;
+          }
+        }),
+      );
+      const retainedManual = inspectedManual.filter((pak): pak is PakIniInfo => pak !== null);
+      const removedMissing = manualOnly.length - retainedManual.length;
+
+      // Merge: keep valid manually-browsed paks that aren't in the folder scan.
       const merged = [
         ...results,
-        ...paks.filter((p) => !results.find((r) => r.pak_path === p.pak_path)),
+        ...retainedManual,
       ];
       setPaks(merged);
       if (merged.length === 0) {
@@ -220,16 +250,16 @@ export function PakTweaks({ gamePath }: Props) {
         if (merged.length === 1) {
           await selectPak(merged[0]);
         }
-        if (!silent) showNotice(`Found ${merged.length} mod${merged.length !== 1 ? "s" : ""}`, "ok");
+        if (!silent) showNotice(formatModsFoundMessage(merged.length, removedMissing), "ok");
       } else if (!merged.find((p) => p.pak_path === selectedPak.pak_path)) {
         // Previously selected pak is gone — deselect
         setSelectedPak(null);
         setTweakStates([]);
         setSavedTweakStates([]);
         setEdits([]);
-        if (!silent) showNotice(`Found ${merged.length} mod${merged.length !== 1 ? "s" : ""}`, "ok");
+        if (!silent) showNotice(formatModsFoundMessage(merged.length, removedMissing), "ok");
       } else {
-        if (!silent) showNotice(`Found ${merged.length} mod${merged.length !== 1 ? "s" : ""}`, "ok");
+        if (!silent) showNotice(formatModsFoundMessage(merged.length, removedMissing), "ok");
       }
     } catch (e: any) {
       console.error("Scan failed:", e);
@@ -266,6 +296,10 @@ export function PakTweaks({ gamePath }: Props) {
       setEdits([]);
       pakCache.current.set(pak.pak_path, { tweakStates: states, savedTweakStates: states, edits: [] });
     } catch (e: any) {
+      if (isPakMissingError(e)) {
+        removePak(pak.pak_path);
+        showNotice("That pak file is missing now. Removed it from the list.", "info");
+      }
       console.error("Load failed:", e);
     } finally {
       setLoading(false);
@@ -283,6 +317,10 @@ export function PakTweaks({ gamePath }: Props) {
       setEdits([]);
       pakCache.current.set(pak.pak_path, { tweakStates: states, savedTweakStates: states, edits: [] });
     } catch (e: any) {
+      if (isPakMissingError(e)) {
+        removePak(pak.pak_path);
+        showNotice("That pak file is missing now. Removed it from the list.", "info");
+      }
       console.error("Reload failed:", e);
     } finally {
       setLoading(false);
@@ -321,7 +359,12 @@ export function PakTweaks({ gamePath }: Props) {
       showNotice(msg, "ok");
       await forceReloadPak(selectedPak);
     } catch (e: any) {
-      showNotice(String(e), "err");
+      if (isPakMissingError(e)) {
+        removePak(selectedPak.pak_path);
+        showNotice("That pak file is missing now. Removed it from the list.", "info");
+      } else {
+        showNotice(String(e), "err");
+      }
       console.error("Apply failed:", e);
     } finally {
       setApplying(false);
