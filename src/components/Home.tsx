@@ -1,15 +1,16 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+import { openPath } from "@tauri-apps/plugin-opener";
 import {
   FolderOpen,
   RefreshCw,
   CheckCircle2,
   XCircle,
   Wrench,
-  ArrowRight,
   Settings,
   Package,
+  ArrowRight,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -41,6 +42,8 @@ interface Props {
 }
 
 export function Home({ gamePath, setGamePath, setActiveTab, installInfo: info, setInstallInfo: setInfo, isActive }: Props) {
+  const [folderNotice, setFolderNotice] = useState<{ msg: string; type: "ok" | "err" } | null>(null);
+  const folderNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [detecting, setDetecting] = useState(false);
   const [showBadge, setShowBadge] = useState(false);
   const [detectError, setDetectError] = useState<string | null>(null);
@@ -96,6 +99,35 @@ export function Home({ gamePath, setGamePath, setActiveTab, installInfo: info, s
     }
   }
 
+  function showFolderNotice(msg: string, type: "ok" | "err") {
+    if (folderNoticeTimer.current) clearTimeout(folderNoticeTimer.current);
+    setFolderNotice({ msg, type });
+    folderNoticeTimer.current = setTimeout(() => setFolderNotice(null), 4000);
+  }
+
+  async function openShortcut(target: string, label: string) {
+    if (!target) return;
+    try {
+      await openPath(target);
+      showFolderNotice(`${label} opened`, "ok");
+    } catch (e) {
+      showFolderNotice(`Failed to open ${label.toLowerCase()}`, "err");
+      console.error(e);
+    }
+  }
+
+  async function openScalabilityFolder() {
+    try {
+      const scalabilityPath = await invoke<string>("get_scalability_path");
+      const folderPath = scalabilityPath.replace(/[/\\][^/\\]+$/, "");
+      await openPath(folderPath);
+      showFolderNotice("Scalability folder opened", "ok");
+    } catch (e) {
+      showFolderNotice("Failed to open scalability folder", "err");
+      console.error(e);
+    }
+  }
+
   useEffect(() => {
     if (!gamePath) detect();
   }, []);
@@ -110,6 +142,9 @@ export function Home({ gamePath, setGamePath, setActiveTab, installInfo: info, s
   }, [gamePath]);
 
   const allDone = !!modsStatus && modsStatus.mods_folder_exists && modsStatus.sig_bypass_installed;
+  const enabledModsCount = modsStatus?.mod_entries.filter((m) => m.enabled).length ?? 0;
+  const paksPath = gamePath ? `${gamePath}\\MarvelGame\\Marvel\\Content\\Paks` : "";
+  const modsPath = modsStatus?.mods_folder_path ?? (paksPath ? `${paksPath}\\~mods` : "");
 
   const setupSteps: { label: string; done: boolean; description: string }[] = modsStatus
     ? [
@@ -247,13 +282,14 @@ export function Home({ gamePath, setGamePath, setActiveTab, installInfo: info, s
           </div>
         </Card>
       )}
+
       {/* ── Feature nav cards ── */}
       <div className="grid gap-3 sm:grid-cols-3">
         <FeatureCard
           icon={<Wrench size={16} />}
           title="Mod Tools"
           description="Install the signature bypass and manage your mods folder."
-        stat={modsStatus && modsStatus.mod_entries.filter((m) => m.enabled).length > 0 ? `${modsStatus.mod_entries.filter((m) => m.enabled).length} active mod${modsStatus.mod_entries.filter((m) => m.enabled).length !== 1 ? "s" : ""}` : undefined}
+          stat={enabledModsCount > 0 ? `${enabledModsCount} active mod${enabledModsCount !== 1 ? "s" : ""}` : undefined}
           onClick={() => setActiveTab("mod-tools")}
         />
         <FeatureCard
@@ -270,7 +306,83 @@ export function Home({ gamePath, setGamePath, setActiveTab, installInfo: info, s
         />
       </div>
 
+      {/* ── Quick folders ── */}
+      <Card className="flex flex-col gap-3 bg-card p-3">
+        <div className="flex items-center justify-between gap-2">
+          <h3 className="text-sm font-semibold">Quick Folders</h3>
+          {folderNotice && (
+            <span
+              className={cn(
+                "flex items-center gap-1 text-[12px] font-medium",
+                folderNotice.type === "ok" ? "text-[var(--color-ok)]" : "text-[var(--color-err)]",
+              )}
+            >
+              {folderNotice.type === "ok" ? <CheckCircle2 size={13} strokeWidth={2.5} /> : <XCircle size={13} strokeWidth={2.5} />}
+              {folderNotice.msg}
+            </span>
+          )}
+        </div>
+
+        <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+          <FolderShortcutCard
+            title="Game Folder"
+            description="Your selected Marvel Rivals root directory."
+            onClick={() => openShortcut(gamePath, "Game folder")}
+            disabled={!gamePath}
+          />
+          <FolderShortcutCard
+            title="Paks Folder"
+            description="MarvelGame/Marvel/Content/Paks"
+            onClick={() => openShortcut(paksPath, "Paks folder")}
+            disabled={!paksPath}
+          />
+          <FolderShortcutCard
+            title="Mods Folder"
+            description="Paks/~mods"
+            onClick={() => openShortcut(modsPath, "Mods folder")}
+            disabled={!modsPath}
+          />
+          <FolderShortcutCard
+            title="Scalability Folder"
+            description="%LOCALAPPDATA%/Marvel/Saved/Config/Windows"
+            onClick={openScalabilityFolder}
+          />
+        </div>
+      </Card>
+
     </div>
+  );
+}
+
+function FolderShortcutCard({
+  title,
+  description,
+  onClick,
+  disabled,
+}: {
+  title: string;
+  description: string;
+  onClick: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      className={cn(
+        "flex items-center justify-between rounded-md border border-border bg-background px-3 py-2 text-left transition-colors",
+        disabled
+          ? "cursor-not-allowed opacity-50"
+          : "hover:bg-secondary/60",
+      )}
+      title={disabled ? "Set game path first" : `Open ${title}`}
+    >
+      <span className="flex min-w-0 flex-col">
+        <span className="text-[13px] font-medium">{title}</span>
+        <span className="truncate text-[11px] text-muted-foreground">{description}</span>
+      </span>
+      <FolderOpen size={14} className="shrink-0 text-muted-foreground" />
+    </button>
   );
 }
 
@@ -281,7 +393,7 @@ function FeatureCard({
   stat,
   onClick,
 }: {
-  icon: React.ReactNode;
+  icon: ReactNode;
   title: string;
   description: string;
   stat?: string;
@@ -301,9 +413,7 @@ function FeatureCard({
       </div>
       <p className="text-[11px] leading-relaxed text-muted-foreground">{description}</p>
       {stat !== undefined && (
-        <span className="text-[11px] font-medium text-[var(--color-ok)]">
-          {stat}
-        </span>
+        <span className="text-[11px] font-medium text-[var(--color-ok)]">{stat}</span>
       )}
     </Card>
   );
