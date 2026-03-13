@@ -10,8 +10,6 @@ import {
   ArrowRight,
   Settings,
   Package,
-  Trash2,
-  Play,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -51,13 +49,7 @@ export function Home({ gamePath, setGamePath, setActiveTab, installInfo: info, s
   const [statusRefreshing, setStatusRefreshing] = useState(false);
   const [showRefreshBadge, setShowRefreshBadge] = useState(false);
   const refreshBadgeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [clearingCache, setClearingCache] = useState(false);
-  const [cacheMsg, setCacheMsg] = useState<string | null>(null);
-  const cacheMsgTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const badgeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [launching, setLaunching] = useState(false);
-  const [launchMsg, setLaunchMsg] = useState<string | null>(null);
-  const launchMsgTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   async function detect() {
     if (badgeTimer.current) clearTimeout(badgeTimer.current);
@@ -85,41 +77,6 @@ export function Home({ gamePath, setGamePath, setActiveTab, installInfo: info, s
   async function browse() {
     const selected = await open({ directory: true, multiple: false });
     if (typeof selected === "string") setGamePath(selected);
-  }
-
-  async function launchGame() {
-    if (!info?.source) return;
-    if (launchMsgTimer.current) clearTimeout(launchMsgTimer.current);
-    setLaunching(true);
-    setLaunchMsg(null);
-    try {
-      await invoke("launch_game", { installInfo: info });
-      setLaunchMsg("Launching…");
-      launchMsgTimer.current = setTimeout(() => setLaunchMsg(null), 4000);
-    } catch (e) {
-      setLaunchMsg(String(e));
-      launchMsgTimer.current = setTimeout(() => setLaunchMsg(null), 6000);
-      console.error(e);
-    } finally {
-      setLaunching(false);
-    }
-  }
-
-  async function clearShaderCache() {
-    if (cacheMsgTimer.current) clearTimeout(cacheMsgTimer.current);
-    setClearingCache(true);
-    setCacheMsg(null);
-    try {
-      const msg = await invoke<string>("clear_shader_cache");
-      setCacheMsg(msg);
-      cacheMsgTimer.current = setTimeout(() => setCacheMsg(null), 4000);
-    } catch (e) {
-      setCacheMsg("Failed to clear shader cache");
-      cacheMsgTimer.current = setTimeout(() => setCacheMsg(null), 4000);
-      console.error(e);
-    } finally {
-      setClearingCache(false);
-    }
   }
 
   async function refreshModsStatus(path: string, showBadge = false) {
@@ -313,56 +270,6 @@ export function Home({ gamePath, setGamePath, setActiveTab, installInfo: info, s
         />
       </div>
 
-      {/* ── Quick Actions ── */}
-      <div className="flex flex-col gap-2">
-        <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-          Quick Actions
-        </span>
-        <div className="flex flex-wrap gap-2">
-          {info?.source && (
-            <Button
-              variant="green"
-              size="sm"
-              onClick={launchGame}
-              disabled={launching}
-              title={`Launch via ${info.source}`}
-            >
-              {launching ? (
-                <RefreshCw size={14} className="animate-spin" />
-              ) : (
-                <Play size={14} />
-              )}
-              Launch Game
-            </Button>
-          )}
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={clearShaderCache}
-            disabled={clearingCache}
-            title="Deletes pipeline cache files from %LOCALAPPDATA%\Marvel\Saved"
-          >
-            {clearingCache ? (
-              <RefreshCw size={14} className="animate-spin" />
-            ) : (
-              <Trash2 size={14} />
-            )}
-            Clear Shader Cache
-          </Button>
-          {launchMsg && (
-            <span className="flex items-center gap-1.5 text-[12px] font-medium text-[var(--color-ok)]">
-              <CheckCircle2 size={14} strokeWidth={2.5} />
-              {launchMsg}
-            </span>
-          )}
-          {cacheMsg && (
-            <span className="flex items-center gap-1.5 text-[12px] font-medium text-[var(--color-ok)]">
-              <CheckCircle2 size={14} strokeWidth={2.5} />
-              {cacheMsg}
-            </span>
-          )}
-        </div>
-      </div>
     </div>
   );
 }
