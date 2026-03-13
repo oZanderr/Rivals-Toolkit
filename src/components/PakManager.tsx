@@ -15,6 +15,11 @@ interface Props {
   gamePath: string;
 }
 
+function isUpdatePatchPak(pakPath: string): boolean {
+  const name = pakPath.split(/[/\\]/).pop() ?? "";
+  return /^Patch_.*\.pak$/i.test(name);
+}
+
 
 
 export function PakManager({ gamePath }: Props) {
@@ -100,6 +105,14 @@ export function PakManager({ gamePath }: Props) {
     if (pak === selectedPak) return;
     setSelectedPak(pak);
     setFilterText("");
+    setDebouncedFilter("");
+    setPakContents([]);
+
+    if (isUpdatePatchPak(pak)) {
+      showNotice("Update patch pak: launch Rivals once to apply it.", "info", 6000);
+      return;
+    }
+
     setBusy(true);
     try {
       const files = await invoke<string[]>("list_pak_contents", { pakPath: pak });
@@ -199,6 +212,7 @@ export function PakManager({ gamePath }: Props) {
   }
 
   const pakName = selectedPak ? selectedPak.split(/[/\\]/).pop() : null;
+  const selectedIsPatch = selectedPak ? isUpdatePatchPak(selectedPak) : false;
 
   return (
     <div className="flex flex-1 min-h-0 flex-col gap-4">
@@ -235,8 +249,8 @@ export function PakManager({ gamePath }: Props) {
         </div>
       </div>
 
-      <div className="flex min-h-0 flex-1 gap-4">
-        <div className="flex w-[320px] shrink-0 flex-col min-h-0">
+      <div className="flex min-h-0 flex-1 flex-row gap-4">
+        <div className="flex min-h-0 w-[clamp(260px,32vw,420px)] min-w-[260px] max-w-[420px] shrink-0 flex-col">
           <Card className="flex min-h-0 flex-1 flex-col gap-3 p-3 bg-card">
           <div className="flex shrink-0 items-center justify-between">
             <h3 className="text-sm font-semibold">Game Paks</h3>
@@ -266,6 +280,7 @@ export function PakManager({ gamePath }: Props) {
                   const isSelected = selectedPak === p;
                   const isMod = /[/\\]~mods[/\\]/i.test(p);
                   const isManual = manualPaks.has(p);
+                  const isPatch = isUpdatePatchPak(p);
                   const displayName = isMod
                     ? `~mods/${p.split(/[/\\]/).pop()}`
                     : p.split(/[/\\]/).pop();
@@ -273,17 +288,27 @@ export function PakManager({ gamePath }: Props) {
                     <li
                       key={p}
                       className={cn(
-                        "flex cursor-pointer items-center gap-2 border-b border-border/50 px-3 py-2 last:border-none",
-                        isSelected ? "bg-secondary text-foreground" : "hover:bg-secondary/50",
+                        "flex items-center gap-2 border-b border-border/50 px-3 py-2 last:border-none",
+                        isPatch
+                          ? "cursor-not-allowed opacity-65"
+                          : "cursor-pointer",
+                        isSelected
+                          ? "bg-secondary text-foreground"
+                          : !isPatch && "hover:bg-secondary/50",
                       )}
-                      onClick={() => inspectPak(p)}
-                      title={p.split(/[/\\]/).pop()}
+                      onClick={() => !isPatch && inspectPak(p)}
+                      title={isPatch ? "Update patch pak (delta): launch game once to apply" : p.split(/[/\\]/).pop()}
                     >
                       {isManual
                         ? <PackagePlus size={14} className="shrink-0 text-sky-400" />
                         : <Package size={14} className={cn("shrink-0", isMod ? "text-amber-400" : "text-muted-foreground")} />
                       }
                       <span className="flex-1 truncate text-[12px]">{displayName}</span>
+                      {isPatch && (
+                        <span className="shrink-0 rounded border border-amber-400/40 bg-amber-400/10 px-1.5 py-0.5 text-[10px] font-semibold text-amber-300">
+                          update patch
+                        </span>
+                      )}
                     </li>
                   );
                 })}
@@ -310,7 +335,7 @@ export function PakManager({ gamePath }: Props) {
               </span>
             </div>
 
-              <Button variant="green" size="sm" onClick={unpackSelected} disabled={busy || !selectedPak}>
+              <Button variant="green" size="sm" onClick={unpackSelected} disabled={busy || !selectedPak || selectedIsPatch}>
               <Download size={14} />
               Extract All…
             </Button>
@@ -324,7 +349,7 @@ export function PakManager({ gamePath }: Props) {
               placeholder="Filter files…"
               value={filterText}
               onChange={(e) => onFilterChange(e.target.value)}
-              disabled={!selectedPak}
+              disabled={!selectedPak || selectedIsPatch}
             />
           </div>
 
@@ -334,6 +359,12 @@ export function PakManager({ gamePath }: Props) {
               <div className="flex h-full flex-col items-center justify-center gap-2 p-4 text-center">
                 <PackageOpen size={28} className="text-muted-foreground/40" />
                 <p className="text-sm text-muted-foreground">Select a pak from the left, or open one manually.</p>
+              </div>
+            ) : selectedIsPatch ? (
+              <div className="flex h-full flex-col items-center justify-center gap-2 p-4 text-center">
+                <PackageOpen size={28} className="text-amber-300/70" />
+                <p className="text-sm text-muted-foreground">This is a game update patch pak (delta).</p>
+                <p className="text-xs text-muted-foreground">Launch Marvel Rivals once after updating, then inspect regular paks.</p>
               </div>
             ) : visible.length === 0 ? (
               <p className="p-4 text-center text-sm text-muted-foreground">
@@ -369,6 +400,8 @@ export function PakManager({ gamePath }: Props) {
           <p className="shrink-0 text-[11px] text-muted-foreground">
             {!selectedPak
               ? "\u00A0"
+              : selectedIsPatch
+                ? "Update patch paks are applied by the game and are not browseable here."
               : `${visible.length} file(s)${visible.length !== pakContents.length ? ` of ${pakContents.length}` : ""} inside ${pakName} — double-click a file to extract`}
           </p>
         </Card>
