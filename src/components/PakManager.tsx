@@ -250,7 +250,7 @@ export function PakManager({ gamePath }: Props) {
       </div>
 
       <div className="flex min-h-0 flex-1 flex-row gap-4">
-        <div className="flex min-h-0 w-[clamp(260px,32vw,420px)] min-w-[260px] max-w-[420px] shrink-0 flex-col">
+        <div className="flex min-h-0 w-[clamp(280px,28vw,560px)] min-w-[280px] max-w-[560px] shrink-0 flex-col">
           <Card className="flex min-h-0 flex-1 flex-col gap-3 p-3 bg-card">
           <div className="flex shrink-0 items-center justify-between">
             <h3 className="text-sm font-semibold">Game Paks</h3>
