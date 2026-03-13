@@ -510,7 +510,7 @@ export function PakTweaks({ gamePath }: Props) {
           }, {});
 
           return (
-            <div className="grid gap-5 xl:grid-cols-2">
+            <div className="grid gap-5 xl:grid-cols-2 2xl:grid-cols-3">
               {Object.entries(categories).map(([category, defs]) => (
                 <Card key={category} className="flex flex-col gap-3 bg-card p-4">
                   <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
