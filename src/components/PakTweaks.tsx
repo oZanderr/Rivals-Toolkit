@@ -99,7 +99,6 @@ export function PakTweaks({ gamePath }: Props) {
   const [scanning, setScanning] = useState(false);
   const [loading, setLoading] = useState(false);
   const [applying, setApplying] = useState(false);
-  const [clearingCache, setClearingCache] = useState(false);
   const [notice, setNotice] = useState<{ msg: string; type: "ok" | "err" | "info" } | null>(null);
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pakCache = useRef<Map<string, PakCacheEntry>>(new Map());
@@ -372,15 +371,12 @@ export function PakTweaks({ gamePath }: Props) {
   }
 
   async function clearShaderCache() {
-    setClearingCache(true);
     try {
       const msg = await invoke<string>("clear_shader_cache");
       showNotice(msg, "ok");
     } catch (e: any) {
       showNotice("Failed to clear shader cache", "err");
       console.error("Clear shader cache failed:", e);
-    } finally {
-      setClearingCache(false);
     }
   }
 
@@ -413,25 +409,6 @@ export function PakTweaks({ gamePath }: Props) {
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Config Mods</span>
-            {notice && (
-              <span
-                className={cn(
-                  "flex items-center gap-1.5 text-[12px] font-medium",
-                  notice.type === "ok"
-                    ? "text-[var(--color-ok)]"
-                    : notice.type === "err"
-                      ? "text-[var(--color-err)]"
-                      : "text-muted-foreground",
-                )}
-              >
-                {notice.type === "ok" ? (
-                  <CheckCircle2 size={14} strokeWidth={2.5} />
-                ) : notice.type === "err" ? (
-                  <XCircle size={14} strokeWidth={2.5} />
-                ) : null}
-                {notice.msg}
-              </span>
-            )}
           </div>
           <div className="flex items-center gap-2">
             <Button variant="outline" size="sm" onClick={browse}>
@@ -566,10 +543,10 @@ export function PakTweaks({ gamePath }: Props) {
       </div>
 
       {/* Apply bar — fixed footer, outside the scroll area */}
-      {selectedPak && !loading && (
+      {((selectedPak && !loading) || !!notice) && (
         <div className="flex flex-col gap-3 border-t border-border pt-3 pb-1 mt-5">
               {/* Pending edits summary */}
-              {edits.length > 0 && (
+              {selectedPak && !loading && edits.length > 0 && (
                 <div className="flex flex-col gap-1.5">
                   <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
                     Pending Changes ({edits.length})
@@ -590,42 +567,56 @@ export function PakTweaks({ gamePath }: Props) {
 
               {/* Apply */}
               <div className="flex items-center gap-3">
-                <Button
-                  variant="green"
-                  size="sm"
-                  onClick={applyEdits}
-                  disabled={!dirty || applying || edits.length === 0}
-                >
-                  {applying ? (
-                    <RefreshCw size={14} className="animate-spin" />
-                  ) : (
-                    <Save size={14} />
-                  )}
-                  {applying ? "Repacking…" : dirty ? "Apply & Repack" : "Up to Date"}
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={clearShaderCache}
-                  disabled={clearingCache}
-                  title="Delete pipeline cache files from %LOCALAPPDATA%\Marvel\Saved"
-                >
-                  {clearingCache ? (
-                    <RefreshCw size={14} className="animate-spin" />
-                  ) : (
-                    <Trash2 size={14} />
-                  )}
-                  Clear Shader Cache
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => selectedPak && forceReloadPak(selectedPak)}
-                  disabled={loading}
-                >
-                  <RefreshCw size={14} />
-                  Reload
-                </Button>
+                {selectedPak && !loading && (
+                  <>
+                    <Button
+                      variant="green"
+                      size="sm"
+                      onClick={applyEdits}
+                      disabled={!dirty || applying || edits.length === 0}
+                    >
+                      {applying ? (
+                        <RefreshCw size={14} className="animate-spin" />
+                      ) : (
+                        <Save size={14} />
+                      )}
+                      {applying ? "Repacking…" : dirty ? "Apply & Repack" : "Up to Date"}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={clearShaderCache}
+                      title="Delete pipeline cache files from %LOCALAPPDATA%\Marvel\Saved"
+                    >
+                      <Trash2 size={14} />
+                      Clear Shader Cache
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => selectedPak && forceReloadPak(selectedPak)}
+                      disabled={loading}
+                    >
+                      <RefreshCw size={14} />
+                      Reload
+                    </Button>
+                  </>
+                )}
+                {notice && (
+                  <span
+                    className={cn(
+                      "flex items-center gap-1 text-[12px]",
+                      notice.type === "ok"
+                        ? "text-[var(--color-ok)]"
+                        : notice.type === "err"
+                          ? "text-[var(--color-err)]"
+                          : "text-muted-foreground",
+                    )}
+                  >
+                    {notice.type === "ok" && <CheckCircle2 size={13} />}
+                    {notice.msg}
+                  </span>
+                )}
               </div>
         </div>
       )}

@@ -82,7 +82,6 @@ export function ScalabilityTweaks({ filePath, setFilePath, fileExists, content, 
   const [savedValues, setSavedValues] = useState<Record<string, string>>({});
   const [status, setStatus] = useState<{ msg: string; type: StatusType } | null>(null);
   const statusTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [clearingCache, setClearingCache] = useState(false);
 
   const showStatus = (msg: string, type: StatusType = "info") => {
     if (statusTimer.current) clearTimeout(statusTimer.current);
@@ -149,14 +148,11 @@ export function ScalabilityTweaks({ filePath, setFilePath, fileExists, content, 
   }
 
   async function clearShaderCache() {
-    setClearingCache(true);
     try {
       const msg = await invoke<string>("clear_shader_cache");
       showStatus(msg, "ok");
     } catch (e: any) {
       showStatus(String(e), "err");
-    } finally {
-      setClearingCache(false);
     }
   }
 
@@ -321,9 +317,9 @@ export function ScalabilityTweaks({ filePath, setFilePath, fileExists, content, 
           <Save size={14} />
           {dirty ? "Apply & Save" : "Up to Date"}
         </Button>
-        <Button variant="outline" size="sm" onClick={clearShaderCache} disabled={clearingCache}>
+        <Button variant="outline" size="sm" onClick={clearShaderCache}>
           <Trash2 size={14} />
-          {clearingCache ? "Clearing…" : "Clear Shader Cache"}
+          Clear Shader Cache
         </Button>
         <Button variant="ghost" size="sm" onClick={onReload}>
           <RefreshCw size={14} />
