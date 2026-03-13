@@ -166,7 +166,7 @@ export function ModTools({ gamePath }: Props) {
   const totalCount = modsStatus?.mod_entries.length ?? 0;
 
   return (
-    <div className="flex w-full flex-col gap-6 overflow-y-auto">
+    <div className="flex flex-1 min-h-0 w-full flex-col gap-6">
       {/* Header */}
       <div className="flex min-h-8 items-center gap-3">
         <h2 className="shrink-0 text-xl font-bold">Mod Tools</h2>
@@ -256,7 +256,7 @@ export function ModTools({ gamePath }: Props) {
 
       {/* Mod list */}
       {modsStatus && totalCount > 0 && (
-      <Card className="flex flex-col gap-4 p-4 bg-card">
+      <Card className="flex min-h-0 flex-1 flex-col gap-4 p-4 bg-card">
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2">
             <h3 className="text-sm font-semibold">Installed Mods</h3>
@@ -289,7 +289,7 @@ export function ModTools({ gamePath }: Props) {
             No mods found in the ~mods folder. Copy <Code>.pak</Code> files there to get started.
           </p>
         ) : (
-          <div className="max-h-[340px] overflow-y-auto rounded-md border border-border bg-background [scrollbar-gutter:stable]">
+          <div className="min-h-0 flex-1 overflow-y-auto rounded-md border border-border bg-background [scrollbar-gutter:stable]">
             <ul>
             {modsStatus.mod_entries.map((entry) => {
               const busy = busyMods.has(entry.full_name);
