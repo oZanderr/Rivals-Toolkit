@@ -7,12 +7,10 @@ use super::{BYPASS_ASI, BYPASS_DSOUND, file_matches};
 pub(crate) fn install_signature_bypass(game_root: &str) -> Result<String, String> {
     // Validate that the bundled DLL is a real PE binary (MZ header), not a placeholder.
     if !BYPASS_DSOUND.starts_with(b"MZ") {
-        return Err(
-            "Bundled dsound.dll is a placeholder. \
+        return Err("Bundled dsound.dll is a placeholder. \
              Replace src-tauri/resources/bypass/dsound.dll with the real file \
              from the Nexusmods bypass mod and rebuild the app."
-                .to_string(),
-        );
+            .to_string());
     }
 
     let bin_dir = binaries_dir(game_root);
@@ -54,7 +52,9 @@ pub(crate) fn install_signature_bypass(game_root: &str) -> Result<String, String
 pub(crate) fn remove_signature_bypass(game_root: &str) -> Result<String, String> {
     let bin_dir = binaries_dir(game_root);
     let dsound_path = bin_dir.join("dsound.dll");
-    let asi_path = bin_dir.join("plugins").join("MarvelRivalsUTOCSignatureBypass.asi");
+    let asi_path = bin_dir
+        .join("plugins")
+        .join("MarvelRivalsUTOCSignatureBypass.asi");
 
     let mut removed = 0usize;
     for path in &[&dsound_path, &asi_path] {

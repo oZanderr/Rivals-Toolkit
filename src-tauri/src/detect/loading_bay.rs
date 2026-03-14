@@ -10,10 +10,15 @@ pub(super) fn find_loading_bay_install() -> Option<PathBuf> {
 
     if let Some(raw) = hkcu_str(&game_key, "InstallPath") {
         let p = PathBuf::from(raw.trim().replace('/', "\\"));
-        if p.exists() { return Some(p); }
+        if p.exists() {
+            return Some(p);
+        }
     }
 
-    let default_root = hkcu_str(r"Software\LoadingBay\LoadingBayInstaller\setting", "defaultGamePath")?;
+    let default_root = hkcu_str(
+        r"Software\LoadingBay\LoadingBayInstaller\setting",
+        "defaultGamePath",
+    )?;
     let p = PathBuf::from(default_root.trim().replace('/', "\\")).join("Marvel Rivals");
     p.exists().then_some(p)
 }

@@ -2,12 +2,9 @@ mod ini;
 mod io;
 
 use serde::{Deserialize, Serialize};
-use std::{
-    fs,
-    path::Path,
-};
+use std::{fs, path::Path};
 
-use ini::{apply_edits_to_ini, parse_console_vars, IniType};
+use ini::{IniType, apply_edits_to_ini, parse_console_vars};
 use io::{extract_file_to_string, inspect_pak_for_ini, repack_dir_to_pak, unpack_to_dir};
 
 use crate::paths::mods_dir;
@@ -135,10 +132,7 @@ pub(crate) fn detect_pak_tweaks(
 }
 
 /// Apply tweaks to a pak mod: extract → edit INI → repack in place.
-pub(crate) fn apply_pak_tweaks(
-    pak_path: &str,
-    edits: &[PakTweakEdit],
-) -> Result<String, String> {
+pub(crate) fn apply_pak_tweaks(pak_path: &str, edits: &[PakTweakEdit]) -> Result<String, String> {
     let pak = Path::new(pak_path);
     if !pak.exists() {
         return Err(format!("Pak file not found: {}", pak_path));
@@ -180,7 +174,10 @@ pub(crate) fn apply_pak_tweaks(
             .partition(|e| e.engine_section.is_some() && e.value.is_some());
 
         // Apply DeviceProfiles edits (set/add/remove for regular CVars).
-        let dp_entry = info.device_profiles_entry.as_ref().unwrap();
+        let dp_entry = info
+            .device_profiles_entry
+            .as_ref()
+            .ok_or("DeviceProfiles entry missing despite has_device_profiles flag")?;
         let dp_rel = dp_entry
             .trim_start_matches("../../../")
             .trim_start_matches('/');
@@ -212,10 +209,7 @@ pub(crate) fn apply_pak_tweaks(
 
             let mut eng_edits = engine_edits;
             for r in remove_edits {
-                if !eng_edits
-                    .iter()
-                    .any(|e| e.key.eq_ignore_ascii_case(&r.key))
-                {
+                if !eng_edits.iter().any(|e| e.key.eq_ignore_ascii_case(&r.key)) {
                     eng_edits.push(r);
                 }
             }
@@ -234,7 +228,10 @@ pub(crate) fn apply_pak_tweaks(
         }
     } else {
         // Only Engine.ini present.
-        let eng_entry = info.engine_ini_entry.as_ref().unwrap();
+        let eng_entry = info
+            .engine_ini_entry
+            .as_ref()
+            .ok_or("Engine INI entry missing despite no device profiles")?;
         let eng_rel = eng_entry
             .trim_start_matches("../../../")
             .trim_start_matches('/');
@@ -279,5 +276,3 @@ pub(crate) fn apply_pak_tweaks(
         info.pak_name
     ))
 }
-
-

@@ -34,10 +34,10 @@ pub(super) fn repack_pak(input_dir: &str, output_pak: &str) -> Result<(), String
             continue;
         }
         // Skip the output pak itself if it lives inside the input directory.
-        if let Some(ref canon_out) = output_canonical {
-            if path.canonicalize().ok().as_ref() == Some(canon_out) {
-                continue;
-            }
+        if let Some(ref canon_out) = output_canonical
+            && path.canonicalize().ok().as_ref() == Some(canon_out)
+        {
+            continue;
         }
         let rel = path
             .strip_prefix(input)

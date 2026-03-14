@@ -26,7 +26,9 @@ export function Titlebar() {
         <span className="text-sm leading-none">🐷</span>
         <span className="text-sm font-semibold leading-none text-foreground">Oinkers Toolkit</span>
         <span className="text-sm leading-none text-muted-foreground">|</span>
-        <span className="text-sm leading-none text-muted-foreground">Marvel Rivals Modding Suite</span>
+        <span className="text-sm leading-none text-muted-foreground">
+          Marvel Rivals Modding Suite
+        </span>
       </div>
       <button
         onClick={() => appWindow.minimize()}

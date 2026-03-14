@@ -24,7 +24,9 @@ pub(crate) struct ScalabilityLine {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub(crate) enum TweakKind {
-    RemoveLines { lines: Vec<ScalabilityLine> },
+    RemoveLines {
+        lines: Vec<ScalabilityLine>,
+    },
     Toggle {
         key: String,
         on_value: String,

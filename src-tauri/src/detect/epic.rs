@@ -28,7 +28,7 @@ pub(super) fn find_epic_install() -> Option<(PathBuf, String)> {
             let content = fs::read_to_string(&path).ok()?;
             let json = serde_json::from_str::<Value>(&content).ok()?;
 
-            let app_name     = json["AppName"].as_str().unwrap_or_default();
+            let app_name = json["AppName"].as_str().unwrap_or_default();
             let display_name = json["DisplayName"].as_str().unwrap_or_default();
 
             if !app_name.eq_ignore_ascii_case(MARVEL_EPIC_APP_NAME)
@@ -46,9 +46,11 @@ pub(super) fn find_epic_install() -> Option<(PathBuf, String)> {
 
             // Build the proper launcher URL from catalog fields in the manifest.
             // Format: com.epicgames.launcher://apps/{ns}%3A{itemId}%3A{appName}?action=launch&silent=true
-            let ns      = json["CatalogNamespace"].as_str().filter(|s| !s.is_empty())?;
+            let ns = json["CatalogNamespace"]
+                .as_str()
+                .filter(|s| !s.is_empty())?;
             let item_id = json["CatalogItemId"].as_str().filter(|s| !s.is_empty())?;
-            let name    = json["AppName"].as_str().filter(|s| !s.is_empty())?;
+            let name = json["AppName"].as_str().filter(|s| !s.is_empty())?;
             let launch_url = format!(
                 "com.epicgames.launcher://apps/{}%3A{}%3A{}?action=launch&silent=true",
                 ns, item_id, name

@@ -52,13 +52,14 @@ pub(crate) fn clear_shader_cache() -> Result<String, String> {
     let files = [
         base.join("Marvel_PCD3D_SM6.upipelinecache"),
         base.join("pso_compile_cache_info.json"),
-        base.join("Config").join("Windows").join("MachinePSOConfig.ini"),
+        base.join("Config")
+            .join("Windows")
+            .join("MachinePSOConfig.ini"),
     ];
 
     for f in &files {
         if f.exists() {
-            fs::remove_file(f)
-                .map_err(|e| format!("Failed to delete {}: {}", f.display(), e))?;
+            fs::remove_file(f).map_err(|e| format!("Failed to delete {}: {}", f.display(), e))?;
             cleared += 1;
         }
     }

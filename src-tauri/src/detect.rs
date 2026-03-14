@@ -44,7 +44,18 @@ impl InstallInfo {
 }
 
 pub(crate) fn detect_game_install() -> Option<InstallInfo> {
-    find_steam_install().map(|p| InstallInfo::new(p, InstallSource::Steam, "steam://rungameid/2767030"))
-        .or_else(|| find_epic_install().map(|(p, url)| InstallInfo::new(p, InstallSource::Epic, url)))
-        .or_else(|| find_loading_bay_install().map(|p| InstallInfo::new(p, InstallSource::LoadingBay, "loadingbay://mygame/?gameId=31")))
+    find_steam_install()
+        .map(|p| InstallInfo::new(p, InstallSource::Steam, "steam://rungameid/2767030"))
+        .or_else(|| {
+            find_epic_install().map(|(p, url)| InstallInfo::new(p, InstallSource::Epic, url))
+        })
+        .or_else(|| {
+            find_loading_bay_install().map(|p| {
+                InstallInfo::new(
+                    p,
+                    InstallSource::LoadingBay,
+                    "loadingbay://mygame/?gameId=31",
+                )
+            })
+        })
 }

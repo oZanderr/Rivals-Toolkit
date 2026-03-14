@@ -181,9 +181,9 @@ fn insert_into_section(lines: &mut Vec<String>, section: &str, new_line: String)
     let header = format!("[{}]", section);
     let header_lower = header.to_ascii_lowercase();
 
-    let section_start = lines.iter().position(|l| {
-        l.trim().to_ascii_lowercase() == header_lower
-    });
+    let section_start = lines
+        .iter()
+        .position(|l| l.trim().to_ascii_lowercase() == header_lower);
 
     let insert_at = if let Some(start) = section_start {
         // Find the first line after the header that starts a new section.

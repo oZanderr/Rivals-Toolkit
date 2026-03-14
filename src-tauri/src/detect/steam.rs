@@ -11,12 +11,9 @@ fn acf_value(line: &str) -> Option<&str> {
 }
 
 fn steam_library_paths() -> Vec<PathBuf> {
-    let Some(root) = [
-        r"SOFTWARE\Wow6432Node\Valve\Steam",
-        r"SOFTWARE\Valve\Steam",
-    ]
-    .iter()
-    .find_map(|&k| hklm_str(k, "InstallPath"))
+    let Some(root) = [r"SOFTWARE\Wow6432Node\Valve\Steam", r"SOFTWARE\Valve\Steam"]
+        .iter()
+        .find_map(|&k| hklm_str(k, "InstallPath"))
     else {
         return Vec::new();
     };
@@ -46,7 +43,9 @@ pub(super) fn find_steam_install() -> Option<PathBuf> {
         let content = fs::read_to_string(&manifest).ok()?;
         content.lines().find_map(|line| {
             let line = line.trim();
-            if !line.starts_with("\"installdir\"") { return None; }
+            if !line.starts_with("\"installdir\"") {
+                return None;
+            }
             acf_value(line).map(|val| lib.join("common").join(val))
         })
     })

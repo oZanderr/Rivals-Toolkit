@@ -3,8 +3,7 @@ use std::{fs, io::BufReader, path::Path};
 use aes::cipher::KeyInit;
 
 /// NetEase AES-256 key for Marvel Rivals pak files
-const MARVEL_AES_KEY: &str =
-    "0C263D8C22DCB085894899C3A3796383E9BF9DE0CBFB08C9BF2DEF2E84F29D74";
+const MARVEL_AES_KEY: &str = "0C263D8C22DCB085894899C3A3796383E9BF9DE0CBFB08C9BF2DEF2E84F29D74";
 
 /// Decodes and byte-swaps the AES key for repak-rivals
 /// The NetEase pak format reverses each 4-byte word of the raw key

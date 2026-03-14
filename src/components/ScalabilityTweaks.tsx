@@ -1,14 +1,16 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+
 import { invoke } from "@tauri-apps/api/core";
+import { openPath } from "@tauri-apps/plugin-opener";
+import { Save, RefreshCw, CheckCircle2, Trash2, FolderOpen, Search, Info } from "lucide-react";
+
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { Switch } from "@/components/ui/switch";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
-import { Button } from "@/components/ui/button";
-import { Save, RefreshCw, CheckCircle2, Trash2, FolderOpen, Search, Info } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
-import { Input } from "@/components/ui/input";
-import { openPath } from "@tauri-apps/plugin-opener";
+import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 
 // ── Types matching Rust backend (serde tag="kind" + flatten) ─────────
@@ -73,7 +75,19 @@ interface Props {
   onReload: () => void;
 }
 
-export function ScalabilityTweaks({ filePath, setFilePath, fileExists, content, setContent, detectBadge, detecting, onDetect, onBrowse, onSaved, onReload }: Props) {
+export function ScalabilityTweaks({
+  filePath,
+  setFilePath,
+  fileExists,
+  content,
+  setContent,
+  detectBadge,
+  detecting,
+  onDetect,
+  onBrowse,
+  onSaved,
+  onReload,
+}: Props) {
   const [definitions, setDefinitions] = useState<TweakDefinition[]>([]);
   const [defsLoaded, setDefsLoaded] = useState(false);
   const [enabled, setEnabled] = useState<Record<string, boolean>>({});
@@ -111,7 +125,7 @@ export function ScalabilityTweaks({ filePath, setFilePath, fileExists, content, 
       setValues(valuesMap);
       setSavedEnabled(enabledMap);
       setSavedValues(valuesMap);
-    } catch (e: any) {
+    } catch (e: unknown) {
       showStatus(String(e), "err");
     }
   }, []);
@@ -130,19 +144,22 @@ export function ScalabilityTweaks({ filePath, setFilePath, fileExists, content, 
 
   async function applyAndSave() {
     try {
-      const settings: TweakSetting[] = definitions.filter((d) => !d.pak_only).map((def) => ({
-        id: def.id,
-        enabled: enabled[def.id] ?? false,
-        value: def.kind === "Slider"
-          ? String(values[def.id] != null ? values[def.id] : def.default_value)
-          : (values[def.id] ?? null),
-      }));
+      const settings: TweakSetting[] = definitions
+        .filter((d) => !d.pak_only)
+        .map((def) => ({
+          id: def.id,
+          enabled: enabled[def.id] ?? false,
+          value:
+            def.kind === "Slider"
+              ? String(values[def.id] != null ? values[def.id] : def.default_value)
+              : (values[def.id] ?? null),
+        }));
       const modified = await invoke<string>("apply_tweaks", { content, settings });
       setContent(modified);
       await invoke("write_scalability", { path: filePath, content: modified });
       showStatus("Settings applied and saved.", "ok");
       onSaved();
-    } catch (e: any) {
+    } catch (e: unknown) {
       showStatus(String(e), "err");
     }
   }
@@ -151,7 +168,7 @@ export function ScalabilityTweaks({ filePath, setFilePath, fileExists, content, 
     try {
       const msg = await invoke<string>("clear_shader_cache");
       showStatus(msg, "ok");
-    } catch (e: any) {
+    } catch (e: unknown) {
       showStatus(String(e), "err");
     }
   }
@@ -160,7 +177,11 @@ export function ScalabilityTweaks({ filePath, setFilePath, fileExists, content, 
   const scalabilityDefs = definitions.filter((d) => !d.pak_only);
 
   // Compute pending changes vs saved baseline — show actual variables like Pak Config
-  interface PendingChange { id: string; kind: "set" | "remove"; display: string; }
+  interface PendingChange {
+    id: string;
+    kind: "set" | "remove";
+    display: string;
+  }
   const pendingChanges: PendingChange[] = scalabilityDefs.flatMap((def) => {
     const changes: PendingChange[] = [];
     const isEnabled = enabled[def.id] ?? false;
@@ -214,81 +235,88 @@ export function ScalabilityTweaks({ filePath, setFilePath, fileExists, content, 
     <div className="flex flex-1 min-h-0 flex-col gap-5">
       <div className="flex-1 overflow-y-auto pr-6">
         <div className="flex flex-col gap-5">
-        {/* Config file location */}
-        <Card className="flex flex-col gap-3 p-4 bg-card">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Config File</span>
-              {detectBadge && (
-                <span className={cn(
-                  "flex items-center gap-1 text-[12px] font-medium",
-                  detectBadge === "Not found" ? "text-[var(--color-warn)]" : "text-[var(--color-ok)]",
-                )}>
-                  <CheckCircle2 size={13} strokeWidth={2.5} />
-                  {detectBadge}
+          {/* Config file location */}
+          <Card className="flex flex-col gap-3 p-4 bg-card">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  Config File
                 </span>
-              )}
+                {detectBadge && (
+                  <span
+                    className={cn(
+                      "flex items-center gap-1 text-[12px] font-medium",
+                      detectBadge === "Not found"
+                        ? "text-[var(--color-warn)]"
+                        : "text-[var(--color-ok)]"
+                    )}
+                  >
+                    <CheckCircle2 size={13} strokeWidth={2.5} />
+                    {detectBadge}
+                  </span>
+                )}
+              </div>
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={!filePath}
+                onClick={() => filePath && openPath(filePath.replace(/[/\\][^/\\]+$/, ""))}
+              >
+                <FolderOpen size={14} />
+                Show in Explorer
+              </Button>
             </div>
-            <Button
-              variant="ghost"
-              size="sm"
-              disabled={!filePath}
-              onClick={() => filePath && openPath(filePath.replace(/[/\\][^/\\]+$/, ""))}
-            >
-              <FolderOpen size={14} />
-              Show in Explorer
-            </Button>
-          </div>
-          <div className="flex items-center gap-2">
-            <Input
-              className="h-8 font-mono text-[12px]"
-              value={filePath}
-              onChange={(e) => setFilePath(e.target.value)}
-              placeholder="Path to Scalability.ini\u2026"
-              title={filePath}
-            />
-            <Button variant="outline" size="sm" onClick={onBrowse}>
-              <FolderOpen size={14} />
-              Browse
-            </Button>
-            <Button variant="blue" size="sm" onClick={onDetect} disabled={detecting}>
-              <Search size={14} className={cn(detecting && "animate-pulse")} />
-              Redetect
-            </Button>
-          </div>
-        </Card>
-
-        {fileExists === false && (
-          <div className="flex items-start gap-2.5 rounded-md border border-border bg-muted/40 px-4 py-3 text-[12px] text-muted-foreground">
-            <Info size={14} className="mt-0.5 shrink-0" />
-            <span>
-              <strong className="font-semibold text-foreground">No Scalability.ini found.</strong>{" "}
-              You can still configure tweaks here, the file will be created automatically when you save.
-            </span>
-          </div>
-        )}
-
-        <div className="grid gap-5 xl:grid-cols-2 2xl:grid-cols-3">
-        {Object.entries(categories).map(([category, tweaks]) => (
-          <Card key={category} className="flex flex-col gap-4 bg-card p-4">
-            <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-              {category}
-            </span>
-            <div className="flex flex-col gap-3">
-              {tweaks.map((tweak) => (
-                <TweakRow
-                  key={tweak.id}
-                  tweak={tweak}
-                  isEnabled={enabled[tweak.id] ?? false}
-                  currentValue={values[tweak.id]}
-                  onToggle={() => toggleEnabled(tweak.id)}
-                  onValueChange={(val) => setValue(tweak.id, val)}
-                />
-              ))}
+            <div className="flex items-center gap-2">
+              <Input
+                className="h-8 font-mono text-[12px]"
+                value={filePath}
+                onChange={(e) => setFilePath(e.target.value)}
+                placeholder="Path to Scalability.ini\u2026"
+                title={filePath}
+              />
+              <Button variant="outline" size="sm" onClick={onBrowse}>
+                <FolderOpen size={14} />
+                Browse
+              </Button>
+              <Button variant="blue" size="sm" onClick={onDetect} disabled={detecting}>
+                <Search size={14} className={cn(detecting && "animate-pulse")} />
+                Redetect
+              </Button>
             </div>
           </Card>
-        ))}
-        </div>
+
+          {fileExists === false && (
+            <div className="flex items-start gap-2.5 rounded-md border border-border bg-muted/40 px-4 py-3 text-[12px] text-muted-foreground">
+              <Info size={14} className="mt-0.5 shrink-0" />
+              <span>
+                <strong className="font-semibold text-foreground">No Scalability.ini found.</strong>{" "}
+                You can still configure tweaks here, the file will be created automatically when you
+                save.
+              </span>
+            </div>
+          )}
+
+          <div className="grid gap-5 xl:grid-cols-2 2xl:grid-cols-3">
+            {Object.entries(categories).map(([category, tweaks]) => (
+              <Card key={category} className="flex flex-col gap-4 bg-card p-4">
+                <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  {category}
+                </span>
+                <div className="flex flex-col gap-3">
+                  {tweaks.map((tweak) => (
+                    <TweakRow
+                      key={tweak.id}
+                      tweak={tweak}
+                      isEnabled={enabled[tweak.id] ?? false}
+                      currentValue={values[tweak.id]}
+                      onToggle={() => toggleEnabled(tweak.id)}
+                      onValueChange={(val) => setValue(tweak.id, val)}
+                    />
+                  ))}
+                </div>
+              </Card>
+            ))}
+          </div>
         </div>
       </div>
 
@@ -313,33 +341,33 @@ export function ScalabilityTweaks({ filePath, setFilePath, fileExists, content, 
           </div>
         )}
         <div className="flex items-center gap-3">
-        <Button variant="green" size="sm" onClick={applyAndSave} disabled={!dirty}>
-          <Save size={14} />
-          {dirty ? "Apply & Save" : "Up to Date"}
-        </Button>
-        <Button variant="outline" size="sm" onClick={clearShaderCache}>
-          <Trash2 size={14} />
-          Clear Shader Cache
-        </Button>
-        <Button variant="ghost" size="sm" onClick={onReload}>
-          <RefreshCw size={14} />
-          Reload
-        </Button>
-        {status && (
-          <span
-            className={cn(
-              "flex items-center gap-1 text-[12px]",
-              status.type === "ok"
-                ? "text-[var(--color-ok)]"
-                : status.type === "err"
-                  ? "text-[var(--color-err)]"
-                  : "text-muted-foreground",
-            )}
-          >
-            {status.type === "ok" && <CheckCircle2 size={13} />}
-            {status.msg}
-          </span>
-        )}
+          <Button variant="green" size="sm" onClick={applyAndSave} disabled={!dirty}>
+            <Save size={14} />
+            {dirty ? "Apply & Save" : "Up to Date"}
+          </Button>
+          <Button variant="outline" size="sm" onClick={clearShaderCache}>
+            <Trash2 size={14} />
+            Clear Shader Cache
+          </Button>
+          <Button variant="ghost" size="sm" onClick={onReload}>
+            <RefreshCw size={14} />
+            Reload
+          </Button>
+          {status && (
+            <span
+              className={cn(
+                "flex items-center gap-1 text-[12px]",
+                status.type === "ok"
+                  ? "text-[var(--color-ok)]"
+                  : status.type === "err"
+                    ? "text-[var(--color-err)]"
+                    : "text-muted-foreground"
+              )}
+            >
+              {status.type === "ok" && <CheckCircle2 size={13} />}
+              {status.msg}
+            </span>
+          )}
         </div>
       </div>
     </div>
@@ -391,8 +419,7 @@ function TweakRow({ tweak, isEnabled, currentValue, onToggle, onValueChange }: T
 // ── CVar code pills ──────────────────────────────────────────────────
 
 function TweakCodes({ tweak }: { tweak: TweakDefinition }) {
-  const codeClass =
-    "rounded bg-muted px-1 py-0.5 font-mono text-[10px] text-muted-foreground";
+  const codeClass = "rounded bg-muted px-1 py-0.5 font-mono text-[10px] text-muted-foreground";
 
   switch (tweak.kind) {
     case "RemoveLines":
@@ -438,10 +465,7 @@ function SliderControl({
 
   return (
     <div
-      className={cn(
-        "flex items-center gap-3 pt-1",
-        !isEnabled && "opacity-40 pointer-events-none",
-      )}
+      className={cn("flex items-center gap-3 pt-1", !isEnabled && "opacity-40 pointer-events-none")}
     >
       <Slider
         min={tweak.min}

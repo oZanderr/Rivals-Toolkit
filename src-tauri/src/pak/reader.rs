@@ -1,8 +1,4 @@
-use std::{
-    fs,
-    io::BufReader,
-    path::Path,
-};
+use std::{fs, io::BufReader, path::Path};
 
 use walkdir::WalkDir;
 
@@ -19,7 +15,8 @@ fn ensure_supported_pak(pak_path: &str) -> Result<(), String> {
     // and are merged by the game/launcher during update flow, not normal browseable paks.
     if name.starts_with("Patch_") {
         return Err(
-            "Update patch pak (delta) is not browseable. Launch Marvel Rivals once after update.".to_string(),
+            "Update patch pak (delta) is not browseable. Launch Marvel Rivals once after update."
+                .to_string(),
         );
     }
 
@@ -49,7 +46,9 @@ pub(super) fn list_pak_files(game_root: &str) -> Result<Vec<String>, String> {
         .filter(|e| e.file_type().is_file())
         .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("pak"))
         .filter(|e| {
-            let Ok(rel) = e.path().strip_prefix(&dir) else { return false };
+            let Ok(rel) = e.path().strip_prefix(&dir) else {
+                return false;
+            };
             !rel.parent()
                 .and_then(|p| p.iter().next())
                 .is_some_and(|segment| segment.to_string_lossy().starts_with('~'))
@@ -57,14 +56,8 @@ pub(super) fn list_pak_files(game_root: &str) -> Result<Vec<String>, String> {
         .map(|e| e.path().to_string_lossy().into_owned())
         .collect();
     game_paks.sort_by(|a, b| {
-        let a_key = (
-            is_update_patch_pak_path(a),
-            a.to_ascii_lowercase(),
-        );
-        let b_key = (
-            is_update_patch_pak_path(b),
-            b.to_ascii_lowercase(),
-        );
+        let a_key = (is_update_patch_pak_path(a), a.to_ascii_lowercase());
+        let b_key = (is_update_patch_pak_path(b), b.to_ascii_lowercase());
         a_key.cmp(&b_key)
     });
 

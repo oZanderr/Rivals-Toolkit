@@ -73,7 +73,11 @@ pub(crate) fn get_mods_status(game_root: &str) -> ModsStatus {
         Vec::new()
     };
 
-    mod_entries.sort_by(|a, b| a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase()));
+    mod_entries.sort_by(|a, b| {
+        a.display_name
+            .to_lowercase()
+            .cmp(&b.display_name.to_lowercase())
+    });
 
     ModsStatus {
         mods_folder_exists: exists,

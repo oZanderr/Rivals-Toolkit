@@ -2,7 +2,7 @@ mod bypass;
 mod folder;
 mod status;
 
-pub(crate) use status::{ModsStatus};
+pub(crate) use status::ModsStatus;
 
 // Bypass files bundled at compile time.
 static BYPASS_DSOUND: &[u8] = include_bytes!("../resources/bypass/dsound.dll");

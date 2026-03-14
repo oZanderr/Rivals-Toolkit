@@ -1,8 +1,4 @@
-use std::{
-    fs,
-    io::BufReader,
-    path::Path,
-};
+use std::{fs, io::BufReader, path::Path};
 use walkdir::WalkDir;
 
 use crate::pak::crypto::{make_aes_key, open_pak};
@@ -105,10 +101,10 @@ pub(super) fn repack_dir_to_pak(input_dir: &Path, output_pak: &Path) -> Result<(
             continue;
         }
         // Skip the output pak itself if it lives inside the input directory.
-        if let Some(ref canon_out) = output_canonical {
-            if path.canonicalize().ok().as_ref() == Some(canon_out) {
-                continue;
-            }
+        if let Some(ref canon_out) = output_canonical
+            && path.canonicalize().ok().as_ref() == Some(canon_out)
+        {
+            continue;
         }
         let rel = path
             .strip_prefix(input_dir)

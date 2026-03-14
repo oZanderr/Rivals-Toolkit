@@ -109,7 +109,9 @@ fn parse_cvar_line(line: &str) -> Option<(String, String)> {
 
 /// Check if a section header is the Windows DeviceProfile section.
 fn is_windows_device_profile_header(header: &str) -> bool {
-    header.trim().eq_ignore_ascii_case("[Windows DeviceProfile]")
+    header
+        .trim()
+        .eq_ignore_ascii_case("[Windows DeviceProfile]")
 }
 
 /// Remove every non-comment line whose CVar key matches `key_lower` (case-insensitive).
@@ -137,8 +139,8 @@ fn format_cvar_line(key: &str, val: &str, preserve_prefix: bool) -> String {
 
 /// Find the end of a section (next `[` header or EOF).
 fn find_section_end(lines: &[String], section_start: usize) -> usize {
-    for i in (section_start + 1)..lines.len() {
-        if lines[i].trim().starts_with('[') {
+    for (i, line) in lines.iter().enumerate().skip(section_start + 1) {
+        if line.trim().starts_with('[') {
             return i;
         }
     }
@@ -182,19 +184,24 @@ fn apply_device_profiles_edits(lines: &mut Vec<String>, edits: &[PakTweakEdit]) 
 
         // Find existing line for this key within the section
         let mut found_idx = None;
-        for i in (start + 1)..end.min(lines.len()) {
-            let trimmed = lines[i].trim();
+        for (i, line) in lines
+            .iter()
+            .enumerate()
+            .take(end.min(lines.len()))
+            .skip(start + 1)
+        {
+            let trimmed = line.trim();
             if trimmed.starts_with('[') {
                 break;
             }
             if trimmed.is_empty() || trimmed.starts_with(';') {
                 continue;
             }
-            if let Some((k, _)) = parse_cvar_line(trimmed) {
-                if k.to_ascii_lowercase() == key_lower {
-                    found_idx = Some(i);
-                    break;
-                }
+            if let Some((k, _)) = parse_cvar_line(trimmed)
+                && k.to_ascii_lowercase() == key_lower
+            {
+                found_idx = Some(i);
+                break;
             }
         }
 
@@ -207,11 +214,11 @@ fn apply_device_profiles_edits(lines: &mut Vec<String>, edits: &[PakTweakEdit]) 
                     if t.starts_with(';') || t.is_empty() {
                         continue;
                     }
-                    if let Some((k, _)) = parse_cvar_line(&t) {
-                        if k.to_ascii_lowercase() == key_lower {
-                            let has_prefix = t.to_ascii_lowercase().starts_with("+cvars=");
-                            lines[i] = format_cvar_line(&edit.key, val, has_prefix);
-                        }
+                    if let Some((k, _)) = parse_cvar_line(&t)
+                        && k.to_ascii_lowercase() == key_lower
+                    {
+                        let has_prefix = t.to_ascii_lowercase().starts_with("+cvars=");
+                        lines[i] = format_cvar_line(&edit.key, val, has_prefix);
                     }
                 }
             }
@@ -252,11 +259,11 @@ fn apply_engine_edits(lines: &mut Vec<String>, edits: &[PakTweakEdit]) {
             if !in_section || trimmed.is_empty() || trimmed.starts_with(';') {
                 continue;
             }
-            if let Some((k, _)) = parse_cvar_line(trimmed) {
-                if k.to_ascii_lowercase() == key_lower {
-                    found_idx = Some(i);
-                    break;
-                }
+            if let Some((k, _)) = parse_cvar_line(trimmed)
+                && k.to_ascii_lowercase() == key_lower
+            {
+                found_idx = Some(i);
+                break;
             }
         }
 
@@ -269,10 +276,10 @@ fn apply_engine_edits(lines: &mut Vec<String>, edits: &[PakTweakEdit]) {
                     if t.starts_with(';') {
                         continue;
                     }
-                    if let Some((k, _)) = parse_cvar_line(t) {
-                        if k.to_ascii_lowercase() == key_lower {
-                            *line = new_line.clone();
-                        }
+                    if let Some((k, _)) = parse_cvar_line(t)
+                        && k.to_ascii_lowercase() == key_lower
+                    {
+                        *line = new_line.clone();
                     }
                 }
             }

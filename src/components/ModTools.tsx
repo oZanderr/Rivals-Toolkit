@@ -1,5 +1,6 @@
 import * as React from "react";
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
+
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import {
@@ -14,6 +15,7 @@ import {
   XCircle,
   Trash2,
 } from "lucide-react";
+
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
@@ -46,26 +48,29 @@ export function ModTools({ gamePath }: Props) {
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const showNotice = (msg: string, type: StatusType, duration = 6000) => {
+  const showNotice = useCallback((msg: string, type: StatusType, duration = 6000) => {
     if (noticeTimer.current) clearTimeout(noticeTimer.current);
     setNotice({ msg, type });
     noticeTimer.current = setTimeout(() => setNotice(null), duration);
-  };
+  }, []);
+
+  const refresh = useCallback(
+    async (silent = false) => {
+      if (!gamePath) return;
+      try {
+        const s = await invoke<ModsStatus>("get_mods_status", { gameRoot: gamePath });
+        setModsStatus(s);
+        if (!silent) showNotice("Status refreshed", "ok", 4000);
+      } catch (e: unknown) {
+        showNotice(String(e), "err");
+      }
+    },
+    [gamePath, showNotice]
+  );
 
   useEffect(() => {
     if (gamePath) refresh(true);
-  }, [gamePath]);
-
-  async function refresh(silent = false) {
-    if (!gamePath) return;
-    try {
-      const s = await invoke<ModsStatus>("get_mods_status", { gameRoot: gamePath });
-      setModsStatus(s);
-      if (!silent) showNotice("Status refreshed", "ok", 4000);
-    } catch (e: any) {
-      showNotice(String(e), "err");
-    }
-  }
+  }, [gamePath, refresh]);
 
   async function installBypass() {
     if (!gamePath) return showNotice("Set game root on the Home tab first.", "err");
@@ -73,7 +78,7 @@ export function ModTools({ gamePath }: Props) {
       const msg = await invoke<string>("install_signature_bypass", { gameRoot: gamePath });
       showNotice(msg, "ok", 4000);
       await refresh(true);
-    } catch (e: any) {
+    } catch (e: unknown) {
       showNotice(String(e), "err");
     }
   }
@@ -84,7 +89,7 @@ export function ModTools({ gamePath }: Props) {
       const msg = await invoke<string>("remove_signature_bypass", { gameRoot: gamePath });
       showNotice(msg, "ok", 4000);
       await refresh(true);
-    } catch (e: any) {
+    } catch (e: unknown) {
       showNotice(String(e), "err");
     }
   }
@@ -93,7 +98,7 @@ export function ModTools({ gamePath }: Props) {
     if (!gamePath) return;
     try {
       await invoke("open_mods_folder", { gameRoot: gamePath });
-    } catch (e: any) {
+    } catch (e: unknown) {
       showNotice(String(e), "err");
     }
   }
@@ -112,7 +117,7 @@ export function ModTools({ gamePath }: Props) {
         fullName: entry.full_name,
       });
       await refresh(true);
-    } catch (e: any) {
+    } catch (e: unknown) {
       showNotice(String(e), "err");
     } finally {
       setBusyMods((prev) => {
@@ -133,7 +138,7 @@ export function ModTools({ gamePath }: Props) {
         enabled: !entry.enabled,
       });
       await refresh(true);
-    } catch (e: any) {
+    } catch (e: unknown) {
       showNotice(String(e), "err");
     } finally {
       setBusyMods((prev) => {
@@ -157,7 +162,7 @@ export function ModTools({ gamePath }: Props) {
         destPath,
       });
       showNotice(msg, "ok", 4000);
-    } catch (e: any) {
+    } catch (e: unknown) {
       showNotice(String(e), "err");
     }
   }
@@ -178,7 +183,7 @@ export function ModTools({ gamePath }: Props) {
                 ? "text-[var(--color-ok)]"
                 : notice.type === "err"
                   ? "text-[var(--color-err)]"
-                  : "text-muted-foreground",
+                  : "text-muted-foreground"
             )}
           >
             {notice.type === "ok" ? (
@@ -195,7 +200,13 @@ export function ModTools({ gamePath }: Props) {
             Set game root on Home tab first
           </span>
         )}
-        <Button variant="ghost" size="sm" onClick={() => refresh()} disabled={!gamePath} className="ml-auto shrink-0">
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => refresh()}
+          disabled={!gamePath}
+          className="ml-auto shrink-0"
+        >
           <RefreshCw size={14} />
           Refresh
         </Button>
@@ -247,7 +258,12 @@ export function ModTools({ gamePath }: Props) {
             <Shield size={14} />
             Install Bypass
           </Button>
-          <Button variant="outline" size="sm" onClick={removeBypass} disabled={!gamePath || !modsStatus?.sig_bypass_installed}>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={removeBypass}
+            disabled={!gamePath || !modsStatus?.sig_bypass_installed}
+          >
             <ShieldOff size={14} />
             Remove Bypass
           </Button>
@@ -256,131 +272,143 @@ export function ModTools({ gamePath }: Props) {
 
       {/* Mod list */}
       {modsStatus && totalCount > 0 && (
-      <Card className="flex min-h-0 flex-1 flex-col gap-4 p-4 bg-card">
-        <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
-            <h3 className="text-sm font-semibold">Installed Mods</h3>
-            {totalCount > 0 && (
-              <span className="rounded-full bg-secondary px-2 py-0.5 text-[11px] font-medium text-foreground">
-                {totalCount}
-              </span>
-            )}
+        <Card className="flex min-h-0 flex-1 flex-col gap-4 p-4 bg-card">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <h3 className="text-sm font-semibold">Installed Mods</h3>
+              {totalCount > 0 && (
+                <span className="rounded-full bg-secondary px-2 py-0.5 text-[11px] font-medium text-foreground">
+                  {totalCount}
+                </span>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={openFolder}
+                disabled={!gamePath}
+                title="Open ~mods folder in Explorer"
+              >
+                <FolderOpen size={14} />
+                Open Folder
+              </Button>
+              <Button
+                variant="blue"
+                size="sm"
+                onClick={exportZip}
+                disabled={enabledCount === 0}
+                title={
+                  enabledCount === 0 ? "No enabled mods to export" : "Export enabled mods as zip"
+                }
+              >
+                <Archive size={14} />
+                Export Zip
+              </Button>
+            </div>
           </div>
-          <div className="flex items-center gap-2">
-            <Button variant="ghost" size="sm" onClick={openFolder} disabled={!gamePath} title="Open ~mods folder in Explorer">
-              <FolderOpen size={14} />
-              Open Folder
-            </Button>
-            <Button
-              variant="blue"
-              size="sm"
-              onClick={exportZip}
-              disabled={enabledCount === 0}
-              title={enabledCount === 0 ? "No enabled mods to export" : "Export enabled mods as zip"}
-            >
-              <Archive size={14} />
-              Export Zip
-            </Button>
-          </div>
-        </div>
 
-        {totalCount === 0 ? (
-          <p className="text-[12px] text-muted-foreground">
-            No mods found in the ~mods folder. Copy <Code>.pak</Code> files there to get started.
-          </p>
-        ) : (
-          <div className="min-h-0 flex-1 overflow-y-auto rounded-md border border-border bg-background [scrollbar-gutter:stable]">
-            <ul>
-            {modsStatus.mod_entries.map((entry) => {
-              const busy = busyMods.has(entry.full_name);
-              return (
-                <li
-                  key={entry.full_name}
-                  className="flex items-center gap-3 border-b border-border/50 px-3 py-2 last:border-none hover:bg-secondary/50"
-                >
-                  <span
-                    className={cn(
-                      "flex-1 truncate font-mono text-[12px]",
-                      !entry.enabled && "text-muted-foreground opacity-50",
-                    )}
-                  >
-                    {entry.display_name}
-                  </span>
-                  {entry.has_companions && (
-                    <span className="shrink-0 text-[10px] text-muted-foreground/50">+ucas/utoc</span>
-                  )}
-                  {pendingDelete === entry.full_name ? (
-                    <div className="flex shrink-0 items-center gap-1">
-                      <span className="text-[11px] font-medium text-[var(--color-err)]">Delete?</span>
-                      <button
-                        title="Confirm delete"
-                        disabled={busy}
-                        onClick={() => deleteMod(entry)}
-                        className="rounded px-1.5 py-0.5 text-[11px] font-semibold bg-[var(--color-err)] text-white hover:opacity-90 transition-opacity"
+          {totalCount === 0 ? (
+            <p className="text-[12px] text-muted-foreground">
+              No mods found in the ~mods folder. Copy <Code>.pak</Code> files there to get started.
+            </p>
+          ) : (
+            <div className="min-h-0 flex-1 overflow-y-auto rounded-md border border-border bg-background [scrollbar-gutter:stable]">
+              <ul>
+                {modsStatus.mod_entries.map((entry) => {
+                  const busy = busyMods.has(entry.full_name);
+                  return (
+                    <li
+                      key={entry.full_name}
+                      className="flex items-center gap-3 border-b border-border/50 px-3 py-2 last:border-none hover:bg-secondary/50"
+                    >
+                      <span
+                        className={cn(
+                          "flex-1 truncate font-mono text-[12px]",
+                          !entry.enabled && "text-muted-foreground opacity-50"
+                        )}
                       >
-                        Yes
-                      </button>
-                      <button
-                        title="Cancel"
-                        onClick={() => setPendingDelete(null)}
-                        className="rounded px-1.5 py-0.5 text-[11px] font-semibold border border-border text-muted-foreground hover:bg-secondary transition-colors"
-                      >
-                        No
-                      </button>
-                    </div>
-                  ) : (
-                    <>
-                      <Switch
-                        checked={entry.enabled}
-                        disabled={busy}
-                        onCheckedChange={() => toggleMod(entry)}
-                        className="shrink-0"
-                      />
-                      <button
-                        title="Delete mod"
-                        disabled={busy}
-                        onClick={() => deleteMod(entry)}
-                        className="shrink-0 rounded p-1 text-muted-foreground/30 transition-colors hover:text-[var(--color-err)] hover:bg-[var(--color-err)]/10"
-                      >
-                        <Trash2 size={13} />
-                      </button>
-                    </>
-                  )}
-                </li>
-              );
-            })}
-            </ul>
-          </div>
-        )}
-      </Card>
+                        {entry.display_name}
+                      </span>
+                      {entry.has_companions && (
+                        <span className="shrink-0 text-[10px] text-muted-foreground/50">
+                          +ucas/utoc
+                        </span>
+                      )}
+                      {pendingDelete === entry.full_name ? (
+                        <div className="flex shrink-0 items-center gap-1">
+                          <span className="text-[11px] font-medium text-[var(--color-err)]">
+                            Delete?
+                          </span>
+                          <button
+                            title="Confirm delete"
+                            disabled={busy}
+                            onClick={() => deleteMod(entry)}
+                            className="rounded px-1.5 py-0.5 text-[11px] font-semibold bg-[var(--color-err)] text-white hover:opacity-90 transition-opacity"
+                          >
+                            Yes
+                          </button>
+                          <button
+                            title="Cancel"
+                            onClick={() => setPendingDelete(null)}
+                            className="rounded px-1.5 py-0.5 text-[11px] font-semibold border border-border text-muted-foreground hover:bg-secondary transition-colors"
+                          >
+                            No
+                          </button>
+                        </div>
+                      ) : (
+                        <>
+                          <Switch
+                            checked={entry.enabled}
+                            disabled={busy}
+                            onCheckedChange={() => toggleMod(entry)}
+                            className="shrink-0"
+                          />
+                          <button
+                            title="Delete mod"
+                            disabled={busy}
+                            onClick={() => deleteMod(entry)}
+                            className="shrink-0 rounded p-1 text-muted-foreground/30 transition-colors hover:text-[var(--color-err)] hover:bg-[var(--color-err)]/10"
+                          >
+                            <Trash2 size={13} />
+                          </button>
+                        </>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          )}
+        </Card>
       )}
 
       {/* How-to */}
       {(!modsStatus || totalCount === 0) && (
-      <Card className="flex flex-col gap-3 p-4 bg-card">
-        <h3 className="text-sm font-semibold">How to Install a Mod</h3>
-        <ol className="flex flex-col gap-3 text-[12px] text-muted-foreground">
-          {[
-            <>
-              Click <strong className="text-foreground">Install Bypass</strong> once. This places{" "}
-              <Code>dsound.dll</Code> + <Code>plugins/bypass.asi</Code> in Binaries and creates the{" "}
-              <Code>~mods</Code> folder.
-            </>,
-            <>
-              Copy your mod <Code>.pak</Code> into the <Code>~mods</Code> folder. Rename it so it
-              ends with <Code>_9999999_P.pak</Code> for correct load priority.
-            </>,
-            <>Launch Marvel Rivals, your mods will be active.</>,
-          ].map((step, i) => (
-            <li key={i} className="flex gap-2.5">
-              <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-secondary text-[10px] font-bold text-foreground">
-                {i + 1}
-              </span>
-              <span className="pt-0.5 leading-relaxed">{step}</span>
-            </li>
-          ))}
-        </ol>
-      </Card>
+        <Card className="flex flex-col gap-3 p-4 bg-card">
+          <h3 className="text-sm font-semibold">How to Install a Mod</h3>
+          <ol className="flex flex-col gap-3 text-[12px] text-muted-foreground">
+            {[
+              <>
+                Click <strong className="text-foreground">Install Bypass</strong> once. This places{" "}
+                <Code>dsound.dll</Code> + <Code>plugins/bypass.asi</Code> in Binaries and creates
+                the <Code>~mods</Code> folder.
+              </>,
+              <>
+                Copy your mod <Code>.pak</Code> into the <Code>~mods</Code> folder. Rename it so it
+                ends with <Code>_9999999_P.pak</Code> for correct load priority.
+              </>,
+              <>Launch Marvel Rivals, your mods will be active.</>,
+            ].map((step, i) => (
+              <li key={i} className="flex gap-2.5">
+                <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-secondary text-[10px] font-bold text-foreground">
+                  {i + 1}
+                </span>
+                <span className="pt-0.5 leading-relaxed">{step}</span>
+              </li>
+            ))}
+          </ol>
+        </Card>
       )}
     </div>
   );
@@ -414,7 +442,7 @@ function StatusCard({
         <span
           className={cn(
             "flex items-center gap-1.5 text-sm font-medium",
-            ok ? "text-[var(--color-ok)]" : "text-[var(--color-warn)]",
+            ok ? "text-[var(--color-ok)]" : "text-[var(--color-warn)]"
           )}
         >
           {ok ? okIcon : failIcon}

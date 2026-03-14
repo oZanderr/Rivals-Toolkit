@@ -1,10 +1,13 @@
 import { useState, useEffect, useRef } from "react";
+
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { FileText, Package } from "lucide-react";
+
 import { cn } from "@/lib/utils";
-import { ScalabilityTweaks } from "./ScalabilityTweaks";
+
 import { PakTweaks } from "./PakTweaks";
+import { ScalabilityTweaks } from "./ScalabilityTweaks";
 
 type SubTab = "scalability" | "pak-config";
 
@@ -22,9 +25,11 @@ export function QuickSettings({ gamePath }: Props) {
   const [detecting, setDetecting] = useState(false);
   const [detectBadge, setDetectBadge] = useState<string | null>(null);
   const detectBadgeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const detectPathRef = useRef(detectPath);
 
+  detectPathRef.current = detectPath;
   useEffect(() => {
-    detectPath();
+    detectPathRef.current();
   }, []);
 
   /** Redetect the Scalability.ini path only — does not reset tweak states */
@@ -105,7 +110,7 @@ export function QuickSettings({ gamePath }: Props) {
               "flex items-center gap-1.5 rounded-sm px-3 py-1.5 text-[12px] font-medium transition-colors",
               subTab === id
                 ? "bg-background text-foreground shadow-sm"
-                : "text-muted-foreground hover:text-foreground",
+                : "text-muted-foreground hover:text-foreground"
             )}
           >
             <Icon size={13} />
@@ -116,20 +121,20 @@ export function QuickSettings({ gamePath }: Props) {
 
       {/* ── Scalability tab ── */}
       <div className={cn("flex flex-1 min-h-0 flex-col", subTab !== "scalability" && "hidden")}>
-          <ScalabilityTweaks
-            key={reloadKey}
-            filePath={filePath}
-            setFilePath={setFilePath}
-            fileExists={fileExists}
-            content={content}
-            setContent={setContent}
-            detectBadge={detectBadge}
-            detecting={detecting}
-            onDetect={detectPath}
-            onBrowse={browse}
-            onSaved={() => setFileExists(true)}
-            onReload={reloadContent}
-          />
+        <ScalabilityTweaks
+          key={reloadKey}
+          filePath={filePath}
+          setFilePath={setFilePath}
+          fileExists={fileExists}
+          content={content}
+          setContent={setContent}
+          detectBadge={detectBadge}
+          detecting={detecting}
+          onDetect={detectPath}
+          onBrowse={browse}
+          onSaved={() => setFileExists(true)}
+          onReload={reloadContent}
+        />
       </div>
 
       {/* ── Pak Config tab ── */}

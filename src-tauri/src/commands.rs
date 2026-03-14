@@ -93,10 +93,7 @@ pub(crate) fn detect_tweaks(content: String) -> Vec<scalability::TweakState> {
 }
 
 #[tauri::command]
-pub(crate) fn apply_tweaks(
-    content: String,
-    settings: Vec<scalability::TweakSetting>,
-) -> String {
+pub(crate) fn apply_tweaks(content: String, settings: Vec<scalability::TweakSetting>) -> String {
     scalability::apply_tweaks(&content, &settings)
 }
 

@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react";
+
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
@@ -12,12 +13,13 @@ import {
   XCircle,
   Trash2,
 } from "lucide-react";
+
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Slider as SliderUI } from "@/components/ui/slider";
+import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 
 // ── Types matching Rust backend ──────────────────────────────────────
@@ -102,6 +104,7 @@ export function PakTweaks({ gamePath }: Props) {
   const [notice, setNotice] = useState<{ msg: string; type: "ok" | "err" | "info" } | null>(null);
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pakCache = useRef<Map<string, PakCacheEntry>>(new Map());
+  const scanRef = useRef(scan);
   // Tweak definitions (for rendering controls)
   const [definitions, setDefinitions] = useState<TweakDefinition[]>([]);
 
@@ -127,8 +130,9 @@ export function PakTweaks({ gamePath }: Props) {
     noticeTimer.current = setTimeout(() => setNotice(null), duration);
   };
 
+  scanRef.current = scan;
   useEffect(() => {
-    if (gamePath) scan(true);
+    if (gamePath) scanRef.current(true);
   }, [gamePath]);
 
   // Load tweak definitions once
@@ -145,9 +149,7 @@ export function PakTweaks({ gamePath }: Props) {
     const newEnabled = !(currentState?.active ?? false);
 
     // Optimistically update local state so the UI responds immediately
-    setTweakStates((prev) =>
-      prev.map((s) => (s.id === id ? { ...s, active: newEnabled } : s)),
-    );
+    setTweakStates((prev) => prev.map((s) => (s.id === id ? { ...s, active: newEnabled } : s)));
 
     switch (def.kind) {
       case "RemoveLines":
@@ -162,14 +164,21 @@ export function PakTweaks({ gamePath }: Props) {
         break;
       case "Toggle": {
         const originalVal = (savedState?.active ?? false) ? def.on_value : def.off_value;
-        queueEdit(def.key, newEnabled ? def.on_value : def.off_value, originalVal, def.engine_section);
+        queueEdit(
+          def.key,
+          newEnabled ? def.on_value : def.off_value,
+          originalVal,
+          def.engine_section
+        );
         break;
       }
       case "Slider": {
-        const currentVal = currentState?.current_value ?? String((def as SliderTweak).default_value);
-        const originalVal = (savedState?.active ?? false)
-          ? (savedState?.current_value ?? String((def as SliderTweak).default_value))
-          : null;
+        const currentVal =
+          currentState?.current_value ?? String((def as SliderTweak).default_value);
+        const originalVal =
+          (savedState?.active ?? false)
+            ? (savedState?.current_value ?? String((def as SliderTweak).default_value))
+            : null;
         queueEdit(def.key, newEnabled ? currentVal : null, originalVal, def.engine_section);
         break;
       }
@@ -180,12 +189,11 @@ export function PakTweaks({ gamePath }: Props) {
     const def = definitions.find((d) => d.id === id);
     if (!def || def.kind !== "Slider") return;
     const savedState = savedTweakStates.find((s) => s.id === id);
-    const originalVal = (savedState?.active ?? false)
-      ? (savedState?.current_value ?? String((def as SliderTweak).default_value))
-      : null;
-    setTweakStates((prev) =>
-      prev.map((s) => (s.id === id ? { ...s, current_value: val } : s)),
-    );
+    const originalVal =
+      (savedState?.active ?? false)
+        ? (savedState?.current_value ?? String((def as SliderTweak).default_value))
+        : null;
+    setTweakStates((prev) => prev.map((s) => (s.id === id ? { ...s, current_value: val } : s)));
     queueEdit((def as SliderTweak).key, val, originalVal, def.engine_section);
   }
 
@@ -202,9 +210,9 @@ export function PakTweaks({ gamePath }: Props) {
         return;
       }
       // Add to list if not already present, then select it
-      setPaks((prev) => prev.find((p) => p.pak_path === info.pak_path) ? prev : [...prev, info]);
+      setPaks((prev) => (prev.find((p) => p.pak_path === info.pak_path) ? prev : [...prev, info]));
       await selectPak(info);
-    } catch (e: any) {
+    } catch (e: unknown) {
       showNotice("Failed to read pak", "err");
       console.error(e);
     }
@@ -227,16 +235,13 @@ export function PakTweaks({ gamePath }: Props) {
           } catch {
             return null;
           }
-        }),
+        })
       );
       const retainedManual = inspectedManual.filter((pak): pak is PakIniInfo => pak !== null);
       const removedMissing = manualOnly.length - retainedManual.length;
 
       // Merge: keep valid manually-browsed paks that aren't in the folder scan.
-      const merged = [
-        ...results,
-        ...retainedManual,
-      ];
+      const merged = [...results, ...retainedManual];
       setPaks(merged);
       if (merged.length === 0) {
         setSelectedPak(null);
@@ -260,7 +265,7 @@ export function PakTweaks({ gamePath }: Props) {
       } else {
         if (!silent) showNotice(formatModsFoundMessage(merged.length, removedMissing), "ok");
       }
-    } catch (e: any) {
+    } catch (e: unknown) {
       console.error("Scan failed:", e);
     } finally {
       setScanning(false);
@@ -293,8 +298,12 @@ export function PakTweaks({ gamePath }: Props) {
       setTweakStates(states);
       setSavedTweakStates(states);
       setEdits([]);
-      pakCache.current.set(pak.pak_path, { tweakStates: states, savedTweakStates: states, edits: [] });
-    } catch (e: any) {
+      pakCache.current.set(pak.pak_path, {
+        tweakStates: states,
+        savedTweakStates: states,
+        edits: [],
+      });
+    } catch (e: unknown) {
       if (isPakMissingError(e)) {
         removePak(pak.pak_path);
         showNotice("That pak file is missing now. Removed it from the list.", "info");
@@ -314,8 +323,12 @@ export function PakTweaks({ gamePath }: Props) {
       setTweakStates(states);
       setSavedTweakStates(states);
       setEdits([]);
-      pakCache.current.set(pak.pak_path, { tweakStates: states, savedTweakStates: states, edits: [] });
-    } catch (e: any) {
+      pakCache.current.set(pak.pak_path, {
+        tweakStates: states,
+        savedTweakStates: states,
+        edits: [],
+      });
+    } catch (e: unknown) {
       if (isPakMissingError(e)) {
         removePak(pak.pak_path);
         showNotice("That pak file is missing now. Removed it from the list.", "info");
@@ -326,7 +339,12 @@ export function PakTweaks({ gamePath }: Props) {
     }
   }
 
-  function queueEdit(key: string, value: string | null, originalValue: string | null | undefined, engineSection?: string) {
+  function queueEdit(
+    key: string,
+    value: string | null,
+    originalValue: string | null | undefined,
+    engineSection?: string
+  ) {
     setEdits((prev) => {
       const existing = prev.findIndex((e) => e.key.toLowerCase() === key.toLowerCase());
       // If the new value restores to original, cancel out this edit
@@ -357,7 +375,7 @@ export function PakTweaks({ gamePath }: Props) {
       });
       showNotice(msg, "ok");
       await forceReloadPak(selectedPak);
-    } catch (e: any) {
+    } catch (e: unknown) {
       if (isPakMissingError(e)) {
         removePak(selectedPak.pak_path);
         showNotice("That pak file is missing now. Removed it from the list.", "info");
@@ -374,7 +392,7 @@ export function PakTweaks({ gamePath }: Props) {
     try {
       const msg = await invoke<string>("clear_shader_cache");
       showNotice(msg, "ok");
-    } catch (e: any) {
+    } catch (e: unknown) {
       showNotice("Failed to clear shader cache", "err");
       console.error("Clear shader cache failed:", e);
     }
@@ -404,223 +422,245 @@ export function PakTweaks({ gamePath }: Props) {
       {/* Scrollable content: pak list + tweak cards */}
       <div className="flex-1 overflow-y-auto pr-6">
         <div className="flex flex-col gap-5">
-      {/* Pak list */}
-      <Card className="flex flex-col gap-3 bg-card p-4">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Config Mods</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <Button variant="outline" size="sm" onClick={browse}>
-              <FolderOpen size={14} />
-              Browse
-            </Button>
-            <Button variant="blue" size="sm" onClick={() => scan()} disabled={scanning || !gamePath}>
-              <Search size={14} className={cn(scanning && "animate-pulse")} />
-              Scan
-            </Button>
-          </div>
-        </div>
-
-        {!gamePath && (
-          <span className="flex items-center gap-1.5 text-[12px] text-[var(--color-warn)]">
-            <XCircle size={14} strokeWidth={2.5} />
-            Set game root on Home tab first
-          </span>
-        )}
-
-        {gamePath && paks.length === 0 && !scanning && (
-          <span className="text-[12px] text-muted-foreground">
-            No mod paks with INI config files found. Mods that only contain assets won't appear
-            here.
-          </span>
-        )}
-
-        {/* Single pak — show inline, no list needed */}
-        {paks.length === 1 && selectedPak && (
-          <div className="flex min-w-0 items-center gap-2">
-            <Package size={13} className="shrink-0 text-muted-foreground" />
-            <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{selectedPak.pak_name}</span>
-            <div className="flex shrink-0 items-center gap-1">
-              {selectedPak.has_device_profiles && (
-                <Badge variant="outline" className="text-[10px] px-2 py-0.5">DeviceProfiles</Badge>
-              )}
-              {selectedPak.has_engine_ini && (
-                <Badge variant="outline" className="text-[10px] px-2 py-0.5">Engine</Badge>
-              )}
-              <button
-                onClick={() => removePak(selectedPak.pak_path)}
-                className="ml-1 rounded p-1.5 text-muted-foreground/60 transition-colors hover:bg-destructive/15 hover:text-destructive"
-                title="Remove from list"
-              >
-                <X size={14} />
-              </button>
+          {/* Pak list */}
+          <Card className="flex flex-col gap-3 bg-card p-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  Config Mods
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <Button variant="outline" size="sm" onClick={browse}>
+                  <FolderOpen size={14} />
+                  Browse
+                </Button>
+                <Button
+                  variant="blue"
+                  size="sm"
+                  onClick={() => scan()}
+                  disabled={scanning || !gamePath}
+                >
+                  <Search size={14} className={cn(scanning && "animate-pulse")} />
+                  Scan
+                </Button>
+              </div>
             </div>
-          </div>
-        )}
 
-        {/* Multiple paks — show selectable list */}
-        {paks.length > 1 && (
-          <ul className="flex flex-col divide-y divide-border/50 rounded-md border border-border bg-background">
-            {paks.map((pak) => (
-              <li
-                key={pak.pak_path}
-                className={cn(
-                  "flex min-w-0 items-center transition-colors hover:bg-secondary",
-                  selectedPak?.pak_path === pak.pak_path && "bg-secondary",
-                )}
-              >
-                <button
-                  onClick={() => selectPak(pak)}
-                  className={cn(
-                    "flex min-w-0 flex-1 items-center gap-2 px-3 py-2 text-left",
-                    selectedPak?.pak_path === pak.pak_path && "font-medium",
+            {!gamePath && (
+              <span className="flex items-center gap-1.5 text-[12px] text-[var(--color-warn)]">
+                <XCircle size={14} strokeWidth={2.5} />
+                Set game root on Home tab first
+              </span>
+            )}
+
+            {gamePath && paks.length === 0 && !scanning && (
+              <span className="text-[12px] text-muted-foreground">
+                No mod paks with INI config files found. Mods that only contain assets won't appear
+                here.
+              </span>
+            )}
+
+            {/* Single pak — show inline, no list needed */}
+            {paks.length === 1 && selectedPak && (
+              <div className="flex min-w-0 items-center gap-2">
+                <Package size={13} className="shrink-0 text-muted-foreground" />
+                <span className="min-w-0 flex-1 truncate font-mono text-[12px]">
+                  {selectedPak.pak_name}
+                </span>
+                <div className="flex shrink-0 items-center gap-1">
+                  {selectedPak.has_device_profiles && (
+                    <Badge variant="outline" className="text-[10px] px-2 py-0.5">
+                      DeviceProfiles
+                    </Badge>
                   )}
-                >
-                  <Package size={13} className="shrink-0 text-muted-foreground" />
-                  <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{pak.pak_name}</span>
-                  <div className="flex shrink-0 gap-1">
-                    {pak.has_device_profiles && (
-                      <Badge variant="outline" className="text-[10px] px-2 py-0.5">DeviceProfiles</Badge>
-                    )}
-                    {pak.has_engine_ini && (
-                      <Badge variant="outline" className="text-[10px] px-2 py-0.5">Engine</Badge>
-                    )}
-                  </div>
-                </button>
-                <button
-                  onClick={() => removePak(pak.pak_path)}
-                  className="mr-2 shrink-0 rounded p-1.5 text-muted-foreground/60 transition-colors hover:bg-destructive/15 hover:text-destructive"
-                  title="Remove from list"
-                >
-                  <X size={14} />
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </Card>
+                  {selectedPak.has_engine_ini && (
+                    <Badge variant="outline" className="text-[10px] px-2 py-0.5">
+                      Engine
+                    </Badge>
+                  )}
+                  <button
+                    onClick={() => removePak(selectedPak.pak_path)}
+                    className="ml-1 rounded p-1.5 text-muted-foreground/60 transition-colors hover:bg-destructive/15 hover:text-destructive"
+                    title="Remove from list"
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+              </div>
+            )}
 
-      {/* Selected pak editor — tweak cards */}
-      {selectedPak && !loading &&
-        (() => {
-          const categories = definitions.reduce<Record<string, TweakDefinition[]>>((acc, def) => {
-            (acc[def.category] ??= []).push(def);
-            return acc;
-          }, {});
+            {/* Multiple paks — show selectable list */}
+            {paks.length > 1 && (
+              <ul className="flex flex-col divide-y divide-border/50 rounded-md border border-border bg-background">
+                {paks.map((pak) => (
+                  <li
+                    key={pak.pak_path}
+                    className={cn(
+                      "flex min-w-0 items-center transition-colors hover:bg-secondary",
+                      selectedPak?.pak_path === pak.pak_path && "bg-secondary"
+                    )}
+                  >
+                    <button
+                      onClick={() => selectPak(pak)}
+                      className={cn(
+                        "flex min-w-0 flex-1 items-center gap-2 px-3 py-2 text-left",
+                        selectedPak?.pak_path === pak.pak_path && "font-medium"
+                      )}
+                    >
+                      <Package size={13} className="shrink-0 text-muted-foreground" />
+                      <span className="min-w-0 flex-1 truncate font-mono text-[12px]">
+                        {pak.pak_name}
+                      </span>
+                      <div className="flex shrink-0 gap-1">
+                        {pak.has_device_profiles && (
+                          <Badge variant="outline" className="text-[10px] px-2 py-0.5">
+                            DeviceProfiles
+                          </Badge>
+                        )}
+                        {pak.has_engine_ini && (
+                          <Badge variant="outline" className="text-[10px] px-2 py-0.5">
+                            Engine
+                          </Badge>
+                        )}
+                      </div>
+                    </button>
+                    <button
+                      onClick={() => removePak(pak.pak_path)}
+                      className="mr-2 shrink-0 rounded p-1.5 text-muted-foreground/60 transition-colors hover:bg-destructive/15 hover:text-destructive"
+                      title="Remove from list"
+                    >
+                      <X size={14} />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </Card>
 
-          return (
-            <div className="grid gap-5 xl:grid-cols-2 2xl:grid-cols-3">
-              {Object.entries(categories).map(([category, defs]) => (
-                <Card key={category} className="flex flex-col gap-3 bg-card p-4">
-                  <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                    {category}
-                  </span>
-                  <div className="flex flex-col gap-2">
-                    {defs.map((tweak) => {
-                        const engineOnly = !!tweak.engine_section;
-                        const disabled = engineOnly && !selectedPak.has_engine_ini;
-                        return (
-                      <QuickTweakRow
-                            key={tweak.id}
-                            tweak={tweak}
-                            isEnabled={tweakStates.find((s) => s.id === tweak.id)?.active ?? false}
-                            currentValue={tweakStates.find((s) => s.id === tweak.id)?.current_value ?? undefined}
-                            disabled={disabled}
-                            onToggle={() => toggleQuickTweak(tweak.id)}
-                            onValueChange={(val) => setQuickTweakValue(tweak.id, val)}
-                          />
-                        );
-                      })}
-                  </div>
-                </Card>
-              ))}
-            </div>
-          );
-        })()
-      }
-      </div>
+          {/* Selected pak editor — tweak cards */}
+          {selectedPak &&
+            !loading &&
+            (() => {
+              const categories = definitions.reduce<Record<string, TweakDefinition[]>>(
+                (acc, def) => {
+                  (acc[def.category] ??= []).push(def);
+                  return acc;
+                },
+                {}
+              );
+
+              return (
+                <div className="grid gap-5 xl:grid-cols-2 2xl:grid-cols-3">
+                  {Object.entries(categories).map(([category, defs]) => (
+                    <Card key={category} className="flex flex-col gap-3 bg-card p-4">
+                      <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                        {category}
+                      </span>
+                      <div className="flex flex-col gap-2">
+                        {defs.map((tweak) => {
+                          const engineOnly = !!tweak.engine_section;
+                          const disabled = engineOnly && !selectedPak.has_engine_ini;
+                          return (
+                            <QuickTweakRow
+                              key={tweak.id}
+                              tweak={tweak}
+                              isEnabled={
+                                tweakStates.find((s) => s.id === tweak.id)?.active ?? false
+                              }
+                              currentValue={
+                                tweakStates.find((s) => s.id === tweak.id)?.current_value ??
+                                undefined
+                              }
+                              disabled={disabled}
+                              onToggle={() => toggleQuickTweak(tweak.id)}
+                              onValueChange={(val) => setQuickTweakValue(tweak.id, val)}
+                            />
+                          );
+                        })}
+                      </div>
+                    </Card>
+                  ))}
+                </div>
+              );
+            })()}
+        </div>
       </div>
 
       {/* Apply bar — fixed footer, outside the scroll area */}
       {((selectedPak && !loading) || !!notice) && (
         <div className="flex flex-col gap-3 border-t border-border pt-3 pb-1 mt-5">
-              {/* Pending edits summary */}
-              {selectedPak && !loading && edits.length > 0 && (
-                <div className="flex flex-col gap-1.5">
-                  <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                    Pending Changes ({edits.length})
-                  </span>
-                  <div className="flex flex-wrap gap-1">
-                    {edits.map((e) => (
-                      <Badge
-                        key={e.key}
-                        variant={e.value === null ? "destructive" : "secondary"}
-                        className="text-[10px] font-mono px-1.5 py-0"
-                      >
-                        {e.value === null ? `- ${e.key}` : `${e.key}=${e.value}`}
-                      </Badge>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Apply */}
-              <div className="flex items-center gap-3">
-                {selectedPak && !loading && (
-                  <>
-                    <Button
-                      variant="green"
-                      size="sm"
-                      onClick={applyEdits}
-                      disabled={!dirty || applying || edits.length === 0}
-                    >
-                      {applying ? (
-                        <RefreshCw size={14} className="animate-spin" />
-                      ) : (
-                        <Save size={14} />
-                      )}
-                      {applying ? "Repacking…" : dirty ? "Apply & Repack" : "Up to Date"}
-                    </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={clearShaderCache}
-                      title="Delete pipeline cache files from %LOCALAPPDATA%\Marvel\Saved"
-                    >
-                      <Trash2 size={14} />
-                      Clear Shader Cache
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => selectedPak && forceReloadPak(selectedPak)}
-                      disabled={loading}
-                    >
-                      <RefreshCw size={14} />
-                      Reload
-                    </Button>
-                  </>
-                )}
-                {notice && (
-                  <span
-                    className={cn(
-                      "flex items-center gap-1 text-[12px]",
-                      notice.type === "ok"
-                        ? "text-[var(--color-ok)]"
-                        : notice.type === "err"
-                          ? "text-[var(--color-err)]"
-                          : "text-muted-foreground",
-                    )}
+          {/* Pending edits summary */}
+          {selectedPak && !loading && edits.length > 0 && (
+            <div className="flex flex-col gap-1.5">
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                Pending Changes ({edits.length})
+              </span>
+              <div className="flex flex-wrap gap-1">
+                {edits.map((e) => (
+                  <Badge
+                    key={e.key}
+                    variant={e.value === null ? "destructive" : "secondary"}
+                    className="text-[10px] font-mono px-1.5 py-0"
                   >
-                    {notice.type === "ok" && <CheckCircle2 size={13} />}
-                    {notice.msg}
-                  </span>
-                )}
+                    {e.value === null ? `- ${e.key}` : `${e.key}=${e.value}`}
+                  </Badge>
+                ))}
               </div>
+            </div>
+          )}
+
+          {/* Apply */}
+          <div className="flex items-center gap-3">
+            {selectedPak && !loading && (
+              <>
+                <Button
+                  variant="green"
+                  size="sm"
+                  onClick={applyEdits}
+                  disabled={!dirty || applying || edits.length === 0}
+                >
+                  {applying ? <RefreshCw size={14} className="animate-spin" /> : <Save size={14} />}
+                  {applying ? "Repacking…" : dirty ? "Apply & Repack" : "Up to Date"}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={clearShaderCache}
+                  title="Delete pipeline cache files from %LOCALAPPDATA%\Marvel\Saved"
+                >
+                  <Trash2 size={14} />
+                  Clear Shader Cache
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => selectedPak && forceReloadPak(selectedPak)}
+                  disabled={loading}
+                >
+                  <RefreshCw size={14} />
+                  Reload
+                </Button>
+              </>
+            )}
+            {notice && (
+              <span
+                className={cn(
+                  "flex items-center gap-1 text-[12px]",
+                  notice.type === "ok"
+                    ? "text-[var(--color-ok)]"
+                    : notice.type === "err"
+                      ? "text-[var(--color-err)]"
+                      : "text-muted-foreground"
+                )}
+              >
+                {notice.type === "ok" && <CheckCircle2 size={13} />}
+                {notice.msg}
+              </span>
+            )}
+          </div>
         </div>
       )}
-
     </div>
   );
 }
@@ -643,13 +683,18 @@ function QuickTweakRow({
   onValueChange: (val: string) => void;
 }) {
   return (
-    <div className={cn(
-      "flex flex-col gap-2 rounded-md border border-border/50 bg-background px-4 py-3",
-      disabled && "opacity-50",
-    )}>
+    <div
+      className={cn(
+        "flex flex-col gap-2 rounded-md border border-border/50 bg-background px-4 py-3",
+        disabled && "opacity-50"
+      )}
+    >
       <div className="flex items-start justify-between gap-4">
         <div className="flex flex-col gap-0.5">
-          <Label htmlFor={`pak-${tweak.id}`} className={cn("text-[13px] font-medium", !disabled && "cursor-pointer")}>
+          <Label
+            htmlFor={`pak-${tweak.id}`}
+            className={cn("text-[13px] font-medium", !disabled && "cursor-pointer")}
+          >
             {tweak.label}
             {tweak.pak_only && (
               <Badge variant="outline" className="ml-2 text-[9px] px-1.5 py-0 align-middle">
@@ -669,7 +714,12 @@ function QuickTweakRow({
             <QuickTweakCodes tweak={tweak} />
           </div>
         </div>
-        <Switch id={`pak-${tweak.id}`} checked={isEnabled} onCheckedChange={onToggle} disabled={disabled} />
+        <Switch
+          id={`pak-${tweak.id}`}
+          checked={isEnabled}
+          onCheckedChange={onToggle}
+          disabled={disabled}
+        />
       </div>
 
       {tweak.kind === "Slider" && (
@@ -685,8 +735,7 @@ function QuickTweakRow({
 }
 
 function QuickTweakCodes({ tweak }: { tweak: TweakDefinition }) {
-  const codeClass =
-    "rounded bg-muted px-1 py-0.5 font-mono text-[10px] text-muted-foreground";
+  const codeClass = "rounded bg-muted px-1 py-0.5 font-mono text-[10px] text-muted-foreground";
 
   switch (tweak.kind) {
     case "RemoveLines":
@@ -729,10 +778,7 @@ function QuickSliderControl({
 
   return (
     <div
-      className={cn(
-        "flex items-center gap-3 pt-1",
-        !isEnabled && "opacity-40 pointer-events-none",
-      )}
+      className={cn("flex items-center gap-3 pt-1", !isEnabled && "opacity-40 pointer-events-none")}
     >
       <SliderUI
         min={tweak.min}

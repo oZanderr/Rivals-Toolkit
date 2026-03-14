@@ -1,4 +1,5 @@
-import { useState, useEffect, useRef, type ReactNode } from "react";
+import { useState, useEffect, useRef, useCallback, type ReactNode } from "react";
+
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
@@ -12,9 +13,10 @@ import {
   Package,
   ArrowRight,
 } from "lucide-react";
+
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 
 interface InstallInfo {
@@ -41,8 +43,17 @@ interface Props {
   isActive: boolean;
 }
 
-export function Home({ gamePath, setGamePath, setActiveTab, installInfo: info, setInstallInfo: setInfo, isActive }: Props) {
-  const [folderNotice, setFolderNotice] = useState<{ msg: string; type: "ok" | "err" } | null>(null);
+export function Home({
+  gamePath,
+  setGamePath,
+  setActiveTab,
+  installInfo: info,
+  setInstallInfo: setInfo,
+  isActive,
+}: Props) {
+  const [folderNotice, setFolderNotice] = useState<{ msg: string; type: "ok" | "err" } | null>(
+    null
+  );
   const folderNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [detecting, setDetecting] = useState(false);
   const [showBadge, setShowBadge] = useState(false);
@@ -54,7 +65,7 @@ export function Home({ gamePath, setGamePath, setActiveTab, installInfo: info, s
   const refreshBadgeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const badgeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  async function detect() {
+  const detect = useCallback(async () => {
     if (badgeTimer.current) clearTimeout(badgeTimer.current);
     if (detectErrTimer.current) clearTimeout(detectErrTimer.current);
     setDetecting(true);
@@ -75,14 +86,14 @@ export function Home({ gamePath, setGamePath, setActiveTab, installInfo: info, s
     } finally {
       setDetecting(false);
     }
-  }
+  }, [setInfo, setGamePath]);
 
   async function browse() {
     const selected = await open({ directory: true, multiple: false });
     if (typeof selected === "string") setGamePath(selected);
   }
 
-  async function refreshModsStatus(path: string, showBadge = false) {
+  const refreshModsStatus = useCallback(async (path: string, showBadge = false) => {
     setStatusRefreshing(true);
     try {
       const s = await invoke<ModsStatus>("get_mods_status", { gameRoot: path });
@@ -97,7 +108,7 @@ export function Home({ gamePath, setGamePath, setActiveTab, installInfo: info, s
     } finally {
       setStatusRefreshing(false);
     }
-  }
+  }, []);
 
   function showFolderNotice(msg: string, type: "ok" | "err") {
     if (folderNoticeTimer.current) clearTimeout(folderNoticeTimer.current);
@@ -130,16 +141,18 @@ export function Home({ gamePath, setGamePath, setActiveTab, installInfo: info, s
 
   useEffect(() => {
     if (!gamePath) detect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional mount-only: auto-detect only on first load
   }, []);
 
   useEffect(() => {
     if (isActive && gamePath) refreshModsStatus(gamePath);
-  }, [isActive]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- gamePath intentionally omitted: separate effect handles gamePath changes
+  }, [isActive, refreshModsStatus]);
 
   useEffect(() => {
     if (gamePath) refreshModsStatus(gamePath);
     else setModsStatus(null);
-  }, [gamePath]);
+  }, [gamePath, refreshModsStatus]);
 
   const allDone = !!modsStatus && modsStatus.mods_folder_exists && modsStatus.sig_bypass_installed;
   const enabledModsCount = modsStatus?.mod_entries.filter((m) => m.enabled).length ?? 0;
@@ -247,7 +260,7 @@ export function Home({ gamePath, setGamePath, setActiveTab, installInfo: info, s
                     "flex size-5 shrink-0 items-center justify-center rounded-full text-[10px] font-bold",
                     step.done
                       ? "bg-[var(--color-ok)]/15 text-[var(--color-ok)]"
-                      : "bg-[var(--color-warn)]/15 text-[var(--color-warn)]",
+                      : "bg-[var(--color-warn)]/15 text-[var(--color-warn)]"
                   )}
                 >
                   {step.done ? "✓" : i + 1}
@@ -256,7 +269,7 @@ export function Home({ gamePath, setGamePath, setActiveTab, installInfo: info, s
                   <span
                     className={cn(
                       "text-[13px] font-medium",
-                      step.done ? "text-foreground" : "text-muted-foreground",
+                      step.done ? "text-foreground" : "text-muted-foreground"
                     )}
                   >
                     {step.label}
@@ -289,7 +302,11 @@ export function Home({ gamePath, setGamePath, setActiveTab, installInfo: info, s
           icon={<Wrench size={16} />}
           title="Mod Tools"
           description="Install the signature bypass and manage your mods folder."
-          stat={enabledModsCount > 0 ? `${enabledModsCount} active mod${enabledModsCount !== 1 ? "s" : ""}` : undefined}
+          stat={
+            enabledModsCount > 0
+              ? `${enabledModsCount} active mod${enabledModsCount !== 1 ? "s" : ""}`
+              : undefined
+          }
           onClick={() => setActiveTab("mod-tools")}
         />
         <FeatureCard
@@ -314,10 +331,14 @@ export function Home({ gamePath, setGamePath, setActiveTab, installInfo: info, s
             <span
               className={cn(
                 "flex items-center gap-1 text-[12px] font-medium",
-                folderNotice.type === "ok" ? "text-[var(--color-ok)]" : "text-[var(--color-err)]",
+                folderNotice.type === "ok" ? "text-[var(--color-ok)]" : "text-[var(--color-err)]"
               )}
             >
-              {folderNotice.type === "ok" ? <CheckCircle2 size={13} strokeWidth={2.5} /> : <XCircle size={13} strokeWidth={2.5} />}
+              {folderNotice.type === "ok" ? (
+                <CheckCircle2 size={13} strokeWidth={2.5} />
+              ) : (
+                <XCircle size={13} strokeWidth={2.5} />
+              )}
               {folderNotice.msg}
             </span>
           )}
@@ -349,7 +370,6 @@ export function Home({ gamePath, setGamePath, setActiveTab, installInfo: info, s
           />
         </div>
       </Card>
-
     </div>
   );
 }
@@ -371,9 +391,7 @@ function FolderShortcutCard({
       disabled={disabled}
       className={cn(
         "flex items-center justify-between rounded-md border border-border bg-background px-3 py-2 text-left transition-colors",
-        disabled
-          ? "cursor-not-allowed opacity-50"
-          : "hover:bg-secondary/60",
+        disabled ? "cursor-not-allowed opacity-50" : "hover:bg-secondary/60"
       )}
       title={disabled ? "Set game path first" : `Open ${title}`}
     >
@@ -418,4 +436,3 @@ function FeatureCard({
     </Card>
   );
 }
-
