@@ -51,7 +51,6 @@ function App() {
     }
   }
 
-
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-background text-foreground">
       <Titlebar />
@@ -104,7 +103,7 @@ function App() {
                 </span>
                 <button
                   onClick={openDiscord}
-                  className="mt-1.5 inline-flex items-center gap-1 text-[11px] font-medium text-[var(--color-blue-accent-foreground)] hover:opacity-90"
+                  className="mt-1.5 inline-flex items-center gap-1 text-[11px] font-medium text-blue-accent-foreground hover:opacity-90"
                   title="Open Discord server"
                 >
                   <ExternalLink size={11} />
