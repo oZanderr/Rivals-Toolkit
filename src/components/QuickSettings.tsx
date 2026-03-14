@@ -101,7 +101,7 @@ export function QuickSettings({ gamePath }: Props) {
       </div>
 
       {/* Sub-tab bar */}
-      <div className="flex gap-1 rounded-md bg-muted p-1">
+      <div className="flex w-fit gap-1 rounded-md bg-muted p-1">
         {SUB_TABS.map(({ id, label, Icon }) => (
           <button
             key={id}
