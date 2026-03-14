@@ -1,6 +1,6 @@
 use super::tweaks::{TweakDefinition, TweakKind, TweakSetting, TweakState};
 
-/// Scan INI content and report the current state of each tweak.
+/// Detect the current state of each tweak from INI content.
 pub(crate) fn detect_active_tweaks(
     content: &str,
     catalogue: &[TweakDefinition],
@@ -52,7 +52,7 @@ fn detect_one(content: &str, tweak: &TweakDefinition) -> TweakState {
     }
 }
 
-/// Apply user settings to INI content and return the modified text.
+/// Apply tweak settings to INI content and return the modified text.
 pub(crate) fn apply_tweaks(
     content: &str,
     catalogue: &[TweakDefinition],
@@ -85,9 +85,7 @@ pub(crate) fn apply_tweaks(
                 section,
             } => {
                 let value = if setting.enabled { on_value } else { off_value };
-                // Only write if the key already exists in the file OR the user
-                // wants a non-default value. Avoids polluting a clean file with
-                // redundant lines that match the engine default.
+                // Avoid writing default-value keys that were never present.
                 let key_in_file = find_key_value(content, key).is_some();
                 if key_in_file {
                     upsert_key_value(&mut lines, key, value);
@@ -115,15 +113,14 @@ pub(crate) fn apply_tweaks(
     result
 }
 
-/// Check if a line matches a pattern, also considering `+CVars=` prefix.
+/// Check whether a line matches a pattern, including `+CVars=` form.
 fn matches_pattern(trimmed_line: &str, pattern: &str) -> bool {
     let line_lower = trimmed_line.to_ascii_lowercase();
     let pat_lower = pattern.to_ascii_lowercase();
     line_lower == pat_lower || line_lower == format!("+cvars={}", pat_lower)
 }
 
-/// Find the first value of a key in the INI content (case-insensitive key).
-/// Also checks `+CVars=key=value` lines.
+/// Find the first value of `key`, including `+CVars=key=value` lines.
 fn find_key_value(content: &str, key: &str) -> Option<String> {
     let key_lower = key.to_ascii_lowercase();
     let prefix = format!("{}=", key_lower);
@@ -146,7 +143,7 @@ fn find_key_value(content: &str, key: &str) -> Option<String> {
     None
 }
 
-/// Remove all lines that match any of the given patterns (+ CVars forms).
+/// Remove all non-comment lines matching any given pattern.
 fn remove_matching_lines(lines: &mut Vec<String>, entries: &[super::tweaks::ScalabilityLine]) {
     lines.retain(|line| {
         let t = line.trim();
@@ -157,8 +154,8 @@ fn remove_matching_lines(lines: &mut Vec<String>, entries: &[super::tweaks::Scal
     });
 }
 
-/// Add lines that aren't already present, each inserted under its own section.
-/// Lines marked `pak_only` are skipped — they must not be written to scalability files.
+/// Add missing lines under their target sections.
+/// `pak_only` entries are ignored for scalability files.
 fn add_lines_if_absent(lines: &mut Vec<String>, entries: &[super::tweaks::ScalabilityLine]) {
     for entry in entries {
         if entry.pak_only {
@@ -174,9 +171,7 @@ fn add_lines_if_absent(lines: &mut Vec<String>, entries: &[super::tweaks::Scalab
     }
 }
 
-/// Insert `new_line` into the named `[section]` block.
-/// Lines are placed just before the next section header (or at end of section).
-/// If the section header is absent it is appended (with a preceding blank line) together with the new line.
+/// Insert `new_line` into `[section]`, creating the section when missing.
 fn insert_into_section(lines: &mut Vec<String>, section: &str, new_line: String) {
     let header = format!("[{}]", section);
     let header_lower = header.to_ascii_lowercase();
@@ -186,8 +181,6 @@ fn insert_into_section(lines: &mut Vec<String>, section: &str, new_line: String)
         .position(|l| l.trim().to_ascii_lowercase() == header_lower);
 
     let insert_at = if let Some(start) = section_start {
-        // Find the first line after the header that starts a new section.
-        // Insert before it, but after any trailing blank lines that belong to this section.
         let end = lines[start + 1..]
             .iter()
             .position(|l| {
@@ -196,14 +189,12 @@ fn insert_into_section(lines: &mut Vec<String>, section: &str, new_line: String)
             })
             .map(|rel| start + 1 + rel)
             .unwrap_or(lines.len());
-        // Walk back over trailing blank lines so the new line sits inside the section
         let mut pos = end;
         while pos > start + 1 && lines[pos - 1].trim().is_empty() {
             pos -= 1;
         }
         pos
     } else {
-        // Section missing — append a blank separator, then the header.
         if lines.last().map(|l| !l.trim().is_empty()).unwrap_or(false) {
             lines.push(String::new());
         }
@@ -214,8 +205,7 @@ fn insert_into_section(lines: &mut Vec<String>, section: &str, new_line: String)
     lines.insert(insert_at, new_line);
 }
 
-/// Update all occurrences of `key=...` to `key=value` (case-insensitive key).
-/// Returns `true` if at least one line was updated.
+/// Update all occurrences of `key` and return whether any line changed.
 fn upsert_key_value(lines: &mut [String], key: &str, value: &str) -> bool {
     let key_lower = key.to_ascii_lowercase();
     let prefix = format!("{}=", key_lower);
@@ -240,7 +230,7 @@ fn upsert_key_value(lines: &mut [String], key: &str, value: &str) -> bool {
     found
 }
 
-/// Remove all non-comment lines matching `key=...` (case-insensitive, + CVars).
+/// Remove all non-comment lines matching `key`, including `+CVars=` form.
 fn remove_key(lines: &mut Vec<String>, key: &str) {
     let key_lower = key.to_ascii_lowercase();
     let prefix = format!("{}=", key_lower);

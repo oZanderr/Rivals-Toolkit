@@ -9,8 +9,7 @@ static BYPASS_DSOUND: &[u8] = include_bytes!("../resources/bypass/dsound.dll");
 static BYPASS_ASI: &[u8] =
     include_bytes!("../resources/bypass/plugins/MarvelRivalsUTOCSignatureBypass.asi");
 
-/// Returns `true` if the file at `path` exists and its contents
-/// are byte-identical to `expected`.
+/// Check whether a file exists and matches the expected bytes.
 fn file_matches(path: &std::path::Path, expected: &[u8]) -> bool {
     std::fs::read(path)
         .map(|data| data == expected)

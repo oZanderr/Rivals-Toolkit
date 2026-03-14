@@ -9,7 +9,7 @@ use io::{extract_file_to_string, inspect_pak_for_ini, repack_dir_to_pak, unpack_
 
 use crate::paths::mods_dir;
 
-/// Describes which INI files exist inside a given pak mod.
+/// INI entries discovered in a pak mod.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct PakIniInfo {
     pub pak_name: String,
@@ -20,7 +20,7 @@ pub(crate) struct PakIniInfo {
     pub engine_ini_entry: Option<String>,
 }
 
-/// The current console variable values detected inside a pak mod's INI.
+/// Parsed CVar state from pak INI files.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct PakTweakState {
     pub key: String,
@@ -28,7 +28,7 @@ pub(crate) struct PakTweakState {
     pub source: String,
 }
 
-/// A console variable to set or remove inside a pak mod's INI.
+/// Requested CVar edit for pak INI files.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct PakTweakEdit {
     pub key: String,
@@ -37,12 +37,12 @@ pub(crate) struct PakTweakEdit {
     pub engine_section: Option<String>,
 }
 
-/// Inspect a single pak file and return its INI metadata, or None if it contains no tweakable INI.
+/// Inspect one pak and return INI metadata when present.
 pub(crate) fn inspect_single_pak(pak_path: &str) -> Result<Option<PakIniInfo>, String> {
     io::inspect_pak_for_ini(Path::new(pak_path))
 }
 
-/// Scan all pak mods in ~mods and report which ones contain INI config files.
+/// Scan `~mods` and return paks that contain tweakable INI files.
 pub(crate) fn scan_mod_paks(game_root: &str) -> Result<Vec<PakIniInfo>, String> {
     let mods_dir = mods_dir(game_root);
     if !mods_dir.is_dir() {
@@ -66,20 +66,14 @@ pub(crate) fn scan_mod_paks(game_root: &str) -> Result<Vec<PakIniInfo>, String> 
     Ok(results)
 }
 
-/// Read current console variables from a pak mod's INI files.
+/// Read CVar values from pak INI files.
 ///
-/// When both DefaultEngine.ini and DefaultDeviceProfiles.ini exist, both are
-/// read and merged: Engine.ini provides the base set of CVars, then
-/// DeviceProfiles.ini layered on top (its values win for any shared keys).
-/// Keys that only exist in Engine.ini are still included — they take effect
-/// even when DeviceProfiles.ini is present, as long as DeviceProfiles does
-/// not explicitly define the same key.
+/// If both Engine and DeviceProfiles are present, DeviceProfiles overrides shared keys.
 pub(crate) fn read_pak_tweaks(pak_path: &str) -> Result<Vec<PakTweakState>, String> {
     let pak_path = Path::new(pak_path);
     let info = inspect_pak_for_ini(pak_path)?
         .ok_or_else(|| "No INI config files found in this pak.".to_string())?;
 
-    // Start with Engine.ini as the base (lower priority).
     let mut merged: Vec<PakTweakState> = if let Some(ref eng) = info.engine_ini_entry {
         let content = extract_file_to_string(pak_path, eng)?;
         parse_console_vars(&content, "DefaultEngine.ini")
@@ -87,8 +81,6 @@ pub(crate) fn read_pak_tweaks(pak_path: &str) -> Result<Vec<PakTweakState>, Stri
         Vec::new()
     };
 
-    // Layer DeviceProfiles on top: its values override Engine for shared keys,
-    // and any keys unique to Engine are preserved as-is.
     if let Some(ref dp) = info.device_profiles_entry {
         let content = extract_file_to_string(pak_path, dp)?;
         let dp_vars = parse_console_vars(&content, "DefaultDeviceProfiles.ini");
@@ -109,18 +101,10 @@ pub(crate) fn read_pak_tweaks(pak_path: &str) -> Result<Vec<PakTweakState>, Stri
     Ok(merged)
 }
 
-/// Detect which tweaks are currently active in a pak mod's INI files.
-///
-/// Reads and merges both INI files (Engine base + DeviceProfiles override),
-/// then runs the same Rust-side detection logic used by ScalabilitySettings so
-/// that `default_enabled`, section-awareness, and all future changes live in
-/// one place rather than being duplicated in JS.
+/// Detect active tweaks from pak INI content using the shared tweak detector.
 pub(crate) fn detect_pak_tweaks(
     pak_path: &str,
 ) -> Result<Vec<crate::scalability::TweakState>, String> {
-    // Build a synthetic flat INI string from the merged key-value pairs.
-    // `detect_tweaks` uses line-by-line `key=value` matching and doesn't
-    // require section headers, so a flat dump is sufficient.
     let merged = read_pak_tweaks(pak_path)?;
     let synthetic: String = merged
         .iter()
@@ -131,7 +115,7 @@ pub(crate) fn detect_pak_tweaks(
     Ok(crate::scalability::detect_tweaks(&synthetic))
 }
 
-/// Apply tweaks to a pak mod: extract → edit INI → repack in place.
+/// Apply edits to pak INI files and repack in place.
 pub(crate) fn apply_pak_tweaks(pak_path: &str, edits: &[PakTweakEdit]) -> Result<String, String> {
     let pak = Path::new(pak_path);
     if !pak.exists() {
@@ -153,27 +137,17 @@ pub(crate) fn apply_pak_tweaks(pak_path: &str, edits: &[PakTweakEdit]) -> Result
 
     let _ = fs::remove_dir_all(&temp_dir);
 
-    // 1. Extract entire pak to temp dir
     unpack_to_dir(pak, &temp_dir)?;
 
-    // 2. Apply edits.
-    //
-    // When both files coexist:
-    //   • Edits with engine_section set → Engine.ini only (those keys only work
-    //     there, e.g. ApplicationScale under [/Script/Engine.UserInterfaceSettings]).
-    //   • Other set/add edits → DeviceProfiles only (it overrides Engine for those keys).
-    //   • Remove edits → DeviceProfiles AND Engine.ini (key could live in either).
-    //
-    // When only one file exists: apply all edits to that file.
+    // When DeviceProfiles exists, scoped engine edits go to Engine.ini.
+    // Remove edits are also applied to Engine.ini to avoid stale keys.
 
     if info.has_device_profiles {
-        // Split: engine-section edits go to Engine.ini; the rest go to DeviceProfiles.
         let (engine_edits, dp_edits): (Vec<PakTweakEdit>, Vec<PakTweakEdit>) = edits
             .iter()
             .cloned()
             .partition(|e| e.engine_section.is_some() && e.value.is_some());
 
-        // Apply DeviceProfiles edits (set/add/remove for regular CVars).
         let dp_entry = info
             .device_profiles_entry
             .as_ref()
@@ -199,7 +173,6 @@ pub(crate) fn apply_pak_tweaks(pak_path: &str, edits: &[PakTweakEdit]) -> Result
             )
         })?;
 
-        // Apply engine-section edits AND all remove-edits to Engine.ini.
         if let Some(ref eng_entry) = info.engine_ini_entry {
             let remove_edits: Vec<PakTweakEdit> = edits
                 .iter()
@@ -227,7 +200,6 @@ pub(crate) fn apply_pak_tweaks(pak_path: &str, edits: &[PakTweakEdit]) -> Result
             }
         }
     } else {
-        // Only Engine.ini present.
         let eng_entry = info
             .engine_ini_entry
             .as_ref()
@@ -254,7 +226,6 @@ pub(crate) fn apply_pak_tweaks(pak_path: &str, edits: &[PakTweakEdit]) -> Result
         })?;
     }
 
-    // 3. Repack to a temp pak, then replace the original
     let temp_pak = pak
         .parent()
         .unwrap_or_else(|| Path::new("."))
@@ -262,12 +233,10 @@ pub(crate) fn apply_pak_tweaks(pak_path: &str, edits: &[PakTweakEdit]) -> Result
 
     repack_dir_to_pak(&temp_dir, &temp_pak)?;
 
-    // 4. Replace original with repacked
     fs::remove_file(pak).map_err(|e| format!("Failed to remove original pak: {}", e))?;
     fs::rename(&temp_pak, pak)
         .map_err(|e| format!("Failed to replace pak with repacked version: {}", e))?;
 
-    // 5. Cleanup
     let _ = fs::remove_dir_all(&temp_dir);
 
     Ok(format!(

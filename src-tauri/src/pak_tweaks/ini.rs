@@ -6,7 +6,7 @@ pub(super) enum IniType {
     DeviceProfiles,
 }
 
-/// Apply edits to an INI file's content.
+/// Apply edits to INI content.
 pub(super) fn apply_edits_to_ini(
     content: &str,
     edits: &[PakTweakEdit],
@@ -30,9 +30,7 @@ pub(super) fn apply_edits_to_ini(
     result
 }
 
-/// Parse console variables from an INI file.
-/// For DefaultEngine.ini, looks for lines under [ConsoleVariables] or bare key=value.
-/// For DefaultDeviceProfiles.ini, looks for +CVars= lines in [Windows DeviceProfile].
+/// Parse CVar key/value lines from Engine or DeviceProfiles INI content.
 pub(super) fn parse_console_vars(content: &str, source: &str) -> Vec<PakTweakState> {
     let mut vars = Vec::new();
     let is_device_profiles = source.contains("DeviceProfiles");
@@ -60,11 +58,7 @@ pub(super) fn parse_console_vars(content: &str, source: &str) -> Vec<PakTweakSta
             }
         }
     } else {
-        // DefaultEngine.ini: scan ALL sections for key=value pairs.
-        //
-        // Some keys (e.g. ApplicationScale) live in object-settings sections like
-        // [Script/Engine.UserInterfaceSettings] rather than [ConsoleVariables].
-        // Reading every section ensures we catch them all regardless of where they sit.
+        // Engine.ini keys can be outside [ConsoleVariables], so scan all sections.
         let mut in_any_section = false;
         for line in content.lines() {
             let trimmed = line.trim();
@@ -90,7 +84,7 @@ pub(super) fn parse_console_vars(content: &str, source: &str) -> Vec<PakTweakSta
     vars
 }
 
-/// Parse a single CVar line, handling optional +CVars= prefix.
+/// Parse one CVar line, supporting optional `+CVars=` prefix.
 fn parse_cvar_line(line: &str) -> Option<(String, String)> {
     let inner = if line.to_ascii_lowercase().starts_with("+cvars=") {
         &line["+CVars=".len()..]
@@ -107,14 +101,14 @@ fn parse_cvar_line(line: &str) -> Option<(String, String)> {
     Some((key.to_string(), value.to_string()))
 }
 
-/// Check if a section header is the Windows DeviceProfile section.
+/// Check whether a section header is `[Windows DeviceProfile]`.
 fn is_windows_device_profile_header(header: &str) -> bool {
     header
         .trim()
         .eq_ignore_ascii_case("[Windows DeviceProfile]")
 }
 
-/// Remove every non-comment line whose CVar key matches `key_lower` (case-insensitive).
+/// Remove non-comment CVar lines whose key matches `key_lower`.
 fn remove_cvar_key(lines: &mut Vec<String>, key_lower: &str) {
     lines.retain(|line| {
         let t = line.trim();
@@ -128,7 +122,7 @@ fn remove_cvar_key(lines: &mut Vec<String>, key_lower: &str) {
     });
 }
 
-/// Format a key=value line, optionally preserving a `+CVars=` prefix.
+/// Format a CVar assignment line.
 fn format_cvar_line(key: &str, val: &str, preserve_prefix: bool) -> String {
     if preserve_prefix {
         format!("+CVars={}={}", key, val)
@@ -137,7 +131,7 @@ fn format_cvar_line(key: &str, val: &str, preserve_prefix: bool) -> String {
     }
 }
 
-/// Find the end of a section (next `[` header or EOF).
+/// Find the end of a section (next header or EOF).
 fn find_section_end(lines: &[String], section_start: usize) -> usize {
     for (i, line) in lines.iter().enumerate().skip(section_start + 1) {
         if line.trim().starts_with('[') {
@@ -147,11 +141,9 @@ fn find_section_end(lines: &[String], section_start: usize) -> usize {
     lines.len()
 }
 
-/// Find the best insert point for a new line inside a section
-/// (after the last non-empty content line, before the next section or EOF).
+/// Find an insert point near the end of a section, before trailing blank lines.
 fn find_section_insert_point(lines: &[String], section_start: usize) -> usize {
     let end = find_section_end(lines, section_start);
-    // Insert before trailing blank lines at end of section
     let mut insert = end;
     while insert > section_start + 1 && lines[insert - 1].trim().is_empty() {
         insert -= 1;
@@ -159,7 +151,7 @@ fn find_section_insert_point(lines: &[String], section_start: usize) -> usize {
     insert
 }
 
-/// Apply edits to DefaultDeviceProfiles.ini inside the [Windows DeviceProfile] section.
+/// Apply edits inside the `[Windows DeviceProfile]` section.
 fn apply_device_profiles_edits(lines: &mut Vec<String>, edits: &[PakTweakEdit]) {
     let mut section_start: Option<usize> = None;
     let mut section_end: Option<usize> = None;
@@ -174,7 +166,6 @@ fn apply_device_profiles_edits(lines: &mut Vec<String>, edits: &[PakTweakEdit]) 
     }
 
     let Some(start) = section_start else {
-        // Don't modify when a section doesn't exist
         return;
     };
     let end = section_end.unwrap_or(lines.len());
@@ -182,7 +173,6 @@ fn apply_device_profiles_edits(lines: &mut Vec<String>, edits: &[PakTweakEdit]) 
     for edit in edits {
         let key_lower = edit.key.to_ascii_lowercase();
 
-        // Find existing line for this key within the section
         let mut found_idx = None;
         for (i, line) in lines
             .iter()
@@ -207,7 +197,6 @@ fn apply_device_profiles_edits(lines: &mut Vec<String>, edits: &[PakTweakEdit]) 
 
         match (&edit.value, found_idx) {
             (Some(val), Some(_)) => {
-                // Update ALL occurrences within the section, preserving +CVars= prefix.
                 let end_now = section_end.unwrap_or(lines.len());
                 for i in (start + 1)..end_now.min(lines.len()) {
                     let t = lines[i].trim().to_string();
@@ -223,7 +212,6 @@ fn apply_device_profiles_edits(lines: &mut Vec<String>, edits: &[PakTweakEdit]) 
                 }
             }
             (Some(val), None) => {
-                // Add new line at end of section (before next section or EOF)
                 let insert_at = find_section_insert_point(lines, start);
                 lines.insert(insert_at, format_cvar_line(&edit.key, val, true));
             }
@@ -235,19 +223,14 @@ fn apply_device_profiles_edits(lines: &mut Vec<String>, edits: &[PakTweakEdit]) 
     }
 }
 
-/// Apply edits to DefaultEngine.ini.
+/// Apply edits to Engine.ini.
 ///
-/// For each edit:
-/// 1. Search the **entire file** for an existing line with that key (any section).
-///    If found, update or remove it in-place — preserving its original section.
-/// 2. If the key is not found and we're inserting a value, use the edit's
-///    `engine_section` hint to find (or create) the right `[Section]` header,
-///    then insert the line there.  Falls back to `[ConsoleVariables]`.
+/// Existing keys are updated in place. New keys are inserted into `engine_section`
+/// when provided, otherwise into `[ConsoleVariables]`.
 fn apply_engine_edits(lines: &mut Vec<String>, edits: &[PakTweakEdit]) {
     for edit in edits {
         let key_lower = edit.key.to_ascii_lowercase();
 
-        // Find the key anywhere in the file
         let mut in_section = false;
         let mut found_idx: Option<usize> = None;
         for (i, line) in lines.iter().enumerate() {
@@ -268,7 +251,6 @@ fn apply_engine_edits(lines: &mut Vec<String>, edits: &[PakTweakEdit]) {
         }
 
         match (&edit.value, found_idx) {
-            // Update all occurrences
             (Some(val), Some(_)) => {
                 let new_line = format_cvar_line(&edit.key, val, false);
                 for line in lines.iter_mut() {
@@ -283,13 +265,10 @@ fn apply_engine_edits(lines: &mut Vec<String>, edits: &[PakTweakEdit]) {
                     }
                 }
             }
-            // Remove all occurrences
             (None, Some(_)) => {
                 remove_cvar_key(lines, &key_lower);
             }
-            // Nothing to remove
             (None, None) => {}
-            // Insert into the correct section
             (Some(val), None) => {
                 let target_header = edit
                     .engine_section
@@ -297,7 +276,6 @@ fn apply_engine_edits(lines: &mut Vec<String>, edits: &[PakTweakEdit]) {
                     .map(|s| format!("[{}]", s))
                     .unwrap_or_else(|| "[ConsoleVariables]".to_string());
 
-                // Find the last occurrence of that section in the file
                 let section_start = lines
                     .iter()
                     .rposition(|l| l.trim().eq_ignore_ascii_case(&target_header));
@@ -305,7 +283,6 @@ fn apply_engine_edits(lines: &mut Vec<String>, edits: &[PakTweakEdit]) {
                 let section_start = match section_start {
                     Some(idx) => idx,
                     None => {
-                        // Section doesn't exist, create it at the end
                         if !lines.last().is_some_and(|l| l.trim().is_empty()) {
                             lines.push(String::new());
                         }
