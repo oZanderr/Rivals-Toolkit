@@ -2,7 +2,7 @@ mod bypass;
 mod folder;
 mod status;
 
-pub(crate) use status::ModsStatus;
+pub(crate) use status::{ModsStatus};
 
 // Bypass files bundled at compile time.
 static BYPASS_DSOUND: &[u8] = include_bytes!("../resources/bypass/dsound.dll");
@@ -25,6 +25,26 @@ pub(crate) fn install_signature_bypass(game_root: &str) -> Result<String, String
     bypass::install_signature_bypass(game_root)
 }
 
+pub(crate) fn remove_signature_bypass(game_root: &str) -> Result<String, String> {
+    bypass::remove_signature_bypass(game_root)
+}
+
 pub(crate) fn open_mods_folder(game_root: &str) -> Result<(), String> {
     folder::open_mods_folder(game_root)
+}
+
+pub(crate) fn toggle_mod_enabled(
+    mods_folder: &str,
+    full_name: &str,
+    enabled: bool,
+) -> Result<(), String> {
+    folder::toggle_mod_enabled(mods_folder, full_name, enabled)
+}
+
+pub(crate) fn export_mods_zip(mods_folder: &str, dest_path: &str) -> Result<String, String> {
+    folder::export_mods_zip(mods_folder, dest_path)
+}
+
+pub(crate) fn delete_mod(mods_folder: &str, full_name: &str) -> Result<(), String> {
+    folder::delete_mod(mods_folder, full_name)
 }

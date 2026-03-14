@@ -20,6 +20,7 @@ pub fn run() {
             commands::repack_pak,
             commands::get_mods_status,
             commands::install_signature_bypass,
+            commands::remove_signature_bypass,
             commands::open_mods_folder,
             commands::get_scalability_path,
             commands::read_scalability,
@@ -28,8 +29,14 @@ pub fn run() {
             commands::detect_tweaks,
             commands::apply_tweaks,
             commands::scan_mod_paks_for_ini,
+            commands::inspect_pak_path,
             commands::detect_pak_tweaks,
-            commands::apply_pak_tweak_edits
+            commands::apply_pak_tweak_edits,
+            commands::clear_shader_cache,
+            commands::launch_game,
+            commands::toggle_mod_enabled,
+            commands::export_mods_zip,
+            commands::delete_mod
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

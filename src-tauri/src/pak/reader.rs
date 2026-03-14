@@ -9,6 +9,30 @@ use walkdir::WalkDir;
 use super::crypto::open_pak;
 use crate::paths::paks_dir;
 
+fn ensure_supported_pak(pak_path: &str) -> Result<(), String> {
+    let name = Path::new(pak_path)
+        .file_name()
+        .and_then(|x| x.to_str())
+        .unwrap_or_default();
+
+    // Rivals update patch paks (e.g. Patch_-Windows_..._P.pak) are delta containers
+    // and are merged by the game/launcher during update flow, not normal browseable paks.
+    if name.starts_with("Patch_") {
+        return Err(
+            "Update patch pak (delta) is not browseable. Launch Marvel Rivals once after update.".to_string(),
+        );
+    }
+
+    Ok(())
+}
+
+fn is_update_patch_pak_path(path: &str) -> bool {
+    Path::new(path)
+        .file_name()
+        .and_then(|x| x.to_str())
+        .is_some_and(|name| name.to_ascii_lowercase().starts_with("patch_"))
+}
+
 /// Walks the game's Paks directory and returns the absolute paths of every pak file found.
 /// Mod paks from the ~mods subdirectory are included and sorted after game paks.
 pub(super) fn list_pak_files(game_root: &str) -> Result<Vec<String>, String> {
@@ -32,7 +56,17 @@ pub(super) fn list_pak_files(game_root: &str) -> Result<Vec<String>, String> {
         })
         .map(|e| e.path().to_string_lossy().into_owned())
         .collect();
-    game_paks.sort();
+    game_paks.sort_by(|a, b| {
+        let a_key = (
+            is_update_patch_pak_path(a),
+            a.to_ascii_lowercase(),
+        );
+        let b_key = (
+            is_update_patch_pak_path(b),
+            b.to_ascii_lowercase(),
+        );
+        a_key.cmp(&b_key)
+    });
 
     // Mod paks from ~mods subdirectory
     let mods_dir = dir.join("~mods");
@@ -55,10 +89,12 @@ pub(super) fn list_pak_files(game_root: &str) -> Result<Vec<String>, String> {
 }
 
 pub(super) fn list_pak_contents(pak_path: &str) -> Result<Vec<String>, String> {
+    ensure_supported_pak(pak_path)?;
     Ok(open_pak(Path::new(pak_path))?.files())
 }
 
 pub(super) fn unpack_pak(pak_path: &str, output_dir: &str) -> Result<Vec<String>, String> {
+    ensure_supported_pak(pak_path)?;
     let output = Path::new(output_dir);
     fs::create_dir_all(output).map_err(|e| e.to_string())?;
 
@@ -84,6 +120,7 @@ pub(super) fn extract_single_file(
     file_name: &str,
     output_path: &str,
 ) -> Result<(), String> {
+    ensure_supported_pak(pak_path)?;
     let pak = open_pak(Path::new(pak_path))?;
     if let Some(parent) = Path::new(output_path).parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;

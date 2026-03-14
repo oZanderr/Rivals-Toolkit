@@ -1,11 +1,16 @@
 import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 import {
   Package,
   RefreshCw,
   Save,
+  Search,
+  FolderOpen,
+  X,
   CheckCircle2,
   XCircle,
+  Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -74,6 +79,13 @@ interface SliderTweak extends TweakBase {
 
 type TweakDefinition = RemoveLinesTweak | ToggleTweak | SliderTweak;
 
+// Per-pak state cache that preserves tweak states and unsaved edits when switching between paks
+interface PakCacheEntry {
+  tweakStates: TweakState[];
+  savedTweakStates: TweakState[];
+  edits: PakTweakEdit[];
+}
+
 interface Props {
   gamePath: string;
 }
@@ -82,27 +94,41 @@ export function PakTweaks({ gamePath }: Props) {
   const [paks, setPaks] = useState<PakIniInfo[]>([]);
   const [selectedPak, setSelectedPak] = useState<PakIniInfo | null>(null);
   const [tweakStates, setTweakStates] = useState<TweakState[]>([]);
+  const [savedTweakStates, setSavedTweakStates] = useState<TweakState[]>([]);
   const [edits, setEdits] = useState<PakTweakEdit[]>([]);
   const [scanning, setScanning] = useState(false);
   const [loading, setLoading] = useState(false);
   const [applying, setApplying] = useState(false);
-  const [dirty, setDirty] = useState(false);
-  const [showBadge, setShowBadge] = useState(false);
-  const [badgeMsg, setBadgeMsg] = useState("");
-  const badgeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
+  const [notice, setNotice] = useState<{ msg: string; type: "ok" | "err" | "info" } | null>(null);
+  const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pakCache = useRef<Map<string, PakCacheEntry>>(new Map());
   // Tweak definitions (for rendering controls)
   const [definitions, setDefinitions] = useState<TweakDefinition[]>([]);
 
-  const flashBadge = (msg: string) => {
-    if (badgeTimer.current) clearTimeout(badgeTimer.current);
-    setBadgeMsg(msg);
-    setShowBadge(true);
-    badgeTimer.current = setTimeout(() => setShowBadge(false), 4000);
+  const isPakMissingError = (err: unknown): boolean => {
+    const text = String(err).toLowerCase();
+    return (
+      text.includes("pak file not found") ||
+      text.includes("no such file") ||
+      text.includes("cannot find the file")
+    );
+  };
+
+  const formatModsFoundMessage = (count: number, removedMissing: number): string => {
+    const modsPart = `Found ${count} mod${count !== 1 ? "s" : ""}`;
+    if (removedMissing <= 0) return modsPart;
+    const removedPart = `removed ${removedMissing} missing manual entr${removedMissing === 1 ? "y" : "ies"}`;
+    return `${modsPart} (${removedPart})`;
+  };
+
+  const showNotice = (msg: string, type: "ok" | "err" | "info", duration = 4000) => {
+    if (noticeTimer.current) clearTimeout(noticeTimer.current);
+    setNotice({ msg, type });
+    noticeTimer.current = setTimeout(() => setNotice(null), duration);
   };
 
   useEffect(() => {
-    if (gamePath) scan();
+    if (gamePath) scan(true);
   }, [gamePath]);
 
   // Load tweak definitions once
@@ -115,6 +141,7 @@ export function PakTweaks({ gamePath }: Props) {
     if (!def) return;
 
     const currentState = tweakStates.find((s) => s.id === id);
+    const savedState = savedTweakStates.find((s) => s.id === id);
     const newEnabled = !(currentState?.active ?? false);
 
     // Optimistically update local state so the UI responds immediately
@@ -128,23 +155,22 @@ export function PakTweaks({ gamePath }: Props) {
           const eqIdx = line.pattern.indexOf("=");
           const key = eqIdx >= 0 ? line.pattern.substring(0, eqIdx) : line.pattern;
           const val = eqIdx >= 0 ? line.pattern.substring(eqIdx + 1) : "0";
-          if (newEnabled) {
-            queueEdit(key, null);
-          } else {
-            queueEdit(key, val);
-          }
+          // Original: null if tweak was active (line removed), val if inactive
+          const originalVal = (savedState?.active ?? false) ? null : val;
+          queueEdit(key, newEnabled ? null : val, originalVal);
         }
         break;
-      case "Toggle":
-        queueEdit(def.key, newEnabled ? def.on_value : def.off_value, def.engine_section);
+      case "Toggle": {
+        const originalVal = (savedState?.active ?? false) ? def.on_value : def.off_value;
+        queueEdit(def.key, newEnabled ? def.on_value : def.off_value, originalVal, def.engine_section);
         break;
+      }
       case "Slider": {
         const currentVal = currentState?.current_value ?? String((def as SliderTweak).default_value);
-        if (newEnabled) {
-          queueEdit(def.key, currentVal, def.engine_section);
-        } else {
-          queueEdit(def.key, null, def.engine_section);
-        }
+        const originalVal = (savedState?.active ?? false)
+          ? (savedState?.current_value ?? String((def as SliderTweak).default_value))
+          : null;
+        queueEdit(def.key, newEnabled ? currentVal : null, originalVal, def.engine_section);
         break;
       }
     }
@@ -153,36 +179,86 @@ export function PakTweaks({ gamePath }: Props) {
   function setQuickTweakValue(id: string, val: string) {
     const def = definitions.find((d) => d.id === id);
     if (!def || def.kind !== "Slider") return;
+    const savedState = savedTweakStates.find((s) => s.id === id);
+    const originalVal = (savedState?.active ?? false)
+      ? (savedState?.current_value ?? String((def as SliderTweak).default_value))
+      : null;
     setTweakStates((prev) =>
       prev.map((s) => (s.id === id ? { ...s, current_value: val } : s)),
     );
-    queueEdit((def as SliderTweak).key, val, def.engine_section);
+    queueEdit((def as SliderTweak).key, val, originalVal, def.engine_section);
   }
 
-  async function scan() {
+  async function browse() {
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: "Pak files", extensions: ["pak"] }],
+    });
+    if (typeof selected !== "string") return;
+    try {
+      const info = await invoke<PakIniInfo | null>("inspect_pak_path", { pakPath: selected });
+      if (!info) {
+        showNotice("No tweakable INI found in that pak", "err");
+        return;
+      }
+      // Add to list if not already present, then select it
+      setPaks((prev) => prev.find((p) => p.pak_path === info.pak_path) ? prev : [...prev, info]);
+      await selectPak(info);
+    } catch (e: any) {
+      showNotice("Failed to read pak", "err");
+      console.error(e);
+    }
+  }
+
+  /** Scan the mods folder for pak files — only updates the list, preserves current selection and edits */
+  async function scan(silent = false) {
     if (!gamePath) return;
     setScanning(true);
     try {
       const results = await invoke<PakIniInfo[]>("scan_mod_paks_for_ini", {
         gameRoot: gamePath,
       });
-      setPaks(results);
-      if (results.length === 0) {
+      // Keep manually-browsed paks that still exist and still contain tweakable INI entries.
+      const manualOnly = paks.filter((p) => !results.find((r) => r.pak_path === p.pak_path));
+      const inspectedManual = await Promise.all(
+        manualOnly.map(async (pak) => {
+          try {
+            return await invoke<PakIniInfo | null>("inspect_pak_path", { pakPath: pak.pak_path });
+          } catch {
+            return null;
+          }
+        }),
+      );
+      const retainedManual = inspectedManual.filter((pak): pak is PakIniInfo => pak !== null);
+      const removedMissing = manualOnly.length - retainedManual.length;
+
+      // Merge: keep valid manually-browsed paks that aren't in the folder scan.
+      const merged = [
+        ...results,
+        ...retainedManual,
+      ];
+      setPaks(merged);
+      if (merged.length === 0) {
         setSelectedPak(null);
         setTweakStates([]);
+        setSavedTweakStates([]);
         setEdits([]);
-        setDirty(false);
-      } else if (results.length === 1) {
-        // Auto-select the only available pak
-        await selectPak(results[0]);
-      } else {
-        // If previously selected pak is gone, deselect
-        if (selectedPak && !results.find((p) => p.pak_path === selectedPak.pak_path)) {
-          setSelectedPak(null);
-          setTweakStates([]);
-          setEdits([]);
-          setDirty(false);
+        if (!silent) showNotice("No config mods found", "info");
+      } else if (!selectedPak) {
+        // Nothing selected yet — auto-select if only one
+        if (merged.length === 1) {
+          await selectPak(merged[0]);
         }
+        if (!silent) showNotice(formatModsFoundMessage(merged.length, removedMissing), "ok");
+      } else if (!merged.find((p) => p.pak_path === selectedPak.pak_path)) {
+        // Previously selected pak is gone — deselect
+        setSelectedPak(null);
+        setTweakStates([]);
+        setSavedTweakStates([]);
+        setEdits([]);
+        if (!silent) showNotice(formatModsFoundMessage(merged.length, removedMissing), "ok");
+      } else {
+        if (!silent) showNotice(formatModsFoundMessage(merged.length, removedMissing), "ok");
       }
     } catch (e: any) {
       console.error("Scan failed:", e);
@@ -192,26 +268,76 @@ export function PakTweaks({ gamePath }: Props) {
   }
 
   async function selectPak(pak: PakIniInfo) {
+    // Save current state before switching so we can restore it if user comes back
+    if (selectedPak && selectedPak.pak_path !== pak.pak_path) {
+      pakCache.current.set(selectedPak.pak_path, { tweakStates, savedTweakStates, edits });
+    }
+
+    const cached = pakCache.current.get(pak.pak_path);
+    if (cached) {
+      setSelectedPak(pak);
+      setTweakStates(cached.tweakStates);
+      setSavedTweakStates(cached.savedTweakStates);
+      setEdits(cached.edits);
+      return;
+    }
+
+    // Cache miss — fetch from backend
     setSelectedPak(pak);
+    setTweakStates([]);
+    setSavedTweakStates([]);
+    setEdits([]);
     setLoading(true);
     try {
-      const states = await invoke<TweakState[]>("detect_pak_tweaks", {
-        pakPath: pak.pak_path,
-      });
+      const states = await invoke<TweakState[]>("detect_pak_tweaks", { pakPath: pak.pak_path });
       setTweakStates(states);
+      setSavedTweakStates(states);
       setEdits([]);
-      setDirty(false);
+      pakCache.current.set(pak.pak_path, { tweakStates: states, savedTweakStates: states, edits: [] });
     } catch (e: any) {
+      if (isPakMissingError(e)) {
+        removePak(pak.pak_path);
+        showNotice("That pak file is missing now. Removed it from the list.", "info");
+      }
       console.error("Load failed:", e);
-      setTweakStates([]);
     } finally {
       setLoading(false);
     }
   }
 
-  function queueEdit(key: string, value: string | null, engineSection?: string) {
+  /** Force a fresh reload from disk, bypassing and updating the cache */
+  async function forceReloadPak(pak: PakIniInfo) {
+    pakCache.current.delete(pak.pak_path);
+    setLoading(true);
+    try {
+      const states = await invoke<TweakState[]>("detect_pak_tweaks", { pakPath: pak.pak_path });
+      setTweakStates(states);
+      setSavedTweakStates(states);
+      setEdits([]);
+      pakCache.current.set(pak.pak_path, { tweakStates: states, savedTweakStates: states, edits: [] });
+    } catch (e: any) {
+      if (isPakMissingError(e)) {
+        removePak(pak.pak_path);
+        showNotice("That pak file is missing now. Removed it from the list.", "info");
+      }
+      console.error("Reload failed:", e);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function queueEdit(key: string, value: string | null, originalValue: string | null | undefined, engineSection?: string) {
     setEdits((prev) => {
       const existing = prev.findIndex((e) => e.key.toLowerCase() === key.toLowerCase());
+      // If the new value restores to original, cancel out this edit
+      if (originalValue !== undefined && value === originalValue) {
+        if (existing >= 0) {
+          const updated = [...prev];
+          updated.splice(existing, 1);
+          return updated;
+        }
+        return prev;
+      }
       if (existing >= 0) {
         const updated = [...prev];
         updated[existing] = { key, value, engine_section: engineSection };
@@ -219,7 +345,6 @@ export function PakTweaks({ gamePath }: Props) {
       }
       return [...prev, { key, value, engine_section: engineSection }];
     });
-    setDirty(true);
   }
 
   async function applyEdits() {
@@ -230,35 +355,71 @@ export function PakTweaks({ gamePath }: Props) {
         pakPath: selectedPak.pak_path,
         edits,
       });
-      flashBadge(msg);
-      setDirty(false);
-      // Reload to reflect changes
-      await selectPak(selectedPak);
+      showNotice(msg, "ok");
+      await forceReloadPak(selectedPak);
     } catch (e: any) {
+      if (isPakMissingError(e)) {
+        removePak(selectedPak.pak_path);
+        showNotice("That pak file is missing now. Removed it from the list.", "info");
+      } else {
+        showNotice(String(e), "err");
+      }
       console.error("Apply failed:", e);
     } finally {
       setApplying(false);
     }
   }
 
+  async function clearShaderCache() {
+    try {
+      const msg = await invoke<string>("clear_shader_cache");
+      showNotice(msg, "ok");
+    } catch (e: any) {
+      showNotice("Failed to clear shader cache", "err");
+      console.error("Clear shader cache failed:", e);
+    }
+  }
+
+  const dirty = edits.length > 0;
+
+  function removePak(pakPath: string) {
+    pakCache.current.delete(pakPath);
+    const wasSelected = selectedPak?.pak_path === pakPath;
+    const remaining = paks.filter((p) => p.pak_path !== pakPath);
+    setPaks(remaining);
+    if (wasSelected) {
+      if (remaining.length === 1) {
+        selectPak(remaining[0]);
+      } else {
+        setSelectedPak(null);
+        setTweakStates([]);
+        setSavedTweakStates([]);
+        setEdits([]);
+      }
+    }
+  }
+
   return (
-    <div className="flex w-full max-w-4xl flex-col gap-5">
+    <div className="flex w-full flex-1 min-h-0 flex-col">
+      {/* Scrollable content: pak list + tweak cards */}
+      <div className="flex-1 overflow-y-auto pr-6">
+        <div className="flex flex-col gap-5">
       {/* Pak list */}
       <Card className="flex flex-col gap-3 bg-card p-4">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Config Mods</span>
-            {showBadge && (
-              <span className="flex items-center gap-1.5 text-[12px] font-medium text-[var(--color-ok)]">
-                <CheckCircle2 size={14} strokeWidth={2.5} />
-                {badgeMsg}
-              </span>
-            )}
           </div>
-          <Button variant="blue" size="sm" onClick={scan} disabled={scanning || !gamePath}>
-            <RefreshCw size={14} className={cn(scanning && "animate-spin")} />
-            Scan
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button variant="outline" size="sm" onClick={browse}>
+              <FolderOpen size={14} />
+              Browse
+            </Button>
+            <Button variant="blue" size="sm" onClick={() => scan()} disabled={scanning || !gamePath}>
+              <Search size={14} className={cn(scanning && "animate-pulse")} />
+              Scan
+            </Button>
+          </div>
         </div>
 
         {!gamePath && (
@@ -277,16 +438,23 @@ export function PakTweaks({ gamePath }: Props) {
 
         {/* Single pak — show inline, no list needed */}
         {paks.length === 1 && selectedPak && (
-          <div className="flex items-center gap-2">
+          <div className="flex min-w-0 items-center gap-2">
             <Package size={13} className="shrink-0 text-muted-foreground" />
-            <span className="flex-1 truncate font-mono text-[12px]">{selectedPak.pak_name}</span>
-            <div className="flex gap-1">
+            <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{selectedPak.pak_name}</span>
+            <div className="flex shrink-0 items-center gap-1">
               {selectedPak.has_device_profiles && (
-                <Badge variant="secondary" className="text-[9px] px-1.5 py-0">DeviceProfiles</Badge>
+                <Badge variant="outline" className="text-[10px] px-2 py-0.5">DeviceProfiles</Badge>
               )}
               {selectedPak.has_engine_ini && (
-                <Badge variant="outline" className="text-[9px] px-1.5 py-0">Engine</Badge>
+                <Badge variant="outline" className="text-[10px] px-2 py-0.5">Engine</Badge>
               )}
+              <button
+                onClick={() => removePak(selectedPak.pak_path)}
+                className="ml-1 rounded p-1.5 text-muted-foreground/60 transition-colors hover:bg-destructive/15 hover:text-destructive"
+                title="Remove from list"
+              >
+                <X size={14} />
+              </button>
             </div>
           </div>
         )}
@@ -295,24 +463,37 @@ export function PakTweaks({ gamePath }: Props) {
         {paks.length > 1 && (
           <ul className="flex flex-col divide-y divide-border/50 rounded-md border border-border bg-background">
             {paks.map((pak) => (
-              <li key={pak.pak_path}>
+              <li
+                key={pak.pak_path}
+                className={cn(
+                  "flex min-w-0 items-center transition-colors hover:bg-secondary",
+                  selectedPak?.pak_path === pak.pak_path && "bg-secondary",
+                )}
+              >
                 <button
                   onClick={() => selectPak(pak)}
                   className={cn(
-                    "flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-secondary",
-                    selectedPak?.pak_path === pak.pak_path && "bg-secondary font-medium",
+                    "flex min-w-0 flex-1 items-center gap-2 px-3 py-2 text-left",
+                    selectedPak?.pak_path === pak.pak_path && "font-medium",
                   )}
                 >
                   <Package size={13} className="shrink-0 text-muted-foreground" />
-                  <span className="flex-1 truncate font-mono text-[12px]">{pak.pak_name}</span>
-                  <div className="flex gap-1">
+                  <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{pak.pak_name}</span>
+                  <div className="flex shrink-0 gap-1">
                     {pak.has_device_profiles && (
-                      <Badge variant="secondary" className="text-[9px] px-1.5 py-0">DeviceProfiles</Badge>
+                      <Badge variant="outline" className="text-[10px] px-2 py-0.5">DeviceProfiles</Badge>
                     )}
                     {pak.has_engine_ini && (
-                      <Badge variant="outline" className="text-[9px] px-1.5 py-0">Engine</Badge>
+                      <Badge variant="outline" className="text-[10px] px-2 py-0.5">Engine</Badge>
                     )}
                   </div>
+                </button>
+                <button
+                  onClick={() => removePak(pak.pak_path)}
+                  className="mr-2 shrink-0 rounded p-1.5 text-muted-foreground/60 transition-colors hover:bg-destructive/15 hover:text-destructive"
+                  title="Remove from list"
+                >
+                  <X size={14} />
                 </button>
               </li>
             ))}
@@ -320,18 +501,16 @@ export function PakTweaks({ gamePath }: Props) {
         )}
       </Card>
 
-      {/* Selected pak editor */}
-      {selectedPak && (
-        <>
-        {/* Settings grouped by category */}
-        {!loading && (() => {
+      {/* Selected pak editor — tweak cards */}
+      {selectedPak && !loading &&
+        (() => {
           const categories = definitions.reduce<Record<string, TweakDefinition[]>>((acc, def) => {
             (acc[def.category] ??= []).push(def);
             return acc;
           }, {});
 
           return (
-            <>
+            <div className="grid gap-5 xl:grid-cols-2 2xl:grid-cols-3">
               {Object.entries(categories).map(([category, defs]) => (
                 <Card key={category} className="flex flex-col gap-3 bg-card p-4">
                   <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
@@ -356,14 +535,18 @@ export function PakTweaks({ gamePath }: Props) {
                   </div>
                 </Card>
               ))}
-            </>
+            </div>
           );
-        })()}
+        })()
+      }
+      </div>
+      </div>
 
-        {/* Pending Changes & Apply */}
-        <div className="flex flex-col gap-4">
+      {/* Apply bar — fixed footer, outside the scroll area */}
+      {((selectedPak && !loading) || !!notice) && (
+        <div className="flex flex-col gap-3 border-t border-border pt-3 pb-1 mt-5">
               {/* Pending edits summary */}
-              {edits.length > 0 && (
+              {selectedPak && !loading && edits.length > 0 && (
                 <div className="flex flex-col gap-1.5">
                   <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
                     Pending Changes ({edits.length})
@@ -384,31 +567,58 @@ export function PakTweaks({ gamePath }: Props) {
 
               {/* Apply */}
               <div className="flex items-center gap-3">
-                <Button
-                  variant="green"
-                  size="sm"
-                  onClick={applyEdits}
-                  disabled={!dirty || applying || edits.length === 0}
-                >
-                  {applying ? (
-                    <RefreshCw size={14} className="animate-spin" />
-                  ) : (
-                    <Save size={14} />
-                  )}
-                  {applying ? "Repacking…" : dirty ? "Apply & Repack" : "Up to Date"}
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => selectedPak && selectPak(selectedPak)}
-                  disabled={loading}
-                >
-                  <RefreshCw size={14} />
-                  Reload
-                </Button>
+                {selectedPak && !loading && (
+                  <>
+                    <Button
+                      variant="green"
+                      size="sm"
+                      onClick={applyEdits}
+                      disabled={!dirty || applying || edits.length === 0}
+                    >
+                      {applying ? (
+                        <RefreshCw size={14} className="animate-spin" />
+                      ) : (
+                        <Save size={14} />
+                      )}
+                      {applying ? "Repacking…" : dirty ? "Apply & Repack" : "Up to Date"}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={clearShaderCache}
+                      title="Delete pipeline cache files from %LOCALAPPDATA%\Marvel\Saved"
+                    >
+                      <Trash2 size={14} />
+                      Clear Shader Cache
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => selectedPak && forceReloadPak(selectedPak)}
+                      disabled={loading}
+                    >
+                      <RefreshCw size={14} />
+                      Reload
+                    </Button>
+                  </>
+                )}
+                {notice && (
+                  <span
+                    className={cn(
+                      "flex items-center gap-1 text-[12px]",
+                      notice.type === "ok"
+                        ? "text-[var(--color-ok)]"
+                        : notice.type === "err"
+                          ? "text-[var(--color-err)]"
+                          : "text-muted-foreground",
+                    )}
+                  >
+                    {notice.type === "ok" && <CheckCircle2 size={13} />}
+                    {notice.msg}
+                  </span>
+                )}
               </div>
         </div>
-        </>
       )}
 
     </div>

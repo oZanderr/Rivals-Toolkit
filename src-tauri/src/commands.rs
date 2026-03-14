@@ -73,6 +73,11 @@ pub(crate) fn install_signature_bypass(game_root: String) -> Result<String, Stri
 }
 
 #[tauri::command]
+pub(crate) fn remove_signature_bypass(game_root: String) -> Result<String, String> {
+    mods::remove_signature_bypass(&game_root)
+}
+
+#[tauri::command]
 pub(crate) fn open_mods_folder(game_root: String) -> Result<(), String> {
     mods::open_mods_folder(&game_root)
 }
@@ -93,6 +98,15 @@ pub(crate) fn apply_tweaks(
     settings: Vec<scalability::TweakSetting>,
 ) -> String {
     scalability::apply_tweaks(&content, &settings)
+}
+
+#[tauri::command]
+pub(crate) async fn inspect_pak_path(
+    pak_path: String,
+) -> Result<Option<pak_tweaks::PakIniInfo>, String> {
+    tauri::async_runtime::spawn_blocking(move || pak_tweaks::inspect_single_pak(&pak_path))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -121,4 +135,38 @@ pub(crate) async fn apply_pak_tweak_edits(
     tauri::async_runtime::spawn_blocking(move || pak_tweaks::apply_pak_tweaks(&pak_path, &edits))
         .await
         .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub(crate) fn clear_shader_cache() -> Result<String, String> {
+    scalability::clear_shader_cache()
+}
+
+#[tauri::command]
+pub(crate) fn launch_game(install_info: detect::InstallInfo) -> Result<(), String> {
+    install_info.launch_game()
+}
+
+#[tauri::command]
+pub(crate) fn toggle_mod_enabled(
+    mods_folder: String,
+    full_name: String,
+    enabled: bool,
+) -> Result<(), String> {
+    mods::toggle_mod_enabled(&mods_folder, &full_name, enabled)
+}
+
+#[tauri::command]
+pub(crate) async fn export_mods_zip(
+    mods_folder: String,
+    dest_path: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || mods::export_mods_zip(&mods_folder, &dest_path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub(crate) fn delete_mod(mods_folder: String, full_name: String) -> Result<(), String> {
+    mods::delete_mod(&mods_folder, &full_name)
 }

@@ -48,5 +48,25 @@ pub(crate) fn install_signature_bypass(game_root: &str) -> Result<String, String
         fs::create_dir_all(mods_dir(game_root)).map_err(|e| e.to_string())?;
     }
 
-    Ok(format!("Bypass installed to {}", bin_dir.display()))
+    Ok("Bypass installed successfully!".to_string())
+}
+
+pub(crate) fn remove_signature_bypass(game_root: &str) -> Result<String, String> {
+    let bin_dir = binaries_dir(game_root);
+    let dsound_path = bin_dir.join("dsound.dll");
+    let asi_path = bin_dir.join("plugins").join("MarvelRivalsUTOCSignatureBypass.asi");
+
+    let mut removed = 0usize;
+    for path in &[&dsound_path, &asi_path] {
+        if path.exists() {
+            fs::remove_file(path).map_err(|e| e.to_string())?;
+            removed += 1;
+        }
+    }
+
+    if removed == 0 {
+        Ok("Bypass files were not present!".to_string())
+    } else {
+        Ok(format!("Removed {removed} bypass file(s)"))
+    }
 }

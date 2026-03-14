@@ -1,13 +1,9 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { openPath } from "@tauri-apps/plugin-opener";
-import { FileText, FolderOpen, Package, RotateCcw } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
+import { FileText, Package } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { ScalabilitySettings } from "./ScalabilitySettings";
+import { ScalabilityTweaks } from "./ScalabilityTweaks";
 import { PakTweaks } from "./PakTweaks";
 
 type SubTab = "scalability" | "pak-config";
@@ -16,24 +12,53 @@ interface Props {
   gamePath: string;
 }
 
-export function SettingsEditor({ gamePath }: Props) {
+export function QuickSettings({ gamePath }: Props) {
   const [subTab, setSubTab] = useState<SubTab>("scalability");
 
   const [filePath, setFilePath] = useState("");
   const [content, setContent] = useState("");
+  const [fileExists, setFileExists] = useState<boolean | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
+  const [detecting, setDetecting] = useState(false);
+  const [detectBadge, setDetectBadge] = useState<string | null>(null);
+  const detectBadgeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    autoLoad();
+    detectPath();
   }, []);
 
-  async function autoLoad() {
+  /** Redetect the Scalability.ini path only — does not reset tweak states */
+  async function detectPath() {
+    setDetecting(true);
+    setDetectBadge(null);
     try {
       const p = await invoke<string>("get_scalability_path");
+      const hadPath = filePath !== "";
+      const pathChanged = p !== filePath;
       setFilePath(p);
       await loadFile(p);
+      if (pathChanged) {
+        if (hadPath) showDetectBadge("Path updated");
+      } else {
+        showDetectBadge("Path unchanged");
+      }
     } catch {
-      // Path detection failed — user can browse manually
+      showDetectBadge("Not found");
+    } finally {
+      setDetecting(false);
     }
+  }
+
+  function showDetectBadge(msg: string) {
+    if (detectBadgeTimer.current) clearTimeout(detectBadgeTimer.current);
+    setDetectBadge(msg);
+    detectBadgeTimer.current = setTimeout(() => setDetectBadge(null), 4000);
+  }
+
+  /** Re-read file from disk and remount ScalabilityTweaks to refresh tweak states */
+  async function reloadContent() {
+    await loadFile(filePath);
+    setReloadKey((k) => k + 1);
   }
 
   async function browse() {
@@ -51,8 +76,10 @@ export function SettingsEditor({ gamePath }: Props) {
     try {
       const text = await invoke<string>("read_scalability", { path });
       setContent(text);
+      setFileExists(true);
     } catch {
       setContent("");
+      setFileExists(false);
     }
   }
 
@@ -62,9 +89,9 @@ export function SettingsEditor({ gamePath }: Props) {
   ];
 
   return (
-    <div className="flex w-full max-w-4xl flex-col gap-6">
+    <div className="flex flex-1 min-h-0 w-full flex-col gap-6">
       {/* Header */}
-      <div>
+      <div className="flex min-h-8 items-center gap-3">
         <h2 className="text-xl font-bold">Quick Settings</h2>
       </div>
 
@@ -88,52 +115,25 @@ export function SettingsEditor({ gamePath }: Props) {
       </div>
 
       {/* ── Scalability tab ── */}
-      <div className={cn(subTab !== "scalability" && "hidden")}>
-          {/* Config file location */}
-          <div className="flex flex-col gap-6">
-          <Card className="flex flex-col gap-3 p-4 bg-card">
-            <div className="flex items-center justify-between">
-              <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Config File</span>
-              <Button
-                variant="ghost"
-                size="sm"
-                disabled={!filePath}
-                onClick={() => filePath && openPath(filePath.replace(/[/\\][^/\\]+$/, ""))}
-              >
-                <FolderOpen size={14} />
-                Show in Explorer
-              </Button>
-            </div>
-            <div className="flex items-center gap-2">
-              <Input
-                className="h-8 font-mono text-[12px]"
-                value={filePath}
-                onChange={(e) => setFilePath(e.target.value)}
-                placeholder="Path to Scalability.ini…"
-              />
-              <Button variant="outline" size="sm" onClick={browse}>
-                <FolderOpen size={14} />
-                Browse
-              </Button>
-              <Button variant="blue" size="sm" onClick={autoLoad}>
-                <RotateCcw size={14} />
-                Re-detect
-              </Button>
-            </div>
-          </Card>
-
-          {/* Quick settings */}
-          <ScalabilitySettings
+      <div className={cn("flex flex-1 min-h-0 flex-col", subTab !== "scalability" && "hidden")}>
+          <ScalabilityTweaks
+            key={reloadKey}
             filePath={filePath}
+            setFilePath={setFilePath}
+            fileExists={fileExists}
             content={content}
             setContent={setContent}
-            onSaved={() => {}}
+            detectBadge={detectBadge}
+            detecting={detecting}
+            onDetect={detectPath}
+            onBrowse={browse}
+            onSaved={() => setFileExists(true)}
+            onReload={reloadContent}
           />
-          </div>
       </div>
 
       {/* ── Pak Config tab ── */}
-      <div className={cn(subTab !== "pak-config" && "hidden")}>
+      <div className={cn("flex flex-1 min-h-0 flex-col", subTab !== "pak-config" && "hidden")}>
         <PakTweaks gamePath={gamePath} />
       </div>
     </div>

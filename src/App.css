@@ -36,6 +36,10 @@
   --green-accent-hover:      oklch(0.31 0.09 155);
   --green-accent-foreground: oklch(0.80 0.14 148);
   --green-accent-border:     oklch(0.50 0.18 148 / 27%);
+  --red-accent:            oklch(0.22 0.07 25);
+  --red-accent-hover:      oklch(0.28 0.09 25);
+  --red-accent-foreground: oklch(0.78 0.14 22);
+  --red-accent-border:     oklch(0.50 0.18 22 / 27%);
 }
 
 .dark {
@@ -69,6 +73,10 @@
   --green-accent-hover:      oklch(0.31 0.09 155);
   --green-accent-foreground: oklch(0.80 0.14 148);
   --green-accent-border:     oklch(0.50 0.18 148 / 27%);
+  --red-accent:            oklch(0.22 0.07 25);
+  --red-accent-hover:      oklch(0.28 0.09 25);
+  --red-accent-foreground: oklch(0.78 0.14 22);
+  --red-accent-border:     oklch(0.50 0.18 22 / 27%);
 }
 
 @theme inline {
@@ -102,6 +110,10 @@
   --color-green-accent-hover:      var(--green-accent-hover);
   --color-green-accent-foreground: var(--green-accent-foreground);
   --color-green-accent-border:     var(--green-accent-border);
+  --color-red-accent:            var(--red-accent);
+  --color-red-accent-hover:      var(--red-accent-hover);
+  --color-red-accent-foreground: var(--red-accent-foreground);
+  --color-red-accent-border:     var(--red-accent-border);
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);

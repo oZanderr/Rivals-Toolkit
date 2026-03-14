@@ -38,7 +38,6 @@ pub(super) fn parse_console_vars(content: &str, source: &str) -> Vec<PakTweakSta
     let is_device_profiles = source.contains("DeviceProfiles");
 
     if is_device_profiles {
-        // Only parse from [Windows DeviceProfile] section
         let mut in_section = false;
         for line in content.lines() {
             let trimmed = line.trim();
@@ -52,7 +51,6 @@ pub(super) fn parse_console_vars(content: &str, source: &str) -> Vec<PakTweakSta
                 continue;
             }
 
-            // Lines look like: +CVars=r.CustomDepth=0 or key=value
             if let Some(kv) = parse_cvar_line(trimmed) {
                 vars.push(PakTweakState {
                     key: kv.0,
@@ -91,8 +89,6 @@ pub(super) fn parse_console_vars(content: &str, source: &str) -> Vec<PakTweakSta
     }
     vars
 }
-
-// ── Helpers ────────────────────────────────────────────────────────────────
 
 /// Parse a single CVar line, handling optional +CVars= prefix.
 fn parse_cvar_line(line: &str) -> Option<(String, String)> {
@@ -161,11 +157,8 @@ fn find_section_insert_point(lines: &[String], section_start: usize) -> usize {
     insert
 }
 
-// ── Edit Functions ─────────────────────────────────────────────────────────
-
 /// Apply edits to DefaultDeviceProfiles.ini inside the [Windows DeviceProfile] section.
 fn apply_device_profiles_edits(lines: &mut Vec<String>, edits: &[PakTweakEdit]) {
-    // Find the [Windows DeviceProfile] section bounds
     let mut section_start: Option<usize> = None;
     let mut section_end: Option<usize> = None;
 
@@ -179,8 +172,7 @@ fn apply_device_profiles_edits(lines: &mut Vec<String>, edits: &[PakTweakEdit]) 
     }
 
     let Some(start) = section_start else {
-        // Section doesn't exist — this shouldn't happen for a valid DeviceProfiles pak,
-        // but handle gracefully by not modifying.
+        // Don't modify when a section doesn't exist
         return;
     };
     let end = section_end.unwrap_or(lines.len());
@@ -248,7 +240,7 @@ fn apply_engine_edits(lines: &mut Vec<String>, edits: &[PakTweakEdit]) {
     for edit in edits {
         let key_lower = edit.key.to_ascii_lowercase();
 
-        // ── Step 1: find the key anywhere in the file ─────────────────
+        // Find the key anywhere in the file
         let mut in_section = false;
         let mut found_idx: Option<usize> = None;
         for (i, line) in lines.iter().enumerate() {
@@ -269,7 +261,7 @@ fn apply_engine_edits(lines: &mut Vec<String>, edits: &[PakTweakEdit]) {
         }
 
         match (&edit.value, found_idx) {
-            // ── Update ALL occurrences ─────────────────────────────────
+            // Update all occurrences
             (Some(val), Some(_)) => {
                 let new_line = format_cvar_line(&edit.key, val, false);
                 for line in lines.iter_mut() {
@@ -284,24 +276,21 @@ fn apply_engine_edits(lines: &mut Vec<String>, edits: &[PakTweakEdit]) {
                     }
                 }
             }
-            // ── Remove ALL occurrences ─────────────────────────────────
+            // Remove all occurrences
             (None, Some(_)) => {
                 remove_cvar_key(lines, &key_lower);
             }
-            // ── Nothing to remove ──────────────────────────────────────
+            // Nothing to remove
             (None, None) => {}
-            // ── Insert into the correct section ────────────────────────
+            // Insert into the correct section
             (Some(val), None) => {
-                // Determine the target section header string.
                 let target_header = edit
                     .engine_section
                     .as_deref()
                     .map(|s| format!("[{}]", s))
                     .unwrap_or_else(|| "[ConsoleVariables]".to_string());
 
-                // Find the LAST occurrence of that section in the file.
-                // Engine.ini often has multiple [ConsoleVariables] blocks; inserting
-                // into the last one matches how UE4 itself appends overrides.
+                // Find the last occurrence of that section in the file
                 let section_start = lines
                     .iter()
                     .rposition(|l| l.trim().eq_ignore_ascii_case(&target_header));
@@ -309,7 +298,7 @@ fn apply_engine_edits(lines: &mut Vec<String>, edits: &[PakTweakEdit]) {
                 let section_start = match section_start {
                     Some(idx) => idx,
                     None => {
-                        // Section doesn't exist — create it at the end.
+                        // Section doesn't exist, create it at the end
                         if !lines.last().is_some_and(|l| l.trim().is_empty()) {
                             lines.push(String::new());
                         }
