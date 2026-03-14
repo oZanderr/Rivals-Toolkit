@@ -1,0 +1,101 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish (for example v0.1.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve release tag
+        id: vars
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $tag = "${{ github.event.inputs.tag }}"
+          }
+          else {
+            $tag = "${{ github.ref_name }}"
+          }
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+
+      - name: Validate release tag format
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.vars.outputs.tag }}"
+          if ($tag -notmatch '^v\d+\.\d+\.\d+([-.].+)?$') {
+            throw "Tag '$tag' is invalid. Expected format like v0.1.0 or v0.1.0-beta.1"
+          }
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Windows executable (no bundles)
+        run: pnpm tauri build --no-bundle
+
+      - name: Verify release executable exists
+        shell: pwsh
+        run: |
+          $exePath = "src-tauri/target/release/oinkers-toolkit.exe"
+          if (-not (Test-Path $exePath)) {
+            throw "Expected executable not found at $exePath"
+          }
+
+      - name: Create or update GitHub Release with executable
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "${{ steps.vars.outputs.tag }}"
+          $title = "Oinkers Toolkit $tag"
+          $exePath = "src-tauri/target/release/oinkers-toolkit.exe"
+          $assetName = "oinkers-toolkit-$tag-windows-x64.exe"
+
+          gh release view "$tag" *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create "$tag" `
+              --title "$title" `
+              --notes "Automated release build." `
+              --prerelease=${{ contains(steps.vars.outputs.tag, '-') }}
+          }
+
+          gh release upload "$tag" "$exePath#$assetName" --clobber
