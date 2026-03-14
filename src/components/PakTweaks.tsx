@@ -317,7 +317,6 @@ export function PakTweaks({ gamePath }: Props) {
   /** Force a fresh reload from disk, bypassing and updating the cache */
   async function forceReloadPak(pak: PakIniInfo) {
     pakCache.current.delete(pak.pak_path);
-    setLoading(true);
     try {
       const states = await invoke<TweakState[]>("detect_pak_tweaks", { pakPath: pak.pak_path });
       setTweakStates(states);
@@ -334,8 +333,6 @@ export function PakTweaks({ gamePath }: Props) {
         showNotice("That pak file is missing now. Removed it from the list.", "info");
       }
       console.error("Reload failed:", e);
-    } finally {
-      setLoading(false);
     }
   }
 

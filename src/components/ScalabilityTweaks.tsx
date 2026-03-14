@@ -67,6 +67,7 @@ interface Props {
   fileExists: boolean | null;
   content: string;
   setContent: (c: string) => void;
+  reloadSignal: number;
   detectBadge: string | null;
   detecting: boolean;
   onDetect: () => void;
@@ -81,6 +82,7 @@ export function ScalabilityTweaks({
   fileExists,
   content,
   setContent,
+  reloadSignal,
   detectBadge,
   detecting,
   onDetect,
@@ -133,6 +135,12 @@ export function ScalabilityTweaks({
   useEffect(() => {
     detectTweaks(content);
   }, [content, detectTweaks]);
+
+  // Re-detect when an explicit reload is triggered, even if content is unchanged
+  useEffect(() => {
+    if (reloadSignal > 0) detectTweaks(content);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional: only fires on reload signal, not on every content change
+  }, [reloadSignal]);
 
   function toggleEnabled(id: string) {
     setEnabled((prev) => ({ ...prev, [id]: !prev[id] }));

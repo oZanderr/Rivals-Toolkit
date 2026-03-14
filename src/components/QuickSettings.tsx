@@ -21,7 +21,7 @@ export function QuickSettings({ gamePath }: Props) {
   const [filePath, setFilePath] = useState("");
   const [content, setContent] = useState("");
   const [fileExists, setFileExists] = useState<boolean | null>(null);
-  const [reloadKey, setReloadKey] = useState(0);
+  const [reloadSignal, setReloadSignal] = useState(0);
   const [detecting, setDetecting] = useState(false);
   const [detectBadge, setDetectBadge] = useState<string | null>(null);
   const detectBadgeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -60,10 +60,9 @@ export function QuickSettings({ gamePath }: Props) {
     detectBadgeTimer.current = setTimeout(() => setDetectBadge(null), 4000);
   }
 
-  /** Re-read file from disk and remount ScalabilityTweaks to refresh tweak states */
   async function reloadContent() {
     await loadFile(filePath);
-    setReloadKey((k) => k + 1);
+    setReloadSignal((s) => s + 1);
   }
 
   async function browse() {
@@ -122,12 +121,12 @@ export function QuickSettings({ gamePath }: Props) {
       {/* ── Scalability tab ── */}
       <div className={cn("flex flex-1 min-h-0 flex-col", subTab !== "scalability" && "hidden")}>
         <ScalabilityTweaks
-          key={reloadKey}
           filePath={filePath}
           setFilePath={setFilePath}
           fileExists={fileExists}
           content={content}
           setContent={setContent}
+          reloadSignal={reloadSignal}
           detectBadge={detectBadge}
           detecting={detecting}
           onDetect={detectPath}
