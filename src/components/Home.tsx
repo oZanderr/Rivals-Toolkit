@@ -158,7 +158,7 @@ export function Home({
   const enabledModsCount = modsStatus?.mod_entries.filter((m) => m.enabled).length ?? 0;
   const paksPath = gamePath ? `${gamePath}\\MarvelGame\\Marvel\\Content\\Paks` : "";
   const modsPath = modsStatus?.mods_folder_path ?? (paksPath ? `${paksPath}\\~mods` : "");
-  const binariesPath = gamePath ? `${gamePath}\\MarvelGame\\Binaries\\Win64` : "";
+  const binariesPath = gamePath ? `${gamePath}\\MarvelGame\\Marvel\\Binaries\\Win64` : "";
 
   const setupSteps: { label: string; done: boolean; description: string }[] = modsStatus
     ? [
@@ -354,7 +354,7 @@ export function Home({
           />
           <FolderShortcutCard
             title="Binaries Folder"
-            description="MarvelGame/Binaries/Win64"
+            description="MarvelGame/Marvel/Binaries/Win64"
             onClick={() => openShortcut(binariesPath, "Binaries folder")}
             disabled={!binariesPath}
           />

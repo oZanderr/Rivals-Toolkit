@@ -37,6 +37,7 @@ function App() {
   const [mountedTabs, setMountedTabs] = useState<Set<Tab>>(() => new Set(["home"]));
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- functional updater is safe; accumulates visited tabs with no external side effects
     setMountedTabs((prev) => {
       if (prev.has(activeTab)) return prev;
       return new Set(prev).add(activeTab);
