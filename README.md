@@ -102,3 +102,10 @@ pnpm tauri build
 - `src/`: React frontend
 - `src-tauri/src/`: Rust backend and Tauri commands
 - `src-tauri/resources/`: bundled runtime resources (for example bypass files)
+
+## License
+
+This project is dual-licensed under either of the following, at your option:
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT License ([LICENSE-MIT](LICENSE-MIT))
