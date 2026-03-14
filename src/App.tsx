@@ -15,8 +15,6 @@ import { Titlebar } from "./components/Titlebar";
 
 type Tab = "home" | "mod-tools" | "pak-manager" | "settings";
 
-const CREATOR_NAME = "Zander";
-const CREATOR_DISCORD_HANDLE = "_zander_";
 const DISCORD_URL = "https://discord.com/invite/F2FYFfVqjs";
 
 interface InstallInfo {
@@ -52,6 +50,7 @@ function App() {
       console.error("Failed to open Discord link:", e);
     }
   }
+
 
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-background text-foreground">
@@ -99,12 +98,6 @@ function App() {
               <div className="rounded-sm border border-border/70 bg-background/60 px-2.5 py-2">
                 <span className="block text-[10px] uppercase tracking-widest text-muted-foreground">
                   About
-                </span>
-                <span
-                  className="block overflow-hidden text-ellipsis whitespace-nowrap text-[11px] font-medium text-foreground"
-                  title={`Created by ${CREATOR_NAME} (@${CREATOR_DISCORD_HANDLE})`}
-                >
-                  By {CREATOR_NAME} (@{CREATOR_DISCORD_HANDLE})
                 </span>
                 <span className="block text-[11px] text-muted-foreground">
                   Join the discord for updates.
