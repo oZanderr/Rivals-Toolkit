@@ -2,7 +2,6 @@ use std::path::PathBuf;
 
 use super::registry::hkcu_str;
 
-// Marvel Rivals game ID
 const LOADING_BAY_GAME_ID: u32 = 31;
 
 pub(super) fn find_loading_bay_install() -> Option<PathBuf> {

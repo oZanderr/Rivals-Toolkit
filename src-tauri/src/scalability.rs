@@ -25,19 +25,18 @@ pub(crate) fn write_scalability(path: &str, content: &str) -> Result<(), String>
     fs::write(path, content).map_err(|e| e.to_string())
 }
 
-/// Return the full tweak catalogue so the frontend can render controls.
+/// Return the full tweak catalogue.
 pub(crate) fn get_tweak_definitions() -> Vec<TweakDefinition> {
     tweaks::tweak_catalogue()
 }
 
-/// Scan INI content and report which tweaks are currently active.
+/// Detect which tweaks are active in INI content.
 pub(crate) fn detect_tweaks(content: &str) -> Vec<TweakState> {
     let catalogue = tweaks::tweak_catalogue();
     engine::detect_active_tweaks(content, &catalogue)
 }
 
-/// Apply tweaks to INI content based on user settings.
-/// Returns the modified INI text.
+/// Apply tweak settings to INI content.
 pub(crate) fn apply_tweaks(content: &str, settings: &[TweakSetting]) -> String {
     let catalogue = tweaks::tweak_catalogue();
     engine::apply_tweaks(content, &catalogue, settings)

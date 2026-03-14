@@ -4,23 +4,19 @@ fn default_cv_section() -> String {
     "ConsoleVariables".to_string()
 }
 
-/// A single pattern for a `RemoveLines` tweak, paired with the scalability
-/// section it must live under to be effective.
-/// For pak/engine INI writes the section is ignored — CVars go flat.
+/// One line pattern used by a `RemoveLines` tweak.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ScalabilityLine {
     pub pattern: String,
-    /// Scalability-file section bracket, e.g. `"PostProcessQuality@0"`.
-    /// Ignored when writing to DeviceProfiles or DefaultEngine.ini.
+    /// Target scalability section for this line.
     #[serde(default = "default_cv_section")]
     pub section: String,
-    /// When `true`, this line is only written when the context is a pak mod INI.
-    /// It is never added to a scalability file.
+    /// If true, only applied in pak INI context.
     #[serde(default)]
     pub pak_only: bool,
 }
 
-/// Describes what kind of tweak this is and how to apply/detect it.
+/// Tweak behavior definition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub(crate) enum TweakKind {
@@ -31,13 +27,10 @@ pub(crate) enum TweakKind {
         key: String,
         on_value: String,
         off_value: String,
-        /// What `active` should report when the key is absent from the INI
-        /// (i.e. the engine default). `true` = feature is ON by default
-        /// (e.g. CAS Sharpening, Font AA); `false` = OFF.
+        /// Active-state fallback when the key is absent.
         #[serde(default)]
         default_enabled: bool,
-        /// Scalability-file section new keys are inserted under.
-        /// Ignored when writing to DeviceProfiles or DefaultEngine.ini.
+        /// Section used when inserting new keys into scalability files.
         #[serde(default = "default_cv_section")]
         section: String,
     },
@@ -47,14 +40,13 @@ pub(crate) enum TweakKind {
         max: f64,
         step: f64,
         default_value: f64,
-        /// Scalability-file section new keys are inserted under.
-        /// Ignored when writing to DeviceProfiles or DefaultEngine.ini.
+        /// Section used when inserting new keys into scalability files.
         #[serde(default = "default_cv_section")]
         section: String,
     },
 }
 
-/// A named, categorized tweak the user can toggle or adjust.
+/// User-facing tweak definition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct TweakDefinition {
     pub id: String,
@@ -63,16 +55,14 @@ pub(crate) struct TweakDefinition {
     pub description: String,
     #[serde(default)]
     pub pak_only: bool,
-    /// For pak-only tweaks that live in a non-`[ConsoleVariables]` section of
-    /// DefaultEngine.ini (e.g. `"Script/Engine.UserInterfaceSettings"`).
-    /// `None` means the standard `[ConsoleVariables]` section.
+    /// Optional Engine.ini section for pak-only tweaks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_section: Option<String>,
     #[serde(flatten)]
     pub kind: TweakKind,
 }
 
-/// Current state of a tweak detected from INI content.
+/// Detected state of a tweak.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct TweakState {
     pub id: String,
@@ -80,7 +70,7 @@ pub(crate) struct TweakState {
     pub current_value: Option<String>,
 }
 
-/// User-provided setting to apply for a specific tweak.
+/// Requested setting for a tweak.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct TweakSetting {
     pub id: String,
@@ -88,7 +78,7 @@ pub(crate) struct TweakSetting {
     pub value: Option<String>,
 }
 
-/// Build the full catalogue of available tweaks.
+/// Build the tweak catalogue.
 pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
     vec![
         // Gameplay Fixes

@@ -12,7 +12,7 @@ fn epic_data_path() -> Option<PathBuf> {
     p.exists().then_some(p)
 }
 
-/// Returns the install path and the Epic launcher URL to launch the game.
+/// Return the Epic install path and launcher URL.
 pub(super) fn find_epic_install() -> Option<(PathBuf, String)> {
     let data_dir = epic_data_path()
         .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData\Epic\EpicGamesLauncher\Data"));
@@ -37,15 +37,13 @@ pub(super) fn find_epic_install() -> Option<(PathBuf, String)> {
                 return None;
             }
 
-            // Epic manifests may use forward slashes on Windows
             let location = json["InstallLocation"].as_str()?;
             let p = PathBuf::from(location.replace('/', "\\"));
             if !p.exists() {
                 return None;
             }
 
-            // Build the proper launcher URL from catalog fields in the manifest.
-            // Format: com.epicgames.launcher://apps/{ns}%3A{itemId}%3A{appName}?action=launch&silent=true
+            // Build the launcher URL from catalog manifest fields.
             let ns = json["CatalogNamespace"]
                 .as_str()
                 .filter(|s| !s.is_empty())?;

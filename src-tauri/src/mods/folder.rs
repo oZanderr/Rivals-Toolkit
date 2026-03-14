@@ -18,7 +18,7 @@ pub(crate) fn open_mods_folder(game_root: &str) -> Result<(), String> {
 
 const COMPANION_EXTS: &[&str] = &["ucas", "utoc"];
 
-/// Rename a mod file to enable or disable, including any companion .ucas/.utoc files.
+/// Enable or disable a mod and its companion `.ucas`/`.utoc` files.
 pub(crate) fn toggle_mod_enabled(
     mods_folder: &str,
     full_name: &str,
@@ -64,7 +64,7 @@ pub(crate) fn toggle_mod_enabled(
     Ok(())
 }
 
-/// Delete a mod and its companion files (.ucas/.utoc) from the mods folder.
+/// Delete a mod and its companion `.ucas`/`.utoc` files.
 pub(crate) fn delete_mod(mods_folder: &str, full_name: &str) -> Result<(), String> {
     let dir = Path::new(mods_folder);
 
@@ -94,7 +94,7 @@ pub(crate) fn delete_mod(mods_folder: &str, full_name: &str) -> Result<(), Strin
     Ok(())
 }
 
-/// Zip all enabled `.pak` files (and their `.ucas`/`.utoc` companions) into `dest_path`.
+/// Export enabled mod files to a zip archive.
 pub(crate) fn export_mods_zip(mods_folder: &str, dest_path: &str) -> Result<String, String> {
     let dir = Path::new(mods_folder);
     let file = std::fs::File::create(dest_path).map_err(|e| e.to_string())?;
@@ -106,7 +106,6 @@ pub(crate) fn export_mods_zip(mods_folder: &str, dest_path: &str) -> Result<Stri
     for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())?.flatten() {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
-        // Skip anything that has been disabled
         if name.ends_with(".disabled") {
             continue;
         }

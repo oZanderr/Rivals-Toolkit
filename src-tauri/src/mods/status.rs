@@ -8,12 +8,12 @@ use super::{BYPASS_ASI, BYPASS_DSOUND, file_matches};
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ModEntry {
-    /// Actual filename on disk (e.g. "mymod.pak" or "mymod.pak.disabled")
+    /// Filename on disk, including optional `.disabled` suffix.
     pub full_name: String,
-    /// Display name without the .disabled suffix (always ends with .pak)
+    /// Display name without `.disabled`.
     pub display_name: String,
     pub enabled: bool,
-    /// Whether companion .ucas/.utoc files also exist for this mod
+    /// Whether companion `.ucas`/`.utoc` files exist.
     pub has_companions: bool,
 }
 

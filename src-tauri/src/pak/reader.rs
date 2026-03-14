@@ -11,13 +11,9 @@ fn ensure_supported_pak(pak_path: &str) -> Result<(), String> {
         .and_then(|x| x.to_str())
         .unwrap_or_default();
 
-    // Rivals update patch paks (e.g. Patch_-Windows_..._P.pak) are delta containers
-    // and are merged by the game/launcher during update flow, not normal browseable paks.
+    // Update patch paks are delta containers and are not directly browseable.
     if name.starts_with("Patch_") {
-        return Err(
-            "Update patch pak (delta) is not browseable. Launch Marvel Rivals once after update."
-                .to_string(),
-        );
+        return Err("Update patch pak (delta) is not browseable.".to_string());
     }
 
     Ok(())
@@ -30,15 +26,13 @@ fn is_update_patch_pak_path(path: &str) -> bool {
         .is_some_and(|name| name.to_ascii_lowercase().starts_with("patch_"))
 }
 
-/// Walks the game's Paks directory and returns the absolute paths of every pak file found.
-/// Mod paks from the ~mods subdirectory are included and sorted after game paks.
+/// List pak files under game `Paks`, then append `~mods` pak files.
 pub(super) fn list_pak_files(game_root: &str) -> Result<Vec<String>, String> {
     let dir = paks_dir(game_root);
     if !dir.is_dir() {
         return Err(format!("Paks directory not found: {}", dir.display()));
     }
 
-    // Game paks (exclude ~-prefixed subdirs like ~mods)
     let mut game_paks: Vec<String> = WalkDir::new(&dir)
         .max_depth(2)
         .into_iter()
@@ -61,7 +55,6 @@ pub(super) fn list_pak_files(game_root: &str) -> Result<Vec<String>, String> {
         a_key.cmp(&b_key)
     });
 
-    // Mod paks from ~mods subdirectory
     let mods_dir = dir.join("~mods");
     let mut mod_paks: Vec<String> = if mods_dir.is_dir() {
         WalkDir::new(&mods_dir)

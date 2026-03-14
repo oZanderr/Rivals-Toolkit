@@ -5,7 +5,7 @@ use crate::pak::crypto::{make_aes_key, open_pak};
 
 use super::PakIniInfo;
 
-/// Inspect a pak to see if it contains DefaultEngine.ini or DefaultDeviceProfiles.ini.
+/// Inspect a pak for tweakable INI entries.
 pub(super) fn inspect_pak_for_ini(pak_path: &Path) -> Result<Option<PakIniInfo>, String> {
     let pak = open_pak(pak_path)?;
     let files = pak.files();
@@ -42,7 +42,7 @@ pub(super) fn inspect_pak_for_ini(pak_path: &Path) -> Result<Option<PakIniInfo>,
     }))
 }
 
-/// Extract a single file from a pak to a string.
+/// Extract one pak entry to a UTF-8 string.
 pub(super) fn extract_file_to_string(pak_path: &Path, entry: &str) -> Result<String, String> {
     let pak = open_pak(pak_path)?;
     let mut reader = BufReader::new(fs::File::open(pak_path).map_err(|e| e.to_string())?);
@@ -52,7 +52,7 @@ pub(super) fn extract_file_to_string(pak_path: &Path, entry: &str) -> Result<Str
     String::from_utf8(buf).map_err(|e| format!("INI file is not valid UTF-8: {}", e))
 }
 
-/// Extract all files from a pak into a directory.
+/// Extract all pak entries to a directory.
 pub(super) fn unpack_to_dir(pak_path: &Path, output_dir: &Path) -> Result<(), String> {
     fs::create_dir_all(output_dir).map_err(|e| e.to_string())?;
 
@@ -73,7 +73,7 @@ pub(super) fn unpack_to_dir(pak_path: &Path, output_dir: &Path) -> Result<(), St
     Ok(())
 }
 
-/// Repack a directory into a pak file using the same settings as the writer module.
+/// Repack a directory into a pak file.
 pub(super) fn repack_dir_to_pak(input_dir: &Path, output_pak: &Path) -> Result<(), String> {
     use std::io::BufWriter;
 
@@ -82,8 +82,7 @@ pub(super) fn repack_dir_to_pak(input_dir: &Path, output_pak: &Path) -> Result<(
     }
 
     let out_file = fs::File::create(output_pak).map_err(|e| e.to_string())?;
-    // Canonicalize after creation so we can skip it during the directory walk
-    // (relevant when the output pak is saved inside the input directory).
+    // Canonicalize output to avoid writing the output file back into itself.
     let output_canonical = output_pak.canonicalize().ok();
     let mut pak_writer = repak::PakBuilder::new()
         .key(make_aes_key()?)
@@ -100,7 +99,6 @@ pub(super) fn repack_dir_to_pak(input_dir: &Path, output_pak: &Path) -> Result<(
         if !path.is_file() {
             continue;
         }
-        // Skip the output pak itself if it lives inside the input directory.
         if let Some(ref canon_out) = output_canonical
             && path.canonicalize().ok().as_ref() == Some(canon_out)
         {
