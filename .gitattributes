@@ -1,0 +1,38 @@
+# Normalize text files in the repo to LF.
+* text=auto eol=lf
+
+# Windows-native scripts should keep CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary assets (never line-normalize / diff as text).
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.icns binary
+*.svgz binary
+*.ttf binary
+*.otf binary
+*.woff binary
+*.woff2 binary
+*.pdf binary
+*.zip binary
+*.7z binary
+*.rar binary
+*.gz binary
+*.exe binary
+*.dll binary
+*.so binary
+*.dylib binary
+*.a binary
+*.lib binary
+*.asi binary
+
+# Generated files should not skew language statistics.
+pnpm-lock.yaml linguist-generated=true
+src-tauri/gen/** linguist-generated=true
+src-tauri/target/** linguist-generated=true
