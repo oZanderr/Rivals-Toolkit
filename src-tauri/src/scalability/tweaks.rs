@@ -249,7 +249,8 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             label: "Fix Black Hair".into(),
             category: "Sharpness & Textures".into(),
             description: "Removes anisotropic material overrides that cause characters to \
-                           have black hair."
+                           have black hair. For full pitch-black hair on all characters, \
+                           keep DLSS off and enable Fix Color Banding."
                 .into(),
             pak_only: false,
             engine_section: None,
