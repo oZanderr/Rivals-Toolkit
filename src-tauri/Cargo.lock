@@ -2347,7 +2347,7 @@ checksum = "42f5e15c9953c5e4ccceeb2e7382a716482c34515315f7b03532b8b4e8393d2d"
 [[package]]
 name = "oodle_loader"
 version = "0.2.3"
-source = "git+https://github.com/oZanderr/repak?branch=master#56452598068a99a9288df7631e82a86941f2a5cb"
+source = "git+https://github.com/oZanderr/repak?branch=master#b9258c204cc3c1485a1d522171a11c11e323cd92"
 dependencies = [
  "hex",
  "libloading 0.9.0",
@@ -2960,7 +2960,7 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 [[package]]
 name = "repak"
 version = "0.2.3"
-source = "git+https://github.com/oZanderr/repak?branch=master#56452598068a99a9288df7631e82a86941f2a5cb"
+source = "git+https://github.com/oZanderr/repak?branch=master#b9258c204cc3c1485a1d522171a11c11e323cd92"
 dependencies = [
  "aes",
  "base64 0.22.1",

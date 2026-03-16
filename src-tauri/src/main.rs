@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    oinkers_editor_lib::run()
+    oinkers_toolkit_lib::run()
 }
