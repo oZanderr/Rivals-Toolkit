@@ -2,6 +2,7 @@ use std::{fs, io::BufReader, path::Path};
 use walkdir::WalkDir;
 
 use crate::pak::crypto::{make_aes_key, open_pak};
+use crate::pak::profile::{RIVALS_PROFILE, strip_mount_prefix};
 
 use super::PakIniInfo;
 
@@ -60,7 +61,7 @@ pub(super) fn unpack_to_dir(pak_path: &Path, output_dir: &Path) -> Result<(), St
     let files = pak.files();
 
     for name in &files {
-        let stripped = name.trim_start_matches("../../../").trim_start_matches('/');
+        let stripped = strip_mount_prefix(name);
         let dest = output_dir.join(stripped);
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -85,12 +86,13 @@ pub(super) fn repack_dir_to_pak(input_dir: &Path, output_pak: &Path) -> Result<(
     // Canonicalize output to avoid writing the output file back into itself.
     let output_canonical = output_pak.canonicalize().ok();
     let mut pak_writer = repak::PakBuilder::new()
+        .profile(RIVALS_PROFILE.repak_profile())
         .key(make_aes_key()?)
-        .compression([repak::Compression::Oodle])
+        .compression(RIVALS_PROFILE.compression())
         .writer(
             BufWriter::new(out_file),
-            repak::Version::V11,
-            "../../../".to_string(),
+            RIVALS_PROFILE.pak_version(),
+            RIVALS_PROFILE.mount_point().to_string(),
             None,
         );
 

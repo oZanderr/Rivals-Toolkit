@@ -7,6 +7,7 @@ use std::{fs, path::Path};
 use ini::{IniType, apply_edits_to_ini, parse_console_vars};
 use io::{extract_file_to_string, inspect_pak_for_ini, repack_dir_to_pak, unpack_to_dir};
 
+use crate::pak::profile::strip_mount_prefix;
 use crate::paths::mods_dir;
 
 /// INI entries discovered in a pak mod.
@@ -152,9 +153,7 @@ pub(crate) fn apply_pak_tweaks(pak_path: &str, edits: &[PakTweakEdit]) -> Result
             .device_profiles_entry
             .as_ref()
             .ok_or("DeviceProfiles entry missing despite has_device_profiles flag")?;
-        let dp_rel = dp_entry
-            .trim_start_matches("../../../")
-            .trim_start_matches('/');
+        let dp_rel = strip_mount_prefix(dp_entry);
         let dp_file = temp_dir.join(dp_rel);
 
         let content = fs::read_to_string(&dp_file).map_err(|e| {
@@ -188,9 +187,7 @@ pub(crate) fn apply_pak_tweaks(pak_path: &str, edits: &[PakTweakEdit]) -> Result
             }
 
             if !eng_edits.is_empty() {
-                let eng_rel = eng_entry
-                    .trim_start_matches("../../../")
-                    .trim_start_matches('/');
+                let eng_rel = strip_mount_prefix(eng_entry);
                 let eng_file = temp_dir.join(eng_rel);
 
                 if let Ok(content) = fs::read_to_string(&eng_file) {
@@ -204,9 +201,7 @@ pub(crate) fn apply_pak_tweaks(pak_path: &str, edits: &[PakTweakEdit]) -> Result
             .engine_ini_entry
             .as_ref()
             .ok_or("Engine INI entry missing despite no device profiles")?;
-        let eng_rel = eng_entry
-            .trim_start_matches("../../../")
-            .trim_start_matches('/');
+        let eng_rel = strip_mount_prefix(eng_entry);
         let eng_file = temp_dir.join(eng_rel);
 
         let content = fs::read_to_string(&eng_file).map_err(|e| {

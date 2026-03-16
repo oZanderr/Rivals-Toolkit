@@ -3,6 +3,7 @@ use std::{fs, io::BufReader, path::Path};
 use walkdir::WalkDir;
 
 use super::crypto::open_pak;
+use super::profile::strip_mount_prefix;
 use crate::paths::paks_dir;
 
 fn ensure_supported_pak(pak_path: &str) -> Result<(), String> {
@@ -87,13 +88,13 @@ pub(super) fn unpack_pak(pak_path: &str, output_dir: &str) -> Result<Vec<String>
     let pak = open_pak(Path::new(pak_path))?;
     let files = pak.files();
 
+    let mut reader = BufReader::new(fs::File::open(pak_path).map_err(|e| e.to_string())?);
     for name in &files {
-        let stripped = name.trim_start_matches("../../../").trim_start_matches('/');
+        let stripped = strip_mount_prefix(name);
         let dest = output.join(stripped);
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
-        let mut reader = BufReader::new(fs::File::open(pak_path).map_err(|e| e.to_string())?);
         let mut out = fs::File::create(&dest).map_err(|e| e.to_string())?;
         pak.read_file(name, &mut reader, &mut out)
             .map_err(|e| e.to_string())?;
