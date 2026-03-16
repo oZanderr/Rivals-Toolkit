@@ -1963,9 +1963,9 @@ dependencies = [
 
 [[package]]
 name = "libloading"
-version = "0.8.9"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
+checksum = "754ca22de805bb5744484a5b151a9e1a8e837d5dc232c2d7d8c2e3492edc8b60"
 dependencies = [
  "cfg-if",
  "windows-link 0.2.1",
@@ -2009,9 +2009,9 @@ checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 
 [[package]]
 name = "lz4_flex"
-version = "0.11.5"
+version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08ab2867e3eeeca90e844d1940eab391c9dc5228783db2ed999acbc0a9ed375a"
+checksum = "98c23545df7ecf1b16c303910a69b079e8e251d60f7dd2cc9b4177f2afaf1746"
 dependencies = [
  "twox-hash",
 ]
@@ -2323,6 +2323,7 @@ name = "oinkers-toolkit"
 version = "0.1.0"
 dependencies = [
  "aes",
+ "blake3",
  "dirs 5.0.1",
  "hex",
  "repak",
@@ -2345,11 +2346,11 @@ checksum = "42f5e15c9953c5e4ccceeb2e7382a716482c34515315f7b03532b8b4e8393d2d"
 
 [[package]]
 name = "oodle_loader"
-version = "2.8.1"
-source = "git+https://github.com/natimerry/repak-rivals?branch=master#bdfc99e32e206e608865c776bc36592e1f189a20"
+version = "0.2.3"
+source = "git+https://github.com/oZanderr/repak?branch=master#56452598068a99a9288df7631e82a86941f2a5cb"
 dependencies = [
  "hex",
- "libloading 0.8.9",
+ "libloading 0.9.0",
  "sha2",
  "thiserror 2.0.18",
 ]
@@ -2958,12 +2959,11 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
 name = "repak"
-version = "2.8.1"
-source = "git+https://github.com/natimerry/repak-rivals?branch=master#bdfc99e32e206e608865c776bc36592e1f189a20"
+version = "0.2.3"
+source = "git+https://github.com/oZanderr/repak?branch=master#56452598068a99a9288df7631e82a86941f2a5cb"
 dependencies = [
  "aes",
  "base64 0.22.1",
- "blake3",
  "byteorder",
  "flate2",
  "hex",
@@ -3478,23 +3478,22 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
 name = "strum"
-version = "0.26.3"
+version = "0.27.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8fec0f0aef304996cf250b31b5a10dee7980c85da9d759361292b8bca5a18f06"
+checksum = "af23d6f6c1a224baef9d3f61e287d2761385a5b88fdab4eb4c6f11aeb54c4bcf"
 dependencies = [
  "strum_macros",
 ]
 
 [[package]]
 name = "strum_macros"
-version = "0.26.4"
+version = "0.27.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4c6bee85a5a24955dc440386795aa378cd9cf82acd5f764469152d2270e581be"
+checksum = "7695ce3845ea4b33927c055a39dc438a45b059f7c1b3d91d38d10355fb8cbca7"
 dependencies = [
  "heck 0.5.0",
  "proc-macro2",
  "quote",
- "rustversion",
  "syn 2.0.117",
 ]
 

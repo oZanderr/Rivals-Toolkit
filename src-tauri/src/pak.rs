@@ -1,4 +1,5 @@
 pub(crate) mod crypto;
+pub(crate) mod profile;
 mod reader;
 mod writer;
 

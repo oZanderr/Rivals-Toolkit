@@ -3,6 +3,7 @@ use std::{fs, io::BufWriter, path::Path};
 use walkdir::WalkDir;
 
 use super::crypto::make_aes_key;
+use super::profile::RIVALS_PROFILE;
 
 pub(super) fn repack_pak(input_dir: &str, output_pak: &str) -> Result<(), String> {
     let input = Path::new(input_dir);
@@ -17,12 +18,13 @@ pub(super) fn repack_pak(input_dir: &str, output_pak: &str) -> Result<(), String
     // Canonicalize output to avoid writing the output file back into itself.
     let output_canonical = Path::new(output_pak).canonicalize().ok();
     let mut pak_writer = repak::PakBuilder::new()
+        .profile(RIVALS_PROFILE.repak_profile())
         .key(make_aes_key()?)
-        .compression([repak::Compression::Oodle])
+        .compression(RIVALS_PROFILE.compression())
         .writer(
             BufWriter::new(out_file),
-            repak::Version::V11,
-            "../../../".to_string(),
+            RIVALS_PROFILE.pak_version(),
+            RIVALS_PROFILE.mount_point().to_string(),
             None,
         );
 

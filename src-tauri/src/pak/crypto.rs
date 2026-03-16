@@ -1,15 +1,9 @@
 use std::{fs, io::BufReader, path::Path};
 
-use aes::cipher::KeyInit;
+use super::profile::RIVALS_PROFILE;
 
-/// AES-256 key used by Marvel Rivals pak files.
-const MARVEL_AES_KEY: &str = "0C263D8C22DCB085894899C3A3796383E9BF9DE0CBFB08C9BF2DEF2E84F29D74";
-
-/// Decode and word-swap the key for `repak-rivals`.
 pub(crate) fn make_aes_key() -> Result<aes::Aes256, String> {
-    let mut bytes = hex::decode(MARVEL_AES_KEY).map_err(|e| e.to_string())?;
-    bytes.chunks_mut(4).for_each(|c| c.reverse());
-    aes::Aes256::new_from_slice(&bytes).map_err(|e| e.to_string())
+    RIVALS_PROFILE.make_aes_key()
 }
 
 pub(crate) fn open_pak(pak_path: &Path) -> Result<repak::PakReader, String> {
@@ -17,6 +11,7 @@ pub(crate) fn open_pak(pak_path: &Path) -> Result<repak::PakReader, String> {
     let file = fs::File::open(pak_path).map_err(|e| e.to_string())?;
     let mut reader = BufReader::new(file);
     repak::PakBuilder::new()
+        .profile(RIVALS_PROFILE.repak_profile())
         .key(key)
         .reader(&mut reader)
         .map_err(|e| e.to_string())

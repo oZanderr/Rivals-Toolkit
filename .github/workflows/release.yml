@@ -80,22 +80,93 @@ jobs:
             throw "Expected executable not found at $exePath"
           }
 
-      - name: Create or update GitHub Release with executable
+      - name: Package release zip
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.vars.outputs.tag }}"
+          $assetBase = "oinkers-toolkit-$tag-windows-x64"
+          $repoRoot = $env:GITHUB_WORKSPACE
+          $releaseDir = Join-Path $repoRoot "src-tauri/target/release"
+          $zipPath = Join-Path $releaseDir "$assetBase.zip"
+          $stagingRoot = Join-Path $releaseDir "_package"
+          $stagingDir = Join-Path $stagingRoot $assetBase
+
+          $exePath = Join-Path $releaseDir "oinkers-toolkit.exe"
+          $oo2corePath = Join-Path $repoRoot "src-tauri/resources/oo2core_9_win64.dll"
+
+          foreach ($required in @($exePath, $oo2corePath)) {
+            if (-not (Test-Path $required)) {
+              throw "Required release file not found: $required"
+            }
+          }
+
+          if (Test-Path $stagingRoot) {
+            Remove-Item $stagingRoot -Recurse -Force
+          }
+          if (Test-Path $zipPath) {
+            Remove-Item $zipPath -Force
+          }
+
+          New-Item -ItemType Directory -Path $stagingDir -Force | Out-Null
+
+          # Keep executable name clean while versioning the archive itself.
+          Copy-Item $exePath "$stagingDir/oinkers-toolkit.exe" -Force
+          Copy-Item $oo2corePath "$stagingDir/oo2core_9_win64.dll" -Force
+
+          Compress-Archive -Path "$stagingDir/*" -DestinationPath $zipPath -CompressionLevel Optimal
+
+      - name: Create or update GitHub Release with zip package
         shell: pwsh
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $tag = "${{ steps.vars.outputs.tag }}"
           $title = "Oinkers Toolkit $tag"
-          $exePath = "src-tauri/target/release/oinkers-toolkit.exe"
-          $assetName = "oinkers-toolkit-$tag-windows-x64.exe"
+          $assetName = "oinkers-toolkit-$tag-windows-x64.zip"
+          $assetPath = Join-Path $env:GITHUB_WORKSPACE "src-tauri/target/release/$assetName"
+          $notesPath = Join-Path $env:RUNNER_TEMP "release-notes.md"
+
+          if (-not (Test-Path $assetPath)) {
+            throw "Expected release asset not found at $assetPath"
+          }
+
+          $checksum = (Get-FileHash -Algorithm SHA256 $assetPath).Hash.ToLower()
+
+          git fetch --tags --force *> $null
+          $prevTag = git tag --sort=-creatordate | Where-Object { $_ -ne $tag } | Select-Object -First 1
+
+          if ($prevTag) {
+            $changes = git log --pretty=format:"- %s (%h)" "$prevTag..$tag"
+          }
+          else {
+            $changes = git log --pretty=format:"- %s (%h)" -n 30 "$tag"
+          }
+
+          if (-not $changes) {
+            $changes = "- No changes detected in git log for this release range."
+          }
+
+          @"
+          ## Checksums
+
+          - `$assetName`: `$checksum`
+
+          ## Changelog
+
+          $changes
+          "@ | Set-Content -Path $notesPath -Encoding utf8
 
           gh release view "$tag" *> $null
           if ($LASTEXITCODE -ne 0) {
             gh release create "$tag" `
               --title "$title" `
-              --notes "Automated release build." `
+              --notes-file "$notesPath" `
               --prerelease=${{ contains(steps.vars.outputs.tag, '-') }}
           }
+          else {
+            gh release edit "$tag" `
+              --title "$title" `
+              --notes-file "$notesPath"
+          }
 
-          gh release upload "$tag" "$exePath#$assetName" --clobber
+          gh release upload "$tag" "$assetPath" --clobber
