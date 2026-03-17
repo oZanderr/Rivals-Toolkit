@@ -211,6 +211,9 @@ export function PakManager({ gamePath }: Props) {
   }
 
   const pakName = selectedPak ? selectedPak.split(/[/\\]/).pop() : null;
+  const footerText = !selectedPak
+    ? "\u00A0"
+    : `${visible.length} file(s)${visible.length !== pakContents.length ? ` of ${pakContents.length}` : ""} inside ${pakName} — double-click a file to extract`;
 
   return (
     <div className="flex flex-1 min-h-0 flex-col gap-4">
@@ -403,10 +406,11 @@ export function PakManager({ gamePath }: Props) {
           </div>
 
           {/* Footer — always rendered to avoid layout shift */}
-          <p className="shrink-0 text-[11px] text-muted-foreground">
-            {!selectedPak
-              ? "\u00A0"
-              : `${visible.length} file(s)${visible.length !== pakContents.length ? ` of ${pakContents.length}` : ""} inside ${pakName} — double-click a file to extract`}
+          <p
+            className="shrink-0 truncate text-[11px] text-muted-foreground"
+            title={selectedPak ? footerText : undefined}
+          >
+            {footerText}
           </p>
         </Card>
       </div>
