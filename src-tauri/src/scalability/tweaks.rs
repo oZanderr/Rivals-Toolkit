@@ -120,7 +120,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             label: "Fix Dead Bodies Falling Through Floor".into(),
             category: "Gameplay Fixes".into(),
             description: "Removes the line that disables simulation collision, fixing dead \
-                           bodies clipping through the floor. Only effective as a pak mod."
+                           bodies clipping through the floor."
                 .into(),
             pak_only: true,
             engine_section: None,
@@ -135,7 +135,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             label: "Fix Missing Smoke & Outlines".into(),
             category: "Gameplay Fixes".into(),
             description: "Restores Punisher smoke, Bruce Banner smoke, and Bucky ult outlines \
-                           by re-enabling Niagara sprite rendering. Only effective as a pak mod."
+                           by re-enabling Niagara sprite rendering."
                 .into(),
             pak_only: true,
             engine_section: None,
@@ -304,6 +304,80 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                 ],
             },
         },
+        // Latency
+        TweakDefinition {
+            id: "latency_gt_sync_type".into(),
+            label: "Game Thread Sync Type".into(),
+            category: "Latency".into(),
+            description: "Controls game-thread sync target. 0 = render thread, \
+                           1 = RHI thread, 2 = GPU swap-chain flip."
+                .into(),
+            pak_only: true,
+            engine_section: None,
+            kind: TweakKind::Slider {
+                key: "r.GTSyncType".into(),
+                min: 0.0,
+                max: 2.0,
+                step: 1.0,
+                default_value: 1.0,
+                section: "ConsoleVariables".into(),
+            },
+        },
+        TweakDefinition {
+            id: "latency_finish_current_frame".into(),
+            label: "Finish Current Frame".into(),
+            category: "Latency".into(),
+            description: "Forces the current frame to finish/present instead of buffering. \
+                           Can improve input latency, but usually reduces \
+                           throughput and overall performance."
+                .into(),
+            pak_only: true,
+            engine_section: None,
+            kind: TweakKind::Toggle {
+                key: "r.FinishCurrentFrame".into(),
+                on_value: "1".into(),
+                off_value: "0".into(),
+                default_enabled: false,
+                section: "ConsoleVariables".into(),
+            },
+        },
+        TweakDefinition {
+            id: "latency_one_frame_thread_lag".into(),
+            label: "One-Frame Thread Lag".into(),
+            category: "Latency".into(),
+            description: "Controls whether the render thread lags one frame behind the game \
+                           thread. Disable this to reduce latency at a \
+                           possible performance cost."
+                .into(),
+            pak_only: true,
+            engine_section: None,
+            kind: TweakKind::Toggle {
+                key: "r.OneFrameThreadLag".into(),
+                on_value: "1".into(),
+                off_value: "0".into(),
+                default_enabled: true,
+                section: "ConsoleVariables".into(),
+            },
+        },
+        TweakDefinition {
+            id: "latency_sync_interval".into(),
+            label: "VSync Sync Interval".into(),
+            category: "Latency".into(),
+            description: "Controls present interval for VSync-capable RHIs: 0 = present \
+                           immediately (unlocked), 1 = every vblank, 2 = every 2 vblanks, \
+                           etc. Higher values generally increase latency and lower frame rate."
+                .into(),
+            pak_only: true,
+            engine_section: None,
+            kind: TweakKind::Slider {
+                key: "rhi.SyncInterval".into(),
+                min: 0.0,
+                max: 4.0,
+                step: 1.0,
+                default_value: 0.0,
+                section: "ConsoleVariables".into(),
+            },
+        },
         // Display
         TweakDefinition {
             id: "application_scale".into(),
@@ -311,7 +385,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             category: "Display".into(),
             description: "Controls UI / viewport scaling. Default is 1.0. Values above 1.0 \
                            zoom in (useful for 4:3 without black bars). \
-                           Only effective as a pak mod (DefaultEngine.ini)."
+                           Only effective as an engine pak mod."
                 .into(),
             pak_only: true,
             engine_section: Some("/Script/Engine.UserInterfaceSettings".into()),
@@ -321,14 +395,14 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                 max: 2.0,
                 step: 0.05,
                 default_value: 1.0,
-                section: "ConsoleVariables".into(), // pak-only; section unused for engine writes
+                section: "ConsoleVariables".into(),
             },
         },
         TweakDefinition {
             id: "font_aa".into(),
             label: "Font Anti-Aliasing".into(),
             category: "Display".into(),
-            description: "Toggles anti-aliasing on UI text / fonts. Only effective as a pak mod.".into(),
+            description: "Toggles anti-aliasing on UI text / fonts. Not much performance change, mostly stylistic preference.".into(),
             pak_only: true,
             engine_section: None,
             kind: TweakKind::Toggle {
@@ -336,7 +410,23 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                 on_value: "1".into(),
                 off_value: "0".into(),
                 default_enabled: true,
-                section: "ConsoleVariables".into(), // pak-only; section unused for engine writes
+                section: "ConsoleVariables".into(),
+            },
+        },
+        TweakDefinition {
+            id: "hide_marvel_widget_ui".into(),
+            label: "Hide Overhead HP/Name UI".into(),
+            category: "Display".into(),
+            description: "Hides the UI for overhead health bars and player names. Potentially helpful for those on low-end hardware."
+                .into(),
+            pak_only: true,
+            engine_section: None,
+            kind: TweakKind::Toggle {
+                key: "UI.HideMarvelWidgetUI".into(),
+                on_value: "1".into(),
+                off_value: "0".into(),
+                default_enabled: false,
+                section: "ConsoleVariables".into(),
             },
         },
     ]
