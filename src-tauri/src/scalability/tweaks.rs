@@ -304,6 +304,24 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                 ],
             },
         },
+        TweakDefinition {
+            id: "force_default_material".into(),
+            label: "Force Default Material".into(),
+            category: "Sharpness & Textures".into(),
+            description: "Replaces all character and world materials with the engine default, \
+                           stripping textures and skins. Can improve performance on very low-end \
+                           hardware at the cost of visual clarity."
+                .into(),
+            pak_only: true,
+            engine_section: None,
+            kind: TweakKind::Toggle {
+                key: "r.debug.ForceDefaultMtl".into(),
+                on_value: "1".into(),
+                off_value: "0".into(),
+                default_enabled: false,
+                section: "ConsoleVariables".into(),
+            },
+        },
         // Latency
         TweakDefinition {
             id: "latency_gt_sync_type".into(),
