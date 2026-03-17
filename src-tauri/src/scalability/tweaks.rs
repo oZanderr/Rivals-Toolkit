@@ -456,8 +456,8 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             id: "character_outlines".into(),
             label: "Character Outlines".into(),
             category: "Display".into(),
-            description: "Controls stencil-based team and enemy outlines rendered around \
-                           characters. Disable to remove all highlight and silhouette effects."
+            description: "Controls stencil-based outlines on characters, including \
+                           team and enemy highlights. Disable to remove all outline/silhouette effects."
                 .into(),
             pak_only: true,
             engine_section: None,
@@ -466,6 +466,43 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                 on_value: "1".into(),
                 off_value: Some("0".into()),
                 default_enabled: true,
+                section: "ConsoleVariables".into(),
+            },
+        },
+        TweakDefinition {
+            id: "team_outline_line_mode".into(),
+            label: "Team Outline Line Mode".into(),
+            category: "Display".into(),
+            description: "Controls the rendering mode used for team/enemy outlines. \
+                           Different modes can noticeably change edge behavior and overall style; visual impact is greater at lower resolutions."
+                .into(),
+            pak_only: true,
+            engine_section: None,
+            kind: TweakKind::Slider {
+                key: "r.TeamOutline.LineMode".into(),
+                min: 0.0,
+                max: 2.0,
+                step: 1.0,
+                default_value: 1.0,
+                section: "ConsoleVariables".into(),
+            },
+        },
+        TweakDefinition {
+            id: "team_outline_line_width".into(),
+            label: "Team Outline Line Width".into(),
+            category: "Display".into(),
+            description: "Controls team/enemy outline thickness. \
+                           Higher values draw thicker lines; \
+                           visual impact is greater at lower resolutions."
+                .into(),
+            pak_only: true,
+            engine_section: None,
+            kind: TweakKind::Slider {
+                key: "r.TeamOutline.LineWidth".into(),
+                min: 0.0,
+                max: 2.0,
+                step: 1.0,
+                default_value: 1.0,
                 section: "ConsoleVariables".into(),
             },
         },
