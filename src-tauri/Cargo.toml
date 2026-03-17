@@ -1,7 +1,7 @@
 [package]
 name = "oinkers-toolkit"
 version = "0.1.0"
-description = "A Tauri App"
+description = "Toolkit for Marvel Rivals configuration and mod files"
 authors = ["Zander"]
 edition = "2024"
 
