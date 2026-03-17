@@ -306,11 +306,11 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                 ],
             },
         },
-        //Performance
+        //Experimental
         TweakDefinition {
             id: "disable_world_backgrounds".into(),
             label: "Disable World Backgrounds".into(),
-            category: "Performance".into(),
+            category: "Experimental".into(),
             description: "Sets r.ViewDistanceScale to an extremely low value, culling distant \
                            world geometry and backgrounds. Can improve performance on low-end \
                            hardware at the cost of environmental depth."
@@ -328,7 +328,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
         TweakDefinition {
             id: "force_default_material".into(),
             label: "Force Default Material".into(),
-            category: "Performance".into(),
+            category: "Experimental".into(),
             description: "Replaces all character and world materials with the engine default, \
                            stripping textures and skins. Can improve performance on very low-end \
                            hardware at the cost of visual clarity."
