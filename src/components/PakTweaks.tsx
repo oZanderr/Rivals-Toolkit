@@ -608,7 +608,7 @@ export function PakTweaks({ gamePath }: Props) {
           )}
 
           {/* Apply */}
-          <div className="flex items-center gap-3">
+          <div className="flex min-w-0 items-center gap-3">
             {selectedPak && !loading && (
               <>
                 <Button
@@ -642,8 +642,9 @@ export function PakTweaks({ gamePath }: Props) {
             )}
             {notice && (
               <span
+                title={notice.msg}
                 className={cn(
-                  "flex items-center gap-1 text-[12px]",
+                  "flex min-w-0 flex-1 items-center gap-1 text-[12px]",
                   notice.type === "ok"
                     ? "text-[var(--color-ok)]"
                     : notice.type === "err"
@@ -651,8 +652,8 @@ export function PakTweaks({ gamePath }: Props) {
                       : "text-muted-foreground"
                 )}
               >
-                {notice.type === "ok" && <CheckCircle2 size={13} />}
-                {notice.msg}
+                {notice.type === "ok" && <CheckCircle2 size={13} className="shrink-0" />}
+                <span className="truncate">{notice.msg}</span>
               </span>
             )}
           </div>
