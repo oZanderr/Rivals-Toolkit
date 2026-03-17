@@ -131,11 +131,12 @@ fn matches_pattern(trimmed_line: &str, pattern: &str) -> bool {
     line_lower == pat_lower || line_lower == format!("+cvars={}", pat_lower)
 }
 
-/// Find the first value of `key`, including `+CVars=key=value` lines.
+/// Find the last value of `key`, including `+CVars=key=value` lines.
 fn find_key_value(content: &str, key: &str) -> Option<String> {
     let key_lower = key.to_ascii_lowercase();
     let prefix = format!("{}=", key_lower);
     let cvars_prefix = format!("+cvars={}=", key_lower);
+    let mut found: Option<String> = None;
 
     for line in content.lines() {
         let t = line.trim();
@@ -145,13 +146,13 @@ fn find_key_value(content: &str, key: &str) -> Option<String> {
         let t_lower = t.to_ascii_lowercase();
 
         if t_lower.starts_with(&prefix) {
-            return Some(t[key.len() + 1..].to_string());
+            found = Some(t[key.len() + 1..].to_string());
         }
         if t_lower.starts_with(&cvars_prefix) {
-            return Some(t["+CVars=".len() + key.len() + 1..].to_string());
+            found = Some(t["+CVars=".len() + key.len() + 1..].to_string());
         }
     }
-    None
+    found
 }
 
 /// Remove all non-comment lines matching any given pattern.
