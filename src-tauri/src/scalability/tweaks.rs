@@ -453,6 +453,23 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             },
         },
         TweakDefinition {
+            id: "character_outlines".into(),
+            label: "Character Outlines".into(),
+            category: "Display".into(),
+            description: "Controls stencil-based team and enemy outlines rendered around \
+                           characters. Disable to remove all highlight and silhouette effects."
+                .into(),
+            pak_only: true,
+            engine_section: None,
+            kind: TweakKind::Toggle {
+                key: "StencilComponent.EnableOutline".into(),
+                on_value: "1".into(),
+                off_value: Some("0".into()),
+                default_enabled: true,
+                section: "ConsoleVariables".into(),
+            },
+        },
+        TweakDefinition {
             id: "hide_marvel_widget_ui".into(),
             label: "Hide Overhead HP/Name UI".into(),
             category: "Display".into(),
