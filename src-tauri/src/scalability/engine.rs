@@ -84,13 +84,24 @@ pub(crate) fn apply_tweaks(
                 default_enabled,
                 section,
             } => {
-                let value = if setting.enabled { on_value } else { off_value };
-                // Avoid writing default-value keys that were never present.
                 let key_in_file = find_key_value(content, key).is_some();
-                if key_in_file {
-                    upsert_key_value(&mut lines, key, value);
-                } else if setting.enabled != *default_enabled {
-                    insert_into_section(&mut lines, section, format!("{}={}", key, value));
+                if setting.enabled {
+                    if key_in_file {
+                        upsert_key_value(&mut lines, key, on_value);
+                    } else if setting.enabled != *default_enabled {
+                        insert_into_section(&mut lines, section, format!("{}={}", key, on_value));
+                    }
+                } else {
+                    match off_value {
+                        Some(v) => {
+                            if key_in_file {
+                                upsert_key_value(&mut lines, key, v);
+                            } else if setting.enabled != *default_enabled {
+                                insert_into_section(&mut lines, section, format!("{}={}", key, v));
+                            }
+                        }
+                        None => remove_key(&mut lines, key),
+                    }
                 }
             }
             TweakKind::Slider { key, section, .. } => {

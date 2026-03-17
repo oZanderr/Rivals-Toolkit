@@ -66,7 +66,7 @@ interface ToggleTweak extends TweakBase {
   kind: "Toggle";
   key: string;
   on_value: string;
-  off_value: string;
+  off_value?: string;
   default_enabled: boolean;
 }
 
@@ -163,10 +163,10 @@ export function PakTweaks({ gamePath }: Props) {
         }
         break;
       case "Toggle": {
-        const originalVal = (savedState?.active ?? false) ? def.on_value : def.off_value;
+        const originalVal = (savedState?.active ?? false) ? def.on_value : (def.off_value ?? null);
         queueEdit(
           def.key,
-          newEnabled ? def.on_value : def.off_value,
+          newEnabled ? def.on_value : (def.off_value ?? null),
           originalVal,
           def.engine_section
         );
@@ -745,7 +745,7 @@ function QuickTweakCodes({ tweak }: { tweak: TweakDefinition }) {
     case "Toggle":
       return (
         <code className={codeClass}>
-          {tweak.key}={tweak.on_value}/{tweak.off_value}
+          {tweak.key}={tweak.on_value}{tweak.off_value !== undefined ? `/${tweak.off_value}` : ""}
         </code>
       );
     case "Slider":

@@ -26,7 +26,9 @@ pub(crate) enum TweakKind {
     Toggle {
         key: String,
         on_value: String,
-        off_value: String,
+        /// Value to write when disabled. If absent, the key is removed from the file instead.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        off_value: Option<String>,
         /// Active-state fallback when the key is absent.
         #[serde(default)]
         default_enabled: bool,
@@ -239,7 +241,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             kind: TweakKind::Toggle {
                 key: "r.PostProcessing.EnableCAS".into(),
                 on_value: "1".into(),
-                off_value: "0".into(),
+                off_value: Some("0".into()),
                 default_enabled: true,
                 section: "PostProcessQuality@0".into(),
             },
@@ -317,7 +319,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             kind: TweakKind::Toggle {
                 key: "r.debug.ForceDefaultMtl".into(),
                 on_value: "1".into(),
-                off_value: "0".into(),
+                off_value: Some("0".into()),
                 default_enabled: false,
                 section: "ConsoleVariables".into(),
             },
@@ -354,7 +356,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             kind: TweakKind::Toggle {
                 key: "r.FinishCurrentFrame".into(),
                 on_value: "1".into(),
-                off_value: "0".into(),
+                off_value: Some("0".into()),
                 default_enabled: false,
                 section: "ConsoleVariables".into(),
             },
@@ -372,7 +374,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             kind: TweakKind::Toggle {
                 key: "r.OneFrameThreadLag".into(),
                 on_value: "1".into(),
-                off_value: "0".into(),
+                off_value: Some("0".into()),
                 default_enabled: true,
                 section: "ConsoleVariables".into(),
             },
@@ -426,7 +428,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             kind: TweakKind::Toggle {
                 key: "Slate.EnableFontAntiAliasing".into(),
                 on_value: "1".into(),
-                off_value: "0".into(),
+                off_value: Some("0".into()),
                 default_enabled: true,
                 section: "ConsoleVariables".into(),
             },
@@ -442,7 +444,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             kind: TweakKind::Toggle {
                 key: "UI.HideMarvelWidgetUI".into(),
                 on_value: "1".into(),
-                off_value: "0".into(),
+                off_value: Some("0".into()),
                 default_enabled: false,
                 section: "ConsoleVariables".into(),
             },
