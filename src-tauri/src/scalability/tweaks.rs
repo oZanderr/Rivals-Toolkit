@@ -306,10 +306,29 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                 ],
             },
         },
+        //Performance
+        TweakDefinition {
+            id: "disable_world_backgrounds".into(),
+            label: "Disable World Backgrounds".into(),
+            category: "Performance".into(),
+            description: "Sets r.ViewDistanceScale to an extremely low value, culling distant \
+                           world geometry and backgrounds. Can improve performance on low-end \
+                           hardware at the cost of environmental depth."
+                .into(),
+            pak_only: false,
+            engine_section: None,
+            kind: TweakKind::Toggle {
+                key: "r.ViewDistanceScale".into(),
+                on_value: "0.0000000000000000000000000000000001".into(),
+                off_value: None,
+                default_enabled: false,
+                section: "ViewDistanceQuality@0".into(),
+            },
+        },
         TweakDefinition {
             id: "force_default_material".into(),
             label: "Force Default Material".into(),
-            category: "Sharpness & Textures".into(),
+            category: "Performance".into(),
             description: "Replaces all character and world materials with the engine default, \
                            stripping textures and skins. Can improve performance on very low-end \
                            hardware at the cost of visual clarity."
@@ -319,7 +338,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             kind: TweakKind::Toggle {
                 key: "r.debug.ForceDefaultMtl".into(),
                 on_value: "1".into(),
-                off_value: Some("0".into()),
+                off_value: None,
                 default_enabled: false,
                 section: "ConsoleVariables".into(),
             },
