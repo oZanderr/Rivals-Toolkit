@@ -318,8 +318,8 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
         },
         //Experimental
         TweakDefinition {
-            id: "disable_world_backgrounds".into(),
-            label: "Disable World Backgrounds".into(),
+            id: "black_backgrounds".into(),
+            label: "Black Backgrounds".into(),
             category: "Experimental".into(),
             description: "Sets r.ViewDistanceScale to an extremely low value, culling distant \
                            world geometry and backgrounds. Can improve performance on low-end \
@@ -395,6 +395,26 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             },
         },
         // Latency
+        TweakDefinition {
+            id: "latency_reflex_mode".into(),
+            label: "NVIDIA Reflex Mode".into(),
+            category: "Latency".into(),
+            description: "Controls NVIDIA Reflex mode via Streamline. \
+                           0 = Off, 1 = On (Low Latency), 2 = On + Boost. \
+                           Mode 2 can have weird issues like massive \
+                           performance loss in certain areas of the firing range."
+                .into(),
+            pak_only: true,
+            kind: TweakKind::Slider {
+                key: "t.Streamline.Reflex.Mode".into(),
+                min: 0.0,
+                max: 2.0,
+                step: 1.0,
+                default_value: 0.0,
+                scalability_section: None,
+                engine_section: None,
+            },
+        },
         TweakDefinition {
             id: "latency_gt_sync_type".into(),
             label: "Game Thread Sync Type".into(),
