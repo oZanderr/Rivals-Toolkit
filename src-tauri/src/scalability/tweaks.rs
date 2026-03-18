@@ -339,7 +339,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             id: "force_default_material".into(),
             label: "Force Default Material".into(),
             category: "Experimental".into(),
-            description: "Replaces all character and world materials with the engine default, \
+            description: "Replaces all character materials with the engine default, \
                            stripping textures and skins. Can improve performance on very low-end \
                            hardware at the cost of visual clarity."
                 .into(),
@@ -351,6 +351,47 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                 default_enabled: false,
                 scalability_section: None,
                 engine_section: None,
+            },
+        },
+        TweakDefinition {
+            id: "network_revert_update_65".into(),
+            label: "Revert Network Rates (Update 6.5+)".into(),
+            category: "Experimental".into(),
+            description: "Reverts update 6.5+ network rate changes that can cause \
+                           teleporting/desync on some setups. Applies all four values in Engine.ini.".into(),
+            pak_only: true,
+            kind: TweakKind::BatchToggle {
+                entries: vec![
+                    BatchToggleEntry {
+                        key: "MaxClientRate".into(),
+                        on_value: "300000".into(),
+                        off_value: Some("8000000".into()),
+                        scalability_section: None,
+                        engine_section: Some("/Script/OnlineSubsystemUtils.IpNetDriver".into()),
+                    },
+                    BatchToggleEntry {
+                        key: "MaxInternetClientRate".into(),
+                        on_value: "300000".into(),
+                        off_value: Some("8000000".into()),
+                        scalability_section: None,
+                        engine_section: Some("/Script/OnlineSubsystemUtils.IpNetDriver".into()),
+                    },
+                    BatchToggleEntry {
+                        key: "ConfiguredInternetSpeed".into(),
+                        on_value: "300000".into(),
+                        off_value: Some("10000000".into()),
+                        scalability_section: None,
+                        engine_section: Some("/Script/Engine.Player".into()),
+                    },
+                    BatchToggleEntry {
+                        key: "ConfiguredLanSpeed".into(),
+                        on_value: "300000".into(),
+                        off_value: Some("15000000".into()),
+                        scalability_section: None,
+                        engine_section: Some("/Script/Engine.Player".into()),
+                    },
+                ],
+                default_enabled: false,
             },
         },
         // Latency
