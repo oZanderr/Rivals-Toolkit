@@ -10,7 +10,7 @@ pub(crate) fn detect_active_tweaks(
 
 fn detect_one(content: &str, tweak: &TweakDefinition) -> TweakState {
     match &tweak.kind {
-        TweakKind::RemoveLines { lines } => {
+        TweakKind::RemoveLines { lines, .. } => {
             let any_found = lines.iter().any(|entry| {
                 content.lines().any(|line| {
                     let t = line.trim();
@@ -86,10 +86,13 @@ pub(crate) fn apply_tweaks(
         };
 
         match &tweak.kind {
-            TweakKind::RemoveLines { lines: entries } => {
+            TweakKind::RemoveLines {
+                lines: entries,
+                remove_only,
+            } => {
                 if setting.enabled {
                     remove_matching_lines(&mut lines, entries);
-                } else {
+                } else if !remove_only {
                     add_lines_if_absent(&mut lines, entries);
                 }
             }
@@ -187,7 +190,7 @@ fn find_key_value(content: &str, key: &str) -> Option<String> {
 }
 
 /// Remove all non-comment lines matching any given pattern.
-fn remove_matching_lines(lines: &mut Vec<String>, entries: &[super::tweaks::ScalabilityLine]) {
+fn remove_matching_lines(lines: &mut Vec<String>, entries: &[super::tweaks::TweakLine]) {
     lines.retain(|line| {
         let t = line.trim();
         if t.starts_with(';') {
@@ -199,9 +202,9 @@ fn remove_matching_lines(lines: &mut Vec<String>, entries: &[super::tweaks::Scal
 
 /// Add missing lines under their target sections.
 /// Entries without a section are skipped (they only apply in pak context).
-fn add_lines_if_absent(lines: &mut Vec<String>, entries: &[super::tweaks::ScalabilityLine]) {
+fn add_lines_if_absent(lines: &mut Vec<String>, entries: &[super::tweaks::TweakLine]) {
     for entry in entries {
-        let Some(section) = &entry.section else {
+        let Some(section) = &entry.scalability_section else {
             continue;
         };
         let already = lines.iter().any(|line| {

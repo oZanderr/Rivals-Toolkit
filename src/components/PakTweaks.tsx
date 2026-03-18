@@ -58,7 +58,8 @@ interface TweakBase {
 
 interface RemoveLinesTweak extends TweakBase {
   kind: "RemoveLines";
-  lines: { pattern: string; section: string }[];
+  lines: { pattern: string; scalability_section?: string | null; engine_section?: string | null }[];
+  remove_only: boolean;
 }
 
 interface ToggleTweak extends TweakBase {
@@ -163,6 +164,9 @@ export function PakTweaks({ gamePath }: Props) {
     const savedState = savedTweakStates.find((s) => s.id === id);
     const newEnabled = !(currentState?.active ?? false);
 
+    // Remove-only tweaks cannot be disabled once enabled
+    if (!newEnabled && def.kind === "RemoveLines" && def.remove_only) return;
+
     // Optimistically update local state so the UI responds immediately
     setTweakStates((prev) => prev.map((s) => (s.id === id ? { ...s, active: newEnabled } : s)));
 
@@ -174,7 +178,7 @@ export function PakTweaks({ gamePath }: Props) {
           const val = eqIdx >= 0 ? line.pattern.substring(eqIdx + 1) : "0";
           // Original: null if tweak was active (line removed), val if inactive
           const originalVal = (savedState?.active ?? false) ? null : val;
-          queueEdit(key, newEnabled ? null : val, originalVal);
+          queueEdit(key, newEnabled ? null : val, originalVal, line.engine_section ?? undefined);
         }
         break;
       case "Toggle": {
@@ -589,13 +593,23 @@ export function PakTweaks({ gamePath }: Props) {
                             (tweak.kind === "Slider" && !!tweak.engine_section) ||
                             (tweak.kind === "BatchToggle" &&
                               tweak.entries.some((entry) => !!entry.engine_section));
-                          const disabled = engineOnly && !selectedPak.has_engine_ini;
+                          const isEnabled =
+                            tweakStates.find((s) => s.id === tweak.id)?.active ?? false;
+                          const removeOnly = tweak.kind === "RemoveLines" && tweak.remove_only;
+                          const needsEngine = engineOnly && !selectedPak.has_engine_ini;
+                          const lockedOn = removeOnly && isEnabled;
+                          const disabled = needsEngine || lockedOn;
                           return (
                             <QuickTweakRow
                               key={tweak.id}
                               tweak={tweak}
-                              isEnabled={
-                                tweakStates.find((s) => s.id === tweak.id)?.active ?? false
+                              isEnabled={isEnabled}
+                              disabledReason={
+                                needsEngine
+                                  ? "Requires DefaultEngine.ini in this pak mod"
+                                  : lockedOn
+                                    ? "Remove-only tweak cannot be reverted"
+                                    : undefined
                               }
                               currentValue={
                                 tweakStates.find((s) => s.id === tweak.id)?.current_value ??
@@ -702,12 +716,14 @@ function QuickTweakRow({
   isEnabled,
   currentValue,
   disabled,
+  disabledReason,
   onToggle,
   onValueChange,
 }: {
   tweak: TweakDefinition;
   isEnabled: boolean;
   currentValue: string | undefined;
+  disabledReason?: string;
   disabled?: boolean;
   onToggle: () => void;
   onValueChange: (val: string) => void;
@@ -735,9 +751,9 @@ function QuickTweakRow({
           <span className="text-[11px] leading-snug text-muted-foreground">
             {tweak.description}
           </span>
-          {disabled && (
+          {disabledReason && (
             <span className="text-[11px] leading-snug text-[var(--color-warn)] mt-0.5">
-              Requires DefaultEngine.ini in this pak mod
+              {disabledReason}
             </span>
           )}
           <div className="mt-1 flex flex-wrap gap-1">
