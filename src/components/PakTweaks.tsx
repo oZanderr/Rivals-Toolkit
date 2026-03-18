@@ -54,7 +54,6 @@ interface TweakBase {
   category: string;
   description: string;
   pak_only: boolean;
-  engine_section?: string;
 }
 
 interface RemoveLinesTweak extends TweakBase {
@@ -68,6 +67,7 @@ interface ToggleTweak extends TweakBase {
   on_value: string;
   off_value?: string;
   default_enabled: boolean;
+  engine_section?: string;
 }
 
 interface SliderTweak extends TweakBase {
@@ -77,9 +77,24 @@ interface SliderTweak extends TweakBase {
   max: number;
   step: number;
   default_value: number;
+  engine_section?: string;
 }
 
-type TweakDefinition = RemoveLinesTweak | ToggleTweak | SliderTweak;
+interface BatchToggleEntry {
+  key: string;
+  on_value: string;
+  off_value?: string;
+  scalability_section?: string;
+  engine_section?: string;
+}
+
+interface BatchToggleTweak extends TweakBase {
+  kind: "BatchToggle";
+  entries: BatchToggleEntry[];
+  default_enabled: boolean;
+}
+
+type TweakDefinition = RemoveLinesTweak | ToggleTweak | SliderTweak | BatchToggleTweak;
 
 // Per-pak state cache that preserves tweak states and unsaved edits when switching between paks
 interface PakCacheEntry {
@@ -182,6 +197,19 @@ export function PakTweaks({ gamePath }: Props) {
         queueEdit(def.key, newEnabled ? currentVal : null, originalVal, def.engine_section);
         break;
       }
+      case "BatchToggle": {
+        for (const entry of def.entries) {
+          const originalVal =
+            (savedState?.active ?? false) ? entry.on_value : (entry.off_value ?? null);
+          queueEdit(
+            entry.key,
+            newEnabled ? entry.on_value : (entry.off_value ?? null),
+            originalVal,
+            entry.engine_section
+          );
+        }
+        break;
+      }
     }
   }
 
@@ -194,7 +222,7 @@ export function PakTweaks({ gamePath }: Props) {
         ? (savedState?.current_value ?? String((def as SliderTweak).default_value))
         : null;
     setTweakStates((prev) => prev.map((s) => (s.id === id ? { ...s, current_value: val } : s)));
-    queueEdit((def as SliderTweak).key, val, originalVal, def.engine_section);
+    queueEdit((def as SliderTweak).key, val, originalVal, (def as SliderTweak).engine_section);
   }
 
   async function browse() {
@@ -556,7 +584,11 @@ export function PakTweaks({ gamePath }: Props) {
                       </span>
                       <div className="flex flex-col gap-2">
                         {defs.map((tweak) => {
-                          const engineOnly = !!tweak.engine_section;
+                          const engineOnly =
+                            (tweak.kind === "Toggle" && !!tweak.engine_section) ||
+                            (tweak.kind === "Slider" && !!tweak.engine_section) ||
+                            (tweak.kind === "BatchToggle" &&
+                              tweak.entries.some((entry) => !!entry.engine_section));
                           const disabled = engineOnly && !selectedPak.has_engine_ini;
                           return (
                             <QuickTweakRow
@@ -745,7 +777,8 @@ function QuickTweakCodes({ tweak }: { tweak: TweakDefinition }) {
     case "Toggle":
       return (
         <code className={codeClass}>
-          {tweak.key}={tweak.on_value}{tweak.off_value !== undefined ? `/${tweak.off_value}` : ""}
+          {tweak.key}={tweak.on_value}
+          {tweak.off_value !== undefined ? `/${tweak.off_value}` : ""}
         </code>
       );
     case "Slider":
@@ -753,6 +786,17 @@ function QuickTweakCodes({ tweak }: { tweak: TweakDefinition }) {
         <code className={codeClass}>
           {tweak.key} ({tweak.min}–{tweak.max})
         </code>
+      );
+    case "BatchToggle":
+      return (
+        <>
+          {tweak.entries.map((entry) => (
+            <code key={entry.key} className={codeClass}>
+              {entry.key}={entry.on_value}
+              {entry.off_value !== undefined ? `/${entry.off_value}` : ""}
+            </code>
+          ))}
+        </>
       );
   }
 }

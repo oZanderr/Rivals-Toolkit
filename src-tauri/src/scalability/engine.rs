@@ -26,9 +26,8 @@ fn detect_one(content: &str, tweak: &TweakDefinition) -> TweakState {
         TweakKind::Toggle {
             key,
             on_value,
-            off_value: _,
             default_enabled,
-            section: _,
+            ..
         } => {
             let current = find_key_value(content, key);
             let active = match current.as_deref() {
@@ -39,6 +38,23 @@ fn detect_one(content: &str, tweak: &TweakDefinition) -> TweakState {
                 id: tweak.id.clone(),
                 active,
                 current_value: current,
+            }
+        }
+        TweakKind::BatchToggle {
+            entries,
+            default_enabled,
+        } => {
+            let active = entries.iter().all(|entry| {
+                let current = find_key_value(content, &entry.key);
+                match current.as_deref() {
+                    Some(v) => v == entry.on_value.as_str(),
+                    None => *default_enabled,
+                }
+            });
+            TweakState {
+                id: tweak.id.clone(),
+                active,
+                current_value: None,
             }
         }
         TweakKind::Slider { key, .. } => {
@@ -82,33 +98,48 @@ pub(crate) fn apply_tweaks(
                 on_value,
                 off_value,
                 default_enabled,
-                section,
+                scalability_section,
+                ..
             } => {
-                let key_in_file = find_key_value(content, key).is_some();
-                if setting.enabled {
-                    if key_in_file {
-                        upsert_key_value(&mut lines, key, on_value);
-                    } else if setting.enabled != *default_enabled {
-                        insert_into_section(&mut lines, section, format!("{}={}", key, on_value));
-                    }
-                } else {
-                    match off_value {
-                        Some(v) => {
-                            if key_in_file {
-                                upsert_key_value(&mut lines, key, v);
-                            } else if setting.enabled != *default_enabled {
-                                insert_into_section(&mut lines, section, format!("{}={}", key, v));
-                            }
-                        }
-                        None => remove_key(&mut lines, key),
-                    }
+                apply_toggle_entry(
+                    &mut lines,
+                    content,
+                    key,
+                    setting.enabled,
+                    *default_enabled,
+                    on_value,
+                    off_value.as_deref(),
+                    scalability_section.as_deref(),
+                );
+            }
+            TweakKind::BatchToggle {
+                entries,
+                default_enabled,
+            } => {
+                for entry in entries {
+                    apply_toggle_entry(
+                        &mut lines,
+                        content,
+                        &entry.key,
+                        setting.enabled,
+                        *default_enabled,
+                        &entry.on_value,
+                        entry.off_value.as_deref(),
+                        entry.scalability_section.as_deref(),
+                    );
                 }
             }
-            TweakKind::Slider { key, section, .. } => {
+            TweakKind::Slider {
+                key,
+                scalability_section,
+                ..
+            } => {
                 if setting.enabled {
                     let value = setting.value.as_deref().unwrap_or("0");
-                    if !upsert_key_value(&mut lines, key, value) {
-                        insert_into_section(&mut lines, section, format!("{}={}", key, value));
+                    if !upsert_key_value(&mut lines, key, value)
+                        && let Some(sec) = scalability_section
+                    {
+                        insert_into_section(&mut lines, sec, format!("{}={}", key, value));
                     }
                 } else {
                     remove_key(&mut lines, key);
@@ -167,19 +198,50 @@ fn remove_matching_lines(lines: &mut Vec<String>, entries: &[super::tweaks::Scal
 }
 
 /// Add missing lines under their target sections.
-/// `pak_only` entries are ignored for scalability files.
+/// Entries without a section are skipped (they only apply in pak context).
 fn add_lines_if_absent(lines: &mut Vec<String>, entries: &[super::tweaks::ScalabilityLine]) {
     for entry in entries {
-        if entry.pak_only {
+        let Some(section) = &entry.section else {
             continue;
-        }
+        };
         let already = lines.iter().any(|line| {
             let t = line.trim();
             !t.starts_with(';') && matches_pattern(t, &entry.pattern)
         });
         if !already {
-            insert_into_section(lines, &entry.section, entry.pattern.clone());
+            insert_into_section(lines, section, entry.pattern.clone());
         }
+    }
+}
+
+/// Apply a single toggle key: set to `on_value` when enabled, `off_value` (or remove) when disabled.
+/// When `scalability_section` is `None` (pak-only tweaks), only in-place updates and removals are
+/// performed; new keys are never inserted since there is no valid scalability section.
+#[allow(clippy::too_many_arguments)]
+fn apply_toggle_entry(
+    lines: &mut Vec<String>,
+    content: &str,
+    key: &str,
+    enabled: bool,
+    default_enabled: bool,
+    on_value: &str,
+    off_value: Option<&str>,
+    scalability_section: Option<&str>,
+) {
+    let key_in_file = find_key_value(content, key).is_some();
+    let value = if enabled { Some(on_value) } else { off_value };
+
+    match value {
+        Some(v) => {
+            if key_in_file {
+                upsert_key_value(lines, key, v);
+            } else if enabled != default_enabled
+                && let Some(sec) = scalability_section
+            {
+                insert_into_section(lines, sec, format!("{}={}", key, v));
+            }
+        }
+        None => remove_key(lines, key),
     }
 }
 

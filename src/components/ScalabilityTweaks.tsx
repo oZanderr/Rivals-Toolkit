@@ -212,7 +212,10 @@ export function ScalabilityTweaks({
         changes.push({
           id: def.id,
           kind: !isEnabled && def.off_value === undefined ? "remove" : "set",
-          display: !isEnabled && def.off_value === undefined ? def.key : `${def.key}=${isEnabled ? def.on_value : def.off_value}`,
+          display:
+            !isEnabled && def.off_value === undefined
+              ? def.key
+              : `${def.key}=${isEnabled ? def.on_value : def.off_value}`,
         });
       }
     } else if (def.kind === "Slider") {
@@ -439,7 +442,8 @@ function TweakCodes({ tweak }: { tweak: TweakDefinition }) {
     case "Toggle":
       return (
         <code className={codeClass}>
-          {tweak.key}={tweak.on_value}{tweak.off_value !== undefined ? `/${tweak.off_value}` : ""}
+          {tweak.key}={tweak.on_value}
+          {tweak.off_value !== undefined ? `/${tweak.off_value}` : ""}
         </code>
       );
     case "Slider":

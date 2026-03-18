@@ -1,19 +1,30 @@
 use serde::{Deserialize, Serialize};
 
-fn default_cv_section() -> String {
-    "ConsoleVariables".to_string()
-}
-
 /// One line pattern used by a `RemoveLines` tweak.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ScalabilityLine {
     pub pattern: String,
-    /// Target scalability section for this line.
-    #[serde(default = "default_cv_section")]
-    pub section: String,
-    /// If true, only applied in pak INI context.
-    #[serde(default)]
-    pub pak_only: bool,
+    /// Target scalability section (e.g. `PostProcessQuality@0`).
+    /// `None` for lines that should only be removed, never re-added to scalability files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section: Option<String>,
+}
+
+/// One key/value assignment used by a `BatchToggle` tweak.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct BatchToggleEntry {
+    pub key: String,
+    pub on_value: String,
+    /// Value to write when disabled. If absent, the key is removed from the file instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub off_value: Option<String>,
+    /// Target scalability section (e.g. `PostProcessQuality@0`).
+    /// `None` for pak-only tweaks that don't touch scalability files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scalability_section: Option<String>,
+    /// Optional Engine.ini section override for pak edits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_section: Option<String>,
 }
 
 /// Tweak behavior definition.
@@ -32,9 +43,19 @@ pub(crate) enum TweakKind {
         /// Active-state fallback when the key is absent.
         #[serde(default)]
         default_enabled: bool,
-        /// Section used when inserting new keys into scalability files.
-        #[serde(default = "default_cv_section")]
-        section: String,
+        /// Target scalability section (e.g. `PostProcessQuality@0`).
+        /// `None` for pak-only tweaks that don't touch scalability files.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scalability_section: Option<String>,
+        /// Target Engine.ini section for pak edits.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        engine_section: Option<String>,
+    },
+    BatchToggle {
+        entries: Vec<BatchToggleEntry>,
+        /// Active-state fallback when keys are absent.
+        #[serde(default)]
+        default_enabled: bool,
     },
     Slider {
         key: String,
@@ -42,9 +63,13 @@ pub(crate) enum TweakKind {
         max: f64,
         step: f64,
         default_value: f64,
-        /// Section used when inserting new keys into scalability files.
-        #[serde(default = "default_cv_section")]
-        section: String,
+        /// Target scalability section (e.g. `PostProcessQuality@0`).
+        /// `None` for pak-only tweaks that don't touch scalability files.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scalability_section: Option<String>,
+        /// Target Engine.ini section for pak edits.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        engine_section: Option<String>,
     },
 }
 
@@ -57,9 +82,6 @@ pub(crate) struct TweakDefinition {
     pub description: String,
     #[serde(default)]
     pub pak_only: bool,
-    /// Optional Engine.ini section for pak-only tweaks.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub engine_section: Option<String>,
     #[serde(flatten)]
     pub kind: TweakKind,
 }
@@ -93,12 +115,11 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                            r.CustomDepth and r.LightTile.Enable only take effect in pak mods."
                 .into(),
             pak_only: false,
-            engine_section: None,
             kind: TweakKind::RemoveLines {
                 lines: vec![
-                    ScalabilityLine { pattern: "r.PostProcessing.DisableMaterials=1".into(), section: "PostProcessQuality@0".into(), pak_only: false },
-                    ScalabilityLine { pattern: "r.CustomDepth=0".into(),                     section: "ConsoleVariables".into(),    pak_only: true  },
-                    ScalabilityLine { pattern: "r.LightTile.Enable=0".into(),                section: "ConsoleVariables".into(),    pak_only: true  },
+                    ScalabilityLine { pattern: "r.PostProcessing.DisableMaterials=1".into(), section: Some("PostProcessQuality@0".into()) },
+                    ScalabilityLine { pattern: "r.CustomDepth=0".into(),                     section: None },
+                    ScalabilityLine { pattern: "r.LightTile.Enable=0".into(),                section: None },
                 ],
             },
         },
@@ -110,10 +131,9 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                            resolution in Doom Match."
                 .into(),
             pak_only: false,
-            engine_section: None,
             kind: TweakKind::RemoveLines {
                 lines: vec![
-                    ScalabilityLine { pattern: "m.Portal.ScreenPercentageLowerLimit=1".into(), section: "EffectsQuality@0".into(), pak_only: false },
+                    ScalabilityLine { pattern: "m.Portal.ScreenPercentageLowerLimit=1".into(), section: Some("EffectsQuality@0".into()) },
                 ],
             },
         },
@@ -125,10 +145,9 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                            bodies clipping through the floor."
                 .into(),
             pak_only: true,
-            engine_section: None,
             kind: TweakKind::RemoveLines {
                 lines: vec![
-                    ScalabilityLine { pattern: "p.SimCollisionEnabled=0".into(), section: "ConsoleVariables".into(), pak_only: false },
+                    ScalabilityLine { pattern: "p.SimCollisionEnabled=0".into(), section: None },
                 ],
             },
         },
@@ -140,10 +159,9 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                            by re-enabling Niagara sprite rendering."
                 .into(),
             pak_only: true,
-            engine_section: None,
             kind: TweakKind::RemoveLines {
                 lines: vec![
-                    ScalabilityLine { pattern: "fx.EnableNiagaraSpriteRendering=0".into(), section: "ConsoleVariables".into(), pak_only: false },
+                    ScalabilityLine { pattern: "fx.EnableNiagaraSpriteRendering=0".into(), section: None },
                 ],
             },
         },
@@ -156,12 +174,11 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                            too dark."
                 .into(),
             pak_only: false,
-            engine_section: None,
             kind: TweakKind::RemoveLines {
                 lines: vec![
-                    ScalabilityLine { pattern: "r.LightMaxDrawDistanceScale=0.00000001".into(), section: "ShadowQuality@0".into(),             pak_only: false },
-                    ScalabilityLine { pattern: "r.LightFadeDistance=1".into(),                  section: "GlobalIlluminationQuality@0".into(), pak_only: false },
-                    ScalabilityLine { pattern: "r.LightCullingDistance=1".into(),               section: "GlobalIlluminationQuality@0".into(), pak_only: false },
+                    ScalabilityLine { pattern: "r.LightMaxDrawDistanceScale=0.00000001".into(), section: Some("ShadowQuality@0".into()) },
+                    ScalabilityLine { pattern: "r.LightFadeDistance=1".into(),                  section: Some("GlobalIlluminationQuality@0".into()) },
+                    ScalabilityLine { pattern: "r.LightCullingDistance=1".into(),               section: Some("GlobalIlluminationQuality@0".into()) },
                 ],
             },
         },
@@ -173,14 +190,14 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                            Higher values = brighter."
                 .into(),
             pak_only: false,
-            engine_section: None,
             kind: TweakKind::Slider {
                 key: "r.TonemapperGamma".into(),
                 min: 0.0,
                 max: 5.0,
                 step: 0.1,
                 default_value: 2.2,
-                section: "PostProcessQuality@0".into(),
+                scalability_section: Some("PostProcessQuality@0".into()),
+                engine_section: None,
             },
         },
         TweakDefinition {
@@ -191,10 +208,9 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                            banding. Especially recommended when using the Quake Environments mod."
                 .into(),
             pak_only: false,
-            engine_section: None,
             kind: TweakKind::RemoveLines {
                 lines: vec![
-                    ScalabilityLine { pattern: "r.SceneColorFormat=0".into(), section: "EffectsQuality@0".into(), pak_only: false },
+                    ScalabilityLine { pattern: "r.SceneColorFormat=0".into(), section: Some("EffectsQuality@0".into()) },
                 ],
             },
         },
@@ -206,10 +222,9 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                            incorrectly dark."
                 .into(),
             pak_only: false,
-            engine_section: None,
             kind: TweakKind::RemoveLines {
                 lines: vec![
-                    ScalabilityLine { pattern: "r.PostProcessing.EnableEyeAdaptation=0".into(), section: "PostProcessQuality@0".into(), pak_only: false },
+                    ScalabilityLine { pattern: "r.PostProcessing.EnableEyeAdaptation=0".into(), section: Some("PostProcessQuality@0".into()) },
                 ],
             },
         },
@@ -221,10 +236,9 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                            appear unsaturated."
                 .into(),
             pak_only: false,
-            engine_section: None,
             kind: TweakKind::RemoveLines {
                 lines: vec![
-                    ScalabilityLine { pattern: "r.SeparateTranslucency=0".into(), section: "PostProcessQuality@0".into(), pak_only: false },
+                    ScalabilityLine { pattern: "r.SeparateTranslucency=0".into(), section: Some("PostProcessQuality@0".into()) },
                 ],
             },
         },
@@ -237,13 +251,13 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                            enable for a sharper image."
                 .into(),
             pak_only: false,
-            engine_section: None,
             kind: TweakKind::Toggle {
                 key: "r.PostProcessing.EnableCAS".into(),
                 on_value: "1".into(),
                 off_value: Some("0".into()),
                 default_enabled: true,
-                section: "PostProcessQuality@0".into(),
+                scalability_section: Some("PostProcessQuality@0".into()),
+                engine_section: None,
             },
         },
         TweakDefinition {
@@ -255,13 +269,12 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                            keep DLSS off and enable Fix Color Banding."
                 .into(),
             pak_only: false,
-            engine_section: None,
             kind: TweakKind::RemoveLines {
                 lines: vec![
-                    ScalabilityLine { pattern: "r.AnisotropicMaterials=0".into(),    section: "ShadingQuality@0".into(),   pak_only: false },
-                    ScalabilityLine { pattern: "r.VT.AnisotropicMaterials=0".into(), section: "TextureQuality@0".into(),   pak_only: false },
-                    ScalabilityLine { pattern: "r.VT.MaxAnisotropy=0".into(),        section: "TextureQuality@0".into(),   pak_only: false },
-                    ScalabilityLine { pattern: "r.MaxAnisotropy=0".into(),           section: "TextureQuality@0".into(),   pak_only: false },
+                    ScalabilityLine { pattern: "r.AnisotropicMaterials=0".into(),    section: Some("ShadingQuality@0".into()) },
+                    ScalabilityLine { pattern: "r.VT.AnisotropicMaterials=0".into(), section: Some("TextureQuality@0".into()) },
+                    ScalabilityLine { pattern: "r.VT.MaxAnisotropy=0".into(),        section: Some("TextureQuality@0".into()) },
+                    ScalabilityLine { pattern: "r.MaxAnisotropy=0".into(),           section: Some("TextureQuality@0".into()) },
                 ],
             },
         },
@@ -271,10 +284,9 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             category: "Sharpness & Textures".into(),
             description: "Removes high MipMap LOD bias that degrades texture quality.".into(),
             pak_only: false,
-            engine_section: None,
             kind: TweakKind::RemoveLines {
                 lines: vec![
-                    ScalabilityLine { pattern: "r.MipMapLODBias=15".into(), section: "TextureQuality@0".into(), pak_only: false },
+                    ScalabilityLine { pattern: "r.MipMapLODBias=15".into(), section: Some("TextureQuality@0".into()) },
                 ],
             },
         },
@@ -284,10 +296,9 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             category: "Sharpness & Textures".into(),
             description: "Removes streaming mip bias that can cause blurry textures.".into(),
             pak_only: false,
-            engine_section: None,
             kind: TweakKind::RemoveLines {
                 lines: vec![
-                    ScalabilityLine { pattern: "r.Streaming.MipBias=2".into(), section: "TextureQuality@0".into(), pak_only: false },
+                    ScalabilityLine { pattern: "r.Streaming.MipBias=2".into(), section: Some("TextureQuality@0".into()) },
                 ],
             },
         },
@@ -299,10 +310,9 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                            Disable this fix to keep the line for Quake Environments mod compatibility."
                 .into(),
             pak_only: false,
-            engine_section: None,
             kind: TweakKind::RemoveLines {
                 lines: vec![
-                    ScalabilityLine { pattern: "r.Streaming.PoolSize=1".into(), section: "TextureQuality@0".into(), pak_only: false },
+                    ScalabilityLine { pattern: "r.Streaming.PoolSize=1".into(), section: Some("TextureQuality@0".into()) },
                 ],
             },
         },
@@ -316,13 +326,13 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                            hardware at the cost of environmental depth."
                 .into(),
             pak_only: false,
-            engine_section: None,
             kind: TweakKind::Toggle {
                 key: "r.ViewDistanceScale".into(),
                 on_value: "0.0000000000000000000000000000000001".into(),
                 off_value: None,
                 default_enabled: false,
-                section: "ViewDistanceQuality@0".into(),
+                scalability_section: Some("ViewDistanceQuality@0".into()),
+                engine_section: None,
             },
         },
         TweakDefinition {
@@ -334,13 +344,13 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                            hardware at the cost of visual clarity."
                 .into(),
             pak_only: true,
-            engine_section: None,
             kind: TweakKind::Toggle {
                 key: "r.debug.ForceDefaultMtl".into(),
                 on_value: "1".into(),
                 off_value: None,
                 default_enabled: false,
-                section: "ConsoleVariables".into(),
+                scalability_section: None,
+                engine_section: None,
             },
         },
         // Latency
@@ -352,14 +362,14 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                            1 = RHI thread, 2 = GPU swap-chain flip."
                 .into(),
             pak_only: true,
-            engine_section: None,
             kind: TweakKind::Slider {
                 key: "r.GTSyncType".into(),
                 min: 0.0,
                 max: 2.0,
                 step: 1.0,
                 default_value: 1.0,
-                section: "ConsoleVariables".into(),
+                scalability_section: None,
+                engine_section: None,
             },
         },
         TweakDefinition {
@@ -371,13 +381,13 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                            throughput and overall performance."
                 .into(),
             pak_only: true,
-            engine_section: None,
             kind: TweakKind::Toggle {
                 key: "r.FinishCurrentFrame".into(),
                 on_value: "1".into(),
                 off_value: Some("0".into()),
                 default_enabled: false,
-                section: "ConsoleVariables".into(),
+                scalability_section: None,
+                engine_section: None,
             },
         },
         TweakDefinition {
@@ -389,13 +399,13 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                            possible performance cost."
                 .into(),
             pak_only: true,
-            engine_section: None,
             kind: TweakKind::Toggle {
                 key: "r.OneFrameThreadLag".into(),
                 on_value: "1".into(),
                 off_value: Some("0".into()),
                 default_enabled: true,
-                section: "ConsoleVariables".into(),
+                scalability_section: None,
+                engine_section: None,
             },
         },
         TweakDefinition {
@@ -407,14 +417,14 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                            etc. Higher values generally increase latency and lower frame rate."
                 .into(),
             pak_only: true,
-            engine_section: None,
             kind: TweakKind::Slider {
                 key: "rhi.SyncInterval".into(),
                 min: 0.0,
                 max: 4.0,
                 step: 1.0,
                 default_value: 0.0,
-                section: "ConsoleVariables".into(),
+                scalability_section: None,
+                engine_section: None,
             },
         },
         // Display
@@ -427,14 +437,14 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                            Only effective as an engine pak mod."
                 .into(),
             pak_only: true,
-            engine_section: Some("/Script/Engine.UserInterfaceSettings".into()),
             kind: TweakKind::Slider {
                 key: "ApplicationScale".into(),
                 min: 0.5,
                 max: 2.0,
                 step: 0.05,
                 default_value: 1.0,
-                section: "ConsoleVariables".into(),
+                scalability_section: None,
+                engine_section: Some("/Script/Engine.UserInterfaceSettings".into()),
             },
         },
         TweakDefinition {
@@ -443,13 +453,13 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             category: "Display".into(),
             description: "Toggles anti-aliasing on UI text / fonts. Not much performance change, mostly stylistic preference.".into(),
             pak_only: true,
-            engine_section: None,
             kind: TweakKind::Toggle {
                 key: "Slate.EnableFontAntiAliasing".into(),
                 on_value: "1".into(),
                 off_value: Some("0".into()),
                 default_enabled: true,
-                section: "ConsoleVariables".into(),
+                scalability_section: None,
+                engine_section: None,
             },
         },
         TweakDefinition {
@@ -460,13 +470,13 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                            team and enemy highlights. Disable to remove all outline/silhouette effects."
                 .into(),
             pak_only: true,
-            engine_section: None,
             kind: TweakKind::Toggle {
                 key: "StencilComponent.EnableOutline".into(),
                 on_value: "1".into(),
                 off_value: Some("0".into()),
                 default_enabled: true,
-                section: "ConsoleVariables".into(),
+                scalability_section: None,
+                engine_section: None,
             },
         },
         TweakDefinition {
@@ -477,14 +487,14 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                            Different modes can noticeably change edge behavior and overall style; visual impact is greater at lower resolutions."
                 .into(),
             pak_only: true,
-            engine_section: None,
             kind: TweakKind::Slider {
                 key: "r.TeamOutline.LineMode".into(),
                 min: 0.0,
                 max: 2.0,
                 step: 1.0,
                 default_value: 1.0,
-                section: "ConsoleVariables".into(),
+                scalability_section: None,
+                engine_section: None,
             },
         },
         TweakDefinition {
@@ -496,14 +506,14 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                            visual impact is greater at lower resolutions."
                 .into(),
             pak_only: true,
-            engine_section: None,
             kind: TweakKind::Slider {
                 key: "r.TeamOutline.LineWidth".into(),
                 min: 0.0,
                 max: 2.0,
                 step: 1.0,
                 default_value: 1.0,
-                section: "ConsoleVariables".into(),
+                scalability_section: None,
+                engine_section: None,
             },
         },
         TweakDefinition {
@@ -513,13 +523,13 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             description: "Hides the UI for overhead health bars and player names. Potentially helpful for those on low-end hardware."
                 .into(),
             pak_only: true,
-            engine_section: None,
             kind: TweakKind::Toggle {
                 key: "UI.HideMarvelWidgetUI".into(),
                 on_value: "1".into(),
                 off_value: Some("0".into()),
                 default_enabled: false,
-                section: "ConsoleVariables".into(),
+                scalability_section: None,
+                engine_section: None,
             },
         },
     ]
