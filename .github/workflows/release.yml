@@ -16,7 +16,7 @@ permissions:
 
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   release:
@@ -25,6 +25,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref }}
 
       - name: Resolve release tag
         id: vars
@@ -147,14 +149,14 @@ jobs:
           }
 
           @"
-          ## Checksums
+## Checksums
 
-          - `$assetName`: `$checksum`
+- ``$assetName``: ``$checksum``
 
-          ## Changelog
+## Changelog
 
-          $changes
-          "@ | Set-Content -Path $notesPath -Encoding utf8
+$changes
+"@ | Set-Content -Path $notesPath -Encoding utf8
 
           gh release view "$tag" *> $null
           if ($LASTEXITCODE -ne 0) {
@@ -170,3 +172,42 @@ jobs:
           }
 
           gh release upload "$tag" "$assetPath" --clobber
+
+      - name: Notify Discord on release success
+        if: ${{ success() }}
+        shell: pwsh
+        env:
+          DISCORD_RELEASE_WEBHOOK: ${{ secrets.DISCORD_RELEASE_WEBHOOK }}
+        run: |
+          if (-not $env:DISCORD_RELEASE_WEBHOOK) {
+            Write-Host "DISCORD_RELEASE_WEBHOOK is not configured; skipping Discord notification."
+            exit 0
+          }
+
+          $tag = "${{ steps.vars.outputs.tag }}"
+          $assetName = "oinkers-toolkit-$tag-windows-x64.zip"
+          $repo = "${{ github.repository }}"
+          $releaseUrl = "https://github.com/$repo/releases/tag/$tag"
+          $downloadUrl = "https://github.com/$repo/releases/download/$tag/$assetName"
+
+          $payload = @{
+            thread_name = "Oinkers Toolkit - $tag"
+            content = ""
+            embeds = @(
+              @{
+                color = 5763719
+                fields = @(
+                  @{ name = "Release"; value = "[View release]($releaseUrl)"; inline = $true },
+                  @{ name = "Download"; value = "[$assetName]($downloadUrl)"; inline = $true }
+                )
+                timestamp = (Get-Date).ToUniversalTime().ToString("o")
+              }
+            )
+          } | ConvertTo-Json -Depth 8
+
+          Invoke-RestMethod `
+            -Uri $env:DISCORD_RELEASE_WEBHOOK `
+            -Method Post `
+            -ContentType "application/json" `
+            -Body $payload
+
