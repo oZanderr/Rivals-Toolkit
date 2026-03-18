@@ -25,7 +25,12 @@ interface TweakBase {
 
 interface RemoveLinesTweak extends TweakBase {
   kind: "RemoveLines";
-  lines: { pattern: string; scalability_section?: string | null; engine_section?: string | null; replace_with?: string | null }[];
+  lines: {
+    pattern: string;
+    scalability_section?: string | null;
+    engine_section?: string | null;
+    replace_with?: string | null;
+  }[];
   remove_only: boolean;
 }
 

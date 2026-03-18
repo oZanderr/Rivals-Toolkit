@@ -58,7 +58,12 @@ interface TweakBase {
 
 interface RemoveLinesTweak extends TweakBase {
   kind: "RemoveLines";
-  lines: { pattern: string; scalability_section?: string | null; engine_section?: string | null; replace_with?: string | null }[];
+  lines: {
+    pattern: string;
+    scalability_section?: string | null;
+    engine_section?: string | null;
+    replace_with?: string | null;
+  }[];
   remove_only: boolean;
 }
 
@@ -177,7 +182,8 @@ export function PakTweaks({ gamePath }: Props) {
           let replaceVal: string | null = null;
           if (line.replace_with != null) {
             const rwEqIdx = line.replace_with.indexOf("=");
-            replaceVal = rwEqIdx >= 0 ? line.replace_with.substring(rwEqIdx + 1) : line.replace_with;
+            replaceVal =
+              rwEqIdx >= 0 ? line.replace_with.substring(rwEqIdx + 1) : line.replace_with;
           }
           const isSavedActive = savedState?.active ?? false;
           const originalVal = isSavedActive ? replaceVal : patternVal;
@@ -600,7 +606,8 @@ export function PakTweaks({ gamePath }: Props) {
                           const isEnabled =
                             tweakStates.find((s) => s.id === tweak.id)?.active ?? false;
                           const removeOnly = tweak.kind === "RemoveLines" && tweak.remove_only;
-                          const isSavedEnabled = savedTweakStates.find((s) => s.id === tweak.id)?.active ?? false;
+                          const isSavedEnabled =
+                            savedTweakStates.find((s) => s.id === tweak.id)?.active ?? false;
                           if (removeOnly && isSavedEnabled) return null;
                           const needsEngine = engineOnly && !selectedPak.has_engine_ini;
                           const disabled = needsEngine;
