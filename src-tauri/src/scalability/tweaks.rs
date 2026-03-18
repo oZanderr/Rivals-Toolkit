@@ -11,6 +11,9 @@ pub(crate) struct TweakLine {
     /// Target Engine.ini section for pak edits (defaults to `[ConsoleVariables]` when `None`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_section: Option<String>,
+    /// When set, replace the matched line with this string instead of removing it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replace_with: Option<String>,
 }
 
 /// One key/value assignment used by a `BatchToggle` tweak.
@@ -123,9 +126,9 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             pak_only: false,
             kind: TweakKind::RemoveLines {
                 lines: vec![
-                    TweakLine { pattern: "r.PostProcessing.DisableMaterials=1".into(), scalability_section: Some("PostProcessQuality@0".into()), engine_section: None },
-                    TweakLine { pattern: "r.CustomDepth=0".into(),                     scalability_section: None, engine_section: None },
-                    TweakLine { pattern: "r.LightTile.Enable=0".into(),                scalability_section: None, engine_section: None },
+                    TweakLine { pattern: "r.PostProcessing.DisableMaterials=1".into(), scalability_section: Some("PostProcessQuality@0".into()), engine_section: None, replace_with: None },
+                    TweakLine { pattern: "r.CustomDepth=0".into(),                     scalability_section: None, engine_section: None, replace_with: None },
+                    TweakLine { pattern: "r.LightTile.Enable=0".into(),                scalability_section: None, engine_section: None, replace_with: None },
                 ],
                 remove_only: false,
             },
@@ -140,7 +143,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             pak_only: false,
             kind: TweakKind::RemoveLines {
                 lines: vec![
-                    TweakLine { pattern: "m.Portal.ScreenPercentageLowerLimit=1".into(), scalability_section: Some("EffectsQuality@0".into()), engine_section: None },
+                    TweakLine { pattern: "m.Portal.ScreenPercentageLowerLimit=1".into(), scalability_section: Some("EffectsQuality@0".into()), engine_section: None, replace_with: None },
                 ],
                 remove_only: false,
             },
@@ -155,7 +158,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             pak_only: true,
             kind: TweakKind::RemoveLines {
                 lines: vec![
-                    TweakLine { pattern: "p.SimCollisionEnabled=0".into(), scalability_section: None, engine_section: None },
+                    TweakLine { pattern: "p.SimCollisionEnabled=0".into(), scalability_section: None, engine_section: None, replace_with: None },
                 ],
                 remove_only: false,
             },
@@ -170,9 +173,29 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             pak_only: true,
             kind: TweakKind::RemoveLines {
                 lines: vec![
-                    TweakLine { pattern: "fx.EnableNiagaraSpriteRendering=0".into(), scalability_section: None, engine_section: None },
+                    TweakLine { pattern: "fx.EnableNiagaraSpriteRendering=0".into(), scalability_section: None, engine_section: None, replace_with: None },
                 ],
                 remove_only: false,
+            },
+        },
+        TweakDefinition {
+            id: "fix_kun_lun_smoke".into(),
+            label: "Fix Kun-Lun Smoke".into(),
+            category: "Gameplay Fixes".into(),
+            description: "Removes distance field CVars that disable smoke effects on Kun-Lun."
+                .into(),
+            pak_only: true,
+            kind: TweakKind::RemoveLines {
+                lines: vec![
+                    TweakLine { pattern: "r.StaticMesh.StripDistanceFieldDataDuringLoad=1".into(),      scalability_section: None, engine_section: None, replace_with: None },
+                    TweakLine { pattern: "r.StaticMesh.StripDistanceFieldDataOnLoad=1".into(),          scalability_section: None, engine_section: None, replace_with: None },
+                    TweakLine { pattern: "r.DistanceFields=0".into(),                                   scalability_section: None, engine_section: None, replace_with: None },
+                    TweakLine { pattern: "r.DistanceFields.MaxObjectBoundingRadius=0.0000001".into(),   scalability_section: None, engine_section: None, replace_with: None },
+                    TweakLine { pattern: "r.AlwaysPrepareGlobalDistaneField=0".into(),                  scalability_section: None, engine_section: None, replace_with: None },
+                    TweakLine { pattern: "r.AlwaysPrepareGlobalDistanceField=0".into(),                 scalability_section: None, engine_section: None, replace_with: None },
+                    TweakLine { pattern: "r.GenerateMeshDistanceFields=0".into(),                       scalability_section: None, engine_section: None, replace_with: Some("r.GenerateMeshDistanceFields=True".into()) },
+                ],
+                remove_only: true,
             },
         },
         // Lighting & Color
@@ -186,9 +209,9 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             pak_only: false,
             kind: TweakKind::RemoveLines {
                 lines: vec![
-                    TweakLine { pattern: "r.LightMaxDrawDistanceScale=0.00000001".into(), scalability_section: Some("ShadowQuality@0".into()), engine_section: None },
-                    TweakLine { pattern: "r.LightFadeDistance=1".into(),                  scalability_section: Some("GlobalIlluminationQuality@0".into()), engine_section: None },
-                    TweakLine { pattern: "r.LightCullingDistance=1".into(),               scalability_section: Some("GlobalIlluminationQuality@0".into()), engine_section: None },
+                    TweakLine { pattern: "r.LightMaxDrawDistanceScale=0.00000001".into(), scalability_section: Some("ShadowQuality@0".into()), engine_section: None, replace_with: None },
+                    TweakLine { pattern: "r.LightFadeDistance=1".into(),                  scalability_section: Some("GlobalIlluminationQuality@0".into()), engine_section: None, replace_with: None },
+                    TweakLine { pattern: "r.LightCullingDistance=1".into(),               scalability_section: Some("GlobalIlluminationQuality@0".into()), engine_section: None, replace_with: None },
                 ],
                 remove_only: false,
             },
@@ -221,7 +244,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             pak_only: false,
             kind: TweakKind::RemoveLines {
                 lines: vec![
-                    TweakLine { pattern: "r.SceneColorFormat=0".into(), scalability_section: Some("EffectsQuality@0".into()), engine_section: None },
+                    TweakLine { pattern: "r.SceneColorFormat=0".into(), scalability_section: Some("EffectsQuality@0".into()), engine_section: None, replace_with: None },
                 ],
                 remove_only: false,
             },
@@ -236,7 +259,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             pak_only: false,
             kind: TweakKind::RemoveLines {
                 lines: vec![
-                    TweakLine { pattern: "r.PostProcessing.EnableEyeAdaptation=0".into(), scalability_section: Some("PostProcessQuality@0".into()), engine_section: None },
+                    TweakLine { pattern: "r.PostProcessing.EnableEyeAdaptation=0".into(), scalability_section: Some("PostProcessQuality@0".into()), engine_section: None, replace_with: None },
                 ],
                 remove_only: false,
             },
@@ -251,7 +274,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             pak_only: false,
             kind: TweakKind::RemoveLines {
                 lines: vec![
-                    TweakLine { pattern: "r.SeparateTranslucency=0".into(), scalability_section: Some("PostProcessQuality@0".into()), engine_section: None },
+                    TweakLine { pattern: "r.SeparateTranslucency=0".into(), scalability_section: Some("PostProcessQuality@0".into()), engine_section: None, replace_with: None },
                 ],
                 remove_only: false,
             },
@@ -285,10 +308,10 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             pak_only: false,
             kind: TweakKind::RemoveLines {
                 lines: vec![
-                    TweakLine { pattern: "r.AnisotropicMaterials=0".into(),    scalability_section: Some("ShadingQuality@0".into()), engine_section: None },
-                    TweakLine { pattern: "r.VT.AnisotropicMaterials=0".into(), scalability_section: Some("TextureQuality@0".into()), engine_section: None },
-                    TweakLine { pattern: "r.VT.MaxAnisotropy=0".into(),        scalability_section: Some("TextureQuality@0".into()), engine_section: None },
-                    TweakLine { pattern: "r.MaxAnisotropy=0".into(),           scalability_section: Some("TextureQuality@0".into()), engine_section: None },
+                    TweakLine { pattern: "r.AnisotropicMaterials=0".into(),    scalability_section: Some("ShadingQuality@0".into()), engine_section: None, replace_with: None },
+                    TweakLine { pattern: "r.VT.AnisotropicMaterials=0".into(), scalability_section: Some("TextureQuality@0".into()), engine_section: None, replace_with: None },
+                    TweakLine { pattern: "r.VT.MaxAnisotropy=0".into(),        scalability_section: Some("TextureQuality@0".into()), engine_section: None, replace_with: None },
+                    TweakLine { pattern: "r.MaxAnisotropy=0".into(),           scalability_section: Some("TextureQuality@0".into()), engine_section: None, replace_with: None },
                 ],
                 remove_only: false,
             },
@@ -301,7 +324,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             pak_only: false,
             kind: TweakKind::RemoveLines {
                 lines: vec![
-                    TweakLine { pattern: "r.MipMapLODBias=15".into(), scalability_section: Some("TextureQuality@0".into()), engine_section: None },
+                    TweakLine { pattern: "r.MipMapLODBias=15".into(), scalability_section: Some("TextureQuality@0".into()), engine_section: None, replace_with: None },
                 ],
                 remove_only: false,
             },
@@ -314,7 +337,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             pak_only: false,
             kind: TweakKind::RemoveLines {
                 lines: vec![
-                    TweakLine { pattern: "r.Streaming.MipBias=2".into(), scalability_section: Some("TextureQuality@0".into()), engine_section: None },
+                    TweakLine { pattern: "r.Streaming.MipBias=2".into(), scalability_section: Some("TextureQuality@0".into()), engine_section: None, replace_with: None },
                 ],
                 remove_only: false,
             },
@@ -329,7 +352,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             pak_only: false,
             kind: TweakKind::RemoveLines {
                 lines: vec![
-                    TweakLine { pattern: "r.Streaming.PoolSize=1".into(), scalability_section: Some("TextureQuality@0".into()), engine_section: None },
+                    TweakLine { pattern: "r.Streaming.PoolSize=1".into(), scalability_section: Some("TextureQuality@0".into()), engine_section: None, replace_with: None },
                 ],
                 remove_only: false,
             },

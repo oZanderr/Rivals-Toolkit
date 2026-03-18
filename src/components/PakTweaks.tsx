@@ -58,7 +58,7 @@ interface TweakBase {
 
 interface RemoveLinesTweak extends TweakBase {
   kind: "RemoveLines";
-  lines: { pattern: string; scalability_section?: string | null; engine_section?: string | null }[];
+  lines: { pattern: string; scalability_section?: string | null; engine_section?: string | null; replace_with?: string | null }[];
   remove_only: boolean;
 }
 
@@ -164,9 +164,6 @@ export function PakTweaks({ gamePath }: Props) {
     const savedState = savedTweakStates.find((s) => s.id === id);
     const newEnabled = !(currentState?.active ?? false);
 
-    // Remove-only tweaks cannot be disabled once enabled
-    if (!newEnabled && def.kind === "RemoveLines" && def.remove_only) return;
-
     // Optimistically update local state so the UI responds immediately
     setTweakStates((prev) => prev.map((s) => (s.id === id ? { ...s, active: newEnabled } : s)));
 
@@ -175,10 +172,17 @@ export function PakTweaks({ gamePath }: Props) {
         for (const line of def.lines) {
           const eqIdx = line.pattern.indexOf("=");
           const key = eqIdx >= 0 ? line.pattern.substring(0, eqIdx) : line.pattern;
-          const val = eqIdx >= 0 ? line.pattern.substring(eqIdx + 1) : "0";
-          // Original: null if tweak was active (line removed), val if inactive
-          const originalVal = (savedState?.active ?? false) ? null : val;
-          queueEdit(key, newEnabled ? null : val, originalVal, line.engine_section ?? undefined);
+          const patternVal = eqIdx >= 0 ? line.pattern.substring(eqIdx + 1) : "0";
+          // When replace_with is set, enabled state writes that value instead of removing
+          let replaceVal: string | null = null;
+          if (line.replace_with != null) {
+            const rwEqIdx = line.replace_with.indexOf("=");
+            replaceVal = rwEqIdx >= 0 ? line.replace_with.substring(rwEqIdx + 1) : line.replace_with;
+          }
+          const isSavedActive = savedState?.active ?? false;
+          const originalVal = isSavedActive ? replaceVal : patternVal;
+          const newVal = newEnabled ? replaceVal : patternVal;
+          queueEdit(key, newVal, originalVal, line.engine_section ?? undefined);
         }
         break;
       case "Toggle": {
@@ -596,9 +600,10 @@ export function PakTweaks({ gamePath }: Props) {
                           const isEnabled =
                             tweakStates.find((s) => s.id === tweak.id)?.active ?? false;
                           const removeOnly = tweak.kind === "RemoveLines" && tweak.remove_only;
+                          const isSavedEnabled = savedTweakStates.find((s) => s.id === tweak.id)?.active ?? false;
+                          if (removeOnly && isSavedEnabled) return null;
                           const needsEngine = engineOnly && !selectedPak.has_engine_ini;
-                          const lockedOn = removeOnly && isEnabled;
-                          const disabled = needsEngine || lockedOn;
+                          const disabled = needsEngine;
                           return (
                             <QuickTweakRow
                               key={tweak.id}
@@ -607,9 +612,7 @@ export function PakTweaks({ gamePath }: Props) {
                               disabledReason={
                                 needsEngine
                                   ? "Requires DefaultEngine.ini in this pak mod"
-                                  : lockedOn
-                                    ? "Remove-only tweak cannot be reverted"
-                                    : undefined
+                                  : undefined
                               }
                               currentValue={
                                 tweakStates.find((s) => s.id === tweak.id)?.current_value ??
@@ -785,6 +788,7 @@ function QuickTweakCodes({ tweak }: { tweak: TweakDefinition }) {
 
   switch (tweak.kind) {
     case "RemoveLines":
+      if (tweak.remove_only) return null;
       return tweak.lines.map((line, i) => (
         <code key={i} className={codeClass}>
           {line.pattern}

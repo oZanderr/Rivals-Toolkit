@@ -190,14 +190,26 @@ fn find_key_value(content: &str, key: &str) -> Option<String> {
 }
 
 /// Remove all non-comment lines matching any given pattern.
+/// Lines whose entry has `replace_with` set are replaced in-place instead of removed.
 fn remove_matching_lines(lines: &mut Vec<String>, entries: &[super::tweaks::TweakLine]) {
-    lines.retain(|line| {
-        let t = line.trim();
+    let mut i = 0;
+    while i < lines.len() {
+        let t = lines[i].trim().to_string();
         if t.starts_with(';') {
-            return true;
+            i += 1;
+            continue;
         }
-        !entries.iter().any(|e| matches_pattern(t, &e.pattern))
-    });
+        if let Some(entry) = entries.iter().find(|e| matches_pattern(&t, &e.pattern)) {
+            if let Some(replacement) = &entry.replace_with {
+                lines[i] = replacement.clone();
+                i += 1;
+            } else {
+                lines.remove(i);
+            }
+        } else {
+            i += 1;
+        }
+    }
 }
 
 /// Add missing lines under their target sections.

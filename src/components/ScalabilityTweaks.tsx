@@ -25,7 +25,7 @@ interface TweakBase {
 
 interface RemoveLinesTweak extends TweakBase {
   kind: "RemoveLines";
-  lines: { pattern: string; scalability_section?: string | null; engine_section?: string | null }[];
+  lines: { pattern: string; scalability_section?: string | null; engine_section?: string | null; replace_with?: string | null }[];
   remove_only: boolean;
 }
 
@@ -199,12 +199,12 @@ export function ScalabilityTweaks({
 
     if (def.kind === "RemoveLines") {
       if (toggleChanged) {
-        // Each line pattern is being added or removed
         def.lines.forEach((line, i) => {
+          const isReplace = isEnabled && line.replace_with != null;
           changes.push({
             id: `${def.id}_line${i}`,
-            kind: isEnabled ? "remove" : "set",
-            display: line.pattern,
+            kind: isEnabled && !isReplace ? "remove" : "set",
+            display: isReplace ? line.replace_with! : line.pattern,
           });
         });
       }
@@ -466,6 +466,7 @@ function TweakCodes({ tweak }: { tweak: TweakDefinition }) {
 
   switch (tweak.kind) {
     case "RemoveLines":
+      if (tweak.remove_only) return null;
       return tweak.lines.map((line, i) => (
         <code key={i} className={codeClass}>
           {line.pattern}
