@@ -39,7 +39,8 @@ pub fn run() {
             commands::launch_game,
             commands::toggle_mod_enabled,
             commands::export_mods_zip,
-            commands::delete_mod
+            commands::delete_mod,
+            commands::install_mod
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

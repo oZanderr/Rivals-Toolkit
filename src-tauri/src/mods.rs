@@ -2,6 +2,7 @@ mod bypass;
 mod folder;
 mod status;
 
+pub(crate) use folder::InstallResult;
 pub(crate) use status::ModsStatus;
 
 // Bypass files bundled at compile time.
@@ -46,4 +47,8 @@ pub(crate) fn export_mods_zip(mods_folder: &str, dest_path: &str) -> Result<Stri
 
 pub(crate) fn delete_mod(mods_folder: &str, full_name: &str) -> Result<(), String> {
     folder::delete_mod(mods_folder, full_name)
+}
+
+pub(crate) fn install_mod(mods_folder: &str, source_path: &str) -> Result<InstallResult, String> {
+    folder::install_mod(mods_folder, source_path)
 }

@@ -2,7 +2,16 @@ import { useState, useEffect, useCallback, useRef } from "react";
 
 import { invoke } from "@tauri-apps/api/core";
 import { openPath } from "@tauri-apps/plugin-opener";
-import { Save, RefreshCw, CheckCircle2, Trash2, FolderOpen, Search, Info } from "lucide-react";
+import {
+  Save,
+  RefreshCw,
+  CheckCircle2,
+  XCircle,
+  Trash2,
+  FolderOpen,
+  Search,
+  Info,
+} from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -390,6 +399,7 @@ export function ScalabilityTweaks({
               )}
             >
               {status.type === "ok" && <CheckCircle2 size={13} />}
+              {status.type === "err" && <XCircle size={13} />}
               {status.msg}
             </span>
           )}

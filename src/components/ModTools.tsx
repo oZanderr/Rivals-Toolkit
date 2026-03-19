@@ -2,6 +2,7 @@ import * as React from "react";
 import { useState, useEffect, useRef, useCallback } from "react";
 
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { save } from "@tauri-apps/plugin-dialog";
 import {
   Archive,
@@ -14,6 +15,7 @@ import {
   CheckCircle2,
   XCircle,
   Trash2,
+  UploadCloud,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -33,26 +35,36 @@ interface ModsStatus {
   mods_folder_path: string;
   sig_bypass_installed: boolean;
   mod_entries: ModEntry[];
+  conflicts_resolved: number;
 }
 
 interface Props {
   gamePath: string;
+  isActive: boolean;
 }
 
 type StatusType = "ok" | "err" | "info";
 
-export function ModTools({ gamePath }: Props) {
+export function ModTools({ gamePath, isActive }: Props) {
   const [modsStatus, setModsStatus] = useState<ModsStatus | null>(null);
   const [notice, setNotice] = useState<{ msg: string; type: StatusType } | null>(null);
   const [busyMods, setBusyMods] = useState<Set<string>>(new Set());
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const modsStatusRef = useRef(modsStatus);
+  const isActiveRef = useRef(isActive);
+  const refreshRef = useRef<typeof refresh>(null!);
+  const dropProcessingRef = useRef(false);
 
   const showNotice = useCallback((msg: string, type: StatusType, duration = 6000) => {
     if (noticeTimer.current) clearTimeout(noticeTimer.current);
     setNotice({ msg, type });
     noticeTimer.current = setTimeout(() => setNotice(null), duration);
   }, []);
+
+  modsStatusRef.current = modsStatus;
+  isActiveRef.current = isActive;
 
   const refresh = useCallback(
     async (silent = false) => {
@@ -61,16 +73,81 @@ export function ModTools({ gamePath }: Props) {
         const s = await invoke<ModsStatus>("get_mods_status", { gameRoot: gamePath });
         setModsStatus(s);
         if (!silent) showNotice("Status refreshed", "ok", 4000);
+        else if (s.conflicts_resolved > 0)
+          showNotice(
+            `Removed ${s.conflicts_resolved} outdated disabled mod${s.conflicts_resolved !== 1 ? "s" : ""} (replaced by enabled version)`,
+            "info"
+          );
       } catch (e: unknown) {
         showNotice(String(e), "err");
       }
     },
     [gamePath, showNotice]
   );
+  refreshRef.current = refresh;
 
   useEffect(() => {
     if (gamePath) refresh(true);
   }, [gamePath, refresh]);
+
+  // Drag-and-drop: accept .pak files dropped anywhere on the window.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    getCurrentWindow()
+      .onDragDropEvent(async (event) => {
+        if (event.payload.type === "enter") {
+          if (isActiveRef.current && modsStatusRef.current?.mods_folder_exists) setIsDragging(true);
+        } else if (event.payload.type === "drop") {
+          setIsDragging(false);
+          if (!isActiveRef.current || dropProcessingRef.current) return;
+          const folder = modsStatusRef.current?.mods_folder_path;
+          if (!folder) return;
+          const pakPaths = event.payload.paths.filter((p) => p.endsWith(".pak"));
+          if (pakPaths.length === 0) return;
+          dropProcessingRef.current = true;
+          try {
+            let installed = 0;
+            let replacedDisabled = 0;
+            let replacedEnabled = 0;
+            const errors: string[] = [];
+            for (const p of pakPaths) {
+              try {
+                const result = await invoke<{
+                  file_name: string;
+                  replaced_disabled: boolean;
+                  replaced_enabled: boolean;
+                }>("install_mod", { modsFolder: folder, sourcePath: p });
+                installed++;
+                if (result.replaced_disabled) replacedDisabled++;
+                if (result.replaced_enabled) replacedEnabled++;
+              } catch (e: unknown) {
+                errors.push(String(e));
+              }
+            }
+            if (errors.length > 0) showNotice(errors[0], "err");
+            else if (installed > 0) {
+              await refreshRef.current(true);
+              const n = (c: number, s: string) => `${c} ${s}${c !== 1 ? "s" : ""}`;
+              const parts: string[] = [];
+              if (replacedEnabled > 0) parts.push(`updated ${n(replacedEnabled, "existing mod")}`);
+              if (replacedDisabled > 0)
+                parts.push(`replaced ${n(replacedDisabled, "disabled version")}`);
+              const suffix = parts.length > 0 ? ` (${parts.join(", ")})` : "";
+              showNotice(`Installed ${n(installed, "mod")}${suffix}`, "ok");
+            }
+          } finally {
+            dropProcessingRef.current = false;
+          }
+        } else if (event.payload.type === "leave") {
+          setIsDragging(false);
+        }
+      })
+      .then((fn) => {
+        unlisten = fn;
+      });
+    return () => unlisten?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function installBypass() {
     if (!gamePath) return showNotice("Set game root on the Home tab first.", "err");
@@ -171,7 +248,13 @@ export function ModTools({ gamePath }: Props) {
   const totalCount = modsStatus?.mod_entries.length ?? 0;
 
   return (
-    <div className="flex flex-1 min-h-0 w-full flex-col gap-6">
+    <div className="relative flex flex-1 min-h-0 w-full flex-col gap-6">
+      {isDragging && (
+        <div className="pointer-events-none absolute inset-0 z-50 flex flex-col items-center justify-center gap-3 rounded-lg border-2 border-dashed border-[var(--color-ok)] bg-background/80 backdrop-blur-sm">
+          <UploadCloud size={36} className="text-[var(--color-ok)]" />
+          <span className="text-sm font-semibold text-[var(--color-ok)]">Drop .pak to install</span>
+        </div>
+      )}
       {/* Header */}
       <div className="flex min-h-8 items-center gap-3">
         <h2 className="shrink-0 text-xl font-bold">Mod Tools</h2>
