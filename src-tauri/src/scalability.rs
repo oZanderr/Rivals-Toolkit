@@ -20,10 +20,13 @@ pub(crate) fn read_scalability(path: &str) -> Result<String, String> {
 
 pub(crate) fn write_scalability(path: &str, content: &str) -> Result<(), String> {
     let p = Path::new(path);
-    if let Ok(meta) = fs::metadata(p) {
-        if meta.permissions().readonly() {
-            return Err("Scalability.ini is read-only. Remove the read-only attribute and try again.".to_string());
-        }
+    if let Ok(meta) = fs::metadata(p)
+        && meta.permissions().readonly()
+    {
+        return Err(
+            "Scalability.ini is read-only. Remove the read-only attribute and try again."
+                .to_string(),
+        );
     }
     if let Some(parent) = p.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
