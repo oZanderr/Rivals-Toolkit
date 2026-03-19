@@ -141,7 +141,7 @@ function App() {
                 activeTab !== "mod-tools" && "hidden"
               )}
             >
-              <ModTools gamePath={gamePath} />
+              <ModTools gamePath={gamePath} isActive={activeTab === "mod-tools"} />
             </div>
           )}
           {mountedTabs.has("pak-manager") && (

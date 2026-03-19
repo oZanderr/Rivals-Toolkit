@@ -24,6 +24,8 @@ pub(crate) struct ModsStatus {
     pub sig_bypass_installed: bool,
     pub sig_bypass_up_to_date: bool,
     pub mod_entries: Vec<ModEntry>,
+    /// Number of disabled duplicates auto-removed because an enabled version of the same mod existed.
+    pub conflicts_resolved: u32,
 }
 
 pub(crate) fn get_mods_status(game_root: &str) -> ModsStatus {
@@ -73,6 +75,28 @@ pub(crate) fn get_mods_status(game_root: &str) -> ModsStatus {
         Vec::new()
     };
 
+    // Auto-resolve: if both an enabled and a disabled version of the same mod exist,
+    // delete the disabled copy (it's stale — the enabled one supersedes it).
+    let mut conflicts_resolved = 0u32;
+    if exists {
+        let enabled_names: std::collections::HashSet<String> = mod_entries
+            .iter()
+            .filter(|e| e.enabled)
+            .map(|e| e.display_name.clone())
+            .collect();
+        let conflicting: std::collections::HashSet<String> = mod_entries
+            .iter()
+            .filter(|e| !e.enabled && enabled_names.contains(&e.display_name))
+            .map(|e| e.full_name.clone())
+            .collect();
+        for full_name in &conflicting {
+            if super::folder::delete_mod(&mods.to_string_lossy(), full_name).is_ok() {
+                conflicts_resolved += 1;
+            }
+        }
+        mod_entries.retain(|e| !conflicting.contains(&e.full_name));
+    }
+
     mod_entries.sort_by(|a, b| {
         a.display_name
             .to_lowercase()
@@ -85,5 +109,6 @@ pub(crate) fn get_mods_status(game_root: &str) -> ModsStatus {
         sig_bypass_installed,
         sig_bypass_up_to_date,
         mod_entries,
+        conflicts_resolved,
     }
 }
