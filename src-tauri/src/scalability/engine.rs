@@ -57,11 +57,25 @@ fn detect_one(content: &str, tweak: &TweakDefinition) -> TweakState {
                 current_value: None,
             }
         }
-        TweakKind::Slider { key, .. } => {
+        TweakKind::Slider {
+            key,
+            default_value,
+            write_default_on_disable,
+            ..
+        } => {
             let current = find_key_value(content, key);
+            let active = if *write_default_on_disable {
+                current
+                    .as_deref()
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .map(|v| v != *default_value)
+                    .unwrap_or(false)
+            } else {
+                current.is_some()
+            };
             TweakState {
                 id: tweak.id.clone(),
-                active: current.is_some(),
+                active,
                 current_value: current,
             }
         }
@@ -134,6 +148,8 @@ pub(crate) fn apply_tweaks(
             }
             TweakKind::Slider {
                 key,
+                default_value,
+                write_default_on_disable,
                 scalability_section,
                 ..
             } => {
@@ -144,6 +160,8 @@ pub(crate) fn apply_tweaks(
                     {
                         insert_into_section(&mut lines, sec, format!("{}={}", key, value));
                     }
+                } else if *write_default_on_disable {
+                    upsert_key_value(&mut lines, key, &default_value.to_string());
                 } else {
                     remove_key(&mut lines, key);
                 }

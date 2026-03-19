@@ -72,6 +72,9 @@ pub(crate) enum TweakKind {
         max: f64,
         step: f64,
         default_value: f64,
+        /// When true, disabling the slider writes `default_value` back instead of removing the key.
+        #[serde(default)]
+        write_default_on_disable: bool,
         /// Target scalability section (e.g. `PostProcessQuality@0`).
         /// `None` for pak-only tweaks that don't touch scalability files.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -127,7 +130,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             kind: TweakKind::RemoveLines {
                 lines: vec![
                     TweakLine { pattern: "r.PostProcessing.DisableMaterials=1".into(), scalability_section: Some("PostProcessQuality@0".into()), engine_section: None, replace_with: None },
-                    TweakLine { pattern: "r.CustomDepth=0".into(),                     scalability_section: None, engine_section: None, replace_with: None },
+                    TweakLine { pattern: "r.CustomDepth=0".into(),                     scalability_section: None, engine_section: None, replace_with: Some("r.CustomDepth=3".into()) },
                     TweakLine { pattern: "r.LightTile.Enable=0".into(),                scalability_section: None, engine_section: None, replace_with: None },
                 ],
                 remove_only: false,
@@ -230,6 +233,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                 max: 5.0,
                 step: 0.1,
                 default_value: 2.2,
+                write_default_on_disable: false,
                 scalability_section: Some("PostProcessQuality@0".into()),
                 engine_section: None,
             },
@@ -452,6 +456,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                 max: 2.0,
                 step: 1.0,
                 default_value: 0.0,
+                write_default_on_disable: false,
                 scalability_section: None,
                 engine_section: None,
             },
@@ -470,6 +475,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                 max: 2.0,
                 step: 1.0,
                 default_value: 1.0,
+                write_default_on_disable: true,
                 scalability_section: None,
                 engine_section: None,
             },
@@ -525,6 +531,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                 max: 4.0,
                 step: 1.0,
                 default_value: 0.0,
+                write_default_on_disable: false,
                 scalability_section: None,
                 engine_section: None,
             },
@@ -545,6 +552,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                 max: 2.0,
                 step: 0.05,
                 default_value: 1.0,
+                write_default_on_disable: false,
                 scalability_section: None,
                 engine_section: Some("/Script/Engine.UserInterfaceSettings".into()),
             },
@@ -595,6 +603,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                 max: 2.0,
                 step: 1.0,
                 default_value: 1.0,
+                write_default_on_disable: false,
                 scalability_section: None,
                 engine_section: None,
             },
@@ -614,6 +623,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
                 max: 2.0,
                 step: 1.0,
                 default_value: 1.0,
+                write_default_on_disable: false,
                 scalability_section: None,
                 engine_section: None,
             },

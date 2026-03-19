@@ -83,6 +83,7 @@ interface SliderTweak extends TweakBase {
   max: number;
   step: number;
   default_value: number;
+  write_default_on_disable?: boolean;
   engine_section?: string;
 }
 
@@ -202,13 +203,14 @@ export function PakTweaks({ gamePath }: Props) {
         break;
       }
       case "Slider": {
-        const currentVal =
-          currentState?.current_value ?? String((def as SliderTweak).default_value);
+        const sliderDef = def as SliderTweak;
+        const currentVal = currentState?.current_value ?? String(sliderDef.default_value);
+        const offVal = sliderDef.write_default_on_disable ? String(sliderDef.default_value) : null;
         const originalVal =
           (savedState?.active ?? false)
-            ? (savedState?.current_value ?? String((def as SliderTweak).default_value))
-            : null;
-        queueEdit(def.key, newEnabled ? currentVal : null, originalVal, def.engine_section);
+            ? (savedState?.current_value ?? String(sliderDef.default_value))
+            : offVal;
+        queueEdit(def.key, newEnabled ? currentVal : offVal, originalVal, def.engine_section);
         break;
       }
       case "BatchToggle": {
@@ -230,13 +232,15 @@ export function PakTweaks({ gamePath }: Props) {
   function setQuickTweakValue(id: string, val: string) {
     const def = definitions.find((d) => d.id === id);
     if (!def || def.kind !== "Slider") return;
+    const sliderDef = def as SliderTweak;
     const savedState = savedTweakStates.find((s) => s.id === id);
+    const offVal = sliderDef.write_default_on_disable ? String(sliderDef.default_value) : null;
     const originalVal =
       (savedState?.active ?? false)
-        ? (savedState?.current_value ?? String((def as SliderTweak).default_value))
-        : null;
+        ? (savedState?.current_value ?? String(sliderDef.default_value))
+        : offVal;
     setTweakStates((prev) => prev.map((s) => (s.id === id ? { ...s, current_value: val } : s)));
-    queueEdit((def as SliderTweak).key, val, originalVal, (def as SliderTweak).engine_section);
+    queueEdit(sliderDef.key, val, originalVal, sliderDef.engine_section);
   }
 
   async function browse() {
