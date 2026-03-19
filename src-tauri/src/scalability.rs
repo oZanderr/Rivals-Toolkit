@@ -19,10 +19,16 @@ pub(crate) fn read_scalability(path: &str) -> Result<String, String> {
 }
 
 pub(crate) fn write_scalability(path: &str, content: &str) -> Result<(), String> {
-    if let Some(parent) = Path::new(path).parent() {
+    let p = Path::new(path);
+    if let Ok(meta) = fs::metadata(p) {
+        if meta.permissions().readonly() {
+            return Err("Scalability.ini is read-only. Remove the read-only attribute and try again.".to_string());
+        }
+    }
+    if let Some(parent) = p.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    fs::write(path, content).map_err(|e| e.to_string())
+    fs::write(p, content).map_err(|e| e.to_string())
 }
 
 /// Return the full tweak catalogue.
