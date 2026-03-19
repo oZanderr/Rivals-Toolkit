@@ -27,11 +27,6 @@ interface Props {
   gamePath: string;
 }
 
-function isUpdatePatchPak(pakPath: string): boolean {
-  const name = pakPath.split(/[/\\]/).pop() ?? "";
-  return /^Patch_.*\.pak$/i.test(name);
-}
-
 export function PakManager({ gamePath }: Props) {
   const [pakList, setPakList] = useState<string[]>([]);
   const [selectedPak, setSelectedPak] = useState<string>("");
@@ -113,11 +108,6 @@ export function PakManager({ gamePath }: Props) {
     setFilterText("");
     setDebouncedFilter("");
     setPakContents([]);
-
-    if (isUpdatePatchPak(pak)) {
-      showNotice("Update patch pak: launch Rivals once to apply it.", "info", 6000);
-      return;
-    }
 
     setBusy(true);
     try {
@@ -221,7 +211,9 @@ export function PakManager({ gamePath }: Props) {
   }
 
   const pakName = selectedPak ? selectedPak.split(/[/\\]/).pop() : null;
-  const selectedIsPatch = selectedPak ? isUpdatePatchPak(selectedPak) : false;
+  const footerText = !selectedPak
+    ? "\u00A0"
+    : `${visible.length} file(s)${visible.length !== pakContents.length ? ` of ${pakContents.length}` : ""} inside ${pakName} — double-click a file to extract`;
 
   return (
     <div className="flex flex-1 min-h-0 flex-col gap-4">
@@ -291,7 +283,6 @@ export function PakManager({ gamePath }: Props) {
                     const isSelected = selectedPak === p;
                     const isMod = /[/\\]~mods[/\\]/i.test(p);
                     const isManual = manualPaks.has(p);
-                    const isPatch = isUpdatePatchPak(p);
                     const displayName = isMod
                       ? `~mods/${p.split(/[/\\]/).pop()}`
                       : p.split(/[/\\]/).pop();
@@ -300,17 +291,11 @@ export function PakManager({ gamePath }: Props) {
                         key={p}
                         className={cn(
                           "flex items-center gap-2 border-b border-border/50 px-3 py-2 last:border-none",
-                          isPatch ? "cursor-not-allowed opacity-65" : "cursor-pointer",
-                          isSelected
-                            ? "bg-secondary text-foreground"
-                            : !isPatch && "hover:bg-secondary/50"
+                          "cursor-pointer",
+                          isSelected ? "bg-secondary text-foreground" : "hover:bg-secondary/50"
                         )}
-                        onClick={() => !isPatch && inspectPak(p)}
-                        title={
-                          isPatch
-                            ? "Update patch pak (delta): launch game once to apply"
-                            : p.split(/[/\\]/).pop()
-                        }
+                        onClick={() => inspectPak(p)}
+                        title={p.split(/[/\\]/).pop()}
                       >
                         {isManual ? (
                           <PackagePlus size={14} className="shrink-0 text-sky-400" />
@@ -324,11 +309,6 @@ export function PakManager({ gamePath }: Props) {
                           />
                         )}
                         <span className="flex-1 truncate text-[12px]">{displayName}</span>
-                        {isPatch && (
-                          <span className="shrink-0 rounded border border-amber-400/40 bg-amber-400/10 px-1.5 py-0.5 text-[10px] font-semibold text-amber-300">
-                            update patch
-                          </span>
-                        )}
                       </li>
                     );
                   })}
@@ -361,7 +341,7 @@ export function PakManager({ gamePath }: Props) {
               variant="green"
               size="sm"
               onClick={unpackSelected}
-              disabled={busy || !selectedPak || selectedIsPatch}
+              disabled={busy || !selectedPak}
             >
               <Download size={14} />
               Extract All…
@@ -379,7 +359,7 @@ export function PakManager({ gamePath }: Props) {
               placeholder="Filter files…"
               value={filterText}
               onChange={(e) => onFilterChange(e.target.value)}
-              disabled={!selectedPak || selectedIsPatch}
+              disabled={!selectedPak}
             />
           </div>
 
@@ -393,16 +373,6 @@ export function PakManager({ gamePath }: Props) {
                 <PackageOpen size={28} className="text-muted-foreground/40" />
                 <p className="text-sm text-muted-foreground">
                   Select a pak from the left, or open one manually.
-                </p>
-              </div>
-            ) : selectedIsPatch ? (
-              <div className="flex h-full flex-col items-center justify-center gap-2 p-4 text-center">
-                <PackageOpen size={28} className="text-amber-300/70" />
-                <p className="text-sm text-muted-foreground">
-                  This is a game update patch pak (delta).
-                </p>
-                <p className="text-xs text-muted-foreground">
-                  Launch Marvel Rivals once after updating, then inspect regular paks.
                 </p>
               </div>
             ) : visible.length === 0 ? (
@@ -436,12 +406,11 @@ export function PakManager({ gamePath }: Props) {
           </div>
 
           {/* Footer — always rendered to avoid layout shift */}
-          <p className="shrink-0 text-[11px] text-muted-foreground">
-            {!selectedPak
-              ? "\u00A0"
-              : selectedIsPatch
-                ? "Update patch paks are applied by the game and are not browseable here."
-                : `${visible.length} file(s)${visible.length !== pakContents.length ? ` of ${pakContents.length}` : ""} inside ${pakName} — double-click a file to extract`}
+          <p
+            className="shrink-0 truncate text-[11px] text-muted-foreground"
+            title={selectedPak ? footerText : undefined}
+          >
+            {footerText}
           </p>
         </Card>
       </div>

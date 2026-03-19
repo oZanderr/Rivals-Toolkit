@@ -54,20 +54,26 @@ interface TweakBase {
   category: string;
   description: string;
   pak_only: boolean;
-  engine_section?: string;
 }
 
 interface RemoveLinesTweak extends TweakBase {
   kind: "RemoveLines";
-  lines: { pattern: string; section: string }[];
+  lines: {
+    pattern: string;
+    scalability_section?: string | null;
+    engine_section?: string | null;
+    replace_with?: string | null;
+  }[];
+  remove_only: boolean;
 }
 
 interface ToggleTweak extends TweakBase {
   kind: "Toggle";
   key: string;
   on_value: string;
-  off_value: string;
+  off_value?: string;
   default_enabled: boolean;
+  engine_section?: string;
 }
 
 interface SliderTweak extends TweakBase {
@@ -77,9 +83,25 @@ interface SliderTweak extends TweakBase {
   max: number;
   step: number;
   default_value: number;
+  write_default_on_disable?: boolean;
+  engine_section?: string;
 }
 
-type TweakDefinition = RemoveLinesTweak | ToggleTweak | SliderTweak;
+interface BatchToggleEntry {
+  key: string;
+  on_value: string;
+  off_value?: string;
+  scalability_section?: string;
+  engine_section?: string;
+}
+
+interface BatchToggleTweak extends TweakBase {
+  kind: "BatchToggle";
+  entries: BatchToggleEntry[];
+  default_enabled: boolean;
+}
+
+type TweakDefinition = RemoveLinesTweak | ToggleTweak | SliderTweak | BatchToggleTweak;
 
 // Per-pak state cache that preserves tweak states and unsaved edits when switching between paks
 interface PakCacheEntry {
@@ -156,30 +178,52 @@ export function PakTweaks({ gamePath }: Props) {
         for (const line of def.lines) {
           const eqIdx = line.pattern.indexOf("=");
           const key = eqIdx >= 0 ? line.pattern.substring(0, eqIdx) : line.pattern;
-          const val = eqIdx >= 0 ? line.pattern.substring(eqIdx + 1) : "0";
-          // Original: null if tweak was active (line removed), val if inactive
-          const originalVal = (savedState?.active ?? false) ? null : val;
-          queueEdit(key, newEnabled ? null : val, originalVal);
+          const patternVal = eqIdx >= 0 ? line.pattern.substring(eqIdx + 1) : "0";
+          // When replace_with is set, enabled state writes that value instead of removing
+          let replaceVal: string | null = null;
+          if (line.replace_with != null) {
+            const rwEqIdx = line.replace_with.indexOf("=");
+            replaceVal =
+              rwEqIdx >= 0 ? line.replace_with.substring(rwEqIdx + 1) : line.replace_with;
+          }
+          const isSavedActive = savedState?.active ?? false;
+          const originalVal = isSavedActive ? replaceVal : patternVal;
+          const newVal = newEnabled ? replaceVal : patternVal;
+          queueEdit(key, newVal, originalVal, line.engine_section ?? undefined);
         }
         break;
       case "Toggle": {
-        const originalVal = (savedState?.active ?? false) ? def.on_value : def.off_value;
+        const originalVal = (savedState?.active ?? false) ? def.on_value : (def.off_value ?? null);
         queueEdit(
           def.key,
-          newEnabled ? def.on_value : def.off_value,
+          newEnabled ? def.on_value : (def.off_value ?? null),
           originalVal,
           def.engine_section
         );
         break;
       }
       case "Slider": {
-        const currentVal =
-          currentState?.current_value ?? String((def as SliderTweak).default_value);
+        const sliderDef = def as SliderTweak;
+        const currentVal = currentState?.current_value ?? String(sliderDef.default_value);
+        const offVal = sliderDef.write_default_on_disable ? String(sliderDef.default_value) : null;
         const originalVal =
           (savedState?.active ?? false)
-            ? (savedState?.current_value ?? String((def as SliderTweak).default_value))
-            : null;
-        queueEdit(def.key, newEnabled ? currentVal : null, originalVal, def.engine_section);
+            ? (savedState?.current_value ?? String(sliderDef.default_value))
+            : offVal;
+        queueEdit(def.key, newEnabled ? currentVal : offVal, originalVal, def.engine_section);
+        break;
+      }
+      case "BatchToggle": {
+        for (const entry of def.entries) {
+          const originalVal =
+            (savedState?.active ?? false) ? entry.on_value : (entry.off_value ?? null);
+          queueEdit(
+            entry.key,
+            newEnabled ? entry.on_value : (entry.off_value ?? null),
+            originalVal,
+            entry.engine_section
+          );
+        }
         break;
       }
     }
@@ -188,13 +232,15 @@ export function PakTweaks({ gamePath }: Props) {
   function setQuickTweakValue(id: string, val: string) {
     const def = definitions.find((d) => d.id === id);
     if (!def || def.kind !== "Slider") return;
+    const sliderDef = def as SliderTweak;
     const savedState = savedTweakStates.find((s) => s.id === id);
+    const offVal = sliderDef.write_default_on_disable ? String(sliderDef.default_value) : null;
     const originalVal =
       (savedState?.active ?? false)
-        ? (savedState?.current_value ?? String((def as SliderTweak).default_value))
-        : null;
+        ? (savedState?.current_value ?? String(sliderDef.default_value))
+        : offVal;
     setTweakStates((prev) => prev.map((s) => (s.id === id ? { ...s, current_value: val } : s)));
-    queueEdit((def as SliderTweak).key, val, originalVal, def.engine_section);
+    queueEdit(sliderDef.key, val, originalVal, sliderDef.engine_section);
   }
 
   async function browse() {
@@ -256,11 +302,15 @@ export function PakTweaks({ gamePath }: Props) {
         }
         if (!silent) showNotice(formatModsFoundMessage(merged.length, removedMissing), "ok");
       } else if (!merged.find((p) => p.pak_path === selectedPak.pak_path)) {
-        // Previously selected pak is gone — deselect
-        setSelectedPak(null);
-        setTweakStates([]);
-        setSavedTweakStates([]);
-        setEdits([]);
+        // Previously selected pak is gone — auto-select if only one remains, otherwise deselect
+        if (merged.length === 1) {
+          await selectPak(merged[0]);
+        } else {
+          setSelectedPak(null);
+          setTweakStates([]);
+          setSavedTweakStates([]);
+          setEdits([]);
+        }
         if (!silent) showNotice(formatModsFoundMessage(merged.length, removedMissing), "ok");
       } else {
         if (!silent) showNotice(formatModsFoundMessage(merged.length, removedMissing), "ok");
@@ -556,14 +606,28 @@ export function PakTweaks({ gamePath }: Props) {
                       </span>
                       <div className="flex flex-col gap-2">
                         {defs.map((tweak) => {
-                          const engineOnly = !!tweak.engine_section;
-                          const disabled = engineOnly && !selectedPak.has_engine_ini;
+                          const engineOnly =
+                            (tweak.kind === "Toggle" && !!tweak.engine_section) ||
+                            (tweak.kind === "Slider" && !!tweak.engine_section) ||
+                            (tweak.kind === "BatchToggle" &&
+                              tweak.entries.some((entry) => !!entry.engine_section));
+                          const isEnabled =
+                            tweakStates.find((s) => s.id === tweak.id)?.active ?? false;
+                          const removeOnly = tweak.kind === "RemoveLines" && tweak.remove_only;
+                          const isSavedEnabled =
+                            savedTweakStates.find((s) => s.id === tweak.id)?.active ?? false;
+                          if (removeOnly && isSavedEnabled) return null;
+                          const needsEngine = engineOnly && !selectedPak.has_engine_ini;
+                          const disabled = needsEngine;
                           return (
                             <QuickTweakRow
                               key={tweak.id}
                               tweak={tweak}
-                              isEnabled={
-                                tweakStates.find((s) => s.id === tweak.id)?.active ?? false
+                              isEnabled={isEnabled}
+                              disabledReason={
+                                needsEngine
+                                  ? "Requires DefaultEngine.ini in this pak mod"
+                                  : undefined
                               }
                               currentValue={
                                 tweakStates.find((s) => s.id === tweak.id)?.current_value ??
@@ -608,7 +672,7 @@ export function PakTweaks({ gamePath }: Props) {
           )}
 
           {/* Apply */}
-          <div className="flex items-center gap-3">
+          <div className="flex min-w-0 items-center gap-3">
             {selectedPak && !loading && (
               <>
                 <Button
@@ -642,8 +706,9 @@ export function PakTweaks({ gamePath }: Props) {
             )}
             {notice && (
               <span
+                title={notice.msg}
                 className={cn(
-                  "flex items-center gap-1 text-[12px]",
+                  "flex min-w-0 flex-1 items-center gap-1 text-[12px]",
                   notice.type === "ok"
                     ? "text-[var(--color-ok)]"
                     : notice.type === "err"
@@ -651,8 +716,8 @@ export function PakTweaks({ gamePath }: Props) {
                       : "text-muted-foreground"
                 )}
               >
-                {notice.type === "ok" && <CheckCircle2 size={13} />}
-                {notice.msg}
+                {notice.type === "ok" && <CheckCircle2 size={13} className="shrink-0" />}
+                <span className="truncate">{notice.msg}</span>
               </span>
             )}
           </div>
@@ -669,12 +734,14 @@ function QuickTweakRow({
   isEnabled,
   currentValue,
   disabled,
+  disabledReason,
   onToggle,
   onValueChange,
 }: {
   tweak: TweakDefinition;
   isEnabled: boolean;
   currentValue: string | undefined;
+  disabledReason?: string;
   disabled?: boolean;
   onToggle: () => void;
   onValueChange: (val: string) => void;
@@ -702,9 +769,9 @@ function QuickTweakRow({
           <span className="text-[11px] leading-snug text-muted-foreground">
             {tweak.description}
           </span>
-          {disabled && (
+          {disabledReason && (
             <span className="text-[11px] leading-snug text-[var(--color-warn)] mt-0.5">
-              Requires DefaultEngine.ini in this pak mod
+              {disabledReason}
             </span>
           )}
           <div className="mt-1 flex flex-wrap gap-1">
@@ -736,6 +803,7 @@ function QuickTweakCodes({ tweak }: { tweak: TweakDefinition }) {
 
   switch (tweak.kind) {
     case "RemoveLines":
+      if (tweak.remove_only) return null;
       return tweak.lines.map((line, i) => (
         <code key={i} className={codeClass}>
           {line.pattern}
@@ -744,7 +812,8 @@ function QuickTweakCodes({ tweak }: { tweak: TweakDefinition }) {
     case "Toggle":
       return (
         <code className={codeClass}>
-          {tweak.key}={tweak.on_value}/{tweak.off_value}
+          {tweak.key}={tweak.on_value}
+          {tweak.off_value !== undefined ? `/${tweak.off_value}` : ""}
         </code>
       );
     case "Slider":
@@ -752,6 +821,17 @@ function QuickTweakCodes({ tweak }: { tweak: TweakDefinition }) {
         <code className={codeClass}>
           {tweak.key} ({tweak.min}–{tweak.max})
         </code>
+      );
+    case "BatchToggle":
+      return (
+        <>
+          {tweak.entries.map((entry) => (
+            <code key={entry.key} className={codeClass}>
+              {entry.key}={entry.on_value}
+              {entry.off_value !== undefined ? `/${entry.off_value}` : ""}
+            </code>
+          ))}
+        </>
       );
   }
 }

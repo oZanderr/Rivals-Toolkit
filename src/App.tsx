@@ -100,7 +100,7 @@ function App() {
                   About
                 </span>
                 <span className="block text-[11px] text-muted-foreground">
-                  Join the discord for updates.
+                  Join the discord for support.
                 </span>
                 <button
                   onClick={openDiscord}

@@ -6,20 +6,6 @@ use super::crypto::open_pak;
 use super::profile::strip_mount_prefix;
 use crate::paths::paks_dir;
 
-fn ensure_supported_pak(pak_path: &str) -> Result<(), String> {
-    let name = Path::new(pak_path)
-        .file_name()
-        .and_then(|x| x.to_str())
-        .unwrap_or_default();
-
-    // Update patch paks are delta containers and are not directly browseable.
-    if name.starts_with("Patch_") {
-        return Err("Update patch pak (delta) is not browseable.".to_string());
-    }
-
-    Ok(())
-}
-
 fn is_update_patch_pak_path(path: &str) -> bool {
     Path::new(path)
         .file_name()
@@ -76,12 +62,10 @@ pub(super) fn list_pak_files(game_root: &str) -> Result<Vec<String>, String> {
 }
 
 pub(super) fn list_pak_contents(pak_path: &str) -> Result<Vec<String>, String> {
-    ensure_supported_pak(pak_path)?;
     Ok(open_pak(Path::new(pak_path))?.files())
 }
 
 pub(super) fn unpack_pak(pak_path: &str, output_dir: &str) -> Result<Vec<String>, String> {
-    ensure_supported_pak(pak_path)?;
     let output = Path::new(output_dir);
     fs::create_dir_all(output).map_err(|e| e.to_string())?;
 
@@ -89,7 +73,8 @@ pub(super) fn unpack_pak(pak_path: &str, output_dir: &str) -> Result<Vec<String>
     let files = pak.files();
 
     let mut reader = BufReader::new(fs::File::open(pak_path).map_err(|e| e.to_string())?);
-    for name in &files {
+    // Extract in file-offset order to read sequentially and avoid backward seeks.
+    for name in pak.files_by_offset() {
         let stripped = strip_mount_prefix(name);
         let dest = output.join(stripped);
         if let Some(parent) = dest.parent() {
@@ -107,7 +92,6 @@ pub(super) fn extract_single_file(
     file_name: &str,
     output_path: &str,
 ) -> Result<(), String> {
-    ensure_supported_pak(pak_path)?;
     let pak = open_pak(Path::new(pak_path))?;
     if let Some(parent) = Path::new(output_path).parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;

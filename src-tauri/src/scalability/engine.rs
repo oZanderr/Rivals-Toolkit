@@ -10,7 +10,7 @@ pub(crate) fn detect_active_tweaks(
 
 fn detect_one(content: &str, tweak: &TweakDefinition) -> TweakState {
     match &tweak.kind {
-        TweakKind::RemoveLines { lines } => {
+        TweakKind::RemoveLines { lines, .. } => {
             let any_found = lines.iter().any(|entry| {
                 content.lines().any(|line| {
                     let t = line.trim();
@@ -26,9 +26,8 @@ fn detect_one(content: &str, tweak: &TweakDefinition) -> TweakState {
         TweakKind::Toggle {
             key,
             on_value,
-            off_value: _,
             default_enabled,
-            section: _,
+            ..
         } => {
             let current = find_key_value(content, key);
             let active = match current.as_deref() {
@@ -41,11 +40,42 @@ fn detect_one(content: &str, tweak: &TweakDefinition) -> TweakState {
                 current_value: current,
             }
         }
-        TweakKind::Slider { key, .. } => {
-            let current = find_key_value(content, key);
+        TweakKind::BatchToggle {
+            entries,
+            default_enabled,
+        } => {
+            let active = entries.iter().all(|entry| {
+                let current = find_key_value(content, &entry.key);
+                match current.as_deref() {
+                    Some(v) => v == entry.on_value.as_str(),
+                    None => *default_enabled,
+                }
+            });
             TweakState {
                 id: tweak.id.clone(),
-                active: current.is_some(),
+                active,
+                current_value: None,
+            }
+        }
+        TweakKind::Slider {
+            key,
+            default_value,
+            write_default_on_disable,
+            ..
+        } => {
+            let current = find_key_value(content, key);
+            let active = if *write_default_on_disable {
+                current
+                    .as_deref()
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .map(|v| v != *default_value)
+                    .unwrap_or(false)
+            } else {
+                current.is_some()
+            };
+            TweakState {
+                id: tweak.id.clone(),
+                active,
                 current_value: current,
             }
         }
@@ -70,10 +100,13 @@ pub(crate) fn apply_tweaks(
         };
 
         match &tweak.kind {
-            TweakKind::RemoveLines { lines: entries } => {
+            TweakKind::RemoveLines {
+                lines: entries,
+                remove_only,
+            } => {
                 if setting.enabled {
                     remove_matching_lines(&mut lines, entries);
-                } else {
+                } else if !remove_only {
                     add_lines_if_absent(&mut lines, entries);
                 }
             }
@@ -82,23 +115,53 @@ pub(crate) fn apply_tweaks(
                 on_value,
                 off_value,
                 default_enabled,
-                section,
+                scalability_section,
+                ..
             } => {
-                let value = if setting.enabled { on_value } else { off_value };
-                // Avoid writing default-value keys that were never present.
-                let key_in_file = find_key_value(content, key).is_some();
-                if key_in_file {
-                    upsert_key_value(&mut lines, key, value);
-                } else if setting.enabled != *default_enabled {
-                    insert_into_section(&mut lines, section, format!("{}={}", key, value));
+                apply_toggle_entry(
+                    &mut lines,
+                    content,
+                    key,
+                    setting.enabled,
+                    *default_enabled,
+                    on_value,
+                    off_value.as_deref(),
+                    scalability_section.as_deref(),
+                );
+            }
+            TweakKind::BatchToggle {
+                entries,
+                default_enabled,
+            } => {
+                for entry in entries {
+                    apply_toggle_entry(
+                        &mut lines,
+                        content,
+                        &entry.key,
+                        setting.enabled,
+                        *default_enabled,
+                        &entry.on_value,
+                        entry.off_value.as_deref(),
+                        entry.scalability_section.as_deref(),
+                    );
                 }
             }
-            TweakKind::Slider { key, section, .. } => {
+            TweakKind::Slider {
+                key,
+                default_value,
+                write_default_on_disable,
+                scalability_section,
+                ..
+            } => {
                 if setting.enabled {
                     let value = setting.value.as_deref().unwrap_or("0");
-                    if !upsert_key_value(&mut lines, key, value) {
-                        insert_into_section(&mut lines, section, format!("{}={}", key, value));
+                    if !upsert_key_value(&mut lines, key, value)
+                        && let Some(sec) = scalability_section
+                    {
+                        insert_into_section(&mut lines, sec, format!("{}={}", key, value));
                     }
+                } else if *write_default_on_disable {
+                    upsert_key_value(&mut lines, key, &default_value.to_string());
                 } else {
                     remove_key(&mut lines, key);
                 }
@@ -120,11 +183,12 @@ fn matches_pattern(trimmed_line: &str, pattern: &str) -> bool {
     line_lower == pat_lower || line_lower == format!("+cvars={}", pat_lower)
 }
 
-/// Find the first value of `key`, including `+CVars=key=value` lines.
+/// Find the last value of `key`, including `+CVars=key=value` lines.
 fn find_key_value(content: &str, key: &str) -> Option<String> {
     let key_lower = key.to_ascii_lowercase();
     let prefix = format!("{}=", key_lower);
     let cvars_prefix = format!("+cvars={}=", key_lower);
+    let mut found: Option<String> = None;
 
     for line in content.lines() {
         let t = line.trim();
@@ -134,40 +198,83 @@ fn find_key_value(content: &str, key: &str) -> Option<String> {
         let t_lower = t.to_ascii_lowercase();
 
         if t_lower.starts_with(&prefix) {
-            return Some(t[key.len() + 1..].to_string());
+            found = Some(t[key.len() + 1..].to_string());
         }
         if t_lower.starts_with(&cvars_prefix) {
-            return Some(t["+CVars=".len() + key.len() + 1..].to_string());
+            found = Some(t["+CVars=".len() + key.len() + 1..].to_string());
         }
     }
-    None
+    found
 }
 
 /// Remove all non-comment lines matching any given pattern.
-fn remove_matching_lines(lines: &mut Vec<String>, entries: &[super::tweaks::ScalabilityLine]) {
-    lines.retain(|line| {
-        let t = line.trim();
+/// Lines whose entry has `replace_with` set are replaced in-place instead of removed.
+fn remove_matching_lines(lines: &mut Vec<String>, entries: &[super::tweaks::TweakLine]) {
+    let mut i = 0;
+    while i < lines.len() {
+        let t = lines[i].trim().to_string();
         if t.starts_with(';') {
-            return true;
+            i += 1;
+            continue;
         }
-        !entries.iter().any(|e| matches_pattern(t, &e.pattern))
-    });
+        if let Some(entry) = entries.iter().find(|e| matches_pattern(&t, &e.pattern)) {
+            if let Some(replacement) = &entry.replace_with {
+                lines[i] = replacement.clone();
+                i += 1;
+            } else {
+                lines.remove(i);
+            }
+        } else {
+            i += 1;
+        }
+    }
 }
 
 /// Add missing lines under their target sections.
-/// `pak_only` entries are ignored for scalability files.
-fn add_lines_if_absent(lines: &mut Vec<String>, entries: &[super::tweaks::ScalabilityLine]) {
+/// Entries without a section are skipped (they only apply in pak context).
+fn add_lines_if_absent(lines: &mut Vec<String>, entries: &[super::tweaks::TweakLine]) {
     for entry in entries {
-        if entry.pak_only {
+        let Some(section) = &entry.scalability_section else {
             continue;
-        }
+        };
         let already = lines.iter().any(|line| {
             let t = line.trim();
             !t.starts_with(';') && matches_pattern(t, &entry.pattern)
         });
         if !already {
-            insert_into_section(lines, &entry.section, entry.pattern.clone());
+            insert_into_section(lines, section, entry.pattern.clone());
         }
+    }
+}
+
+/// Apply a single toggle key: set to `on_value` when enabled, `off_value` (or remove) when disabled.
+/// When `scalability_section` is `None` (pak-only tweaks), only in-place updates and removals are
+/// performed; new keys are never inserted since there is no valid scalability section.
+#[allow(clippy::too_many_arguments)]
+fn apply_toggle_entry(
+    lines: &mut Vec<String>,
+    content: &str,
+    key: &str,
+    enabled: bool,
+    default_enabled: bool,
+    on_value: &str,
+    off_value: Option<&str>,
+    scalability_section: Option<&str>,
+) {
+    let key_in_file = find_key_value(content, key).is_some();
+    let value = if enabled { Some(on_value) } else { off_value };
+
+    match value {
+        Some(v) => {
+            if key_in_file {
+                upsert_key_value(lines, key, v);
+            } else if enabled != default_enabled
+                && let Some(sec) = scalability_section
+            {
+                insert_into_section(lines, sec, format!("{}={}", key, v));
+            }
+        }
+        None => remove_key(lines, key),
     }
 }
 

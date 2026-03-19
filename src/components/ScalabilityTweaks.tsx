@@ -25,14 +25,20 @@ interface TweakBase {
 
 interface RemoveLinesTweak extends TweakBase {
   kind: "RemoveLines";
-  lines: { pattern: string; section: string }[];
+  lines: {
+    pattern: string;
+    scalability_section?: string | null;
+    engine_section?: string | null;
+    replace_with?: string | null;
+  }[];
+  remove_only: boolean;
 }
 
 interface ToggleTweak extends TweakBase {
   kind: "Toggle";
   key: string;
   on_value: string;
-  off_value: string;
+  off_value?: string;
   default_enabled: boolean;
 }
 
@@ -198,12 +204,12 @@ export function ScalabilityTweaks({
 
     if (def.kind === "RemoveLines") {
       if (toggleChanged) {
-        // Each line pattern is being added or removed
         def.lines.forEach((line, i) => {
+          const isReplace = isEnabled && line.replace_with != null;
           changes.push({
             id: `${def.id}_line${i}`,
-            kind: isEnabled ? "remove" : "set",
-            display: line.pattern,
+            kind: isEnabled && !isReplace ? "remove" : "set",
+            display: isReplace ? line.replace_with! : line.pattern,
           });
         });
       }
@@ -211,8 +217,11 @@ export function ScalabilityTweaks({
       if (toggleChanged) {
         changes.push({
           id: def.id,
-          kind: "set",
-          display: `${def.key}=${isEnabled ? def.on_value : def.off_value}`,
+          kind: !isEnabled && def.off_value === undefined ? "remove" : "set",
+          display:
+            !isEnabled && def.off_value === undefined
+              ? def.key
+              : `${def.key}=${isEnabled ? def.on_value : def.off_value}`,
         });
       }
     } else if (def.kind === "Slider") {
@@ -311,16 +320,24 @@ export function ScalabilityTweaks({
                   {category}
                 </span>
                 <div className="flex flex-col gap-3">
-                  {tweaks.map((tweak) => (
-                    <TweakRow
-                      key={tweak.id}
-                      tweak={tweak}
-                      isEnabled={enabled[tweak.id] ?? false}
-                      currentValue={values[tweak.id]}
-                      onToggle={() => toggleEnabled(tweak.id)}
-                      onValueChange={(val) => setValue(tweak.id, val)}
-                    />
-                  ))}
+                  {tweaks.map((tweak) => {
+                    const isOn = enabled[tweak.id] ?? false;
+                    const lockedOn = tweak.kind === "RemoveLines" && tweak.remove_only && isOn;
+                    return (
+                      <TweakRow
+                        key={tweak.id}
+                        tweak={tweak}
+                        isEnabled={isOn}
+                        currentValue={values[tweak.id]}
+                        disabled={lockedOn}
+                        disabledReason={
+                          lockedOn ? "Remove-only tweak cannot be reverted" : undefined
+                        }
+                        onToggle={() => toggleEnabled(tweak.id)}
+                        onValueChange={(val) => setValue(tweak.id, val)}
+                      />
+                    );
+                  })}
                 </div>
               </Card>
             ))}
@@ -388,27 +405,50 @@ interface TweakRowProps {
   tweak: TweakDefinition;
   isEnabled: boolean;
   currentValue: string | undefined;
+  disabled?: boolean;
+  disabledReason?: string;
   onToggle: () => void;
   onValueChange: (val: string) => void;
 }
 
-function TweakRow({ tweak, isEnabled, currentValue, onToggle, onValueChange }: TweakRowProps) {
+function TweakRow({
+  tweak,
+  isEnabled,
+  currentValue,
+  disabled,
+  disabledReason,
+  onToggle,
+  onValueChange,
+}: TweakRowProps) {
   return (
-    <div className="flex flex-col gap-2 rounded-md border border-border/50 bg-background px-4 py-3">
+    <div
+      className={cn(
+        "flex flex-col gap-2 rounded-md border border-border/50 bg-background px-4 py-3",
+        disabled && "opacity-50"
+      )}
+    >
       {/* Top line: label + switch */}
       <div className="flex items-start justify-between gap-4">
         <div className="flex flex-col gap-0.5">
-          <Label htmlFor={tweak.id} className="text-[13px] font-medium cursor-pointer">
+          <Label
+            htmlFor={tweak.id}
+            className={cn("text-[13px] font-medium", !disabled && "cursor-pointer")}
+          >
             {tweak.label}
           </Label>
           <span className="text-[11px] leading-snug text-muted-foreground">
             {tweak.description}
           </span>
+          {disabledReason && (
+            <span className="text-[11px] leading-snug text-[var(--color-warn)] mt-0.5">
+              {disabledReason}
+            </span>
+          )}
           <div className="mt-1 flex flex-wrap gap-1">
             <TweakCodes tweak={tweak} />
           </div>
         </div>
-        <Switch id={tweak.id} checked={isEnabled} onCheckedChange={onToggle} />
+        <Switch id={tweak.id} checked={isEnabled} onCheckedChange={onToggle} disabled={disabled} />
       </div>
 
       {/* Slider control (only for Slider kind) */}
@@ -431,6 +471,7 @@ function TweakCodes({ tweak }: { tweak: TweakDefinition }) {
 
   switch (tweak.kind) {
     case "RemoveLines":
+      if (tweak.remove_only) return null;
       return tweak.lines.map((line, i) => (
         <code key={i} className={codeClass}>
           {line.pattern}
@@ -439,7 +480,8 @@ function TweakCodes({ tweak }: { tweak: TweakDefinition }) {
     case "Toggle":
       return (
         <code className={codeClass}>
-          {tweak.key}={tweak.on_value}/{tweak.off_value}
+          {tweak.key}={tweak.on_value}
+          {tweak.off_value !== undefined ? `/${tweak.off_value}` : ""}
         </code>
       );
     case "Slider":
