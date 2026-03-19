@@ -93,6 +93,12 @@ export function PakManager({ gamePath }: Props) {
         setPakContents([]);
         showNotice("No .pak files found.", "err");
       } else {
+        if (selectedPak && !paks.includes(selectedPak)) {
+          setSelectedPak("");
+          setPakContents([]);
+          setFilterText("");
+          setDebouncedFilter("");
+        }
         showNotice(`${paks.length} pak${paks.length !== 1 ? "s" : ""} found`, "ok", 4000);
       }
     } catch (e: unknown) {
