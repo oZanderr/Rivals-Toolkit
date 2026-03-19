@@ -1,6 +1,8 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Minus, X } from "lucide-react";
 
+import icon from "@/assets/icon.png";
+
 const appWindow = getCurrentWindow();
 
 export function Titlebar() {
@@ -23,7 +25,7 @@ export function Titlebar() {
         onMouseDown={handleTitleMouseDown}
         className="flex flex-1 items-center gap-2 px-3 select-none"
       >
-        <span className="text-sm leading-none">🐷</span>
+        <img src={icon} alt="" className="size-4 shrink-0" />
         <span className="text-sm font-semibold leading-none text-foreground">Oinkers Toolkit</span>
         <span className="text-sm leading-none text-muted-foreground">|</span>
         <span className="text-sm leading-none text-muted-foreground">
