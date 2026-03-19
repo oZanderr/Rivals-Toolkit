@@ -4,12 +4,6 @@ on:
   push:
     tags:
       - "v*"
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Release tag to publish (for example v0.1.0)"
-        required: true
-        type: string
 
 permissions:
   contents: write
@@ -26,18 +20,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref }}
+          ref: ${{ github.ref }}
 
       - name: Resolve release tag
         id: vars
         shell: pwsh
         run: |
-          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
-            $tag = "${{ github.event.inputs.tag }}"
-          }
-          else {
-            $tag = "${{ github.ref_name }}"
-          }
+          $tag = "${{ github.ref_name }}"
           "tag=$tag" >> $env:GITHUB_OUTPUT
 
       - name: Validate release tag format
@@ -148,15 +137,15 @@ jobs:
             $changes = "- No changes detected in git log for this release range."
           }
 
-          @"
-## Checksums
-
-- ``$assetName``: ``$checksum``
-
-## Changelog
-
-$changes
-"@ | Set-Content -Path $notesPath -Encoding utf8
+          @(
+            "## Checksums",
+            "",
+            "- ``$assetName``: ``$checksum``",
+            "",
+            "## Changelog",
+            "",
+            $changes
+          ) -join "`n" | Set-Content -Path $notesPath -Encoding utf8
 
           gh release view "$tag" *> $null
           if ($LASTEXITCODE -ne 0) {
