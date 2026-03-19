@@ -254,8 +254,8 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             },
         },
         TweakDefinition {
-            id: "fix_black_characters".into(),
-            label: "Fix Incorrect Black Characters".into(),
+            id: "fix_dark_characters".into(),
+            label: "Fix Incorrect Dark Characters".into(),
             category: "Lighting & Color".into(),
             description: "Removes the eye adaptation disable that causes characters to render \
                            incorrectly dark."
@@ -363,8 +363,8 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
         },
         //Experimental
         TweakDefinition {
-            id: "black_backgrounds".into(),
-            label: "Black Backgrounds".into(),
+            id: "black_skyboxes".into(),
+            label: "Black Skyboxes".into(),
             category: "Experimental".into(),
             description: "Sets r.ViewDistanceScale to an extremely low value, culling distant \
                            world geometry and backgrounds. Can improve performance on low-end \
@@ -486,7 +486,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             category: "Latency".into(),
             description: "Forces the current frame to finish/present instead of buffering. \
                            Can improve input latency, but usually reduces \
-                           throughput and overall performance."
+                           overall performance."
                 .into(),
             pak_only: true,
             kind: TweakKind::Toggle {
@@ -504,7 +504,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             category: "Latency".into(),
             description: "Controls whether the render thread lags one frame behind the game \
                            thread. Disable this to reduce latency at a \
-                           possible performance cost."
+                           cost of performance."
                 .into(),
             pak_only: true,
             kind: TweakKind::Toggle {
@@ -522,7 +522,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             category: "Latency".into(),
             description: "Controls present interval for VSync-capable RHIs: 0 = present \
                            immediately (unlocked), 1 = every vblank, 2 = every 2 vblanks, \
-                           etc. Higher values generally increase latency and lower frame rate."
+                           etc. Higher values generally increase latency and lower frame rate. Only effective with VSync on."
                 .into(),
             pak_only: true,
             kind: TweakKind::Slider {
@@ -577,7 +577,7 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             label: "Character Outlines".into(),
             category: "Display".into(),
             description: "Controls stencil-based outlines on characters, including \
-                           team and enemy highlights. Disable to remove all outline/silhouette effects."
+                           team and enemy highlights. Disable to remove all outline/highlighting effects."
                 .into(),
             pak_only: true,
             kind: TweakKind::Toggle {
