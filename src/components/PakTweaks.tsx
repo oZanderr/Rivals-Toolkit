@@ -302,11 +302,15 @@ export function PakTweaks({ gamePath }: Props) {
         }
         if (!silent) showNotice(formatModsFoundMessage(merged.length, removedMissing), "ok");
       } else if (!merged.find((p) => p.pak_path === selectedPak.pak_path)) {
-        // Previously selected pak is gone — deselect
-        setSelectedPak(null);
-        setTweakStates([]);
-        setSavedTweakStates([]);
-        setEdits([]);
+        // Previously selected pak is gone — auto-select if only one remains, otherwise deselect
+        if (merged.length === 1) {
+          await selectPak(merged[0]);
+        } else {
+          setSelectedPak(null);
+          setTweakStates([]);
+          setSavedTweakStates([]);
+          setEdits([]);
+        }
         if (!silent) showNotice(formatModsFoundMessage(merged.length, removedMissing), "ok");
       } else {
         if (!silent) showNotice(formatModsFoundMessage(merged.length, removedMissing), "ok");
