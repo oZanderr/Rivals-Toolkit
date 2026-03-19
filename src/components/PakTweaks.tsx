@@ -12,6 +12,8 @@ import {
   CheckCircle2,
   XCircle,
   Trash2,
+  Info,
+  TriangleAlert,
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -471,13 +473,37 @@ export function PakTweaks({ gamePath }: Props) {
         <div className="flex flex-col gap-5">
           {/* Pak list */}
           <Card className="flex flex-col gap-3 bg-card p-4">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex min-w-0 flex-1 items-center gap-2">
+                <span className="shrink-0 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
                   Config Mods
                 </span>
+                {notice && (
+                  <span
+                    title={notice.msg}
+                    className={cn(
+                      "flex min-w-0 items-center gap-1 text-[12px] font-medium",
+                      notice.type === "ok"
+                        ? "text-[var(--color-ok)]"
+                        : notice.type === "err"
+                          ? "text-[var(--color-err)]"
+                          : "text-[var(--color-warn)]"
+                    )}
+                  >
+                    {notice.type === "ok" && (
+                      <CheckCircle2 size={13} strokeWidth={2.5} className="shrink-0" />
+                    )}
+                    {notice.type === "err" && (
+                      <XCircle size={13} strokeWidth={2.5} className="shrink-0" />
+                    )}
+                    {notice.type === "info" && (
+                      <TriangleAlert size={13} strokeWidth={2.5} className="shrink-0" />
+                    )}
+                    <span className="truncate">{notice.msg}</span>
+                  </span>
+                )}
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex shrink-0 items-center gap-2">
                 <Button variant="outline" size="sm" onClick={browse}>
                   <FolderOpen size={14} />
                   Browse
@@ -501,10 +527,13 @@ export function PakTweaks({ gamePath }: Props) {
               </span>
             )}
 
-            {gamePath && paks.length === 0 && !scanning && (
-              <span className="text-[12px] text-muted-foreground">
-                No mod paks with INI config files found. Mods that only contain assets won't appear
-                here.
+            {gamePath && paks.length === 0 && (
+              <span className="flex items-start gap-1.5 text-[12px] text-muted-foreground">
+                <Info size={14} className="mt-0.5 shrink-0" />
+                <span>
+                  <strong className="font-semibold text-foreground">No config mods found.</strong>{" "}
+                  Mods that only contain assets won't appear here.
+                </span>
               </span>
             )}
 
@@ -649,7 +678,7 @@ export function PakTweaks({ gamePath }: Props) {
       </div>
 
       {/* Apply bar — fixed footer, outside the scroll area */}
-      {((selectedPak && !loading) || !!notice) && (
+      {selectedPak && !loading && (
         <div className="flex flex-col gap-3 border-t border-border pt-3 pb-1 mt-5">
           {/* Pending edits summary */}
           {selectedPak && !loading && edits.length > 0 && (
@@ -703,22 +732,6 @@ export function PakTweaks({ gamePath }: Props) {
                   Reload
                 </Button>
               </>
-            )}
-            {notice && (
-              <span
-                title={notice.msg}
-                className={cn(
-                  "flex min-w-0 flex-1 items-center gap-1 text-[12px]",
-                  notice.type === "ok"
-                    ? "text-[var(--color-ok)]"
-                    : notice.type === "err"
-                      ? "text-[var(--color-err)]"
-                      : "text-muted-foreground"
-                )}
-              >
-                {notice.type === "ok" && <CheckCircle2 size={13} className="shrink-0" />}
-                <span className="truncate">{notice.msg}</span>
-              </span>
             )}
           </div>
         </div>
