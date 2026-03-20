@@ -57,9 +57,18 @@ fn detect_one(content: &str, tweak: &TweakDefinition) -> TweakState {
                 current_value: None,
             }
         }
-        TweakKind::Slider { key, .. } => {
+        TweakKind::Slider {
+            key,
+            default_value,
+            write_default_on_disable,
+            ..
+        } => {
             let current = find_key_value(content, key);
-            let active = current.is_some();
+            let active = match (&current, *write_default_on_disable) {
+                (Some(v), true) => !values_equal(v, *default_value),
+                (Some(_), false) => true,
+                (None, _) => false,
+            };
             TweakState {
                 id: tweak.id.clone(),
                 active,
@@ -161,6 +170,16 @@ pub(crate) fn apply_tweaks(
         result.push_str("\r\n");
     }
     result
+}
+
+/// Compare a string value from an INI file against a default `f64`.
+/// Handles mismatches like `"1"` vs `1.0` by parsing both as numbers.
+fn values_equal(file_value: &str, default: f64) -> bool {
+    if let Ok(v) = file_value.trim().parse::<f64>() {
+        (v - default).abs() < f64::EPSILON
+    } else {
+        false
+    }
 }
 
 /// Check whether a line matches a pattern, including `+CVars=` form.

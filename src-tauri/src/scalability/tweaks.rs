@@ -465,8 +465,12 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
             id: "latency_gt_sync_type".into(),
             label: "Game Thread Sync Type".into(),
             category: "Latency".into(),
-            description: "Controls game-thread sync target. 0 = render thread, \
-                           1 = RHI thread, 2 = GPU swap-chain flip."
+            description: "Controls how the game thread synchronises with the GPU pipeline, \
+                           affecting input latency. \
+                           0 = sync to render thread (highest latency); \
+                           1 = sync to RHI thread (game default, balanced); \
+                           2 = sync to GPU swap-chain flip (lowest latency, if compatible). \
+                           Toggle is active only when set away from the default."
                 .into(),
             pak_only: true,
             kind: TweakKind::Slider {
