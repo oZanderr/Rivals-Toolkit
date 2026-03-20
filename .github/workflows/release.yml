@@ -131,30 +131,33 @@ jobs:
 
           $repo = "${{ github.repository }}"
           $downloadUrl = "https://github.com/$repo/releases/download/$tag/$assetName"
+          $checksumUrl = "https://github.com/$repo/releases/download/$tag/$checksumFileName"
 
           $prevTag = git tag --sort=-creatordate | Where-Object { $_ -ne $tag } | Select-Object -First 1
 
           if ($prevTag) {
-            $changes = git log --pretty=format:"- %s (%h)" "$prevTag..$tag"
+            $changeLines = git --no-pager log --reverse --no-merges --pretty=format:"- %s (%h)" "$prevTag..$tag"
           }
           else {
-            $changes = git log --pretty=format:"- %s (%h)" "$tag"
+            $changeLines = git --no-pager log --reverse --no-merges --pretty=format:"- %s (%h)" "$tag"
           }
 
-          if (-not $changes) {
-            $changes = "- No changes detected in git log for this release range."
+          if (-not $changeLines) {
+            $changeLines = "- No changes detected in git log for this release range."
           }
+
+          $changelog = ($changeLines -join "`n")
 
           @(
             "## Downloads",
             "",
-            "| File | SHA256 |",
-            "| ---- | ------ |",
-            "| [$assetName]($downloadUrl) | ``$checksum`` |",
+            "| File | |",
+            "| ---- | - |",
+            "| [$assetName]($downloadUrl) | [checksum]($checksumUrl) |",
             "",
             "## Changelog",
             "",
-            $changes
+            $changelog
           ) -join "`n" | Set-Content -Path $notesPath -Encoding utf8
 
           gh release view "$tag" *> $null
