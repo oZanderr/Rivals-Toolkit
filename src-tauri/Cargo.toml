@@ -1,6 +1,6 @@
 [package]
 name = "oinkers-toolkit"
-version = "0.1.0"
+version = "0.2.0"
 description = "Toolkit for Marvel Rivals configuration and mod files"
 authors = ["Zander"]
 edition = "2024"
