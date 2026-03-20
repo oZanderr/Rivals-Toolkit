@@ -57,22 +57,9 @@ fn detect_one(content: &str, tweak: &TweakDefinition) -> TweakState {
                 current_value: None,
             }
         }
-        TweakKind::Slider {
-            key,
-            default_value,
-            write_default_on_disable,
-            ..
-        } => {
+        TweakKind::Slider { key, .. } => {
             let current = find_key_value(content, key);
-            let active = if *write_default_on_disable {
-                current
-                    .as_deref()
-                    .and_then(|v| v.parse::<f64>().ok())
-                    .map(|v| v != *default_value)
-                    .unwrap_or(false)
-            } else {
-                current.is_some()
-            };
+            let active = current.is_some();
             TweakState {
                 id: tweak.id.clone(),
                 active,

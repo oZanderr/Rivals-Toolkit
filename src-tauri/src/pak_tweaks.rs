@@ -88,14 +88,8 @@ pub(crate) fn read_pak_tweaks(pak_path: &str) -> Result<Vec<PakTweakState>, Stri
 
         for dp_var in dp_vars {
             let key_lower = dp_var.key.to_ascii_lowercase();
-            if let Some(existing) = merged
-                .iter_mut()
-                .find(|v| v.key.to_ascii_lowercase() == key_lower)
-            {
-                *existing = dp_var;
-            } else {
-                merged.push(dp_var);
-            }
+            merged.retain(|v| v.key.to_ascii_lowercase() != key_lower);
+            merged.push(dp_var);
         }
     }
 
