@@ -21,6 +21,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ github.ref }}
+          fetch-depth: 0
 
       - name: Resolve release tag
         id: vars
@@ -123,14 +124,21 @@ jobs:
 
           $checksum = (Get-FileHash -Algorithm SHA256 $assetPath).Hash.ToLower()
 
-          git fetch --tags --force *> $null
+          # Write standalone checksum file
+          $checksumFileName = "$assetName.sha256"
+          $checksumFilePath = Join-Path $env:RUNNER_TEMP $checksumFileName
+          "$checksum  $assetName" | Set-Content -Path $checksumFilePath -Encoding utf8 -NoNewline
+
+          $repo = "${{ github.repository }}"
+          $downloadUrl = "https://github.com/$repo/releases/download/$tag/$assetName"
+
           $prevTag = git tag --sort=-creatordate | Where-Object { $_ -ne $tag } | Select-Object -First 1
 
           if ($prevTag) {
             $changes = git log --pretty=format:"- %s (%h)" "$prevTag..$tag"
           }
           else {
-            $changes = git log --pretty=format:"- %s (%h)" -n 30 "$tag"
+            $changes = git log --pretty=format:"- %s (%h)" "$tag"
           }
 
           if (-not $changes) {
@@ -138,9 +146,11 @@ jobs:
           }
 
           @(
-            "## Checksums",
+            "## Downloads",
             "",
-            "- ``$assetName``: ``$checksum``",
+            "| File | SHA256 |",
+            "| ---- | ------ |",
+            "| [$assetName]($downloadUrl) | ``$checksum`` |",
             "",
             "## Changelog",
             "",
@@ -161,6 +171,7 @@ jobs:
           }
 
           gh release upload "$tag" "$assetPath" --clobber
+          gh release upload "$tag" "$checksumFilePath" --clobber
 
       - name: Notify Discord on release success
         if: ${{ success() }}
