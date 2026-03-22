@@ -175,3 +175,13 @@ pub(crate) fn install_mod(
 ) -> Result<mods::InstallResult, String> {
     mods::install_mod(&mods_folder, &source_path)
 }
+
+#[tauri::command]
+pub(crate) async fn install_from_zip(
+    mods_folder: String,
+    zip_path: String,
+) -> Result<Vec<mods::InstallResult>, String> {
+    tauri::async_runtime::spawn_blocking(move || mods::install_from_zip(&mods_folder, &zip_path))
+        .await
+        .map_err(|e| e.to_string())?
+}

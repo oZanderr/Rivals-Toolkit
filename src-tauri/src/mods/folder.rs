@@ -152,6 +152,62 @@ pub(crate) fn install_mod(mods_folder: &str, source_path: &str) -> Result<Instal
     })
 }
 
+/// Install mods from a zip archive.
+/// Extracts .pak/.ucas/.utoc files to a temp directory, then installs each pak
+pub(crate) fn install_from_zip(
+    mods_folder: &str,
+    zip_path: &str,
+) -> Result<Vec<InstallResult>, String> {
+    let file = std::fs::File::open(zip_path).map_err(|e| format!("Failed to open zip: {e}"))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("Invalid zip file: {e}"))?;
+
+    let temp_dir = std::env::temp_dir().join(format!("oinkers_zip_{}", std::process::id()));
+    if temp_dir.exists() {
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+    std::fs::create_dir_all(&temp_dir).map_err(|e| format!("Failed to create temp dir: {e}"))?;
+
+    // Extract only mod files (.pak, .ucas, .utoc) into temp dir.
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
+        let Some(name) = entry.enclosed_name().and_then(|p| {
+            p.file_name().map(|n| n.to_string_lossy().into_owned())
+        }) else {
+            continue;
+        };
+        let ext = Path::new(&name)
+            .extension()
+            .and_then(|x| x.to_str())
+            .unwrap_or("");
+        if !matches!(ext, "pak" | "ucas" | "utoc") {
+            continue;
+        }
+        let dest = temp_dir.join(&name);
+        let mut out =
+            std::fs::File::create(&dest).map_err(|e| format!("Failed to create {name}: {e}"))?;
+        io::copy(&mut entry, &mut out).map_err(|e| format!("Failed to extract {name}: {e}"))?;
+    }
+
+    // Install each extracted .pak and companion files
+    let mut results = Vec::new();
+    for entry in std::fs::read_dir(&temp_dir).map_err(|e| e.to_string())?.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|x| x.to_str()) == Some("pak") {
+            results.push(install_mod(
+                mods_folder,
+                &path.to_string_lossy(),
+            )?);
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+
+    if results.is_empty() {
+        return Err("No .pak files found in the zip archive".to_string());
+    }
+    Ok(results)
+}
+
 /// Export enabled mod files to a zip archive.
 pub(crate) fn export_mods_zip(mods_folder: &str, dest_path: &str) -> Result<String, String> {
     let dir = Path::new(mods_folder);

@@ -90,7 +90,7 @@ export function ModTools({ gamePath, isActive }: Props) {
     if (gamePath) refresh(true);
   }, [gamePath, refresh]);
 
-  // Drag-and-drop: accept .pak files dropped anywhere on the window.
+  // Drag-and-drop: accept .pak and .zip files dropped anywhere on the window.
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     getCurrentWindow()
@@ -103,13 +103,16 @@ export function ModTools({ gamePath, isActive }: Props) {
           const folder = modsStatusRef.current?.mods_folder_path;
           if (!folder) return;
           const pakPaths = event.payload.paths.filter((p) => p.endsWith(".pak"));
-          if (pakPaths.length === 0) return;
+          const zipPaths = event.payload.paths.filter((p) => p.toLowerCase().endsWith(".zip"));
+          if (pakPaths.length === 0 && zipPaths.length === 0) return;
           dropProcessingRef.current = true;
           try {
             let installed = 0;
             let replacedDisabled = 0;
             let replacedEnabled = 0;
             const errors: string[] = [];
+
+            // Install loose .pak files
             for (const p of pakPaths) {
               try {
                 const result = await invoke<{
@@ -124,6 +127,23 @@ export function ModTools({ gamePath, isActive }: Props) {
                 errors.push(String(e));
               }
             }
+
+            // Install mods from .zip archives
+            for (const z of zipPaths) {
+              try {
+                const results = await invoke<
+                  { file_name: string; replaced_disabled: boolean; replaced_enabled: boolean }[]
+                >("install_from_zip", { modsFolder: folder, zipPath: z });
+                for (const result of results) {
+                  installed++;
+                  if (result.replaced_disabled) replacedDisabled++;
+                  if (result.replaced_enabled) replacedEnabled++;
+                }
+              } catch (e: unknown) {
+                errors.push(String(e));
+              }
+            }
+
             if (errors.length > 0) showNotice(errors[0], "err");
             else if (installed > 0) {
               await refreshRef.current(true);
@@ -252,7 +272,7 @@ export function ModTools({ gamePath, isActive }: Props) {
       {isDragging && (
         <div className="pointer-events-none absolute inset-0 z-50 flex flex-col items-center justify-center gap-3 rounded-lg border-2 border-dashed border-[var(--color-ok)] bg-background/80 backdrop-blur-sm">
           <UploadCloud size={36} className="text-[var(--color-ok)]" />
-          <span className="text-sm font-semibold text-[var(--color-ok)]">Drop .pak to install</span>
+          <span className="text-sm font-semibold text-[var(--color-ok)]">Drop .pak or .zip to install</span>
         </div>
       )}
       {/* Header */}

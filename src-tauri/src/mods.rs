@@ -52,3 +52,10 @@ pub(crate) fn delete_mod(mods_folder: &str, full_name: &str) -> Result<(), Strin
 pub(crate) fn install_mod(mods_folder: &str, source_path: &str) -> Result<InstallResult, String> {
     folder::install_mod(mods_folder, source_path)
 }
+
+pub(crate) fn install_from_zip(
+    mods_folder: &str,
+    zip_path: &str,
+) -> Result<Vec<InstallResult>, String> {
+    folder::install_from_zip(mods_folder, zip_path)
+}
