@@ -44,7 +44,9 @@ pub fn run() {
             commands::install_mod,
             commands::install_from_zip,
             commands::get_skip_launcher,
-            commands::set_skip_launcher
+            commands::set_skip_launcher,
+            commands::extract_pak_ini,
+            commands::save_pak_ini
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

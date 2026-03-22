@@ -38,6 +38,13 @@ pub(crate) struct PakTweakEdit {
     pub engine_section: Option<String>,
 }
 
+/// Raw INI file content for writing back to a pak.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct PakIniFileContent {
+    pub entry: String,
+    pub content: String,
+}
+
 /// Inspect one pak and return INI metadata when present.
 pub(crate) fn inspect_single_pak(pak_path: &str) -> Result<Option<PakIniInfo>, String> {
     io::inspect_pak_for_ini(Path::new(pak_path))
@@ -233,4 +240,56 @@ pub(crate) fn apply_pak_tweaks(pak_path: &str, edits: &[PakTweakEdit]) -> Result
         edits.len(),
         info.pak_name
     ))
+}
+
+/// Extract a single file from a pak as a UTF-8 string.
+pub(crate) fn extract_pak_ini(pak_path: &str, entry: &str) -> Result<String, String> {
+    extract_file_to_string(Path::new(pak_path), entry)
+}
+
+/// Replace raw INI file contents in a pak and repack in place.
+pub(crate) fn save_pak_ini(
+    pak_path: &str,
+    files: Vec<PakIniFileContent>,
+) -> Result<String, String> {
+    let pak = Path::new(pak_path);
+    if !pak.exists() {
+        return Err(format!("Pak file not found: {}", pak_path));
+    }
+
+    let stem = pak
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let parent = pak.parent().unwrap_or_else(|| Path::new("."));
+    let temp_dir = parent.join(format!(".{}_temp", stem));
+
+    let _ = fs::remove_dir_all(&temp_dir);
+
+    unpack_to_dir(pak, &temp_dir)?;
+
+    for file in &files {
+        let rel = strip_mount_prefix(&file.entry);
+        let dest = temp_dir.join(rel);
+        fs::write(&dest, &file.content)
+            .map_err(|e| format!("Failed to write {}: {}", dest.display(), e))?;
+    }
+
+    let temp_pak = parent.join(format!(".{}_repacked.pak", stem));
+
+    repack_dir_to_pak(&temp_dir, &temp_pak)?;
+
+    fs::remove_file(pak).map_err(|e| format!("Failed to remove original pak: {}", e))?;
+    fs::rename(&temp_pak, pak)
+        .map_err(|e| format!("Failed to replace pak with repacked version: {}", e))?;
+
+    let _ = fs::remove_dir_all(&temp_dir);
+
+    let pak_name = pak
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    Ok(format!("Saved {} file(s) to {}", files.len(), pak_name))
 }
