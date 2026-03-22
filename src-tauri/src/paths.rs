@@ -11,3 +11,7 @@ pub(crate) fn mods_dir(game_root: &str) -> PathBuf {
 pub(crate) fn binaries_dir(game_root: &str) -> PathBuf {
     PathBuf::from(game_root).join("MarvelGame\\Marvel\\Binaries\\Win64")
 }
+
+pub(crate) fn launch_record_path(game_root: &str) -> PathBuf {
+    PathBuf::from(game_root).join("launch_record")
+}

@@ -1,4 +1,4 @@
-use crate::{detect, mods, pak, pak_tweaks, scalability};
+use crate::{detect, launch_record, mods, pak, pak_tweaks, scalability};
 
 #[tauri::command]
 pub(crate) fn get_scalability_path() -> Result<String, String> {
@@ -142,6 +142,16 @@ pub(crate) fn clear_shader_cache() -> Result<String, String> {
 #[tauri::command]
 pub(crate) fn launch_game(install_info: detect::InstallInfo) -> Result<(), String> {
     install_info.launch_game()
+}
+
+#[tauri::command]
+pub(crate) fn get_skip_launcher(game_root: String) -> Result<bool, String> {
+    launch_record::get_skip_launcher(&game_root)
+}
+
+#[tauri::command]
+pub(crate) fn set_skip_launcher(game_root: String, skip: bool) -> Result<(), String> {
+    launch_record::set_skip_launcher(&game_root, skip)
 }
 
 #[tauri::command]

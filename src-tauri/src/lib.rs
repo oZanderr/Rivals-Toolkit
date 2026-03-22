@@ -2,6 +2,7 @@
 
 mod commands;
 mod detect;
+mod launch_record;
 mod mods;
 mod pak;
 mod pak_tweaks;
@@ -41,7 +42,9 @@ pub fn run() {
             commands::export_mods_zip,
             commands::delete_mod,
             commands::install_mod,
-            commands::install_from_zip
+            commands::install_from_zip,
+            commands::get_skip_launcher,
+            commands::set_skip_launcher
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

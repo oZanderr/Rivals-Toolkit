@@ -17,6 +17,8 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 
 interface InstallInfo {
@@ -64,6 +66,8 @@ export function Home({
   const [showRefreshBadge, setShowRefreshBadge] = useState(false);
   const refreshBadgeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const badgeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [skipLauncher, setSkipLauncher] = useState<boolean | null>(null);
+  const [skipLauncherError, setSkipLauncherError] = useState<string | null>(null);
 
   const detect = useCallback(async () => {
     if (badgeTimer.current) clearTimeout(badgeTimer.current);
@@ -110,6 +114,30 @@ export function Home({
     }
   }, []);
 
+  const loadLaunchRecord = useCallback(async (path: string) => {
+    try {
+      const skip = await invoke<boolean>("get_skip_launcher", { gameRoot: path });
+      setSkipLauncher(skip);
+      setSkipLauncherError(null);
+    } catch (e) {
+      setSkipLauncher(null);
+      setSkipLauncherError(String(e));
+      console.error(e);
+    }
+  }, []);
+
+  async function handleSkipLauncherToggle(checked: boolean) {
+    if (!gamePath) return;
+    try {
+      await invoke("set_skip_launcher", { gameRoot: gamePath, skip: checked });
+      setSkipLauncher(checked);
+      setSkipLauncherError(null);
+    } catch (e) {
+      setSkipLauncherError(String(e));
+      console.error(e);
+    }
+  }
+
   function showFolderNotice(msg: string, type: "ok" | "err") {
     if (folderNoticeTimer.current) clearTimeout(folderNoticeTimer.current);
     setFolderNotice({ msg, type });
@@ -145,14 +173,22 @@ export function Home({
   }, []);
 
   useEffect(() => {
-    if (isActive && gamePath) refreshModsStatus(gamePath);
+    if (isActive && gamePath) {
+      refreshModsStatus(gamePath);
+      loadLaunchRecord(gamePath);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- gamePath intentionally omitted: separate effect handles gamePath changes
-  }, [isActive, refreshModsStatus]);
+  }, [isActive, refreshModsStatus, loadLaunchRecord]);
 
   useEffect(() => {
-    if (gamePath) refreshModsStatus(gamePath);
-    else setModsStatus(null);
-  }, [gamePath, refreshModsStatus]);
+    if (gamePath) {
+      refreshModsStatus(gamePath);
+      loadLaunchRecord(gamePath);
+    } else {
+      setModsStatus(null);
+      setSkipLauncher(null);
+    }
+  }, [gamePath, refreshModsStatus, loadLaunchRecord]);
 
   const allDone = !!modsStatus && modsStatus.mods_folder_exists && modsStatus.sig_bypass_installed;
   const enabledModsCount = modsStatus?.mod_entries.filter((m) => m.enabled).length ?? 0;
@@ -225,6 +261,29 @@ export function Home({
             <RefreshCw size={15} className={cn(detecting && "animate-spin")} />
             Redetect
           </Button>
+          {gamePath && (
+            <div
+              className="flex shrink-0 items-center gap-1.5 border-l border-border pl-2"
+              title={skipLauncherError ?? "Skip the launcher window and go straight into the game"}
+            >
+              <Label
+                htmlFor="skip-launcher"
+                className={cn(
+                  "cursor-pointer text-[11px] whitespace-nowrap",
+                  skipLauncherError ? "text-[var(--color-err)]" : "text-muted-foreground"
+                )}
+              >
+                Skip Launcher
+              </Label>
+              <Switch
+                id="skip-launcher"
+                size="sm"
+                checked={skipLauncher ?? false}
+                onCheckedChange={handleSkipLauncherToggle}
+                disabled={skipLauncher === null}
+              />
+            </div>
+          )}
         </div>
       </div>
 

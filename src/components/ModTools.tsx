@@ -272,7 +272,9 @@ export function ModTools({ gamePath, isActive }: Props) {
       {isDragging && (
         <div className="pointer-events-none absolute inset-0 z-50 flex flex-col items-center justify-center gap-3 rounded-lg border-2 border-dashed border-[var(--color-ok)] bg-background/80 backdrop-blur-sm">
           <UploadCloud size={36} className="text-[var(--color-ok)]" />
-          <span className="text-sm font-semibold text-[var(--color-ok)]">Drop .pak or .zip to install</span>
+          <span className="text-sm font-semibold text-[var(--color-ok)]">
+            Drop .pak or .zip to install
+          </span>
         </div>
       )}
       {/* Header */}

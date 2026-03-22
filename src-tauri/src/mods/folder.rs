@@ -170,9 +170,10 @@ pub(crate) fn install_from_zip(
     // Extract only mod files (.pak, .ucas, .utoc) into temp dir.
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
-        let Some(name) = entry.enclosed_name().and_then(|p| {
-            p.file_name().map(|n| n.to_string_lossy().into_owned())
-        }) else {
+        let Some(name) = entry
+            .enclosed_name()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        else {
             continue;
         };
         let ext = Path::new(&name)
@@ -190,13 +191,13 @@ pub(crate) fn install_from_zip(
 
     // Install each extracted .pak and companion files
     let mut results = Vec::new();
-    for entry in std::fs::read_dir(&temp_dir).map_err(|e| e.to_string())?.flatten() {
+    for entry in std::fs::read_dir(&temp_dir)
+        .map_err(|e| e.to_string())?
+        .flatten()
+    {
         let path = entry.path();
         if path.extension().and_then(|x| x.to_str()) == Some("pak") {
-            results.push(install_mod(
-                mods_folder,
-                &path.to_string_lossy(),
-            )?);
+            results.push(install_mod(mods_folder, &path.to_string_lossy())?);
         }
     }
 
