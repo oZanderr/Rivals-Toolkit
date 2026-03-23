@@ -29,7 +29,7 @@ const TABS: { id: Tab; label: string; icon: ReactNode }[] = [
   { id: "mod-tools", label: "Mod Tools", icon: <Wrench size={15} /> },
   { id: "settings", label: "Quick Settings", icon: <Settings size={15} /> },
   { id: "ini-editor", label: "Pak INI Editor", icon: <FileCode2 size={15} /> },
-  { id: "pak-manager", label: "Pak Manager (Expert)", icon: <Package size={15} /> },
+  { id: "pak-manager", label: "Pak Manager", icon: <Package size={15} /> },
 ];
 
 function App() {
