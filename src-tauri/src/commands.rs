@@ -135,6 +135,23 @@ pub(crate) async fn apply_pak_tweak_edits(
 }
 
 #[tauri::command]
+pub(crate) async fn extract_pak_ini(pak_path: String, entry: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || pak_tweaks::extract_pak_ini(&pak_path, &entry))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub(crate) async fn save_pak_ini(
+    pak_path: String,
+    files: Vec<pak_tweaks::PakIniFileContent>,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || pak_tweaks::save_pak_ini(&pak_path, files))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 pub(crate) fn clear_shader_cache() -> Result<String, String> {
     scalability::clear_shader_cache()
 }
