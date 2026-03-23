@@ -140,8 +140,13 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
     }
   }
 
-  async function loadPak(pak: PakIniInfo) {
-    if (isDirty && !confirm("You have unsaved changes. Discard and switch paks?")) return;
+  async function loadPak(pak: PakIniInfo, skipDirtyCheck = false) {
+    if (
+      !skipDirtyCheck &&
+      isDirty &&
+      !confirm("You have unsaved changes. Discard and switch paks?")
+    )
+      return;
 
     setSelectedPak(pak);
     setDpContent(null);
@@ -186,7 +191,7 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
   async function reload() {
     if (!selectedPak) return;
     if (isDirty && !confirm("Discard unsaved changes and reload from disk?")) return;
-    await loadPak(selectedPak);
+    await loadPak(selectedPak, true);
     showNotice("Reloaded from disk", "ok");
   }
 
@@ -216,7 +221,7 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
       showNotice(msg, "ok");
 
       // Reload from repacked pak to verify round-trip
-      await loadPak(selectedPak);
+      await loadPak(selectedPak, true);
     } catch (e) {
       showNotice(String(e), "err", 8000);
       console.error(e);

@@ -229,9 +229,20 @@ pub(crate) fn apply_pak_tweaks(pak_path: &str, edits: &[PakTweakEdit]) -> Result
 
     repack_dir_to_pak(&temp_dir, &temp_pak)?;
 
-    fs::remove_file(pak).map_err(|e| format!("Failed to remove original pak: {}", e))?;
-    fs::rename(&temp_pak, pak)
-        .map_err(|e| format!("Failed to replace pak with repacked version: {}", e))?;
+    // Crash-safe replacement: backup original first, then swap in the new file.
+    // If rename-into-place fails, the .bak still has the original.
+    let pak_parent = pak.parent().unwrap_or_else(|| Path::new("."));
+    let backup = pak_parent.join(format!(".{}.bak", stem));
+    fs::rename(pak, &backup).map_err(|e| format!("Failed to back up original pak: {}", e))?;
+    if let Err(e) = fs::rename(&temp_pak, pak) {
+        // Restore from backup on failure
+        let _ = fs::rename(&backup, pak);
+        return Err(format!(
+            "Failed to replace pak with repacked version: {}",
+            e
+        ));
+    }
+    let _ = fs::remove_file(&backup);
 
     let _ = fs::remove_dir_all(&temp_dir);
 
@@ -280,9 +291,17 @@ pub(crate) fn save_pak_ini(
 
     repack_dir_to_pak(&temp_dir, &temp_pak)?;
 
-    fs::remove_file(pak).map_err(|e| format!("Failed to remove original pak: {}", e))?;
-    fs::rename(&temp_pak, pak)
-        .map_err(|e| format!("Failed to replace pak with repacked version: {}", e))?;
+    // Crash-safe replacement: backup original first, then swap in the new file.
+    let backup = parent.join(format!(".{}.bak", stem));
+    fs::rename(pak, &backup).map_err(|e| format!("Failed to back up original pak: {}", e))?;
+    if let Err(e) = fs::rename(&temp_pak, pak) {
+        let _ = fs::rename(&backup, pak);
+        return Err(format!(
+            "Failed to replace pak with repacked version: {}",
+            e
+        ));
+    }
+    let _ = fs::remove_file(&backup);
 
     let _ = fs::remove_dir_all(&temp_dir);
 
