@@ -38,6 +38,31 @@ jobs:
             throw "Tag '$tag' is invalid. Expected format like v0.1.0 or v0.1.0-beta.1"
           }
 
+      - name: Generate changelog
+        id: changelog
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.vars.outputs.tag }}"
+          $prevTag = git tag --sort=-creatordate | Where-Object { $_ -ne $tag } | Select-Object -First 1
+
+          if ($prevTag) {
+            $changeLines = git --no-pager log --reverse --no-merges --pretty=format:"- %s (%h)" "$prevTag..$tag"
+          }
+          else {
+            $changeLines = git --no-pager log --reverse --no-merges --pretty=format:"- %s (%h)" "$tag"
+          }
+
+          if (-not $changeLines) {
+            $changeLines = "- No changes detected in git log for this release range."
+          }
+
+          $changelog = ($changeLines -join "`n")
+
+          $delim = "CHANGELOG_$(New-Guid)"
+          "text<<$delim" | Add-Content $env:GITHUB_OUTPUT
+          $changelog | Add-Content $env:GITHUB_OUTPUT
+          $delim | Add-Content $env:GITHUB_OUTPUT
+
       - name: Setup pnpm
         uses: pnpm/action-setup@v5
         with:
@@ -113,7 +138,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $tag = "${{ steps.vars.outputs.tag }}"
-          $title = "Oinkers Toolkit $tag"
           $assetName = "oinkers-toolkit-$tag-windows-x64.zip"
           $assetPath = Join-Path $env:GITHUB_WORKSPACE "src-tauri/target/release/$assetName"
           $notesPath = Join-Path $env:RUNNER_TEMP "release-notes.md"
@@ -133,20 +157,7 @@ jobs:
           $downloadUrl = "https://github.com/$repo/releases/download/$tag/$assetName"
           $checksumUrl = "https://github.com/$repo/releases/download/$tag/$checksumFileName"
 
-          $prevTag = git tag --sort=-creatordate | Where-Object { $_ -ne $tag } | Select-Object -First 1
-
-          if ($prevTag) {
-            $changeLines = git --no-pager log --reverse --no-merges --pretty=format:"- %s (%h)" "$prevTag..$tag"
-          }
-          else {
-            $changeLines = git --no-pager log --reverse --no-merges --pretty=format:"- %s (%h)" "$tag"
-          }
-
-          if (-not $changeLines) {
-            $changeLines = "- No changes detected in git log for this release range."
-          }
-
-          $changelog = ($changeLines -join "`n")
+          $changelog = "${{ steps.changelog.outputs.text }}"
 
           @(
             "## Downloads",
@@ -163,13 +174,13 @@ jobs:
           gh release view "$tag" *> $null
           if ($LASTEXITCODE -ne 0) {
             gh release create "$tag" `
-              --title "$title" `
+              --title "Oinkers Toolkit $tag" `
               --notes-file "$notesPath" `
               --prerelease=${{ contains(steps.vars.outputs.tag, '-') }}
           }
           else {
             gh release edit "$tag" `
-              --title "$title" `
+              --title "Oinkers Toolkit $tag" `
               --notes-file "$notesPath"
           }
 
@@ -193,12 +204,21 @@ jobs:
           $releaseUrl = "https://github.com/$repo/releases/tag/$tag"
           $downloadUrl = "https://github.com/$repo/releases/download/$tag/$assetName"
 
+          $changelog = "${{ steps.changelog.outputs.text }}"
+
+          # Discord embed description is capped at 4096 chars; trim if needed.
+          $maxLen = 4000
+          if ($changelog.Length -gt $maxLen) {
+            $changelog = $changelog.Substring(0, $maxLen) + "`n... [see full changelog]($releaseUrl)"
+          }
+
           $payload = @{
             thread_name = "Oinkers Toolkit - $tag"
             content = ""
             embeds = @(
               @{
                 color = 5763719
+                description = $changelog
                 fields = @(
                   @{ name = "Release"; value = "[View release]($releaseUrl)"; inline = $true },
                   @{ name = "Download"; value = "[$assetName]($downloadUrl)"; inline = $true }
@@ -213,4 +233,3 @@ jobs:
             -Method Post `
             -ContentType "application/json" `
             -Body $payload
-
