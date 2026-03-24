@@ -1,26 +1,36 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
+import { EditorState, StateField, StateEffect, RangeSetBuilder } from "@codemirror/state";
 import {
-  search,
-  openSearchPanel,
-  closeSearchPanel,
-  SearchQuery,
-  setSearchQuery,
-  findNext as cmFindNext,
-  findPrevious as cmFindPrev,
-  replaceNext as cmReplaceNext,
-  replaceAll as cmReplaceAll,
-  getSearchQuery,
-} from "@codemirror/search";
-import { EditorState } from "@codemirror/state";
-import { EditorView, keymap, type Panel } from "@codemirror/view";
+  EditorView,
+  keymap,
+  Decoration,
+  ViewPlugin,
+  type DecorationSet,
+  type ViewUpdate,
+} from "@codemirror/view";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { CheckCircle2, XCircle, RefreshCw, Save, Search, FolderOpen, FileText } from "lucide-react";
+import {
+  CheckCircle2,
+  XCircle,
+  RefreshCw,
+  Save,
+  Search,
+  FolderOpen,
+  FileText,
+  CaseSensitive,
+  ChevronUp,
+  ChevronDown,
+  Replace,
+  ReplaceAll,
+  X,
+} from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
@@ -54,6 +64,70 @@ interface Props {
   isActive: boolean;
 }
 
+// ── Search highlight CM extension ───────────────────────────────────
+
+const setSearchHighlight = StateEffect.define<{
+  search: string;
+  caseSensitive: boolean;
+}>();
+
+const searchConfigField = StateField.define<{
+  search: string;
+  caseSensitive: boolean;
+}>({
+  create: () => ({ search: "", caseSensitive: false }),
+  update(value, tr) {
+    for (const e of tr.effects) {
+      if (e.is(setSearchHighlight)) return e.value;
+    }
+    return value;
+  },
+});
+
+const matchMark = Decoration.mark({ class: "cm-search-match" });
+const currentMatchMark = Decoration.mark({ class: "cm-search-match-current" });
+
+function buildSearchDecos(view: EditorView): DecorationSet {
+  const { search, caseSensitive } = view.state.field(searchConfigField);
+  if (!search) return Decoration.none;
+
+  const builder = new RangeSetBuilder<Decoration>();
+  const doc = view.state.doc.toString();
+  const hay = caseSensitive ? doc : doc.toLowerCase();
+  const ndl = caseSensitive ? search : search.toLowerCase();
+  const selFrom = view.state.selection.main.from;
+
+  let idx = hay.indexOf(ndl);
+  while (idx !== -1) {
+    builder.add(idx, idx + ndl.length, idx === selFrom ? currentMatchMark : matchMark);
+    idx = hay.indexOf(ndl, idx + 1);
+  }
+  return builder.finish();
+}
+
+const searchHighlightPlugin = ViewPlugin.fromClass(
+  class {
+    decorations: DecorationSet;
+    constructor(view: EditorView) {
+      this.decorations = buildSearchDecos(view);
+    }
+    update(update: ViewUpdate) {
+      if (
+        update.docChanged ||
+        update.selectionSet ||
+        update.transactions.some((t) => t.effects.some((e) => e.is(setSearchHighlight)))
+      ) {
+        this.decorations = buildSearchDecos(update.view);
+      }
+    }
+  },
+  { decorations: (v) => v.decorations }
+);
+
+const searchExtension = [searchConfigField, searchHighlightPlugin];
+
+// ── Component ───────────────────────────────────────────────────────
+
 export function PakIniEditor({ gamePath, isActive }: Props) {
   // ── Pak selection ──
   const [paks, setPaks] = useState<PakIniInfo[]>([]);
@@ -68,6 +142,14 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
   const [savedDp, setSavedDp] = useState<string | null>(null);
   const [savedEngine, setSavedEngine] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+
+  // ── Search ──
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchTerm, setSearchTerm] = useState("");
+  const [replaceTerm, setReplaceTerm] = useState("");
+  const [caseSensitive, setCaseSensitive] = useState(false);
+  const [currentMatchIndex, setCurrentMatchIndex] = useState(-1);
+  const searchInputRef = useRef<HTMLInputElement>(null);
 
   // ── CodeMirror ──
   const editorContainerRef = useRef<HTMLDivElement>(null);
@@ -90,6 +172,20 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
 
   const currentContent = activeFile === "device_profiles" ? dpContent : engineContent;
   const setCurrentContent = activeFile === "device_profiles" ? setDpContent : setEngineContent;
+
+  // ── Match positions ──
+  const matchPositions = useMemo(() => {
+    if (!searchTerm || !currentContent || !searchOpen) return [];
+    const hay = caseSensitive ? currentContent : currentContent.toLowerCase();
+    const ndl = caseSensitive ? searchTerm : searchTerm.toLowerCase();
+    const positions: number[] = [];
+    let idx = hay.indexOf(ndl);
+    while (idx !== -1) {
+      positions.push(idx);
+      idx = hay.indexOf(ndl, idx + 1);
+    }
+    return positions;
+  }, [searchTerm, currentContent, caseSensitive, searchOpen]);
 
   // ── Pak scanning ──
   const scan = useCallback(
@@ -221,233 +317,74 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
     }
   }
 
-  // ── CodeMirror setup ──
+  // ── Search functions ──
   const saveRef = useRef(save);
   saveRef.current = save;
 
-  function createSearchPanel(view: EditorView): Panel {
-    const el = (tag: string, cls?: string) => {
-      const e = document.createElement(tag);
-      if (cls) e.className = cls;
-      return e;
-    };
-
-    const svgIcon = (paths: string) => {
-      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-      svg.setAttribute("width", "14");
-      svg.setAttribute("height", "14");
-      svg.setAttribute("viewBox", "0 0 24 24");
-      svg.setAttribute("fill", "none");
-      svg.setAttribute("stroke", "currentColor");
-      svg.setAttribute("stroke-width", "2");
-      svg.setAttribute("stroke-linecap", "round");
-      svg.setAttribute("stroke-linejoin", "round");
-      svg.innerHTML = paths;
-      return svg;
-    };
-
-    // ── State ──
-    let caseSensitive = false;
-
-    // ── DOM ──
-    const dom = el("div", "cm-search-panel");
-
-    const searchInput = document.createElement("input") as HTMLInputElement;
-    searchInput.type = "text";
-    searchInput.placeholder = "Search...";
-    searchInput.setAttribute("main-field", "true");
-
-    const replaceInput = document.createElement("input") as HTMLInputElement;
-    replaceInput.type = "text";
-    replaceInput.placeholder = "Replace...";
-
-    const countSpan = el("span", "cm-search-count");
-
-    const caseBtn = el("button", "cm-search-icon-btn") as HTMLButtonElement;
-    caseBtn.append(
-      svgIcon(
-        '<path d="m2 16 4.039-9.69a.5.5 0 0 1 .923 0L11 16"/>' +
-          '<path d="M22 9v7"/>' +
-          '<path d="M3.304 13h6.392"/>' +
-          '<circle cx="18.5" cy="12.5" r="3.5"/>'
-      )
-    );
-    caseBtn.title = "Match Case";
-
-    const prevBtn = el("button", "cm-search-icon-btn") as HTMLButtonElement;
-    prevBtn.append(svgIcon('<path d="m18 15-6-6-6 6"/>'));
-    prevBtn.title = "Previous Match";
-
-    const nextBtn = el("button", "cm-search-icon-btn") as HTMLButtonElement;
-    nextBtn.append(svgIcon('<path d="m6 9 6 6 6-6"/>'));
-    nextBtn.title = "Next Match";
-
-    const replaceBtn = el("button", "cm-search-icon-btn") as HTMLButtonElement;
-    replaceBtn.append(
-      svgIcon(
-        '<path d="M14 4a1 1 0 0 1 1-1"/>' +
-          '<path d="M15 10a1 1 0 0 1-1-1"/>' +
-          '<path d="M21 4a1 1 0 0 0-1-1"/>' +
-          '<path d="M21 9a1 1 0 0 1-1 1"/>' +
-          '<path d="m3 7 3 3 3-3"/>' +
-          '<path d="M6 10V5a2 2 0 0 1 2-2h2"/>' +
-          '<rect x="3" y="14" width="7" height="7" rx="1"/>'
-      )
-    );
-    replaceBtn.title = "Replace";
-
-    const replaceAllBtn = el("button", "cm-search-icon-btn") as HTMLButtonElement;
-    replaceAllBtn.append(
-      svgIcon(
-        '<path d="M14 14a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1"/>' +
-          '<path d="M14 4a1 1 0 0 1 1-1"/>' +
-          '<path d="M15 10a1 1 0 0 1-1-1"/>' +
-          '<path d="M19 14a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1"/>' +
-          '<path d="M21 4a1 1 0 0 0-1-1"/>' +
-          '<path d="M21 9a1 1 0 0 1-1 1"/>' +
-          '<path d="m3 7 3 3 3-3"/>' +
-          '<path d="M6 10V5a2 2 0 0 1 2-2h2"/>' +
-          '<rect x="3" y="14" width="7" height="7" rx="1"/>'
-      )
-    );
-    replaceAllBtn.title = "Replace All";
-
-    const closeBtn = el("button", "cm-search-close") as HTMLButtonElement;
-    closeBtn.append(svgIcon('<path d="M18 6 6 18"/><path d="m6 6 12 12"/>'));
-    closeBtn.title = "Close";
-
-    const inputsWrap = el("div", "cm-search-inputs");
-    inputsWrap.append(searchInput, replaceInput);
-    dom.append(
-      inputsWrap,
-      countSpan,
-      caseBtn,
-      prevBtn,
-      nextBtn,
-      replaceBtn,
-      replaceAllBtn,
-      closeBtn
-    );
-
-    // ── Helpers ──
-    function commit() {
-      const query = new SearchQuery({
-        search: searchInput.value,
-        caseSensitive,
-        replace: replaceInput.value,
-      });
-      view.dispatch({ effects: setSearchQuery.of(query) });
-    }
-
-    function updateCount() {
-      const term = searchInput.value;
-      if (!term) {
-        countSpan.textContent = "";
-        return;
-      }
-
-      const doc = view.state.doc.toString();
-      const hay = caseSensitive ? doc : doc.toLowerCase();
-      const ndl = caseSensitive ? term : term.toLowerCase();
-      const selFrom = view.state.selection.main.from;
-
-      let total = 0;
-      let current = 0;
-      let idx = hay.indexOf(ndl);
-      while (idx !== -1) {
-        total++;
-        if (idx === selFrom) current = total;
-        idx = hay.indexOf(ndl, idx + 1);
-      }
-
-      countSpan.textContent = total > 0 ? `${current || "?"}/${total}` : "No results";
-    }
-
-    // ── Events ──
-    searchInput.addEventListener("input", () => {
-      commit();
-      // Jump to the first match without stealing focus from the input
-      const term = searchInput.value;
-      if (term) {
-        const doc = view.state.doc.toString();
-        const hay = caseSensitive ? doc : doc.toLowerCase();
-        const ndl = caseSensitive ? term : term.toLowerCase();
-        const idx = hay.indexOf(ndl);
-        if (idx !== -1) {
-          view.dispatch({
-            selection: { anchor: idx, head: idx + ndl.length },
-            scrollIntoView: true,
-          });
-        }
-      }
-      updateCount();
-    });
-    searchInput.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && e.shiftKey) {
-        e.preventDefault();
-        cmFindPrev(view);
-        updateCount();
-      } else if (e.key === "Enter") {
-        e.preventDefault();
-        cmFindNext(view);
-        updateCount();
-      } else if (e.key === "Escape") closeSearchPanel(view);
-    });
-
-    replaceInput.addEventListener("input", () => commit());
-    replaceInput.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") {
-        e.preventDefault();
-        cmReplaceNext(view);
-        updateCount();
-      }
-      if (e.key === "Escape") closeSearchPanel(view);
-    });
-
-    caseBtn.addEventListener("click", () => {
-      caseSensitive = !caseSensitive;
-      caseBtn.classList.toggle("cm-search-toggle-active", caseSensitive);
-      commit();
-      updateCount();
-    });
-
-    prevBtn.addEventListener("click", () => {
-      cmFindPrev(view);
-      updateCount();
-    });
-    nextBtn.addEventListener("click", () => {
-      cmFindNext(view);
-      updateCount();
-    });
-    replaceBtn.addEventListener("click", () => {
-      cmReplaceNext(view);
-      updateCount();
-    });
-    replaceAllBtn.addEventListener("click", () => {
-      cmReplaceAll(view);
-      updateCount();
-    });
-    closeBtn.addEventListener("click", () => closeSearchPanel(view));
-
-    return {
-      dom,
-      top: true,
-      mount() {
-        // Sync from any existing query state (e.g. re-opening panel)
-        const q = getSearchQuery(view.state);
-        searchInput.value = q.search;
-        replaceInput.value = q.replace;
-        caseSensitive = q.caseSensitive;
-        caseBtn.classList.toggle("cm-search-toggle-active", caseSensitive);
-        updateCount();
-        searchInput.focus();
-        searchInput.select();
-      },
-      update(update) {
-        if (update.docChanged || update.selectionSet) updateCount();
-      },
-    };
+  function openSearch() {
+    setSearchOpen(true);
+    setTimeout(() => searchInputRef.current?.focus(), 0);
   }
+
+  const openSearchRef = useRef(openSearch);
+  openSearchRef.current = openSearch;
+
+  function scrollToPos(view: EditorView, pos: number) {
+    requestAnimationFrame(() => {
+      const coords = view.coordsAtPos(pos);
+      if (!coords) return;
+      const scroller = view.scrollDOM;
+      const rect = scroller.getBoundingClientRect();
+      scroller.scrollTop += coords.top - rect.top - rect.height / 2;
+    });
+  }
+
+  function jumpToMatch(index: number) {
+    const view = editorViewRef.current;
+    if (!view || matchPositions.length === 0) return;
+    const pos = matchPositions[index];
+    view.dispatch({ selection: { anchor: pos, head: pos + searchTerm.length } });
+    scrollToPos(view, pos);
+    setCurrentMatchIndex(index);
+  }
+
+  function findNext() {
+    if (matchPositions.length === 0) return;
+    jumpToMatch((currentMatchIndex + 1) % matchPositions.length);
+  }
+
+  function findPrev() {
+    if (matchPositions.length === 0) return;
+    jumpToMatch((currentMatchIndex - 1 + matchPositions.length) % matchPositions.length);
+  }
+
+  function replaceOne() {
+    const view = editorViewRef.current;
+    if (!view || matchPositions.length === 0 || currentMatchIndex < 0) return;
+    const pos = matchPositions[currentMatchIndex];
+    view.dispatch({
+      changes: { from: pos, to: pos + searchTerm.length, insert: replaceTerm },
+    });
+  }
+
+  function replaceAllMatches() {
+    const view = editorViewRef.current;
+    if (!view || matchPositions.length === 0) return;
+    const count = matchPositions.length;
+    view.dispatch({
+      changes: matchPositions.map((pos) => ({
+        from: pos,
+        to: pos + searchTerm.length,
+        insert: replaceTerm,
+      })),
+    });
+    showNotice(`Replaced ${count} occurrence${count !== 1 ? "s" : ""}`, "ok");
+  }
+
+  // ── CodeMirror setup ──
+  // Ref to access current search state in the editor creation effect
+  const searchStateRef = useRef({ open: false, term: "", caseSensitive: false });
+  searchStateRef.current = { open: searchOpen, term: searchTerm, caseSensitive };
 
   useEffect(() => {
     if (!editorContainerRef.current || currentContent === null) return;
@@ -489,110 +426,15 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
       "&.cm-focused": {
         outline: "none",
       },
-      ".cm-searchMatch": {
+      ".cm-search-match": {
         backgroundColor: "hsl(210 80% 60% / 0.35)",
       },
-      ".cm-searchMatch-selected": {
+      ".cm-search-match-current": {
         backgroundColor: "hsl(210 80% 60% / 0.7)",
-      },
-      // ── Search panel ──
-      ".cm-panels": {
-        backgroundColor: "var(--color-muted)",
-        color: "var(--color-foreground)",
-      },
-      ".cm-panels-top": {
-        borderBottom: "1px solid var(--color-border)",
-      },
-      ".cm-search-panel": {
-        display: "flex",
-        flexDirection: "row",
-        alignItems: "center",
-        gap: "6px",
-        padding: "6px 12px",
-        fontSize: "12px",
-      },
-      ".cm-search-inputs": {
-        display: "flex",
-        flex: "1",
-        minWidth: "0",
-        gap: "6px",
-      },
-      ".cm-search-panel input[type=text]": {
-        backgroundColor: "var(--color-background)",
-        color: "var(--color-foreground)",
-        border: "1px solid var(--color-border)",
-        borderRadius: "6px",
-        fontSize: "12px",
-        padding: "4px 8px",
-        height: "28px",
-        flex: "1",
-        minWidth: "0",
-        outline: "none",
-        fontFamily: "inherit",
-        boxSizing: "border-box",
-      },
-      ".cm-search-panel input[type=text]:focus": {
-        borderColor: "var(--color-ring)",
-        boxShadow: "0 0 0 1px var(--color-ring)",
-      },
-      ".cm-search-panel .cm-search-count": {
-        fontSize: "11px",
-        color: "var(--color-muted-foreground)",
-        whiteSpace: "nowrap",
-      },
-      ".cm-search-panel button": {
-        backgroundImage: "none",
-        backgroundColor: "var(--color-secondary)",
-        color: "var(--color-foreground)",
-        border: "none",
-        borderRadius: "6px",
-        fontSize: "11px",
-        padding: "4px 10px",
-        height: "28px",
-        cursor: "pointer",
-        fontFamily: "inherit",
-        transition: "background-color 120ms, color 120ms",
-        whiteSpace: "nowrap",
-      },
-      ".cm-search-panel button:hover": {
-        backgroundColor: "var(--color-accent)",
-      },
-      ".cm-search-panel button.cm-search-icon-btn": {
-        width: "28px",
-        padding: "0",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        flexShrink: "0",
-      },
-      ".cm-search-panel button svg, .cm-search-panel button span": {
-        pointerEvents: "none",
-      },
-      ".cm-search-panel button.cm-search-toggle-active": {
-        backgroundColor: "var(--color-accent)",
-        color: "var(--color-foreground)",
-      },
-      ".cm-search-panel button.cm-search-close": {
-        backgroundColor: "transparent",
-        border: "none",
-        color: "var(--color-muted-foreground)",
-        fontSize: "16px",
-        width: "22px",
-        height: "22px",
-        borderRadius: "4px",
-        padding: "0",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        marginLeft: "auto",
-      },
-      ".cm-search-panel button.cm-search-close:hover": {
-        color: "var(--color-foreground)",
-        backgroundColor: "var(--color-secondary)",
       },
     });
 
-    const saveKeymap = keymap.of([
+    const cmKeymap = keymap.of([
       {
         key: "Mod-s",
         run: () => {
@@ -600,12 +442,18 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
           return true;
         },
       },
+      {
+        key: "Mod-f",
+        run: () => {
+          openSearchRef.current();
+          return true;
+        },
+      },
     ]);
 
     const updateListener = EditorView.updateListener.of((update) => {
       if (update.docChanged) {
-        const newDoc = update.state.doc.toString();
-        setCurrentContent(newDoc);
+        setCurrentContent(update.state.doc.toString());
       }
     });
 
@@ -614,13 +462,10 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
         doc: currentContent,
         extensions: [
           cmTheme,
-          saveKeymap,
+          cmKeymap,
           keymap.of([...defaultKeymap, ...historyKeymap]),
           history(),
-          search({
-            top: true,
-            createPanel: createSearchPanel,
-          }),
+          searchExtension,
           updateListener,
           EditorView.lineWrapping,
         ],
@@ -630,6 +475,14 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
 
     editorViewRef.current = view;
 
+    // Re-sync search highlights if search is open when editor is recreated
+    const s = searchStateRef.current;
+    if (s.open && s.term) {
+      view.dispatch({
+        effects: setSearchHighlight.of({ search: s.term, caseSensitive: s.caseSensitive }),
+      });
+    }
+
     return () => {
       view.destroy();
       editorViewRef.current = null;
@@ -638,12 +491,37 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeFile, savedDp, savedEngine]);
 
-  // ── Open CM search panel on Ctrl+F when this tab is active ──
+  // ── Sync search config + auto-jump (single atomic dispatch) ──
+  useEffect(() => {
+    const view = editorViewRef.current;
+    if (!view) return;
+
+    const search = searchOpen ? searchTerm : "";
+    const effects = setSearchHighlight.of({ search, caseSensitive });
+
+    if (search && matchPositions.length > 0) {
+      const pos = matchPositions[0];
+      setCurrentMatchIndex(0);
+      view.dispatch({
+        effects,
+        selection: { anchor: pos, head: pos + search.length },
+      });
+      scrollToPos(view, pos);
+    } else {
+      setCurrentMatchIndex(-1);
+      view.dispatch({ effects });
+    }
+    // Only re-run when search params change, not when content changes
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchOpen, searchTerm, caseSensitive]);
+
+  // ── Ctrl+F when this tab is active ──
   useEffect(() => {
     if (!isActive) return;
     function onKeyDown(e: KeyboardEvent) {
-      if (e.key === "f" && (e.ctrlKey || e.metaKey) && editorViewRef.current) {
-        openSearchPanel(editorViewRef.current);
+      if (e.key === "f" && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        openSearch();
       }
     }
     document.addEventListener("keydown", onKeyDown);
@@ -664,7 +542,7 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
     if (paks.length === 1 && !selectedPak && !loading) {
       loadPak(paks[0]);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- fire-once after scan populates paks; loadPak identity is irrelevant here
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- fire-once after scan populates paks
   }, [paks, selectedPak, loading]);
 
   // Reset scan flag when game path changes
@@ -807,13 +685,116 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={() => editorViewRef.current && openSearchPanel(editorViewRef.current)}
+                onClick={() => (searchOpen ? setSearchOpen(false) : openSearch())}
                 title="Search & Replace (Ctrl+F)"
+                className={cn(searchOpen && "bg-secondary")}
               >
                 <Search size={13} />
               </Button>
             </div>
           </div>
+
+          {/* Search/replace bar */}
+          {searchOpen && (
+            <div className="flex items-center gap-2 border-b border-border bg-muted/50 px-3 py-1.5">
+              <div className="flex flex-1 items-center gap-2">
+                <Input
+                  ref={searchInputRef}
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && e.shiftKey) {
+                      e.preventDefault();
+                      findPrev();
+                    } else if (e.key === "Enter") {
+                      e.preventDefault();
+                      findNext();
+                    }
+                    if (e.key === "Escape") setSearchOpen(false);
+                  }}
+                  placeholder="Search..."
+                  className="h-7 flex-1 text-xs"
+                />
+                <Input
+                  value={replaceTerm}
+                  onChange={(e) => setReplaceTerm(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      replaceOne();
+                    }
+                    if (e.key === "Escape") setSearchOpen(false);
+                  }}
+                  placeholder="Replace..."
+                  className="h-7 flex-1 text-xs"
+                />
+              </div>
+              <span className="shrink-0 text-[11px] text-muted-foreground">
+                {matchPositions.length > 0
+                  ? currentMatchIndex >= 0
+                    ? `${currentMatchIndex + 1}/${matchPositions.length}`
+                    : `${matchPositions.length} matches`
+                  : searchTerm
+                    ? "No results"
+                    : ""}
+              </span>
+              <div className="flex items-center gap-0.5">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setCaseSensitive((p) => !p)}
+                  title="Match Case"
+                  className={cn(caseSensitive && "bg-secondary text-foreground")}
+                >
+                  <CaseSensitive size={14} />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={findPrev}
+                  disabled={matchPositions.length === 0}
+                  title="Previous Match"
+                >
+                  <ChevronUp size={13} />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={findNext}
+                  disabled={matchPositions.length === 0}
+                  title="Next Match"
+                >
+                  <ChevronDown size={13} />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={replaceOne}
+                  disabled={matchPositions.length === 0}
+                  title="Replace"
+                >
+                  <Replace size={13} />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={replaceAllMatches}
+                  disabled={matchPositions.length === 0}
+                  title="Replace All"
+                >
+                  <ReplaceAll size={13} />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setSearchOpen(false)}
+                  title="Close"
+                >
+                  <X size={13} />
+                </Button>
+              </div>
+            </div>
+          )}
 
           {/* CodeMirror editor */}
           <div ref={editorContainerRef} className="flex-1 min-h-0 w-full overflow-hidden" />
