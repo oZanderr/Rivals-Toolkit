@@ -1,5 +1,5 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Minus, X } from "lucide-react";
+import { Minus, Square, X } from "lucide-react";
 
 import icon from "@/assets/icon.png";
 
@@ -38,6 +38,13 @@ export function Titlebar() {
         title="Minimize"
       >
         <Minus size={14} strokeWidth={2} />
+      </button>
+      <button
+        onClick={() => appWindow.toggleMaximize()}
+        className="inline-flex h-[35px] w-[35px] items-center justify-center text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+        title="Maximize"
+      >
+        <Square size={11} strokeWidth={2} />
       </button>
       <button
         onClick={() => appWindow.close()}

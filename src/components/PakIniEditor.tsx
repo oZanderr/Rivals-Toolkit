@@ -1,5 +1,15 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 
+import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
+import { EditorState, StateField, StateEffect, RangeSetBuilder } from "@codemirror/state";
+import {
+  EditorView,
+  keymap,
+  Decoration,
+  ViewPlugin,
+  type DecorationSet,
+  type ViewUpdate,
+} from "@codemirror/view";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
@@ -9,11 +19,13 @@ import {
   Save,
   Search,
   FolderOpen,
-  Replace,
-  X,
   FileText,
-  ChevronDown,
+  CaseSensitive,
   ChevronUp,
+  ChevronDown,
+  Replace,
+  ReplaceAll,
+  X,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -52,6 +64,70 @@ interface Props {
   isActive: boolean;
 }
 
+// ── Search highlight CM extension ───────────────────────────────────
+
+const setSearchHighlight = StateEffect.define<{
+  search: string;
+  caseSensitive: boolean;
+}>();
+
+const searchConfigField = StateField.define<{
+  search: string;
+  caseSensitive: boolean;
+}>({
+  create: () => ({ search: "", caseSensitive: false }),
+  update(value, tr) {
+    for (const e of tr.effects) {
+      if (e.is(setSearchHighlight)) return e.value;
+    }
+    return value;
+  },
+});
+
+const matchMark = Decoration.mark({ class: "cm-search-match" });
+const currentMatchMark = Decoration.mark({ class: "cm-search-match-current" });
+
+function buildSearchDecos(view: EditorView): DecorationSet {
+  const { search, caseSensitive } = view.state.field(searchConfigField);
+  if (!search) return Decoration.none;
+
+  const builder = new RangeSetBuilder<Decoration>();
+  const doc = view.state.doc.toString();
+  const hay = caseSensitive ? doc : doc.toLowerCase();
+  const ndl = caseSensitive ? search : search.toLowerCase();
+  const selFrom = view.state.selection.main.from;
+
+  let idx = hay.indexOf(ndl);
+  while (idx !== -1) {
+    builder.add(idx, idx + ndl.length, idx === selFrom ? currentMatchMark : matchMark);
+    idx = hay.indexOf(ndl, idx + 1);
+  }
+  return builder.finish();
+}
+
+const searchHighlightPlugin = ViewPlugin.fromClass(
+  class {
+    decorations: DecorationSet;
+    constructor(view: EditorView) {
+      this.decorations = buildSearchDecos(view);
+    }
+    update(update: ViewUpdate) {
+      if (
+        update.docChanged ||
+        update.selectionSet ||
+        update.transactions.some((t) => t.effects.some((e) => e.is(setSearchHighlight)))
+      ) {
+        this.decorations = buildSearchDecos(update.view);
+      }
+    }
+  },
+  { decorations: (v) => v.decorations }
+);
+
+const searchExtension = [searchConfigField, searchHighlightPlugin];
+
+// ── Component ───────────────────────────────────────────────────────
+
 export function PakIniEditor({ gamePath, isActive }: Props) {
   // ── Pak selection ──
   const [paks, setPaks] = useState<PakIniInfo[]>([]);
@@ -67,15 +143,17 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
   const [savedEngine, setSavedEngine] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
-  // ── Search/replace ──
+  // ── Search ──
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
   const [replaceTerm, setReplaceTerm] = useState("");
-  const [matchCount, setMatchCount] = useState(0);
-  const [currentMatch, setCurrentMatch] = useState(-1);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const [caseSensitive, setCaseSensitive] = useState(false);
+  const [currentMatchIndex, setCurrentMatchIndex] = useState(-1);
   const searchInputRef = useRef<HTMLInputElement>(null);
-  const replaceInputRef = useRef<HTMLInputElement>(null);
+
+  // ── CodeMirror ──
+  const editorContainerRef = useRef<HTMLDivElement>(null);
+  const editorViewRef = useRef<EditorView | null>(null);
 
   // ── Notices ──
   const [notice, setNotice] = useState<{ msg: string; type: NoticeType } | null>(null);
@@ -94,6 +172,20 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
 
   const currentContent = activeFile === "device_profiles" ? dpContent : engineContent;
   const setCurrentContent = activeFile === "device_profiles" ? setDpContent : setEngineContent;
+
+  // ── Match positions ──
+  const matchPositions = useMemo(() => {
+    if (!searchTerm || !currentContent || !searchOpen) return [];
+    const hay = caseSensitive ? currentContent : currentContent.toLowerCase();
+    const ndl = caseSensitive ? searchTerm : searchTerm.toLowerCase();
+    const positions: number[] = [];
+    let idx = hay.indexOf(ndl);
+    while (idx !== -1) {
+      positions.push(idx);
+      idx = hay.indexOf(ndl, idx + 1);
+    }
+    return positions;
+  }, [searchTerm, currentContent, caseSensitive, searchOpen]);
 
   // ── Pak scanning ──
   const scan = useCallback(
@@ -140,14 +232,7 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
     }
   }
 
-  async function loadPak(pak: PakIniInfo, skipDirtyCheck = false) {
-    if (
-      !skipDirtyCheck &&
-      isDirty &&
-      !confirm("You have unsaved changes. Discard and switch paks?")
-    )
-      return;
-
+  async function loadPak(pak: PakIniInfo) {
     setSelectedPak(pak);
     setDpContent(null);
     setEngineContent(null);
@@ -172,10 +257,13 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
         });
       }
 
-      setDpContent(dp);
-      setSavedDp(dp);
-      setEngineContent(eng);
-      setSavedEngine(eng);
+      // Normalize to \n so dirty detection matches CM's internal line endings
+      const normDp = dp?.replace(/\r\n/g, "\n") ?? null;
+      const normEng = eng?.replace(/\r\n/g, "\n") ?? null;
+      setDpContent(normDp);
+      setSavedDp(normDp);
+      setEngineContent(normEng);
+      setSavedEngine(normEng);
 
       // Auto-select the first available file
       if (dp !== null) setActiveFile("device_profiles");
@@ -190,8 +278,7 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
 
   async function reload() {
     if (!selectedPak) return;
-    if (isDirty && !confirm("Discard unsaved changes and reload from disk?")) return;
-    await loadPak(selectedPak, true);
+    await loadPak(selectedPak);
     showNotice("Reloaded from disk", "ok");
   }
 
@@ -221,7 +308,7 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
       showNotice(msg, "ok");
 
       // Reload from repacked pak to verify round-trip
-      await loadPak(selectedPak, true);
+      await loadPak(selectedPak);
     } catch (e) {
       showNotice(String(e), "err", 8000);
       console.error(e);
@@ -230,129 +317,216 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
     }
   }
 
-  // ── Search/replace logic ──
-  useEffect(() => {
-    if (!searchTerm || !currentContent) {
-      setMatchCount(0);
-      setCurrentMatch(-1);
-      return;
-    }
-    const term = searchTerm.toLowerCase();
-    const content = currentContent.toLowerCase();
-    let count = 0;
-    let idx = content.indexOf(term);
-    while (idx !== -1) {
-      count++;
-      idx = content.indexOf(term, idx + 1);
-    }
-    setMatchCount(count);
-    setCurrentMatch(count > 0 ? 0 : -1);
-  }, [searchTerm, currentContent]);
+  // ── Search functions ──
+  const saveRef = useRef(save);
+  saveRef.current = save;
+
+  function openSearch() {
+    setSearchOpen(true);
+    setTimeout(() => searchInputRef.current?.focus(), 0);
+  }
+
+  const openSearchRef = useRef(openSearch);
+  openSearchRef.current = openSearch;
+
+  function scrollToPos(view: EditorView, pos: number) {
+    requestAnimationFrame(() => {
+      const coords = view.coordsAtPos(pos);
+      if (!coords) return;
+      const scroller = view.scrollDOM;
+      const rect = scroller.getBoundingClientRect();
+      scroller.scrollTop += coords.top - rect.top - rect.height / 2;
+    });
+  }
+
+  function jumpToMatch(index: number) {
+    const view = editorViewRef.current;
+    if (!view || matchPositions.length === 0) return;
+    const pos = matchPositions[index];
+    view.dispatch({ selection: { anchor: pos, head: pos + searchTerm.length } });
+    scrollToPos(view, pos);
+    setCurrentMatchIndex(index);
+  }
 
   function findNext() {
-    if (matchCount === 0 || !currentContent || !textareaRef.current) return;
-    const term = searchTerm.toLowerCase();
-    const content = currentContent.toLowerCase();
-
-    // Find the Nth occurrence
-    const nextIdx = (currentMatch + 1) % matchCount;
-    let pos = -1;
-    let found = 0;
-    let searchFrom = 0;
-    while (found <= nextIdx) {
-      pos = content.indexOf(term, searchFrom);
-      if (pos === -1) break;
-      if (found === nextIdx) break;
-      found++;
-      searchFrom = pos + 1;
-    }
-
-    if (pos !== -1) {
-      textareaRef.current.focus();
-      textareaRef.current.setSelectionRange(pos, pos + searchTerm.length);
-      setCurrentMatch(nextIdx);
-    }
+    if (matchPositions.length === 0) return;
+    jumpToMatch((currentMatchIndex + 1) % matchPositions.length);
   }
 
   function findPrev() {
-    if (matchCount === 0 || !currentContent || !textareaRef.current) return;
-    const term = searchTerm.toLowerCase();
-    const content = currentContent.toLowerCase();
-
-    const prevIdx = (currentMatch - 1 + matchCount) % matchCount;
-    let pos = -1;
-    let found = 0;
-    let searchFrom = 0;
-    while (found <= prevIdx) {
-      pos = content.indexOf(term, searchFrom);
-      if (pos === -1) break;
-      if (found === prevIdx) break;
-      found++;
-      searchFrom = pos + 1;
-    }
-
-    if (pos !== -1) {
-      textareaRef.current.focus();
-      textareaRef.current.setSelectionRange(pos, pos + searchTerm.length);
-      setCurrentMatch(prevIdx);
-    }
+    if (matchPositions.length === 0) return;
+    jumpToMatch((currentMatchIndex - 1 + matchPositions.length) % matchPositions.length);
   }
 
   function replaceOne() {
-    if (matchCount === 0 || !currentContent || !textareaRef.current) return;
-    const start = textareaRef.current.selectionStart;
-    const end = textareaRef.current.selectionEnd;
-    const selected = currentContent.substring(start, end);
+    const view = editorViewRef.current;
+    if (!view || matchPositions.length === 0 || currentMatchIndex < 0) return;
+    const pos = matchPositions[currentMatchIndex];
+    view.dispatch({
+      changes: { from: pos, to: pos + searchTerm.length, insert: replaceTerm },
+    });
+  }
 
-    if (selected.toLowerCase() === searchTerm.toLowerCase()) {
-      const newContent =
-        currentContent.substring(0, start) + replaceTerm + currentContent.substring(end);
-      setCurrentContent(newContent);
+  function replaceAllMatches() {
+    const view = editorViewRef.current;
+    if (!view || matchPositions.length === 0) return;
+    const count = matchPositions.length;
+    view.dispatch({
+      changes: matchPositions.map((pos) => ({
+        from: pos,
+        to: pos + searchTerm.length,
+        insert: replaceTerm,
+      })),
+    });
+    showNotice(`Replaced ${count} occurrence${count !== 1 ? "s" : ""}`, "ok");
+  }
+
+  // ── CodeMirror setup ──
+  // Ref to access current search state in the editor creation effect
+  const searchStateRef = useRef({ open: false, term: "", caseSensitive: false });
+  searchStateRef.current = { open: searchOpen, term: searchTerm, caseSensitive };
+
+  useEffect(() => {
+    if (!editorContainerRef.current || currentContent === null) return;
+
+    // Destroy previous editor if switching files
+    if (editorViewRef.current) {
+      editorViewRef.current.destroy();
+      editorViewRef.current = null;
     }
-    // Auto-advance to next match
-    setTimeout(findNext, 0);
-  }
 
-  function replaceAll() {
-    if (!searchTerm || !currentContent) return;
-    // Case-insensitive replace all
-    const regex = new RegExp(searchTerm.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
-    const newContent = currentContent.replace(regex, replaceTerm);
-    setCurrentContent(newContent);
-    showNotice(`Replaced ${matchCount} occurrence${matchCount !== 1 ? "s" : ""}`, "ok");
-  }
+    const cmTheme = EditorView.theme({
+      "&": {
+        height: "100%",
+        fontSize: "13px",
+        backgroundColor: "var(--color-background)",
+      },
+      ".cm-content": {
+        fontFamily: "ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace",
+        caretColor: "var(--color-foreground)",
+        color: "var(--color-foreground)",
+        lineHeight: "1.625",
+        padding: "16px 0",
+      },
+      ".cm-line": {
+        padding: "0 16px",
+      },
+      "&.cm-focused .cm-cursor": {
+        borderLeftColor: "var(--color-foreground)",
+      },
+      "&.cm-focused .cm-selectionBackground, .cm-selectionBackground": {
+        backgroundColor: "hsl(215 60% 40% / 0.4)",
+      },
+      ".cm-gutters": {
+        display: "none",
+      },
+      ".cm-scroller": {
+        overflow: "auto",
+      },
+      "&.cm-focused": {
+        outline: "none",
+      },
+      ".cm-search-match": {
+        backgroundColor: "hsl(210 80% 60% / 0.35)",
+      },
+      ".cm-search-match-current": {
+        backgroundColor: "hsl(210 80% 60% / 0.7)",
+      },
+    });
 
-  function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
-    // Tab inserts two spaces
-    if (e.key === "Tab") {
-      e.preventDefault();
-      const ta = e.currentTarget;
-      const start = ta.selectionStart;
-      const end = ta.selectionEnd;
-      const val = ta.value;
-      const newVal = val.substring(0, start) + "  " + val.substring(end);
-      setCurrentContent(newVal);
-      requestAnimationFrame(() => {
-        ta.selectionStart = ta.selectionEnd = start + 2;
+    const cmKeymap = keymap.of([
+      {
+        key: "Mod-s",
+        run: () => {
+          saveRef.current();
+          return true;
+        },
+      },
+      {
+        key: "Mod-f",
+        run: () => {
+          openSearchRef.current();
+          return true;
+        },
+      },
+    ]);
+
+    const updateListener = EditorView.updateListener.of((update) => {
+      if (update.docChanged) {
+        setCurrentContent(update.state.doc.toString());
+      }
+    });
+
+    const view = new EditorView({
+      state: EditorState.create({
+        doc: currentContent,
+        extensions: [
+          cmTheme,
+          cmKeymap,
+          keymap.of([...defaultKeymap, ...historyKeymap]),
+          history(),
+          searchExtension,
+          updateListener,
+          EditorView.lineWrapping,
+        ],
+      }),
+      parent: editorContainerRef.current,
+    });
+
+    editorViewRef.current = view;
+
+    // Re-sync search highlights if search is open when editor is recreated
+    const s = searchStateRef.current;
+    if (s.open && s.term) {
+      view.dispatch({
+        effects: setSearchHighlight.of({ search: s.term, caseSensitive: s.caseSensitive }),
       });
     }
-    // Ctrl+F opens search bar, Ctrl+H opens search bar focused on replace
-    if (e.key === "f" && (e.ctrlKey || e.metaKey)) {
-      e.preventDefault();
-      setSearchOpen(true);
-      setTimeout(() => searchInputRef.current?.focus(), 0);
+
+    return () => {
+      view.destroy();
+      editorViewRef.current = null;
+    };
+    // Only recreate when switching files or loading new content from disk
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeFile, savedDp, savedEngine]);
+
+  // ── Sync search config + auto-jump (single atomic dispatch) ──
+  useEffect(() => {
+    const view = editorViewRef.current;
+    if (!view) return;
+
+    const search = searchOpen ? searchTerm : "";
+    const effects = setSearchHighlight.of({ search, caseSensitive });
+
+    if (search && matchPositions.length > 0) {
+      const pos = matchPositions[0];
+      setCurrentMatchIndex(0);
+      view.dispatch({
+        effects,
+        selection: { anchor: pos, head: pos + search.length },
+      });
+      scrollToPos(view, pos);
+    } else {
+      setCurrentMatchIndex(-1);
+      view.dispatch({ effects });
     }
-    if (e.key === "h" && (e.ctrlKey || e.metaKey)) {
-      e.preventDefault();
-      setSearchOpen(true);
-      setTimeout(() => replaceInputRef.current?.focus(), 0);
+    // Only re-run when search params change, not when content changes
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchOpen, searchTerm, caseSensitive]);
+
+  // ── Ctrl+F when this tab is active ──
+  useEffect(() => {
+    if (!isActive) return;
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === "f" && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        openSearch();
+      }
     }
-    // Ctrl+S saves
-    if (e.key === "s" && (e.ctrlKey || e.metaKey)) {
-      e.preventDefault();
-      save();
-    }
-  }
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [isActive]);
 
   // Auto-scan on first activation with a game path
   const hasScanned = useRef(false);
@@ -368,7 +542,7 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
     if (paks.length === 1 && !selectedPak && !loading) {
       loadPak(paks[0]);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- fire-once after scan populates paks; loadPak identity is irrelevant here
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- fire-once after scan populates paks
   }, [paks, selectedPak, loading]);
 
   // Reset scan flag when game path changes
@@ -511,11 +685,8 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={() => {
-                  setSearchOpen((prev) => !prev);
-                  setTimeout(() => searchInputRef.current?.focus(), 0);
-                }}
-                title="Search & Replace (Ctrl+F / Ctrl+H)"
+                onClick={() => (searchOpen ? setSearchOpen(false) : openSearch())}
+                title="Search & Replace (Ctrl+F)"
                 className={cn(searchOpen && "bg-secondary")}
               >
                 <Search size={13} />
@@ -532,18 +703,26 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
                   value={searchTerm}
                   onChange={(e) => setSearchTerm(e.target.value)}
                   onKeyDown={(e) => {
-                    if (e.key === "Enter") findNext();
+                    if (e.key === "Enter" && e.shiftKey) {
+                      e.preventDefault();
+                      findPrev();
+                    } else if (e.key === "Enter") {
+                      e.preventDefault();
+                      findNext();
+                    }
                     if (e.key === "Escape") setSearchOpen(false);
                   }}
                   placeholder="Search..."
                   className="h-7 flex-1 text-xs"
                 />
                 <Input
-                  ref={replaceInputRef}
                   value={replaceTerm}
                   onChange={(e) => setReplaceTerm(e.target.value)}
                   onKeyDown={(e) => {
-                    if (e.key === "Enter") replaceOne();
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      replaceOne();
+                    }
                     if (e.key === "Escape") setSearchOpen(false);
                   }}
                   placeholder="Replace..."
@@ -551,15 +730,30 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
                 />
               </div>
               <span className="shrink-0 text-[11px] text-muted-foreground">
-                {matchCount > 0 ? `${currentMatch + 1}/${matchCount}` : "No results"}
+                {matchPositions.length > 0
+                  ? currentMatchIndex >= 0
+                    ? `${currentMatchIndex + 1}/${matchPositions.length}`
+                    : `${matchPositions.length} matches`
+                  : searchTerm
+                    ? "No results"
+                    : ""}
               </span>
               <div className="flex items-center gap-0.5">
                 <Button
                   variant="ghost"
                   size="sm"
+                  onClick={() => setCaseSensitive((p) => !p)}
+                  title="Match Case"
+                  className={cn(caseSensitive && "bg-secondary text-foreground")}
+                >
+                  <CaseSensitive size={14} />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
                   onClick={findPrev}
-                  disabled={matchCount === 0}
-                  title="Previous match"
+                  disabled={matchPositions.length === 0}
+                  title="Previous Match"
                 >
                   <ChevronUp size={13} />
                 </Button>
@@ -567,8 +761,8 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
                   variant="ghost"
                   size="sm"
                   onClick={findNext}
-                  disabled={matchCount === 0}
-                  title="Next match"
+                  disabled={matchPositions.length === 0}
+                  title="Next Match"
                 >
                   <ChevronDown size={13} />
                 </Button>
@@ -576,7 +770,7 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
                   variant="ghost"
                   size="sm"
                   onClick={replaceOne}
-                  disabled={matchCount === 0}
+                  disabled={matchPositions.length === 0}
                   title="Replace"
                 >
                   <Replace size={13} />
@@ -584,11 +778,11 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
                 <Button
                   variant="ghost"
                   size="sm"
-                  onClick={replaceAll}
-                  disabled={matchCount === 0}
-                  title="Replace all"
+                  onClick={replaceAllMatches}
+                  disabled={matchPositions.length === 0}
+                  title="Replace All"
                 >
-                  Replace All
+                  <ReplaceAll size={13} />
                 </Button>
                 <Button
                   variant="ghost"
@@ -602,16 +796,8 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
             </div>
           )}
 
-          {/* Textarea editor */}
-          <textarea
-            ref={textareaRef}
-            className="flex-1 min-h-0 w-full resize-none bg-background p-4 font-mono text-[13px] leading-relaxed text-foreground focus:outline-none"
-            value={currentContent ?? ""}
-            onChange={(e) => setCurrentContent(e.target.value)}
-            onKeyDown={handleKeyDown}
-            spellCheck={false}
-            wrap="off"
-          />
+          {/* CodeMirror editor */}
+          <div ref={editorContainerRef} className="flex-1 min-h-0 w-full overflow-hidden" />
 
           {/* Footer bar */}
           <div className="flex items-center justify-between border-t border-border px-3 py-1.5">

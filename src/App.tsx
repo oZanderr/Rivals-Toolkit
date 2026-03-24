@@ -46,6 +46,15 @@ function App() {
     });
   }, [activeTab]);
 
+  // Suppress webview's native Ctrl+F on all tabs
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === "f" && (e.ctrlKey || e.metaKey)) e.preventDefault();
+    }
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, []);
+
   async function openDiscord() {
     try {
       await openPath(DISCORD_URL);
