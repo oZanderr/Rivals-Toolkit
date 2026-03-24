@@ -1,24 +1,26 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
+import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
+import {
+  search,
+  openSearchPanel,
+  closeSearchPanel,
+  SearchQuery,
+  setSearchQuery,
+  findNext as cmFindNext,
+  findPrevious as cmFindPrev,
+  replaceNext as cmReplaceNext,
+  replaceAll as cmReplaceAll,
+  getSearchQuery,
+} from "@codemirror/search";
+import { EditorState } from "@codemirror/state";
+import { EditorView, keymap, type Panel } from "@codemirror/view";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import {
-  CheckCircle2,
-  XCircle,
-  RefreshCw,
-  Save,
-  Search,
-  FolderOpen,
-  Replace,
-  X,
-  FileText,
-  ChevronDown,
-  ChevronUp,
-} from "lucide-react";
+import { CheckCircle2, XCircle, RefreshCw, Save, Search, FolderOpen, FileText } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
@@ -67,15 +69,9 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
   const [savedEngine, setSavedEngine] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
-  // ── Search/replace ──
-  const [searchOpen, setSearchOpen] = useState(false);
-  const [searchTerm, setSearchTerm] = useState("");
-  const [replaceTerm, setReplaceTerm] = useState("");
-  const [matchCount, setMatchCount] = useState(0);
-  const [currentMatch, setCurrentMatch] = useState(-1);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const searchInputRef = useRef<HTMLInputElement>(null);
-  const replaceInputRef = useRef<HTMLInputElement>(null);
+  // ── CodeMirror ──
+  const editorContainerRef = useRef<HTMLDivElement>(null);
+  const editorViewRef = useRef<EditorView | null>(null);
 
   // ── Notices ──
   const [notice, setNotice] = useState<{ msg: string; type: NoticeType } | null>(null);
@@ -140,14 +136,7 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
     }
   }
 
-  async function loadPak(pak: PakIniInfo, skipDirtyCheck = false) {
-    if (
-      !skipDirtyCheck &&
-      isDirty &&
-      !confirm("You have unsaved changes. Discard and switch paks?")
-    )
-      return;
-
+  async function loadPak(pak: PakIniInfo) {
     setSelectedPak(pak);
     setDpContent(null);
     setEngineContent(null);
@@ -172,10 +161,13 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
         });
       }
 
-      setDpContent(dp);
-      setSavedDp(dp);
-      setEngineContent(eng);
-      setSavedEngine(eng);
+      // Normalize to \n so dirty detection matches CM's internal line endings
+      const normDp = dp?.replace(/\r\n/g, "\n") ?? null;
+      const normEng = eng?.replace(/\r\n/g, "\n") ?? null;
+      setDpContent(normDp);
+      setSavedDp(normDp);
+      setEngineContent(normEng);
+      setSavedEngine(normEng);
 
       // Auto-select the first available file
       if (dp !== null) setActiveFile("device_profiles");
@@ -190,8 +182,7 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
 
   async function reload() {
     if (!selectedPak) return;
-    if (isDirty && !confirm("Discard unsaved changes and reload from disk?")) return;
-    await loadPak(selectedPak, true);
+    await loadPak(selectedPak);
     showNotice("Reloaded from disk", "ok");
   }
 
@@ -221,7 +212,7 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
       showNotice(msg, "ok");
 
       // Reload from repacked pak to verify round-trip
-      await loadPak(selectedPak, true);
+      await loadPak(selectedPak);
     } catch (e) {
       showNotice(String(e), "err", 8000);
       console.error(e);
@@ -230,129 +221,434 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
     }
   }
 
-  // ── Search/replace logic ──
-  useEffect(() => {
-    if (!searchTerm || !currentContent) {
-      setMatchCount(0);
-      setCurrentMatch(-1);
-      return;
-    }
-    const term = searchTerm.toLowerCase();
-    const content = currentContent.toLowerCase();
-    let count = 0;
-    let idx = content.indexOf(term);
-    while (idx !== -1) {
-      count++;
-      idx = content.indexOf(term, idx + 1);
-    }
-    setMatchCount(count);
-    setCurrentMatch(count > 0 ? 0 : -1);
-  }, [searchTerm, currentContent]);
+  // ── CodeMirror setup ──
+  const saveRef = useRef(save);
+  saveRef.current = save;
 
-  function findNext() {
-    if (matchCount === 0 || !currentContent || !textareaRef.current) return;
-    const term = searchTerm.toLowerCase();
-    const content = currentContent.toLowerCase();
+  function createSearchPanel(view: EditorView): Panel {
+    const el = (tag: string, cls?: string) => {
+      const e = document.createElement(tag);
+      if (cls) e.className = cls;
+      return e;
+    };
 
-    // Find the Nth occurrence
-    const nextIdx = (currentMatch + 1) % matchCount;
-    let pos = -1;
-    let found = 0;
-    let searchFrom = 0;
-    while (found <= nextIdx) {
-      pos = content.indexOf(term, searchFrom);
-      if (pos === -1) break;
-      if (found === nextIdx) break;
-      found++;
-      searchFrom = pos + 1;
-    }
+    const svgIcon = (paths: string) => {
+      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.setAttribute("width", "14");
+      svg.setAttribute("height", "14");
+      svg.setAttribute("viewBox", "0 0 24 24");
+      svg.setAttribute("fill", "none");
+      svg.setAttribute("stroke", "currentColor");
+      svg.setAttribute("stroke-width", "2");
+      svg.setAttribute("stroke-linecap", "round");
+      svg.setAttribute("stroke-linejoin", "round");
+      svg.innerHTML = paths;
+      return svg;
+    };
 
-    if (pos !== -1) {
-      textareaRef.current.focus();
-      textareaRef.current.setSelectionRange(pos, pos + searchTerm.length);
-      setCurrentMatch(nextIdx);
-    }
-  }
+    // ── State ──
+    let caseSensitive = false;
 
-  function findPrev() {
-    if (matchCount === 0 || !currentContent || !textareaRef.current) return;
-    const term = searchTerm.toLowerCase();
-    const content = currentContent.toLowerCase();
+    // ── DOM ──
+    const dom = el("div", "cm-search-panel");
 
-    const prevIdx = (currentMatch - 1 + matchCount) % matchCount;
-    let pos = -1;
-    let found = 0;
-    let searchFrom = 0;
-    while (found <= prevIdx) {
-      pos = content.indexOf(term, searchFrom);
-      if (pos === -1) break;
-      if (found === prevIdx) break;
-      found++;
-      searchFrom = pos + 1;
-    }
+    const searchInput = document.createElement("input") as HTMLInputElement;
+    searchInput.type = "text";
+    searchInput.placeholder = "Search...";
+    searchInput.setAttribute("main-field", "true");
 
-    if (pos !== -1) {
-      textareaRef.current.focus();
-      textareaRef.current.setSelectionRange(pos, pos + searchTerm.length);
-      setCurrentMatch(prevIdx);
-    }
-  }
+    const replaceInput = document.createElement("input") as HTMLInputElement;
+    replaceInput.type = "text";
+    replaceInput.placeholder = "Replace...";
 
-  function replaceOne() {
-    if (matchCount === 0 || !currentContent || !textareaRef.current) return;
-    const start = textareaRef.current.selectionStart;
-    const end = textareaRef.current.selectionEnd;
-    const selected = currentContent.substring(start, end);
+    const countSpan = el("span", "cm-search-count");
 
-    if (selected.toLowerCase() === searchTerm.toLowerCase()) {
-      const newContent =
-        currentContent.substring(0, start) + replaceTerm + currentContent.substring(end);
-      setCurrentContent(newContent);
-    }
-    // Auto-advance to next match
-    setTimeout(findNext, 0);
-  }
+    const caseBtn = el("button", "cm-search-icon-btn") as HTMLButtonElement;
+    caseBtn.append(
+      svgIcon(
+        '<path d="m2 16 4.039-9.69a.5.5 0 0 1 .923 0L11 16"/>' +
+          '<path d="M22 9v7"/>' +
+          '<path d="M3.304 13h6.392"/>' +
+          '<circle cx="18.5" cy="12.5" r="3.5"/>'
+      )
+    );
+    caseBtn.title = "Match Case";
 
-  function replaceAll() {
-    if (!searchTerm || !currentContent) return;
-    // Case-insensitive replace all
-    const regex = new RegExp(searchTerm.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
-    const newContent = currentContent.replace(regex, replaceTerm);
-    setCurrentContent(newContent);
-    showNotice(`Replaced ${matchCount} occurrence${matchCount !== 1 ? "s" : ""}`, "ok");
-  }
+    const prevBtn = el("button", "cm-search-icon-btn") as HTMLButtonElement;
+    prevBtn.append(svgIcon('<path d="m18 15-6-6-6 6"/>'));
+    prevBtn.title = "Previous Match";
 
-  function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
-    // Tab inserts two spaces
-    if (e.key === "Tab") {
-      e.preventDefault();
-      const ta = e.currentTarget;
-      const start = ta.selectionStart;
-      const end = ta.selectionEnd;
-      const val = ta.value;
-      const newVal = val.substring(0, start) + "  " + val.substring(end);
-      setCurrentContent(newVal);
-      requestAnimationFrame(() => {
-        ta.selectionStart = ta.selectionEnd = start + 2;
+    const nextBtn = el("button", "cm-search-icon-btn") as HTMLButtonElement;
+    nextBtn.append(svgIcon('<path d="m6 9 6 6 6-6"/>'));
+    nextBtn.title = "Next Match";
+
+    const replaceBtn = el("button", "cm-search-icon-btn") as HTMLButtonElement;
+    replaceBtn.append(
+      svgIcon(
+        '<path d="M14 4a1 1 0 0 1 1-1"/>' +
+          '<path d="M15 10a1 1 0 0 1-1-1"/>' +
+          '<path d="M21 4a1 1 0 0 0-1-1"/>' +
+          '<path d="M21 9a1 1 0 0 1-1 1"/>' +
+          '<path d="m3 7 3 3 3-3"/>' +
+          '<path d="M6 10V5a2 2 0 0 1 2-2h2"/>' +
+          '<rect x="3" y="14" width="7" height="7" rx="1"/>'
+      )
+    );
+    replaceBtn.title = "Replace";
+
+    const replaceAllBtn = el("button", "cm-search-icon-btn") as HTMLButtonElement;
+    replaceAllBtn.append(
+      svgIcon(
+        '<path d="M14 14a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1"/>' +
+          '<path d="M14 4a1 1 0 0 1 1-1"/>' +
+          '<path d="M15 10a1 1 0 0 1-1-1"/>' +
+          '<path d="M19 14a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1"/>' +
+          '<path d="M21 4a1 1 0 0 0-1-1"/>' +
+          '<path d="M21 9a1 1 0 0 1-1 1"/>' +
+          '<path d="m3 7 3 3 3-3"/>' +
+          '<path d="M6 10V5a2 2 0 0 1 2-2h2"/>' +
+          '<rect x="3" y="14" width="7" height="7" rx="1"/>'
+      )
+    );
+    replaceAllBtn.title = "Replace All";
+
+    const closeBtn = el("button", "cm-search-close") as HTMLButtonElement;
+    closeBtn.append(svgIcon('<path d="M18 6 6 18"/><path d="m6 6 12 12"/>'));
+    closeBtn.title = "Close";
+
+    const inputsWrap = el("div", "cm-search-inputs");
+    inputsWrap.append(searchInput, replaceInput);
+    dom.append(
+      inputsWrap,
+      countSpan,
+      caseBtn,
+      prevBtn,
+      nextBtn,
+      replaceBtn,
+      replaceAllBtn,
+      closeBtn
+    );
+
+    // ── Helpers ──
+    function commit() {
+      const query = new SearchQuery({
+        search: searchInput.value,
+        caseSensitive,
+        replace: replaceInput.value,
       });
+      view.dispatch({ effects: setSearchQuery.of(query) });
     }
-    // Ctrl+F opens search bar, Ctrl+H opens search bar focused on replace
-    if (e.key === "f" && (e.ctrlKey || e.metaKey)) {
-      e.preventDefault();
-      setSearchOpen(true);
-      setTimeout(() => searchInputRef.current?.focus(), 0);
+
+    function updateCount() {
+      const term = searchInput.value;
+      if (!term) {
+        countSpan.textContent = "";
+        return;
+      }
+
+      const doc = view.state.doc.toString();
+      const hay = caseSensitive ? doc : doc.toLowerCase();
+      const ndl = caseSensitive ? term : term.toLowerCase();
+      const selFrom = view.state.selection.main.from;
+
+      let total = 0;
+      let current = 0;
+      let idx = hay.indexOf(ndl);
+      while (idx !== -1) {
+        total++;
+        if (idx === selFrom) current = total;
+        idx = hay.indexOf(ndl, idx + 1);
+      }
+
+      countSpan.textContent = total > 0 ? `${current || "?"}/${total}` : "No results";
     }
-    if (e.key === "h" && (e.ctrlKey || e.metaKey)) {
-      e.preventDefault();
-      setSearchOpen(true);
-      setTimeout(() => replaceInputRef.current?.focus(), 0);
-    }
-    // Ctrl+S saves
-    if (e.key === "s" && (e.ctrlKey || e.metaKey)) {
-      e.preventDefault();
-      save();
-    }
+
+    // ── Events ──
+    searchInput.addEventListener("input", () => {
+      commit();
+      // Jump to the first match without stealing focus from the input
+      const term = searchInput.value;
+      if (term) {
+        const doc = view.state.doc.toString();
+        const hay = caseSensitive ? doc : doc.toLowerCase();
+        const ndl = caseSensitive ? term : term.toLowerCase();
+        const idx = hay.indexOf(ndl);
+        if (idx !== -1) {
+          view.dispatch({
+            selection: { anchor: idx, head: idx + ndl.length },
+            scrollIntoView: true,
+          });
+        }
+      }
+      updateCount();
+    });
+    searchInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && e.shiftKey) {
+        e.preventDefault();
+        cmFindPrev(view);
+        updateCount();
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        cmFindNext(view);
+        updateCount();
+      } else if (e.key === "Escape") closeSearchPanel(view);
+    });
+
+    replaceInput.addEventListener("input", () => commit());
+    replaceInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        cmReplaceNext(view);
+        updateCount();
+      }
+      if (e.key === "Escape") closeSearchPanel(view);
+    });
+
+    caseBtn.addEventListener("click", () => {
+      caseSensitive = !caseSensitive;
+      caseBtn.classList.toggle("cm-search-toggle-active", caseSensitive);
+      commit();
+      updateCount();
+    });
+
+    prevBtn.addEventListener("click", () => {
+      cmFindPrev(view);
+      updateCount();
+    });
+    nextBtn.addEventListener("click", () => {
+      cmFindNext(view);
+      updateCount();
+    });
+    replaceBtn.addEventListener("click", () => {
+      cmReplaceNext(view);
+      updateCount();
+    });
+    replaceAllBtn.addEventListener("click", () => {
+      cmReplaceAll(view);
+      updateCount();
+    });
+    closeBtn.addEventListener("click", () => closeSearchPanel(view));
+
+    return {
+      dom,
+      top: true,
+      mount() {
+        // Sync from any existing query state (e.g. re-opening panel)
+        const q = getSearchQuery(view.state);
+        searchInput.value = q.search;
+        replaceInput.value = q.replace;
+        caseSensitive = q.caseSensitive;
+        caseBtn.classList.toggle("cm-search-toggle-active", caseSensitive);
+        updateCount();
+        searchInput.focus();
+        searchInput.select();
+      },
+      update(update) {
+        if (update.docChanged || update.selectionSet) updateCount();
+      },
+    };
   }
+
+  useEffect(() => {
+    if (!editorContainerRef.current || currentContent === null) return;
+
+    // Destroy previous editor if switching files
+    if (editorViewRef.current) {
+      editorViewRef.current.destroy();
+      editorViewRef.current = null;
+    }
+
+    const cmTheme = EditorView.theme({
+      "&": {
+        height: "100%",
+        fontSize: "13px",
+        backgroundColor: "var(--color-background)",
+      },
+      ".cm-content": {
+        fontFamily: "ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace",
+        caretColor: "var(--color-foreground)",
+        color: "var(--color-foreground)",
+        lineHeight: "1.625",
+        padding: "16px 0",
+      },
+      ".cm-line": {
+        padding: "0 16px",
+      },
+      "&.cm-focused .cm-cursor": {
+        borderLeftColor: "var(--color-foreground)",
+      },
+      "&.cm-focused .cm-selectionBackground, .cm-selectionBackground": {
+        backgroundColor: "hsl(215 60% 40% / 0.4)",
+      },
+      ".cm-gutters": {
+        display: "none",
+      },
+      ".cm-scroller": {
+        overflow: "auto",
+      },
+      "&.cm-focused": {
+        outline: "none",
+      },
+      ".cm-searchMatch": {
+        backgroundColor: "hsl(210 80% 60% / 0.35)",
+      },
+      ".cm-searchMatch-selected": {
+        backgroundColor: "hsl(210 80% 60% / 0.7)",
+      },
+      // ── Search panel ──
+      ".cm-panels": {
+        backgroundColor: "var(--color-muted)",
+        color: "var(--color-foreground)",
+      },
+      ".cm-panels-top": {
+        borderBottom: "1px solid var(--color-border)",
+      },
+      ".cm-search-panel": {
+        display: "flex",
+        flexDirection: "row",
+        alignItems: "center",
+        gap: "6px",
+        padding: "6px 12px",
+        fontSize: "12px",
+      },
+      ".cm-search-inputs": {
+        display: "flex",
+        flex: "1",
+        minWidth: "0",
+        gap: "6px",
+      },
+      ".cm-search-panel input[type=text]": {
+        backgroundColor: "var(--color-background)",
+        color: "var(--color-foreground)",
+        border: "1px solid var(--color-border)",
+        borderRadius: "6px",
+        fontSize: "12px",
+        padding: "4px 8px",
+        height: "28px",
+        flex: "1",
+        minWidth: "0",
+        outline: "none",
+        fontFamily: "inherit",
+        boxSizing: "border-box",
+      },
+      ".cm-search-panel input[type=text]:focus": {
+        borderColor: "var(--color-ring)",
+        boxShadow: "0 0 0 1px var(--color-ring)",
+      },
+      ".cm-search-panel .cm-search-count": {
+        fontSize: "11px",
+        color: "var(--color-muted-foreground)",
+        whiteSpace: "nowrap",
+      },
+      ".cm-search-panel button": {
+        backgroundImage: "none",
+        backgroundColor: "var(--color-secondary)",
+        color: "var(--color-foreground)",
+        border: "none",
+        borderRadius: "6px",
+        fontSize: "11px",
+        padding: "4px 10px",
+        height: "28px",
+        cursor: "pointer",
+        fontFamily: "inherit",
+        transition: "background-color 120ms, color 120ms",
+        whiteSpace: "nowrap",
+      },
+      ".cm-search-panel button:hover": {
+        backgroundColor: "var(--color-accent)",
+      },
+      ".cm-search-panel button.cm-search-icon-btn": {
+        width: "28px",
+        padding: "0",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        flexShrink: "0",
+      },
+      ".cm-search-panel button svg, .cm-search-panel button span": {
+        pointerEvents: "none",
+      },
+      ".cm-search-panel button.cm-search-toggle-active": {
+        backgroundColor: "var(--color-accent)",
+        color: "var(--color-foreground)",
+      },
+      ".cm-search-panel button.cm-search-close": {
+        backgroundColor: "transparent",
+        border: "none",
+        color: "var(--color-muted-foreground)",
+        fontSize: "16px",
+        width: "22px",
+        height: "22px",
+        borderRadius: "4px",
+        padding: "0",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        marginLeft: "auto",
+      },
+      ".cm-search-panel button.cm-search-close:hover": {
+        color: "var(--color-foreground)",
+        backgroundColor: "var(--color-secondary)",
+      },
+    });
+
+    const saveKeymap = keymap.of([
+      {
+        key: "Mod-s",
+        run: () => {
+          saveRef.current();
+          return true;
+        },
+      },
+    ]);
+
+    const updateListener = EditorView.updateListener.of((update) => {
+      if (update.docChanged) {
+        const newDoc = update.state.doc.toString();
+        setCurrentContent(newDoc);
+      }
+    });
+
+    const view = new EditorView({
+      state: EditorState.create({
+        doc: currentContent,
+        extensions: [
+          cmTheme,
+          saveKeymap,
+          keymap.of([...defaultKeymap, ...historyKeymap]),
+          history(),
+          search({
+            top: true,
+            createPanel: createSearchPanel,
+          }),
+          updateListener,
+          EditorView.lineWrapping,
+        ],
+      }),
+      parent: editorContainerRef.current,
+    });
+
+    editorViewRef.current = view;
+
+    return () => {
+      view.destroy();
+      editorViewRef.current = null;
+    };
+    // Only recreate when switching files or loading new content from disk
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeFile, savedDp, savedEngine]);
+
+  // ── Open CM search panel on Ctrl+F when this tab is active ──
+  useEffect(() => {
+    if (!isActive) return;
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === "f" && (e.ctrlKey || e.metaKey) && editorViewRef.current) {
+        openSearchPanel(editorViewRef.current);
+      }
+    }
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [isActive]);
 
   // Auto-scan on first activation with a game path
   const hasScanned = useRef(false);
@@ -511,107 +807,16 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={() => {
-                  setSearchOpen((prev) => !prev);
-                  setTimeout(() => searchInputRef.current?.focus(), 0);
-                }}
-                title="Search & Replace (Ctrl+F / Ctrl+H)"
-                className={cn(searchOpen && "bg-secondary")}
+                onClick={() => editorViewRef.current && openSearchPanel(editorViewRef.current)}
+                title="Search & Replace (Ctrl+F)"
               >
                 <Search size={13} />
               </Button>
             </div>
           </div>
 
-          {/* Search/replace bar */}
-          {searchOpen && (
-            <div className="flex items-center gap-2 border-b border-border bg-muted/50 px-3 py-1.5">
-              <div className="flex flex-1 items-center gap-2">
-                <Input
-                  ref={searchInputRef}
-                  value={searchTerm}
-                  onChange={(e) => setSearchTerm(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") findNext();
-                    if (e.key === "Escape") setSearchOpen(false);
-                  }}
-                  placeholder="Search..."
-                  className="h-7 flex-1 text-xs"
-                />
-                <Input
-                  ref={replaceInputRef}
-                  value={replaceTerm}
-                  onChange={(e) => setReplaceTerm(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") replaceOne();
-                    if (e.key === "Escape") setSearchOpen(false);
-                  }}
-                  placeholder="Replace..."
-                  className="h-7 flex-1 text-xs"
-                />
-              </div>
-              <span className="shrink-0 text-[11px] text-muted-foreground">
-                {matchCount > 0 ? `${currentMatch + 1}/${matchCount}` : "No results"}
-              </span>
-              <div className="flex items-center gap-0.5">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={findPrev}
-                  disabled={matchCount === 0}
-                  title="Previous match"
-                >
-                  <ChevronUp size={13} />
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={findNext}
-                  disabled={matchCount === 0}
-                  title="Next match"
-                >
-                  <ChevronDown size={13} />
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={replaceOne}
-                  disabled={matchCount === 0}
-                  title="Replace"
-                >
-                  <Replace size={13} />
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={replaceAll}
-                  disabled={matchCount === 0}
-                  title="Replace all"
-                >
-                  Replace All
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setSearchOpen(false)}
-                  title="Close"
-                >
-                  <X size={13} />
-                </Button>
-              </div>
-            </div>
-          )}
-
-          {/* Textarea editor */}
-          <textarea
-            ref={textareaRef}
-            className="flex-1 min-h-0 w-full resize-none bg-background p-4 font-mono text-[13px] leading-relaxed text-foreground focus:outline-none"
-            value={currentContent ?? ""}
-            onChange={(e) => setCurrentContent(e.target.value)}
-            onKeyDown={handleKeyDown}
-            spellCheck={false}
-            wrap="off"
-          />
+          {/* CodeMirror editor */}
+          <div ref={editorContainerRef} className="flex-1 min-h-0 w-full overflow-hidden" />
 
           {/* Footer bar */}
           <div className="flex items-center justify-between border-t border-border px-3 py-1.5">

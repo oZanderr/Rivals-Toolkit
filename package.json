@@ -20,6 +20,10 @@
     "format:check": "pnpm format:web:check && pnpm format:rust:check"
   },
   "dependencies": {
+    "@codemirror/commands": "^6.10.3",
+    "@codemirror/search": "^6.6.0",
+    "@codemirror/state": "^6.6.0",
+    "@codemirror/view": "^6.40.0",
     "@tailwindcss/vite": "^4.2.1",
     "@tanstack/react-virtual": "^3.13.19",
     "@tauri-apps/api": "^2",
