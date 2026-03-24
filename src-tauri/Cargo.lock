@@ -2320,7 +2320,7 @@ dependencies = [
 
 [[package]]
 name = "oinkers-toolkit"
-version = "0.3.0"
+version = "0.3.5"
 dependencies = [
  "aes",
  "blake3",
