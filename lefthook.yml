@@ -1,16 +1,18 @@
 pre-commit:
   parallel: true
   commands:
-    prettier:
-      run: pnpm format:web:check
+    format-web:
+      run: pnpm format:web
+      stage_fixed: true
       glob: "src/**/*.{ts,tsx,js,css}"
     eslint:
       run: pnpm lint:web
       glob: "src/**/*.{ts,tsx}"
     tsc:
       run: pnpm exec tsc --noEmit
-    rustfmt:
-      run: pnpm format:rust:check
+    format-rust:
+      run: pnpm format:rust
+      stage_fixed: true
       glob: "src-tauri/**/*.rs"
     clippy:
       run: pnpm lint:rust
