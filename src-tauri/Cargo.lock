@@ -2326,6 +2326,7 @@ dependencies = [
  "blake3",
  "dirs 5.0.1",
  "hex",
+ "rebnk",
  "repak",
  "serde",
  "serde_json",
@@ -2876,6 +2877,11 @@ name = "raw-window-handle"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20675572f6f24e9e76ef639bc5552774ed45f1c30e2951e1e99c59888861c539"
+
+[[package]]
+name = "rebnk"
+version = "0.1.0"
+source = "git+https://github.com/oZanderr/rebnk?branch=master#264d31a8415a0f7d40cd0ac53619342f44ba3a0e"
 
 [[package]]
 name = "redox_syscall"
