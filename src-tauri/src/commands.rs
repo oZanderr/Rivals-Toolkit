@@ -219,6 +219,11 @@ pub(crate) fn validate_wav(path: String) -> Result<wav_to_wem::WavValidation, St
 }
 
 #[tauri::command]
+pub(crate) fn path_exists(path: String) -> bool {
+    std::path::Path::new(&path).exists()
+}
+
+#[tauri::command]
 pub(crate) async fn build_hitsound_mod(
     game_root: String,
     head_wav: Option<String>,

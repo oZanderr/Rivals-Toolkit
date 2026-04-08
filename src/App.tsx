@@ -2,11 +2,21 @@ import { useState, useEffect, type ReactNode } from "react";
 
 import { invoke } from "@tauri-apps/api/core";
 import { openPath } from "@tauri-apps/plugin-opener";
-import { House, Package, Settings, Wrench, Play, ExternalLink, FileCode2 } from "lucide-react";
+import {
+  House,
+  Package,
+  Settings,
+  Wrench,
+  Play,
+  ExternalLink,
+  FileCode2,
+  Volume2,
+} from "lucide-react";
 
 import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
 
+import { Hitsounds } from "./components/Hitsounds";
 import { Home } from "./components/Home";
 import { ModTools } from "./components/ModTools";
 import { PakIniEditor } from "./components/PakIniEditor";
@@ -14,7 +24,7 @@ import { PakManager } from "./components/PakManager";
 import { QuickSettings } from "./components/QuickSettings";
 import { Titlebar } from "./components/Titlebar";
 
-type Tab = "home" | "mod-tools" | "pak-manager" | "ini-editor" | "settings";
+type Tab = "home" | "mod-tools" | "pak-manager" | "ini-editor" | "settings" | "hitsounds";
 
 const DISCORD_URL = "https://discord.com/invite/F2FYFfVqjs";
 
@@ -27,6 +37,7 @@ interface InstallInfo {
 const TABS: { id: Tab; label: string; icon: ReactNode }[] = [
   { id: "home", label: "Home", icon: <House size={15} /> },
   { id: "mod-tools", label: "Mod Tools", icon: <Wrench size={15} /> },
+  { id: "hitsounds", label: "Hitsounds", icon: <Volume2 size={15} /> },
   { id: "settings", label: "Quick Settings", icon: <Settings size={15} /> },
   { id: "ini-editor", label: "Pak INI Editor", icon: <FileCode2 size={15} /> },
   { id: "pak-manager", label: "Pak Manager", icon: <Package size={15} /> },
@@ -183,6 +194,16 @@ function App() {
               )}
             >
               <QuickSettings gamePath={gamePath} />
+            </div>
+          )}
+          {mountedTabs.has("hitsounds") && (
+            <div
+              className={cn(
+                "flex flex-1 min-h-0 flex-col overflow-hidden p-5",
+                activeTab !== "hitsounds" && "hidden"
+              )}
+            >
+              <Hitsounds gamePath={gamePath} isActive={activeTab === "hitsounds"} />
             </div>
           )}
         </main>

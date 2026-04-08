@@ -50,6 +50,7 @@ pub fn run() {
             commands::extract_pak_ini,
             commands::save_pak_ini,
             commands::validate_wav,
+            commands::path_exists,
             commands::build_hitsound_mod
         ])
         .run(tauri::generate_context!())

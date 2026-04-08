@@ -34,7 +34,7 @@ interface ModsStatus {
   mod_entries: { enabled: boolean }[];
 }
 
-type Tab = "home" | "mod-tools" | "pak-manager" | "settings";
+type Tab = "home" | "mod-tools" | "pak-manager" | "ini-editor" | "settings" | "hitsounds";
 
 interface Props {
   gamePath: string;

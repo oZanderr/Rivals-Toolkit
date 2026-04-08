@@ -117,7 +117,7 @@ pub(crate) fn build_hitsound_mod(
     output_pak: &str,
 ) -> Result<String, String> {
     if head_wav.is_none() && body_wav.is_none() {
-        return Err("At least one hitsound (head or body) must be provided".into());
+        return Err("At least one hitsound (body or head) must be provided".into());
     }
 
     let _temp_guard = TempDirGuard::create("oinkers_hitsounds")?;
@@ -135,13 +135,6 @@ pub(crate) fn build_hitsound_mod(
     let mut replacements: HashMap<u32, Vec<u8>> = HashMap::new();
     let mut summary_parts: Vec<String> = Vec::new();
 
-    if let Some(wav_path) = head_wav {
-        let (wem_bytes, _) = wav_to_wem::convert_to_bytes(Path::new(wav_path))
-            .map_err(|e| format!("Head WAV conversion failed: {e}"))?;
-        replacements.insert(HEAD_WEM_ID, wem_bytes);
-        summary_parts.push("head".to_string());
-    }
-
     if let Some(wav_path) = body_wav {
         let (wem_bytes, _) = wav_to_wem::convert_to_bytes(Path::new(wav_path))
             .map_err(|e| format!("Body WAV conversion failed: {e}"))?;
@@ -149,7 +142,14 @@ pub(crate) fn build_hitsound_mod(
         summary_parts.push("body".to_string());
     }
 
-    for (id, label) in [(HEAD_WEM_ID, "head"), (BODY_WEM_ID, "body")] {
+    if let Some(wav_path) = head_wav {
+        let (wem_bytes, _) = wav_to_wem::convert_to_bytes(Path::new(wav_path))
+            .map_err(|e| format!("Head WAV conversion failed: {e}"))?;
+        replacements.insert(HEAD_WEM_ID, wem_bytes);
+        summary_parts.push("head".to_string());
+    }
+
+    for (id, label) in [(BODY_WEM_ID, "body"), (HEAD_WEM_ID, "head")] {
         if replacements.contains_key(&id) && !bnk.wems.iter().any(|w| w.id == id) {
             return Err(format!(
                 "WEM ID {id} ({label} hitsound) not found in BNK; the game may have been updated"
