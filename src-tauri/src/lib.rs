@@ -2,12 +2,14 @@
 
 mod commands;
 mod detect;
+mod hitsounds;
 mod launch_record;
 mod mods;
 mod pak;
 mod pak_tweaks;
 mod paths;
 mod scalability;
+mod wav_to_wem;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 #[allow(clippy::expect_used)]
@@ -46,7 +48,10 @@ pub fn run() {
             commands::get_skip_launcher,
             commands::set_skip_launcher,
             commands::extract_pak_ini,
-            commands::save_pak_ini
+            commands::save_pak_ini,
+            commands::validate_wav,
+            commands::path_exists,
+            commands::build_hitsound_mod
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

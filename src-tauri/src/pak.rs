@@ -51,3 +51,10 @@ pub(crate) fn extract_single_file(
 pub(crate) fn repack_pak(input_dir: &str, output_pak: &str) -> Result<(), String> {
     writer::repack_pak(input_dir, output_pak)
 }
+
+pub(crate) fn write_pak_bytes(
+    output_pak: &str,
+    files: Vec<(String, Vec<u8>)>,
+) -> Result<(), String> {
+    writer::write_pak_bytes(output_pak, files)
+}
