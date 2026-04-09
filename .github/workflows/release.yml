@@ -74,6 +74,9 @@ jobs:
           node-version: 24
           cache: pnpm
 
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
@@ -82,11 +85,15 @@ jobs:
         with:
           workspaces: |
             src-tauri -> target
+          cache-on-failure: true
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
       - name: Build Windows executable (no bundles)
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
         run: pnpm tauri build --no-bundle
 
       - name: Verify release executable exists
@@ -136,6 +143,7 @@ jobs:
         shell: pwsh
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHANGELOG: ${{ steps.changelog.outputs.text }}
         run: |
           $tag = "${{ steps.vars.outputs.tag }}"
           $assetName = "oinkers-toolkit-$tag-windows-x64.zip"
@@ -157,7 +165,7 @@ jobs:
           $downloadUrl = "https://github.com/$repo/releases/download/$tag/$assetName"
           $checksumUrl = "https://github.com/$repo/releases/download/$tag/$checksumFileName"
 
-          $changelog = "${{ steps.changelog.outputs.text }}"
+          $changelog = $env:CHANGELOG
 
           @(
             "## Downloads",
@@ -192,6 +200,7 @@ jobs:
         shell: pwsh
         env:
           DISCORD_RELEASE_WEBHOOK: ${{ secrets.DISCORD_RELEASE_WEBHOOK }}
+          CHANGELOG: ${{ steps.changelog.outputs.text }}
         run: |
           if (-not $env:DISCORD_RELEASE_WEBHOOK) {
             Write-Host "DISCORD_RELEASE_WEBHOOK is not configured; skipping Discord notification."
@@ -204,7 +213,7 @@ jobs:
           $releaseUrl = "https://github.com/$repo/releases/tag/$tag"
           $downloadUrl = "https://github.com/$repo/releases/download/$tag/$assetName"
 
-          $changelog = "${{ steps.changelog.outputs.text }}"
+          $changelog = $env:CHANGELOG
 
           # Discord embed fields are capped at 1024 chars; trim if needed.
           $maxLen = 1000
