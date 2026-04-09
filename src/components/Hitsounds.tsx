@@ -267,7 +267,8 @@ export function Hitsounds({ gamePath, isActive }: Props) {
         <div>
           <h2 className="text-xl font-bold">Hitsounds</h2>
           <p className="mt-1 text-xs text-muted-foreground">
-            Build a hitsound mod from WAV files. 16-bit stereo PCM at 48kHz recommended.
+            Build a hitsound mod from WAV files. 16-bit stereo PCM at 48kHz recommended, but 44.1kHz
+            should also be fine.
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2 pt-0.5">

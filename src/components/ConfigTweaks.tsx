@@ -15,7 +15,7 @@ interface Props {
   gamePath: string;
 }
 
-export function QuickSettings({ gamePath }: Props) {
+export function ConfigTweaks({ gamePath }: Props) {
   const [subTab, setSubTab] = useState<SubTab>("scalability");
 
   const [filePath, setFilePath] = useState("");
@@ -96,7 +96,7 @@ export function QuickSettings({ gamePath }: Props) {
     <div className="flex flex-1 min-h-0 w-full flex-col gap-6">
       {/* Header */}
       <div className="flex min-h-8 items-center gap-3">
-        <h2 className="text-xl font-bold">Quick Settings</h2>
+        <h2 className="text-xl font-bold">Config Tweaks</h2>
       </div>
 
       {/* Sub-tab bar */}

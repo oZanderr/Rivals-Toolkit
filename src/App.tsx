@@ -16,12 +16,12 @@ import {
 import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
 
+import { ConfigTweaks } from "./components/ConfigTweaks";
 import { Hitsounds } from "./components/Hitsounds";
 import { Home } from "./components/Home";
 import { ModTools } from "./components/ModTools";
 import { PakIniEditor } from "./components/PakIniEditor";
 import { PakManager } from "./components/PakManager";
-import { QuickSettings } from "./components/QuickSettings";
 import { Titlebar } from "./components/Titlebar";
 
 type Tab = "home" | "mod-tools" | "pak-manager" | "ini-editor" | "settings" | "hitsounds";
@@ -38,7 +38,7 @@ const TABS: { id: Tab; label: string; icon: ReactNode }[] = [
   { id: "home", label: "Home", icon: <House size={15} /> },
   { id: "mod-tools", label: "Mod Tools", icon: <Wrench size={15} /> },
   { id: "hitsounds", label: "Hitsounds", icon: <Volume2 size={15} /> },
-  { id: "settings", label: "Quick Settings", icon: <Settings size={15} /> },
+  { id: "settings", label: "Config Tweaks", icon: <Settings size={15} /> },
   { id: "ini-editor", label: "Pak INI Editor", icon: <FileCode2 size={15} /> },
   { id: "pak-manager", label: "Pak Manager", icon: <Package size={15} /> },
 ];
@@ -193,7 +193,7 @@ function App() {
                 activeTab !== "settings" && "hidden"
               )}
             >
-              <QuickSettings gamePath={gamePath} />
+              <ConfigTweaks gamePath={gamePath} />
             </div>
           )}
           {mountedTabs.has("hitsounds") && (
