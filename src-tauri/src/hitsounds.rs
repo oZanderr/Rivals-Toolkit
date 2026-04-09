@@ -4,10 +4,13 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use crate::pak;
 use crate::pak::crypto::open_pak;
 use crate::wav_to_wem;
+
+static BNK_CACHE: OnceLock<Mutex<HashMap<String, Vec<u8>>>> = OnceLock::new();
 
 const HEAD_WEM_ID: u32 = 681577199;
 const BODY_WEM_ID: u32 = 975983943;
@@ -110,6 +113,29 @@ fn read_bnk_from_pak(pak_path: &Path, entry: &str) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+fn get_or_extract_bnk(game_root: &str) -> Result<Vec<u8>, String> {
+    let cache = BNK_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+
+    if let Some(bytes) = cache
+        .lock()
+        .map_err(|e| format!("BNK cache lock poisoned: {e}"))?
+        .get(game_root)
+        .cloned()
+    {
+        return Ok(bytes);
+    }
+
+    let (source_pak, entry) = find_source_bnk(game_root)?;
+    let bytes = read_bnk_from_pak(&source_pak, &entry)?;
+
+    cache
+        .lock()
+        .map_err(|e| format!("BNK cache lock poisoned: {e}"))?
+        .insert(game_root.to_string(), bytes.clone());
+
+    Ok(bytes)
+}
+
 pub(crate) fn build_hitsound_mod(
     game_root: &str,
     head_wav: Option<&str>,
@@ -122,8 +148,7 @@ pub(crate) fn build_hitsound_mod(
 
     let _temp_guard = TempDirGuard::create("oinkers_hitsounds")?;
 
-    let (source_pak, bnk_entry) = find_source_bnk(game_root)?;
-    let bnk_bytes = read_bnk_from_pak(&source_pak, &bnk_entry)?;
+    let bnk_bytes = get_or_extract_bnk(game_root)?;
 
     if bnk_bytes.len() < 8 || &bnk_bytes[0..4] != b"BKHD" {
         return Err("Extracted BNK appears corrupt or has unexpected header".to_string());
