@@ -87,7 +87,7 @@ interface Props {
   detecting: boolean;
   onDetect: () => void;
   onBrowse: () => void;
-  onSaved: () => void;
+  onSaved: (content: string) => void;
   onReload: () => void;
 }
 
@@ -181,7 +181,7 @@ export function ScalabilityTweaks({
       setContent(modified);
       await invoke("write_scalability", { path: filePath, content: modified });
       showStatus("Settings applied and saved.", "ok");
-      onSaved();
+      onSaved(modified);
     } catch (e: unknown) {
       showStatus(String(e), "err");
     }

@@ -20,6 +20,7 @@ export function ConfigTweaks({ gamePath }: Props) {
 
   const [filePath, setFilePath] = useState("");
   const [content, setContent] = useState("");
+  const [scalabilityContent, setScalabilityContent] = useState("");
   const [fileExists, setFileExists] = useState<boolean | null>(null);
   const [reloadSignal, setReloadSignal] = useState(0);
   const [detecting, setDetecting] = useState(false);
@@ -80,9 +81,11 @@ export function ConfigTweaks({ gamePath }: Props) {
     try {
       const text = await invoke<string>("read_scalability", { path });
       setContent(text);
+      setScalabilityContent(text);
       setFileExists(true);
     } catch {
       setContent("");
+      setScalabilityContent("");
       setFileExists(false);
     }
   }
@@ -131,14 +134,17 @@ export function ConfigTweaks({ gamePath }: Props) {
           detecting={detecting}
           onDetect={detectPath}
           onBrowse={browse}
-          onSaved={() => setFileExists(true)}
+          onSaved={(newContent) => {
+            setFileExists(true);
+            setScalabilityContent(newContent);
+          }}
           onReload={reloadContent}
         />
       </div>
 
       {/* ── Pak Config tab ── */}
       <div className={cn("flex flex-1 min-h-0 flex-col", subTab !== "pak-config" && "hidden")}>
-        <PakTweaks gamePath={gamePath} />
+        <PakTweaks gamePath={gamePath} scalabilityContent={scalabilityContent} />
       </div>
     </div>
   );

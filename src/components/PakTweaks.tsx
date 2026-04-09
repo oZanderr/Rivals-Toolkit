@@ -114,9 +114,10 @@ interface PakCacheEntry {
 
 interface Props {
   gamePath: string;
+  scalabilityContent: string;
 }
 
-export function PakTweaks({ gamePath }: Props) {
+export function PakTweaks({ gamePath, scalabilityContent }: Props) {
   const [paks, setPaks] = useState<PakIniInfo[]>([]);
   const [selectedPak, setSelectedPak] = useState<PakIniInfo | null>(null);
   const [tweakStates, setTweakStates] = useState<TweakState[]>([]);
@@ -449,6 +450,23 @@ export function PakTweaks({ gamePath }: Props) {
 
   const dirty = edits.length > 0;
 
+  function hasScalabilityConflict(tweak: TweakDefinition): boolean {
+    if (tweak.pak_only || tweak.kind !== "RemoveLines") return false;
+    const isActive = tweakStates.find((s) => s.id === tweak.id)?.active ?? false;
+    if (!isActive) return false;
+    const lines = scalabilityContent.split(/\r?\n/);
+    return tweak.lines.some(
+      (line) =>
+        line.scalability_section != null &&
+        lines.some((l) => {
+          const t = l.trim().toLowerCase();
+          if (t.startsWith(";")) return false;
+          const pat = line.pattern.toLowerCase();
+          return t === pat || t === `+cvars=${pat}`;
+        })
+    );
+  }
+
   function removePak(pakPath: string) {
     pakCache.current.delete(pakPath);
     const wasSelected = selectedPak?.pak_path === pakPath;
@@ -648,6 +666,7 @@ export function PakTweaks({ gamePath }: Props) {
                           if (removeOnly && isSavedEnabled) return null;
                           const needsEngine = engineOnly && !selectedPak.has_engine_ini;
                           const disabled = needsEngine;
+                          const conflict = hasScalabilityConflict(tweak);
                           return (
                             <QuickTweakRow
                               key={tweak.id}
@@ -658,6 +677,7 @@ export function PakTweaks({ gamePath }: Props) {
                                   ? "Requires DefaultEngine.ini in this pak mod"
                                   : undefined
                               }
+                              scalabilityConflict={conflict}
                               currentValue={
                                 tweakStates.find((s) => s.id === tweak.id)?.current_value ??
                                 undefined
@@ -748,6 +768,7 @@ function QuickTweakRow({
   currentValue,
   disabled,
   disabledReason,
+  scalabilityConflict,
   onToggle,
   onValueChange,
 }: {
@@ -755,6 +776,7 @@ function QuickTweakRow({
   isEnabled: boolean;
   currentValue: string | undefined;
   disabledReason?: string;
+  scalabilityConflict?: boolean;
   disabled?: boolean;
   onToggle: () => void;
   onValueChange: (val: string) => void;
@@ -762,8 +784,9 @@ function QuickTweakRow({
   return (
     <div
       className={cn(
-        "flex flex-col gap-2 rounded-md border border-border/50 bg-background px-4 py-3",
-        disabled && "opacity-50"
+        "flex flex-col gap-2 rounded-md border bg-background px-4 py-3",
+        disabled && "opacity-50",
+        scalabilityConflict ? "border-[var(--color-warn)]/40" : "border-border/50"
       )}
     >
       <div className="flex items-start justify-between gap-4">
@@ -785,6 +808,12 @@ function QuickTweakRow({
           {disabledReason && (
             <span className="text-[11px] leading-snug text-[var(--color-warn)] mt-0.5">
               {disabledReason}
+            </span>
+          )}
+          {scalabilityConflict && (
+            <span className="mt-0.5 flex items-center gap-1 text-[11px] leading-snug text-[var(--color-warn)]">
+              <TriangleAlert size={11} className="shrink-0" />
+              Still present in Scalability.ini — also apply this fix in the Scalability tab
             </span>
           )}
           <div className="mt-1 flex flex-wrap gap-1">
