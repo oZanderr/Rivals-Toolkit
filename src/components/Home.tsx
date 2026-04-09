@@ -220,7 +220,7 @@ export function Home({
     <div className="flex flex-1 min-h-0 w-full flex-col gap-4 overflow-y-auto">
       {/* ── Game path ── */}
       <div className="flex min-h-8 items-center gap-3">
-        <h2 className="text-xl font-bold">Installation</h2>
+        <h2 className="text-xl font-bold">Game Setup</h2>
         {showBadge && info && (
           <span className="flex items-center gap-1.5 text-[12px] font-medium text-[var(--color-ok)]">
             <CheckCircle2 size={14} strokeWidth={2.5} />
@@ -371,7 +371,7 @@ export function Home({
         />
         <FeatureCard
           icon={<Settings size={16} />}
-          title="Quick Settings"
+          title="Config Tweaks"
           description="Tweak graphics scalability and pak-based config settings."
           onClick={() => setActiveTab("settings")}
         />

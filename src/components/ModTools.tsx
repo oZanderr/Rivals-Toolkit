@@ -51,11 +51,15 @@ export function ModTools({ gamePath, isActive }: Props) {
   const [busyMods, setBusyMods] = useState<Set<string>>(new Set());
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
+  const [listMaxHeight, setListMaxHeight] = useState<number | undefined>(undefined);
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const modsStatusRef = useRef(modsStatus);
   const isActiveRef = useRef(isActive);
   const refreshRef = useRef<typeof refresh>(null!);
   const dropProcessingRef = useRef(false);
+  const outerRef = useRef<HTMLDivElement>(null);
+  const cardHeaderRef = useRef<HTMLDivElement>(null);
+  const cardRef = useRef<HTMLDivElement>(null);
 
   const showNotice = useCallback((msg: string, type: StatusType, duration = 6000) => {
     if (noticeTimer.current) clearTimeout(noticeTimer.current);
@@ -89,6 +93,31 @@ export function ModTools({ gamePath, isActive }: Props) {
   useEffect(() => {
     if (gamePath) refresh(true);
   }, [gamePath, refresh]);
+
+  const recalcListHeight = useCallback(() => {
+    const outer = outerRef.current;
+    const card = cardRef.current;
+    const cardHeader = cardHeaderRef.current;
+    if (!outer || !card || !cardHeader) return;
+    const outerBottom = outer.getBoundingClientRect().bottom;
+    const cardTop = card.getBoundingClientRect().top;
+    const cardHeaderHeight = cardHeader.getBoundingClientRect().height;
+    // 16px top padding + 16px bottom padding + 16px gap between header and list
+    const cardChrome = 16 + 16 + 16;
+    setListMaxHeight(outerBottom - cardTop - cardHeaderHeight - cardChrome);
+  }, []);
+
+  useEffect(() => {
+    const ro = new ResizeObserver(recalcListHeight);
+    if (outerRef.current) ro.observe(outerRef.current);
+    recalcListHeight();
+    return () => ro.disconnect();
+  }, [recalcListHeight]);
+
+  // Re-run when the mod list card mounts (modsStatus transitions from null).
+  useEffect(() => {
+    recalcListHeight();
+  }, [modsStatus, recalcListHeight]);
 
   // Drag-and-drop: accept .pak and .zip files dropped anywhere on the window.
   useEffect(() => {
@@ -268,7 +297,7 @@ export function ModTools({ gamePath, isActive }: Props) {
   const totalCount = modsStatus?.mod_entries.length ?? 0;
 
   return (
-    <div className="relative flex flex-1 min-h-0 w-full flex-col gap-6">
+    <div ref={outerRef} className="relative flex flex-1 min-h-0 w-full flex-col gap-6">
       {isDragging && (
         <div className="pointer-events-none absolute inset-0 z-50 flex flex-col items-center justify-center gap-3 rounded-lg border-2 border-dashed border-[var(--color-ok)] bg-background/80 backdrop-blur-sm">
           <UploadCloud size={36} className="text-[var(--color-ok)]" />
@@ -377,8 +406,8 @@ export function ModTools({ gamePath, isActive }: Props) {
 
       {/* Mod list */}
       {modsStatus && totalCount > 0 && (
-        <Card className="flex min-h-0 flex-1 flex-col gap-4 p-4 bg-card">
-          <div className="flex items-center justify-between gap-2">
+        <Card ref={cardRef} className="flex flex-col gap-4 p-4 bg-card">
+          <div ref={cardHeaderRef} className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2">
               <h3 className="text-sm font-semibold">Installed Mods</h3>
               {totalCount > 0 && (
@@ -418,7 +447,10 @@ export function ModTools({ gamePath, isActive }: Props) {
               No mods found in the ~mods folder. Copy <Code>.pak</Code> files there to get started.
             </p>
           ) : (
-            <div className="min-h-0 flex-1 overflow-y-auto rounded-md border border-border bg-background [scrollbar-gutter:stable]">
+            <div
+              style={{ maxHeight: listMaxHeight }}
+              className="overflow-y-auto rounded-md border border-border bg-background [scrollbar-gutter:stable]"
+            >
               <ul>
                 {modsStatus.mod_entries.map((entry) => {
                   const busy = busyMods.has(entry.full_name);
