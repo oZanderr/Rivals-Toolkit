@@ -16,12 +16,12 @@ import {
 import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
 
+import { AssetManager } from "./components/AssetManager";
 import { ConfigTweaks } from "./components/ConfigTweaks";
 import { Hitsounds } from "./components/Hitsounds";
 import { Home } from "./components/Home";
 import { ModTools } from "./components/ModTools";
 import { PakIniEditor } from "./components/PakIniEditor";
-import { PakManager } from "./components/PakManager";
 import { Titlebar } from "./components/Titlebar";
 
 type Tab = "home" | "mod-tools" | "pak-manager" | "ini-editor" | "settings" | "hitsounds";
@@ -40,7 +40,7 @@ const TABS: { id: Tab; label: string; icon: ReactNode }[] = [
   { id: "hitsounds", label: "Hitsounds", icon: <Volume2 size={15} /> },
   { id: "settings", label: "Config Tweaks", icon: <Settings size={15} /> },
   { id: "ini-editor", label: "Pak INI Editor", icon: <FileCode2 size={15} /> },
-  { id: "pak-manager", label: "Pak Manager", icon: <Package size={15} /> },
+  { id: "pak-manager", label: "Asset Manager", icon: <Package size={15} /> },
 ];
 
 function App() {
@@ -173,7 +173,7 @@ function App() {
                 activeTab !== "pak-manager" && "hidden"
               )}
             >
-              <PakManager gamePath={gamePath} />
+              <AssetManager gamePath={gamePath} />
             </div>
           )}
           {mountedTabs.has("ini-editor") && (

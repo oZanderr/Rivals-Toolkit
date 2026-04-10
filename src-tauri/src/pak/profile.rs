@@ -1,7 +1,8 @@
 use aes::cipher::KeyInit;
 
 /// AES-256 key used by Marvel Rivals pak files.
-const MARVEL_AES_KEY_HEX: &str = "0C263D8C22DCB085894899C3A3796383E9BF9DE0CBFB08C9BF2DEF2E84F29D74";
+pub(crate) const MARVEL_AES_KEY_HEX: &str =
+    "0C263D8C22DCB085894899C3A3796383E9BF9DE0CBFB08C9BF2DEF2E84F29D74";
 
 pub(crate) const RIVALS_MOUNT_POINT: &str = "../../../";
 const RIVALS_ENCRYPTION_SEED_BYTES: [u8; 4] = [0x11, 0x22, 0x33, 0x44];
@@ -54,13 +55,21 @@ impl RivalsPakProfile {
     }
 }
 
-/// Partial encryption: only the first N bytes of each file are encrypted, where N is
-/// derived from a BLAKE3 hash of the lowercase file path with a game-specific seed.
-/// The mount point is ignored — the plain relative path drives the hash.
-fn rivals_encrypted_prefix_len(_mount_point: &str, path: &str, total_len: usize) -> usize {
+/// Compute per-file partial encryption limit via BLAKE3(seed + path).
+/// The hash path must include the validated mount prefix to match the game engine.
+/// (e.g. `"../../../Marvel/"` validates to `"Marvel/"`, giving `"Marvel/Config/..."`).
+fn rivals_encrypted_prefix_len(mount_point: &str, path: &str, total_len: usize) -> usize {
+    let validated = mount_point
+        .find("../../..")
+        .map(|i| &mount_point[i + 8..])
+        .and_then(|s| s.strip_prefix('/'))
+        .unwrap_or("");
+
+    let hash_path = format!("{validated}{path}");
+
     let mut hasher = blake3::Hasher::new();
     hasher.update(&RIVALS_ENCRYPTION_SEED_BYTES);
-    hasher.update(path.to_ascii_lowercase().as_bytes());
+    hasher.update(hash_path.to_ascii_lowercase().as_bytes());
 
     let hash = hasher.finalize();
     let bytes = hash.as_bytes();
