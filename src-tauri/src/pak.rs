@@ -108,11 +108,24 @@ pub(crate) fn extract_utoc_file(
     iostore::extract_utoc_file(utoc_path, file_name, output_path)
 }
 
+pub(crate) fn count_utoc_legacy_packages(
+    utoc_path: &str,
+    game_root: &str,
+    filter: &[String],
+) -> Result<usize, String> {
+    iostore::count_utoc_legacy_packages(utoc_path, game_root, filter)
+}
+
 pub(crate) fn extract_utoc_legacy(
     utoc_path: &str,
     game_root: &str,
     output_dir: &str,
     filter: &[String],
+    app: tauri::AppHandle,
 ) -> Result<Vec<String>, String> {
-    iostore::extract_utoc_legacy(utoc_path, game_root, output_dir, filter)
+    iostore::extract_utoc_legacy(utoc_path, game_root, output_dir, filter, app)
+}
+
+pub(crate) fn cancel_legacy_extraction() {
+    iostore::cancel_legacy_extraction();
 }

@@ -1,8 +1,11 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use rayon::prelude::*;
+use serde::Serialize;
+use tauri::{AppHandle, Emitter};
 
 use retoc::asset_conversion::{self, FZenPackageContext};
 use retoc::iostore::IoStoreTrait;
@@ -16,6 +19,19 @@ use retoc::{
 };
 
 const MOUNT_POINT: &str = "../../../";
+
+/// Global cancellation flag for legacy extraction — set from frontend via command.
+static LEGACY_CANCEL: AtomicBool = AtomicBool::new(false);
+
+#[derive(Clone, Serialize)]
+pub(crate) struct LegacyExtractionProgress {
+    pub current: usize,
+    pub total: usize,
+}
+
+pub(crate) fn cancel_legacy_extraction() {
+    LEGACY_CANCEL.store(true, Ordering::Relaxed);
+}
 
 /// Convert a directory of legacy assets into an IoStore container (.utoc + .ucas + .pak).
 pub(crate) fn repack_iostore(input_dir: &str, output_utoc: &str) -> Result<(), String> {
@@ -247,34 +263,36 @@ pub(crate) fn extract_utoc_file(
     Err(format!("File not found in container: {file_name}"))
 }
 
-/// Extract IoStore assets to legacy format (.uasset/.uexp/.ubulk) for use in
-/// tools like UAssetGUI. Opens the full Paks directory so ScriptObjects from
-/// the global container are available for import resolution.
-pub(crate) fn extract_utoc_legacy(
-    utoc_path: &str,
+/// Collect asset paths that belong to a single .utoc container (standalone open,
+/// no base-game merge). Returns the stripped paths from the container's directory index.
+fn collect_target_paths(utoc_path: &str) -> Result<HashSet<String>, String> {
+    let store = open_utoc(utoc_path)?;
+    let paths: HashSet<String> = store
+        .chunks()
+        .filter_map(|chunk| {
+            let full_path = chunk.path()?;
+            let stripped = full_path
+                .strip_prefix(MOUNT_POINT)
+                .unwrap_or(&full_path)
+                .to_string();
+            Some(stripped)
+        })
+        .collect();
+    Ok(paths)
+}
+
+type PackageList = Vec<(retoc::FPackageId, String)>;
+
+/// Resolve the set of convertible packages in a container. Opens base game paks
+/// for package resolution and filters to only packages that belong to the target.
+fn resolve_target_packages(
+    target_paths: &HashSet<String>,
     game_root: &str,
-    output_dir: &str,
+    target_container: &str,
     filter: &[String],
-) -> Result<Vec<String>, String> {
-    let target_container = Path::new(utoc_path)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .ok_or("Invalid utoc path")?
-        .to_string();
-
+) -> Result<(Box<dyn IoStoreTrait>, PackageList), String> {
     let paks_dir = crate::paths::paks_dir(game_root);
-    let store = open_base_game_paks(&paks_dir, &target_container)?;
-
-    let engine_version = EngineVersion::UE5_3;
-    let log = retoc::logging::Log::no_log();
-    let package_context = FZenPackageContext::create(
-        &*store,
-        Some(engine_version.package_file_version()),
-        &log,
-        None,
-    );
-
-    let writer = FSFileWriter::new(output_dir);
+    let store = open_base_game_paks(&paks_dir, target_container)?;
 
     let target = store
         .child_containers()
@@ -287,6 +305,9 @@ pub(crate) fn extract_utoc_legacy(
             let chunk_id = FIoChunkId::from_package_id(pkg.id(), 0, EIoChunkType::ExportBundleData);
             let path = store.chunk_path(chunk_id)?;
             let stripped = path.strip_prefix(MOUNT_POINT).unwrap_or(&path).to_string();
+            if !target_paths.contains(&stripped) {
+                return None;
+            }
             if !filter.is_empty() && !filter.iter().any(|f| stripped.contains(f.as_str())) {
                 return None;
             }
@@ -294,10 +315,103 @@ pub(crate) fn extract_utoc_legacy(
         })
         .collect();
 
-    let results: Vec<Result<String, String>> = packages
+    Ok((store, packages))
+}
+
+/// Open only the target container from the Paks directory (no base game, no mods).
+fn open_target_only(
+    paks_dir: &Path,
+    target_container: &str,
+) -> Result<Box<dyn IoStoreTrait>, String> {
+    let target = target_container.to_string();
+    retoc::iostore::open_filtered(paks_dir, make_config()?, move |name| name == target)
+        .map_err(|e| e.to_string())
+}
+
+/// Count legacy-convertible packages in a .utoc container.
+/// Loads only the target container — fast, no base game paks.
+pub(crate) fn count_utoc_legacy_packages(
+    utoc_path: &str,
+    game_root: &str,
+    filter: &[String],
+) -> Result<usize, String> {
+    let target_container = Path::new(utoc_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or("Invalid utoc path")?
+        .to_string();
+
+    let paks_dir = crate::paths::paks_dir(game_root);
+    let store = open_target_only(&paks_dir, &target_container)?;
+
+    let target = store
+        .child_containers()
+        .find(|c| c.container_name() == target_container)
+        .ok_or_else(|| format!("Container not found: {target_container}"))?;
+
+    let count = target
+        .packages()
+        .filter(|pkg| {
+            let chunk_id = FIoChunkId::from_package_id(pkg.id(), 0, EIoChunkType::ExportBundleData);
+            let Some(path) = store.chunk_path(chunk_id) else {
+                return false;
+            };
+            let stripped = path.strip_prefix(MOUNT_POINT).unwrap_or(&path);
+            filter.is_empty() || filter.iter().any(|f| stripped.contains(f.as_str()))
+        })
+        .count();
+
+    Ok(count)
+}
+
+/// Extract IoStore assets to legacy format (.uasset/.uexp/.ubulk) for use in
+/// tools like UAssetGUI. Opens the full Paks directory so ScriptObjects from
+/// the global container are available for import resolution.
+///
+/// Emits `legacy-extraction-progress` events and respects the global cancellation flag.
+pub(crate) fn extract_utoc_legacy(
+    utoc_path: &str,
+    game_root: &str,
+    output_dir: &str,
+    filter: &[String],
+    app: AppHandle,
+) -> Result<Vec<String>, String> {
+    // Reset cancellation flag at start
+    LEGACY_CANCEL.store(false, Ordering::Relaxed);
+
+    let target_paths = collect_target_paths(utoc_path)?;
+    let target_container = Path::new(utoc_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or("Invalid utoc path")?
+        .to_string();
+    let (store, packages) =
+        resolve_target_packages(&target_paths, game_root, &target_container, filter)?;
+
+    let engine_version = EngineVersion::UE5_3;
+    let log = retoc::logging::Log::no_log();
+    let package_context = FZenPackageContext::create(
+        &*store,
+        Some(engine_version.package_file_version()),
+        &log,
+        None,
+    );
+
+    let writer = FSFileWriter::new(output_dir);
+
+    let total = packages.len();
+    let completed = std::sync::atomic::AtomicUsize::new(0);
+
+    // Full parallel — rayon distributes work across all cores. Cancel and
+    // progress are handled per-item via atomics to avoid artificial batching.
+    let results: Vec<Option<Result<String, String>>> = packages
         .par_iter()
         .map(|(pkg_id, stripped)| {
-            match asset_conversion::build_legacy(
+            if LEGACY_CANCEL.load(Ordering::Relaxed) {
+                return None;
+            }
+
+            let result = match asset_conversion::build_legacy(
                 &package_context,
                 *pkg_id,
                 UEPath::new(stripped),
@@ -305,17 +419,37 @@ pub(crate) fn extract_utoc_legacy(
             ) {
                 Ok(()) => Ok(stripped.clone()),
                 Err(e) => Err(format!("{stripped}: {e}")),
+            };
+
+            let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+            if done.is_multiple_of(10) || done == total {
+                let _ = app.emit(
+                    "legacy-extraction-progress",
+                    LegacyExtractionProgress {
+                        current: done,
+                        total,
+                    },
+                );
             }
+
+            Some(result)
         })
         .collect();
 
     let mut extracted: Vec<String> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
-    for result in results {
+    for result in results.into_iter().flatten() {
         match result {
             Ok(path) => extracted.push(path),
             Err(err) => errors.push(err),
         }
+    }
+
+    if LEGACY_CANCEL.load(Ordering::Relaxed) {
+        return Err(format!(
+            "Cancelled after converting {}/{total} asset(s). Partial output may remain in the output folder.",
+            extracted.len()
+        ));
     }
 
     if extracted.is_empty() {

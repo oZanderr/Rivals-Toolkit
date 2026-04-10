@@ -109,17 +109,36 @@ pub(crate) async fn extract_utoc_file(
 }
 
 #[tauri::command]
+pub(crate) async fn count_utoc_legacy_packages(
+    utoc_path: String,
+    game_root: String,
+    filter: Vec<String>,
+) -> Result<usize, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        pak::count_utoc_legacy_packages(&utoc_path, &game_root, &filter)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 pub(crate) async fn extract_utoc_legacy(
     utoc_path: String,
     game_root: String,
     output_dir: String,
     filter: Vec<String>,
+    app: tauri::AppHandle,
 ) -> Result<Vec<String>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        pak::extract_utoc_legacy(&utoc_path, &game_root, &output_dir, &filter)
+        pak::extract_utoc_legacy(&utoc_path, &game_root, &output_dir, &filter, app)
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub(crate) fn cancel_legacy_extraction() {
+    pak::cancel_legacy_extraction();
 }
 
 #[tauri::command]

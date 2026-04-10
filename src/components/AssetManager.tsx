@@ -1,8 +1,9 @@
 import * as React from "react";
-import { useState, useRef, useMemo, useCallback } from "react";
+import { useState, useRef, useMemo, useCallback, useEffect } from "react";
 
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
@@ -19,9 +20,20 @@ import {
   XCircle,
 } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Progress } from "@/components/ui/progress";
 import {
   Select,
   SelectContent,
@@ -65,9 +77,29 @@ export function AssetManager({ gamePath }: Props) {
   const [manualPaks, setManualPaks] = useState<Set<string>>(new Set());
   const [debouncedFilter, setDebouncedFilter] = useState("");
   const [repackFormat, setRepackFormat] = useState<RepackFormat>("pak");
+  const [legacyConfirm, setLegacyConfirm] = useState<{
+    count: number;
+    utocPath: string;
+    outputDir: string;
+  } | null>(null);
+  const [legacyProgress, setLegacyProgress] = useState<{
+    current: number;
+    total: number;
+  } | null>(null);
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const filterTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const contentsScrollRef = useRef<HTMLDivElement>(null);
+
+  // Listen for legacy extraction progress events
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen<{ current: number; total: number }>("legacy-extraction-progress", (event) => {
+      setLegacyProgress(event.payload);
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => unlisten?.();
+  }, []);
 
   const showNotice = (
     msg: string,
@@ -309,11 +341,37 @@ export function AssetManager({ gamePath }: Props) {
         .split("/")
         .pop()
         ?.replace(/\.pak$/i, "") ?? "output";
-    const outputDir = `${dir}\\${pakBaseName}_legacy`;
+    const outputDir = `${dir}\\${pakBaseName}`;
     const utocPath = selectedPak.replace(/\.pak$/i, ".utoc");
 
+    // Count packages first to warn on large extractions
     setBusy(true);
-    showNotice("Converting to legacy format\u2026 (this may take a while)", "info");
+    showNotice("Counting packages\u2026", "info");
+    try {
+      const count = await invoke<number>("count_utoc_legacy_packages", {
+        utocPath,
+        gameRoot: gamePath,
+        filter: [],
+      });
+      setBusy(false);
+      setNotice(null);
+
+      if (count > 500) {
+        setLegacyConfirm({ count, utocPath, outputDir });
+        return;
+      }
+
+      await runLegacyExtraction(utocPath, outputDir);
+    } catch (e: unknown) {
+      showNotice(String(e), "err");
+      setBusy(false);
+    }
+  }
+
+  async function runLegacyExtraction(utocPath: string, outputDir: string) {
+    setBusy(true);
+    setLegacyProgress(null);
+    showNotice("Converting to legacy format\u2026", "info");
     try {
       const files = await invoke<string[]>("extract_utoc_legacy", {
         utocPath,
@@ -324,9 +382,13 @@ export function AssetManager({ gamePath }: Props) {
       const warning = files.find((f) => f.startsWith("__warnings__:"));
       const exported = files.filter((f) => !f.startsWith("__warnings__:"));
       if (warning) {
-        showNotice(`Exported ${exported.length} asset(s) (some failed to convert)`, "err");
+        showNotice(
+          `Exported ${exported.length} asset(s) to ${outputDir} (some failed to convert)`,
+          "err",
+          { revealPath: outputDir }
+        );
       } else {
-        showNotice(`Exported ${exported.length} asset(s) to legacy format`, "ok", {
+        showNotice(`Exported ${exported.length} asset(s) to ${outputDir}`, "ok", {
           revealPath: outputDir,
         });
       }
@@ -334,6 +396,16 @@ export function AssetManager({ gamePath }: Props) {
       showNotice(String(e), "err");
     } finally {
       setBusy(false);
+      // Small delay so the final progress event arrives before we clear the bar
+      setTimeout(() => setLegacyProgress(null), 200);
+    }
+  }
+
+  async function cancelLegacyExtraction() {
+    try {
+      await invoke("cancel_legacy_extraction");
+    } catch {
+      // Best-effort — extraction loop will stop on next batch regardless
     }
   }
 
@@ -415,6 +487,25 @@ export function AssetManager({ gamePath }: Props) {
             ) : null}
             <span className="truncate">{notice.msg}</span>
           </span>
+        )}
+        {legacyProgress && (
+          <div className="flex min-w-0 items-center gap-2">
+            <Progress
+              value={(legacyProgress.current / legacyProgress.total) * 100}
+              className="h-2 w-32"
+            />
+            <span className="shrink-0 text-[11px] text-muted-foreground">
+              {legacyProgress.current}/{legacyProgress.total}
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-6 px-2 text-[11px]"
+              onClick={cancelLegacyExtraction}
+            >
+              Cancel
+            </Button>
+          </div>
         )}
         <div className="ml-auto flex shrink-0 items-center gap-2">
           <div className="flex items-center">
@@ -666,6 +757,41 @@ export function AssetManager({ gamePath }: Props) {
           </p>
         </Card>
       </div>
+
+      <AlertDialog
+        open={!!legacyConfirm}
+        onOpenChange={(open) => {
+          if (!open) setLegacyConfirm(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Large Extraction</AlertDialogTitle>
+            <AlertDialogDescription>
+              This container has{" "}
+              <span className="font-semibold text-foreground">
+                {legacyConfirm?.count.toLocaleString()}
+              </span>{" "}
+              assets to convert. Legacy conversion decompresses every asset and may use significant
+              disk space. Are you sure you want to continue?
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className={buttonVariants({ variant: "blue" })}
+              onClick={() => {
+                if (legacyConfirm) {
+                  runLegacyExtraction(legacyConfirm.utocPath, legacyConfirm.outputDir);
+                }
+                setLegacyConfirm(null);
+              }}
+            >
+              Continue
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
