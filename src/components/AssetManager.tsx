@@ -4,6 +4,7 @@ import { useState, useRef, useMemo, useCallback } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   FolderOpen,
   PackageOpen,
@@ -55,7 +56,11 @@ export function AssetManager({ gamePath }: Props) {
   const [selectedPak, setSelectedPak] = useState<string>("");
   const [pakContents, setPakContents] = useState<ContentEntry[]>([]);
   const [filterText, setFilterText] = useState("");
-  const [notice, setNotice] = useState<{ msg: string; type: StatusType } | null>(null);
+  const [notice, setNotice] = useState<{
+    msg: string;
+    type: StatusType;
+    revealPath?: string;
+  } | null>(null);
   const [busy, setBusy] = useState(false);
   const [manualPaks, setManualPaks] = useState<Set<string>>(new Set());
   const [debouncedFilter, setDebouncedFilter] = useState("");
@@ -64,14 +69,18 @@ export function AssetManager({ gamePath }: Props) {
   const filterTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const contentsScrollRef = useRef<HTMLDivElement>(null);
 
-  const showNotice = (msg: string, type: StatusType, duration?: number) => {
+  const showNotice = (
+    msg: string,
+    type: StatusType,
+    opts?: { duration?: number; revealPath?: string }
+  ) => {
     // Strip any trailing path from error messages
     const clean =
       type === "err" ? msg.replace(/:\s*[A-Za-z]:\\[^\r\n]*|:\s*\/[^\r\n]*/g, "").trim() : msg;
     if (noticeTimer.current) clearTimeout(noticeTimer.current);
-    setNotice({ msg: clean, type });
+    setNotice({ msg: clean, type, revealPath: opts?.revealPath });
     // "info" notices persist until replaced by another notice (no auto-dismiss)
-    const ms = duration ?? (type === "info" ? 0 : 6000);
+    const ms = opts?.duration ?? (type === "info" ? 0 : 6000);
     if (ms > 0) {
       noticeTimer.current = setTimeout(() => setNotice(null), ms);
     }
@@ -135,7 +144,9 @@ export function AssetManager({ gamePath }: Props) {
           setFilterText("");
           setDebouncedFilter("");
         }
-        showNotice(`${paks.length} pak${paks.length !== 1 ? "s" : ""} found`, "ok", 4000);
+        showNotice(`${paks.length} pak${paks.length !== 1 ? "s" : ""} found`, "ok", {
+          duration: 4000,
+        });
       }
     } catch (e: unknown) {
       showNotice(String(e), "err");
@@ -250,7 +261,9 @@ export function AssetManager({ gamePath }: Props) {
       });
       totalFiles += pakFiles.length;
 
-      showNotice(`Extracted ${totalFiles} file(s) to ${outputDir}`, "ok");
+      showNotice(`Extracted ${totalFiles} file(s) to ${outputDir}`, "ok", {
+        revealPath: outputDir,
+      });
     } catch (e: unknown) {
       showNotice(String(e), "err");
     } finally {
@@ -277,7 +290,7 @@ export function AssetManager({ gamePath }: Props) {
           outputPath: outPath,
         });
       }
-      showNotice(`Extracted: ${outPath}`, "ok");
+      showNotice(`Extracted: ${outPath}`, "ok", { revealPath: outPath });
     } catch (e: unknown) {
       showNotice(String(e), "err");
     } finally {
@@ -313,7 +326,9 @@ export function AssetManager({ gamePath }: Props) {
       if (warning) {
         showNotice(`Exported ${exported.length} asset(s) (some failed to convert)`, "err");
       } else {
-        showNotice(`Exported ${exported.length} asset(s) to legacy format`, "ok");
+        showNotice(`Exported ${exported.length} asset(s) to legacy format`, "ok", {
+          revealPath: outputDir,
+        });
       }
     } catch (e: unknown) {
       showNotice(String(e), "err");
@@ -343,7 +358,7 @@ export function AssetManager({ gamePath }: Props) {
       showNotice("Repacking to IoStore\u2026", "info");
       try {
         await invoke("repack_iostore", { inputDir, outputUtoc });
-        showNotice(`Repacked IoStore to: ${outputUtoc}`, "ok");
+        showNotice(`Repacked IoStore to: ${outputUtoc}`, "ok", { revealPath: outputUtoc });
       } catch (e: unknown) {
         showNotice(String(e), "err");
       } finally {
@@ -361,7 +376,7 @@ export function AssetManager({ gamePath }: Props) {
       showNotice("Repacking\u2026", "info");
       try {
         await invoke("repack_pak", { inputDir, outputPak });
-        showNotice(`Repacked to: ${outputPak}`, "ok");
+        showNotice(`Repacked to: ${outputPak}`, "ok", { revealPath: outputPak });
       } catch (e: unknown) {
         showNotice(String(e), "err");
       } finally {
@@ -387,8 +402,11 @@ export function AssetManager({ gamePath }: Props) {
                 ? "text-[var(--color-ok)]"
                 : notice.type === "err"
                   ? "text-[var(--color-err)]"
-                  : "text-muted-foreground"
+                  : "text-muted-foreground",
+              notice.revealPath && "cursor-pointer hover:underline"
             )}
+            onClick={notice.revealPath ? () => revealItemInDir(notice.revealPath!) : undefined}
+            title={notice.revealPath ? "Click to reveal in explorer" : undefined}
           >
             {notice.type === "ok" ? (
               <CheckCircle2 className="shrink-0" size={14} strokeWidth={2.5} />
