@@ -2,6 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
+use rayon::prelude::*;
+
 use retoc::asset_conversion::{self, FZenPackageContext};
 use retoc::iostore::IoStoreTrait;
 use retoc::iostore_writer::IoStoreWriter;
@@ -137,10 +139,26 @@ fn open_utoc(utoc_path: &str) -> Result<Box<dyn IoStoreTrait>, String> {
     retoc::iostore::open(utoc_path, make_config()?).map_err(|e| e.to_string())
 }
 
-/// Open the entire Paks directory as a merged IoStore backend (gives access to
-/// ScriptObjects from the global container, which is needed for legacy conversion).
-fn open_paks_dir(paks_dir: &Path) -> Result<Box<dyn IoStoreTrait>, String> {
-    retoc::iostore::open(paks_dir, make_config()?).map_err(|e| e.to_string())
+/// Open only base game containers (no mods, no patches) for legacy conversion.
+/// Mod assets only import from base game patches and other mods are unnecessary.
+fn open_base_game_paks(
+    paks_dir: &Path,
+    target_container: &str,
+) -> Result<Box<dyn IoStoreTrait>, String> {
+    let target = target_container.to_string();
+    retoc::iostore::open_filtered(paks_dir, make_config()?, move |name| {
+        if name == target {
+            return true;
+        }
+        if name.contains("_9999999_") {
+            return false;
+        }
+        if name.starts_with("Patch_") {
+            return false;
+        }
+        true
+    })
+    .map_err(|e| e.to_string())
 }
 
 /// List asset paths inside a .utoc container.
@@ -168,25 +186,35 @@ pub(crate) fn extract_utoc(utoc_path: &str, output_dir: &str) -> Result<Vec<Stri
     let output = Path::new(output_dir);
     std::fs::create_dir_all(output).map_err(|e| e.to_string())?;
 
-    let mut extracted: Vec<String> = Vec::new();
+    // Collect chunks with their paths (cheap metadata pass)
+    let chunks: Vec<_> = store
+        .chunks()
+        .filter_map(|chunk| {
+            let full_path = chunk.path()?;
+            let stripped = full_path
+                .strip_prefix(MOUNT_POINT)
+                .unwrap_or(&full_path)
+                .to_string();
+            Some((chunk, stripped))
+        })
+        .collect();
 
-    for chunk in store.chunks() {
-        let Some(full_path) = chunk.path() else {
-            continue;
-        };
-        let stripped = full_path.strip_prefix(MOUNT_POINT).unwrap_or(&full_path);
-
-        let dest = output.join(stripped);
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        let data = chunk
-            .read()
-            .map_err(|e| format!("Failed to read {stripped}: {e}"))?;
-        std::fs::write(&dest, data).map_err(|e| format!("Failed to write {stripped}: {e}"))?;
-
-        extracted.push(stripped.to_string());
-    }
+    // Read and write in parallel
+    let mut extracted: Vec<String> = chunks
+        .par_iter()
+        .map(|(chunk, stripped)| {
+            let dest = output.join(stripped);
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("Failed to create dir for {stripped}: {e}"))?;
+            }
+            let data = chunk
+                .read()
+                .map_err(|e| format!("Failed to read {stripped}: {e}"))?;
+            std::fs::write(&dest, data).map_err(|e| format!("Failed to write {stripped}: {e}"))?;
+            Ok(stripped.clone())
+        })
+        .collect::<Result<Vec<_>, String>>()?;
 
     extracted.sort();
     Ok(extracted)
@@ -228,16 +256,14 @@ pub(crate) fn extract_utoc_legacy(
     output_dir: &str,
     filter: &[String],
 ) -> Result<Vec<String>, String> {
-    // Determine which container name to extract from (e.g. "elsa_9999999_P")
     let target_container = Path::new(utoc_path)
         .file_stem()
         .and_then(|s| s.to_str())
         .ok_or("Invalid utoc path")?
         .to_string();
 
-    // Open the entire Paks directory for full context (ScriptObjects, etc.)
     let paks_dir = crate::paths::paks_dir(game_root);
-    let store = open_paks_dir(&paks_dir)?;
+    let store = open_base_game_paks(&paks_dir, &target_container)?;
 
     let engine_version = EngineVersion::UE5_3;
     let log = retoc::logging::Log::no_log();
@@ -249,34 +275,46 @@ pub(crate) fn extract_utoc_legacy(
     );
 
     let writer = FSFileWriter::new(output_dir);
+
+    let target = store
+        .child_containers()
+        .find(|c| c.container_name() == target_container)
+        .ok_or_else(|| format!("Container not found: {target_container}"))?;
+
+    let packages: Vec<_> = target
+        .packages()
+        .filter_map(|pkg| {
+            let chunk_id = FIoChunkId::from_package_id(pkg.id(), 0, EIoChunkType::ExportBundleData);
+            let path = store.chunk_path(chunk_id)?;
+            let stripped = path.strip_prefix(MOUNT_POINT).unwrap_or(&path).to_string();
+            if !filter.is_empty() && !filter.iter().any(|f| stripped.contains(f.as_str())) {
+                return None;
+            }
+            Some((pkg.id(), stripped))
+        })
+        .collect();
+
+    let results: Vec<Result<String, String>> = packages
+        .par_iter()
+        .map(|(pkg_id, stripped)| {
+            match asset_conversion::build_legacy(
+                &package_context,
+                *pkg_id,
+                UEPath::new(stripped),
+                &writer,
+            ) {
+                Ok(()) => Ok(stripped.clone()),
+                Err(e) => Err(format!("{stripped}: {e}")),
+            }
+        })
+        .collect();
+
     let mut extracted: Vec<String> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
-
-    for pkg in store.packages() {
-        // Only extract packages from the target container
-        if pkg.container().container_name() != target_container {
-            continue;
-        }
-
-        let chunk_id = FIoChunkId::from_package_id(pkg.id(), 0, EIoChunkType::ExportBundleData);
-        let Some(path) = store.chunk_path(chunk_id) else {
-            continue;
-        };
-        let stripped = path.strip_prefix(MOUNT_POINT).unwrap_or(&path);
-
-        // Apply filter if provided
-        if !filter.is_empty() && !filter.iter().any(|f| stripped.contains(f.as_str())) {
-            continue;
-        }
-
-        match asset_conversion::build_legacy(
-            &package_context,
-            pkg.id(),
-            UEPath::new(stripped),
-            &writer,
-        ) {
-            Ok(()) => extracted.push(stripped.to_string()),
-            Err(e) => errors.push(format!("{stripped}: {e}")),
+    for result in results {
+        match result {
+            Ok(path) => extracted.push(path),
+            Err(err) => errors.push(err),
         }
     }
 

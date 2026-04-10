@@ -33,6 +33,7 @@ winreg = "0.52"
 dirs = "5"
 zip = { version = "8.2.0", default-features = false, features = ["deflate"] }
 blake3 = "1"
+rayon = "1"
 
 [profile.release]
 opt-level = 3

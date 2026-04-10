@@ -88,7 +88,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -99,7 +99,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -941,7 +941,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1109,7 +1109,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2460,7 +2460,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2641,6 +2641,7 @@ dependencies = [
  "blake3",
  "dirs 5.0.1",
  "hex",
+ "rayon",
  "rebnk",
  "repak 0.2.3 (git+https://github.com/oZanderr/repak?branch=master)",
  "retoc",
@@ -2681,7 +2682,7 @@ dependencies = [
 [[package]]
 name = "oodle_loader"
 version = "0.2.3"
-source = "git+https://github.com/oZanderr/repak.git#b9258c204cc3c1485a1d522171a11c11e323cd92"
+source = "git+https://github.com/oZanderr/repak.git#e9c8f5db7c755a8f9557f19dfd13cb1d9dad9fbf"
 dependencies = [
  "hex",
  "libloading 0.9.0",
@@ -3378,7 +3379,7 @@ dependencies = [
 [[package]]
 name = "repak"
 version = "0.2.3"
-source = "git+https://github.com/oZanderr/repak.git#b9258c204cc3c1485a1d522171a11c11e323cd92"
+source = "git+https://github.com/oZanderr/repak.git#e9c8f5db7c755a8f9557f19dfd13cb1d9dad9fbf"
 dependencies = [
  "aes",
  "base64 0.22.1",
@@ -3430,7 +3431,7 @@ dependencies = [
 [[package]]
 name = "retoc"
 version = "0.1.5"
-source = "git+https://github.com/oZanderr/retoc?branch=master#a14fbb80a2799308faa9f064982927a6dcdf93a7"
+source = "git+https://github.com/oZanderr/retoc?branch=master#2723c92b77fcc521996d487c34eba9b83643832e"
 dependencies = [
  "aes",
  "anyhow",
@@ -3507,7 +3508,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3866,7 +3867,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -4399,7 +4400,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4797,7 +4798,7 @@ checksum = "51b70b87d15e91f553711b40df3048faf27a7a04e01e0ddc0cf9309f0af7c2ca"
 dependencies = [
  "memoffset",
  "tempfile",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
