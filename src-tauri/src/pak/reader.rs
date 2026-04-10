@@ -132,11 +132,14 @@ pub(super) fn list_pak_files_info(game_root: &str) -> Result<Vec<PakFileInfo>, S
     Ok(paths
         .into_iter()
         .map(|p| {
-            let pak_path = Path::new(&p);
-            let stem = pak_path.with_extension("");
+            // String-based swap: Path::with_extension breaks on dotted filenames.
+            let base = p
+                .strip_suffix(".pak")
+                .or_else(|| p.strip_suffix(".PAK"))
+                .unwrap_or(&p);
             PakFileInfo {
-                has_utoc: stem.with_extension("utoc").exists(),
-                has_ucas: stem.with_extension("ucas").exists(),
+                has_utoc: Path::new(&format!("{base}.utoc")).exists(),
+                has_ucas: Path::new(&format!("{base}.ucas")).exists(),
                 path: p,
             }
         })
