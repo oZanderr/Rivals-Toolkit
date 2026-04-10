@@ -8,9 +8,11 @@ import {
   FolderOpen,
   PackageOpen,
   Download,
+  FileOutput,
   Search,
   Package,
   PackagePlus,
+  Layers,
   List,
   CheckCircle2,
   XCircle,
@@ -19,38 +21,67 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 
+type RepackFormat = "pak" | "iostore";
 type StatusType = "ok" | "err" | "info";
+
+interface PakFileInfo {
+  path: string;
+  has_utoc: boolean;
+  has_ucas: boolean;
+}
+
+type ContentSource = "pak" | "utoc";
+
+interface ContentEntry {
+  path: string;
+  source: ContentSource;
+}
 
 interface Props {
   gamePath: string;
 }
 
-export function PakManager({ gamePath }: Props) {
-  const [pakList, setPakList] = useState<string[]>([]);
+export function AssetManager({ gamePath }: Props) {
+  const [pakList, setPakList] = useState<PakFileInfo[]>([]);
   const [selectedPak, setSelectedPak] = useState<string>("");
-  const [pakContents, setPakContents] = useState<string[]>([]);
+  const [pakContents, setPakContents] = useState<ContentEntry[]>([]);
   const [filterText, setFilterText] = useState("");
   const [notice, setNotice] = useState<{ msg: string; type: StatusType } | null>(null);
   const [busy, setBusy] = useState(false);
   const [manualPaks, setManualPaks] = useState<Set<string>>(new Set());
   const [debouncedFilter, setDebouncedFilter] = useState("");
+  const [repackFormat, setRepackFormat] = useState<RepackFormat>("pak");
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const filterTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const contentsScrollRef = useRef<HTMLDivElement>(null);
 
-  const showNotice = (msg: string, type: StatusType, duration = 6000) => {
+  const showNotice = (msg: string, type: StatusType, duration?: number) => {
     // Strip any trailing path from error messages
     const clean =
       type === "err" ? msg.replace(/:\s*[A-Za-z]:\\[^\r\n]*|:\s*\/[^\r\n]*/g, "").trim() : msg;
     if (noticeTimer.current) clearTimeout(noticeTimer.current);
     setNotice({ msg: clean, type });
-    noticeTimer.current = setTimeout(() => setNotice(null), duration);
+    // "info" notices persist until replaced by another notice (no auto-dismiss)
+    const ms = duration ?? (type === "info" ? 0 : 6000);
+    if (ms > 0) {
+      noticeTimer.current = setTimeout(() => setNotice(null), ms);
+    }
   };
 
-  // Pre-compute lowercase file names once when pakContents changes
-  const pakContentsLower = useMemo(() => pakContents.map((f) => f.toLowerCase()), [pakContents]);
+  // Pre-compute lowercase paths once when pakContents changes
+  const pakContentsLower = useMemo(
+    () => pakContents.map((e) => e.path.toLowerCase()),
+    [pakContents]
+  );
 
   // Filter against pre-lowered names, debounced input
   const visible = useMemo(() => {
@@ -65,6 +96,11 @@ export function PakManager({ gamePath }: Props) {
     if (filterTimerRef.current) clearTimeout(filterTimerRef.current);
     filterTimerRef.current = setTimeout(() => setDebouncedFilter(value), 150);
   }, []);
+
+  const selectedIsIoStore = useMemo(() => {
+    const info = pakList.find((p) => p.path === selectedPak);
+    return !!(info?.has_utoc && info?.has_ucas);
+  }, [pakList, selectedPak]);
 
   // Virtualizer for the contents list
   const contentsVirtualizer = useVirtualizer({
@@ -85,7 +121,7 @@ export function PakManager({ gamePath }: Props) {
 
     setBusy(true);
     try {
-      const paks = await invoke<string[]>("list_pak_files", { gameRoot: gamePath });
+      const paks = await invoke<PakFileInfo[]>("list_pak_files_info", { gameRoot: gamePath });
       setPakList(paks);
 
       if (paks.length === 0) {
@@ -93,7 +129,7 @@ export function PakManager({ gamePath }: Props) {
         setPakContents([]);
         showNotice("No .pak files found.", "err");
       } else {
-        if (selectedPak && !paks.includes(selectedPak)) {
+        if (selectedPak && !paks.some((p) => p.path === selectedPak)) {
           setSelectedPak("");
           setPakContents([]);
           setFilterText("");
@@ -115,11 +151,40 @@ export function PakManager({ gamePath }: Props) {
     setDebouncedFilter("");
     setPakContents([]);
 
+    const info = pakList.find((p) => p.path === pak);
+    const isIoStore = info?.has_utoc && info?.has_ucas;
+
     setBusy(true);
     try {
-      const files = await invoke<string[]>("list_pak_contents", { pakPath: pak });
-      setPakContents(files);
-      showNotice(`${files.length} file(s) inside ${pak.split(/[/\\]/).pop()}`, "ok");
+      const utocPath = isIoStore ? pak.replace(/\.pak$/i, ".utoc") : "";
+      const [pakFiles, utocResult] = await Promise.all([
+        invoke<string[]>("list_pak_contents", { pakPath: pak }),
+        isIoStore
+          ? invoke<string[]>("list_utoc_contents", { utocPath }).then(
+              (files) => ({ ok: true as const, files }),
+              (err) => ({ ok: false as const, err: String(err) })
+            )
+          : Promise.resolve({ ok: true as const, files: [] as string[] }),
+      ]);
+
+      const entries: ContentEntry[] = [];
+      for (const f of pakFiles) {
+        if (isIoStore && f === "chunknames") continue;
+        entries.push({ path: f, source: "pak" });
+      }
+      if (utocResult.ok) {
+        for (const f of utocResult.files) {
+          entries.push({ path: f, source: "utoc" });
+        }
+      }
+
+      setPakContents(entries);
+      const displayName = pak.split(/[/\\]/).pop();
+      if (!utocResult.ok) {
+        showNotice(`${entries.length} file(s) inside ${displayName} (utoc failed to load)`, "err");
+      } else {
+        showNotice(`${entries.length} file(s) inside ${displayName}`, "ok");
+      }
     } catch (e: unknown) {
       showNotice(String(e), "err");
     } finally {
@@ -133,7 +198,14 @@ export function PakManager({ gamePath }: Props) {
       filters: [{ name: "Pak files", extensions: ["pak"] }],
     });
     if (typeof selected === "string") {
-      setPakList((prev) => (prev.includes(selected) ? prev : [...prev, selected]));
+      const [hasUtoc, hasUcas] = await Promise.all([
+        invoke<boolean>("path_exists", { path: selected.replace(/\.pak$/i, ".utoc") }),
+        invoke<boolean>("path_exists", { path: selected.replace(/\.pak$/i, ".ucas") }),
+      ]);
+      setPakList((prev) => {
+        if (prev.some((p) => p.path === selected)) return prev;
+        return [...prev, { path: selected, has_utoc: hasUtoc, has_ucas: hasUcas }];
+      });
       setManualPaks((prev) => new Set(prev).add(selected));
       await inspectPak(selected);
     }
@@ -144,7 +216,6 @@ export function PakManager({ gamePath }: Props) {
     const dir = await open({ directory: true, multiple: false });
     if (!dir || typeof dir !== "string") return;
 
-    // Auto-create a subfolder named after the pak (without extension)
     const pakBaseName =
       selectedPak
         .replace(/\\/g, "/")
@@ -153,14 +224,33 @@ export function PakManager({ gamePath }: Props) {
         ?.replace(/\.pak$/i, "") ?? "output";
     const outputDir = `${dir}\\${pakBaseName}`;
 
+    const info = pakList.find((p) => p.path === selectedPak);
+    const isIoStore = info?.has_utoc && info?.has_ucas;
+
     setBusy(true);
     showNotice("Unpacking\u2026", "info");
     try {
-      const files = await invoke<string[]>("unpack_pak", {
+      let totalFiles = 0;
+
+      if (isIoStore) {
+        // IoStore: extract raw chunks from utoc + pak contents (excluding chunknames)
+        const utocPath = selectedPak.replace(/\.pak$/i, ".utoc");
+        const utocFiles = await invoke<string[]>("extract_utoc", {
+          utocPath,
+          outputDir,
+        });
+        totalFiles += utocFiles.length;
+      }
+
+      // Extract pak contents (skip chunknames for IoStore companions)
+      const pakFiles = await invoke<string[]>("unpack_pak", {
         pakPath: selectedPak,
         outputDir,
+        skip: isIoStore ? ["chunknames"] : [],
       });
-      showNotice(`Extracted ${files.length} file(s) to ${outputDir}`, "ok");
+      totalFiles += pakFiles.length;
+
+      showNotice(`Extracted ${totalFiles} file(s) to ${outputDir}`, "ok");
     } catch (e: unknown) {
       showNotice(String(e), "err");
     } finally {
@@ -168,17 +258,63 @@ export function PakManager({ gamePath }: Props) {
     }
   }
 
-  async function extractSingleFile(filePath: string) {
-    const outPath = await save({ defaultPath: filePath.split("/").pop() });
+  async function extractSingleEntry(entry: ContentEntry) {
+    const outPath = await save({ defaultPath: entry.path.split("/").pop() });
     if (!outPath) return;
     setBusy(true);
     try {
-      await invoke("extract_single_file", {
-        pakPath: selectedPak,
-        fileName: filePath,
-        outputPath: outPath,
-      });
+      if (entry.source === "utoc") {
+        const utocPath = selectedPak.replace(/\.pak$/i, ".utoc");
+        await invoke("extract_utoc_file", {
+          utocPath,
+          fileName: entry.path,
+          outputPath: outPath,
+        });
+      } else {
+        await invoke("extract_single_file", {
+          pakPath: selectedPak,
+          fileName: entry.path,
+          outputPath: outPath,
+        });
+      }
       showNotice(`Extracted: ${outPath}`, "ok");
+    } catch (e: unknown) {
+      showNotice(String(e), "err");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function exportLegacy() {
+    if (!selectedPak) return;
+    const dir = await open({ directory: true, multiple: false });
+    if (!dir || typeof dir !== "string") return;
+
+    const pakBaseName =
+      selectedPak
+        .replace(/\\/g, "/")
+        .split("/")
+        .pop()
+        ?.replace(/\.pak$/i, "") ?? "output";
+    const outputDir = `${dir}\\${pakBaseName}_legacy`;
+    const utocPath = selectedPak.replace(/\.pak$/i, ".utoc");
+
+    setBusy(true);
+    showNotice("Converting to legacy format\u2026 (this may take a while)", "info");
+    try {
+      const files = await invoke<string[]>("extract_utoc_legacy", {
+        utocPath,
+        gameRoot: gamePath,
+        outputDir,
+        filter: [],
+      });
+      const warning = files.find((f) => f.startsWith("__warnings__:"));
+      const exported = files.filter((f) => !f.startsWith("__warnings__:"));
+      if (warning) {
+        showNotice(`Exported ${exported.length} asset(s) (some failed to convert)`, "err");
+      } else {
+        showNotice(`Exported ${exported.length} asset(s) to legacy format`, "ok");
+      }
     } catch (e: unknown) {
       showNotice(String(e), "err");
     } finally {
@@ -190,41 +326,59 @@ export function PakManager({ gamePath }: Props) {
     const inputDir = await open({ directory: true, multiple: false });
     if (!inputDir || typeof inputDir !== "string") return;
 
-    // Derive default pak name from folder name
+    // Derive default output name from folder name
     const folderName = inputDir.replace(/\\/g, "/").split("/").pop() ?? "mod_output";
     const baseName = folderName.replace(/_9999999_P$/i, "");
-    const defaultPakName = `${baseName}_9999999_P.pak`;
-
-    // Default save location: mods folder
     const modsDir = `${gamePath}\\MarvelGame\\Marvel\\Content\\Paks\\~mods`;
-    const defaultPath = `${modsDir}\\${defaultPakName}`;
 
-    const outputPak = await save({
-      defaultPath,
-      filters: [{ name: "Pak files", extensions: ["pak"] }],
-    });
-    if (!outputPak) return;
-    setBusy(true);
-    showNotice("Repacking\u2026", "info");
-    try {
-      await invoke("repack_pak", { inputDir, outputPak });
-      showNotice(`Repacked to: ${outputPak}`, "ok");
-    } catch (e: unknown) {
-      showNotice(String(e), "err");
-    } finally {
-      setBusy(false);
+    if (repackFormat === "iostore") {
+      // IoStore: output is .utoc (companion .ucas and .pak are created automatically)
+      const defaultPath = `${modsDir}\\${baseName}_9999999_P.utoc`;
+      const outputUtoc = await save({
+        defaultPath,
+        filters: [{ name: "IoStore container", extensions: ["utoc"] }],
+      });
+      if (!outputUtoc) return;
+      setBusy(true);
+      showNotice("Repacking to IoStore\u2026", "info");
+      try {
+        await invoke("repack_iostore", { inputDir, outputUtoc });
+        showNotice(`Repacked IoStore to: ${outputUtoc}`, "ok");
+      } catch (e: unknown) {
+        showNotice(String(e), "err");
+      } finally {
+        setBusy(false);
+      }
+    } else {
+      // Pak: standard pak repack
+      const defaultPath = `${modsDir}\\${baseName}_9999999_P.pak`;
+      const outputPak = await save({
+        defaultPath,
+        filters: [{ name: "Pak files", extensions: ["pak"] }],
+      });
+      if (!outputPak) return;
+      setBusy(true);
+      showNotice("Repacking\u2026", "info");
+      try {
+        await invoke("repack_pak", { inputDir, outputPak });
+        showNotice(`Repacked to: ${outputPak}`, "ok");
+      } catch (e: unknown) {
+        showNotice(String(e), "err");
+      } finally {
+        setBusy(false);
+      }
     }
   }
 
   const pakName = selectedPak ? selectedPak.split(/[/\\]/).pop() : null;
   const footerText = !selectedPak
     ? "\u00A0"
-    : `${visible.length} file(s)${visible.length !== pakContents.length ? ` of ${pakContents.length}` : ""} inside ${pakName} — double-click a file to extract`;
+    : `${visible.length} file(s)${visible.length !== pakContents.length ? ` of ${pakContents.length}` : ""} inside ${pakName} \u2014 double-click a file to extract`;
 
   return (
     <div className="flex flex-1 min-h-0 flex-col gap-4">
       <div className="flex min-h-8 shrink-0 items-center gap-3">
-        <h2 className="shrink-0 text-xl font-bold">Pak Manager</h2>
+        <h2 className="shrink-0 text-xl font-bold">Asset Manager</h2>
         {notice && (
           <span
             className={cn(
@@ -245,26 +399,75 @@ export function PakManager({ gamePath }: Props) {
           </span>
         )}
         <div className="ml-auto flex shrink-0 items-center gap-2">
-          <Button variant="outline" size="sm" onClick={openPak} disabled={busy}>
-            <Package size={15} />
-            Open Pak
-          </Button>
-          <Button variant="blue" size="sm" onClick={openAndRepack} disabled={busy}>
-            <PackageOpen size={15} />
-            Repack Folder → Pak
-          </Button>
+          <div className="flex items-center">
+            <Select value={repackFormat} onValueChange={(v) => setRepackFormat(v as RepackFormat)}>
+              <SelectTrigger
+                size="sm"
+                className="h-8 w-[120px] rounded-r-none border-r-0 text-sm font-medium"
+              >
+                <SelectValue>
+                  <span className="flex items-center gap-1.5">
+                    {repackFormat === "pak" ? (
+                      <Package size={15} strokeWidth={2} className="text-foreground" />
+                    ) : (
+                      <Layers size={15} strokeWidth={2} className="text-foreground" />
+                    )}
+                    {repackFormat === "pak" ? "Pak" : "IoStore"}
+                  </span>
+                </SelectValue>
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="pak">
+                  <Package size={13} className="text-foreground inline-block mr-1.5 -mt-px" />
+                  Pak
+                </SelectItem>
+                <SelectItem value="iostore">
+                  <Layers size={13} className="text-foreground inline-block mr-1.5 -mt-px" />
+                  IoStore
+                </SelectItem>
+              </SelectContent>
+            </Select>
+            <Button
+              variant="blue"
+              size="sm"
+              className="rounded-l-none"
+              onClick={openAndRepack}
+              disabled={busy}
+            >
+              <PackageOpen size={15} />
+              Repack Folder
+            </Button>
+          </div>
         </div>
       </div>
 
       <div className="flex min-h-0 flex-1 flex-row gap-4">
         <div className="flex min-h-0 w-[clamp(280px,28vw,560px)] min-w-[280px] max-w-[560px] shrink-0 flex-col">
           <Card className="flex min-h-0 flex-1 flex-col gap-3 p-3 bg-card">
-            <div className="flex shrink-0 items-center justify-between">
+            <div className="flex shrink-0 items-center justify-between gap-1.5">
               <h3 className="text-sm font-semibold">Game Paks</h3>
-              <Button variant="outline" size="sm" onClick={listPaks} disabled={busy}>
-                <List size={14} />
-                List Game Paks
-              </Button>
+              <div className="flex items-center gap-1.5">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={openPak}
+                  disabled={busy}
+                  title="Open Pak"
+                >
+                  <FolderOpen size={14} />
+                  Browse
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={listPaks}
+                  disabled={busy}
+                  title="List all paks from your game's Paks folder"
+                >
+                  <List size={14} />
+                  List Paks
+                </Button>
+              </div>
             </div>
 
             <p className="shrink-0 text-[11px] text-muted-foreground">
@@ -285,13 +488,14 @@ export function PakManager({ gamePath }: Props) {
                 </div>
               ) : (
                 <ul>
-                  {pakList.map((p) => {
+                  {pakList.map((info) => {
+                    const p = info.path;
                     const isSelected = selectedPak === p;
                     const isMod = /[/\\]~mods[/\\]/i.test(p);
                     const isManual = manualPaks.has(p);
-                    const displayName = isMod
-                      ? `~mods/${p.split(/[/\\]/).pop()}`
-                      : p.split(/[/\\]/).pop();
+                    const isIoStore = info.has_utoc && info.has_ucas;
+                    const fileName = p.split(/[/\\]/).pop();
+                    const displayName = isMod ? `~mods/${fileName}` : fileName;
                     return (
                       <li
                         key={p}
@@ -301,7 +505,7 @@ export function PakManager({ gamePath }: Props) {
                           isSelected ? "bg-secondary text-foreground" : "hover:bg-secondary/50"
                         )}
                         onClick={() => inspectPak(p)}
-                        title={p.split(/[/\\]/).pop()}
+                        title={fileName}
                       >
                         {isManual ? (
                           <PackagePlus size={14} className="shrink-0 text-sky-400" />
@@ -315,6 +519,11 @@ export function PakManager({ gamePath }: Props) {
                           />
                         )}
                         <span className="flex-1 truncate text-[12px]">{displayName}</span>
+                        {isIoStore && (
+                          <span className="shrink-0 rounded bg-purple-500/20 px-1.5 py-0.5 text-[9px] font-semibold uppercase leading-none text-purple-400">
+                            IoStore
+                          </span>
+                        )}
                       </li>
                     );
                   })}
@@ -343,15 +552,29 @@ export function PakManager({ gamePath }: Props) {
               </span>
             </div>
 
-            <Button
-              variant="green"
-              size="sm"
-              onClick={unpackSelected}
-              disabled={busy || !selectedPak}
-            >
-              <Download size={14} />
-              Extract All…
-            </Button>
+            <div className="flex gap-1.5">
+              {selectedIsIoStore && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={exportLegacy}
+                  disabled={busy || !selectedPak}
+                  title="Convert IoStore assets to legacy .uasset/.uexp for UAssetGUI"
+                >
+                  <FileOutput size={14} />
+                  Export Legacy
+                </Button>
+              )}
+              <Button
+                variant="green"
+                size="sm"
+                onClick={unpackSelected}
+                disabled={busy || !selectedPak}
+              >
+                <Download size={14} />
+                Extract All
+              </Button>
+            </div>
           </div>
 
           {/* Filter — always rendered */}
@@ -390,7 +613,7 @@ export function PakManager({ gamePath }: Props) {
                 style={{ height: `${contentsVirtualizer.getTotalSize()}px`, position: "relative" }}
               >
                 {contentsVirtualizer.getVirtualItems().map((vRow) => {
-                  const f = visible[vRow.index];
+                  const entry = visible[vRow.index];
                   return (
                     <div
                       key={vRow.index}
@@ -399,11 +622,16 @@ export function PakManager({ gamePath }: Props) {
                         height: `${vRow.size}px`,
                         transform: `translateY(${vRow.start}px)`,
                       }}
-                      onDoubleClick={() => extractSingleFile(f)}
-                      title={f}
+                      onDoubleClick={() => extractSingleEntry(entry)}
+                      title={entry.path}
                     >
-                      <span className="shrink-0 text-muted-foreground">{fileIcon(f)}</span>
-                      <span className="truncate font-mono text-[11px]">{f}</span>
+                      <span className="shrink-0 text-muted-foreground">{fileIcon(entry.path)}</span>
+                      <span className="truncate font-mono text-[11px]">{entry.path}</span>
+                      {entry.source === "utoc" && (
+                        <span className="ml-auto shrink-0 rounded bg-purple-500/20 px-1 py-0.5 text-[8px] font-semibold uppercase leading-none text-purple-400">
+                          utoc
+                        </span>
+                      )}
                     </div>
                   );
                 })}

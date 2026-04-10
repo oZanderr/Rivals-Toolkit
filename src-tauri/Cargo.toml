@@ -25,6 +25,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 repak = { git = "https://github.com/oZanderr/repak", branch = "master", features = ["oodle"] }
 rebnk = { git = "https://github.com/oZanderr/rebnk", branch = "master" }
+retoc = { git = "https://github.com/oZanderr/retoc", branch = "master" }
 aes = "0.8.4"
 hex = "0.4"
 walkdir = "2"
