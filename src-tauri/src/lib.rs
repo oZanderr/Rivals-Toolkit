@@ -24,6 +24,8 @@ pub fn run() {
             commands::list_pak_contents,
             commands::unpack_pak,
             commands::extract_single_file,
+            commands::extract_pak_files,
+            commands::extract_utoc_files,
             commands::repack_pak,
             commands::repack_iostore,
             commands::list_utoc_contents,

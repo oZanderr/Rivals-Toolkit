@@ -236,6 +236,54 @@ pub(crate) fn extract_utoc(utoc_path: &str, output_dir: &str) -> Result<Vec<Stri
     Ok(extracted)
 }
 
+/// Extract multiple files from a .utoc container into an output directory.
+pub(crate) fn extract_utoc_files(
+    utoc_path: &str,
+    file_names: &[String],
+    output_dir: &str,
+) -> Result<Vec<String>, String> {
+    let store = open_utoc(utoc_path)?;
+    let output = Path::new(output_dir);
+    std::fs::create_dir_all(output).map_err(|e| e.to_string())?;
+
+    let wanted: HashSet<&str> = file_names.iter().map(|s| s.as_str()).collect();
+
+    let chunks: Vec<_> = store
+        .chunks()
+        .filter_map(|chunk| {
+            let full_path = chunk.path()?;
+            let stripped = full_path
+                .strip_prefix(MOUNT_POINT)
+                .unwrap_or(&full_path)
+                .to_string();
+            if wanted.contains(stripped.as_str()) {
+                Some((chunk, stripped))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let mut extracted: Vec<String> = chunks
+        .par_iter()
+        .map(|(chunk, stripped)| {
+            let dest = output.join(stripped);
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("Failed to create dir for {stripped}: {e}"))?;
+            }
+            let data = chunk
+                .read()
+                .map_err(|e| format!("Failed to read {stripped}: {e}"))?;
+            std::fs::write(&dest, data).map_err(|e| format!("Failed to write {stripped}: {e}"))?;
+            Ok(stripped.clone())
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    extracted.sort();
+    Ok(extracted)
+}
+
 /// Extract a single file from a .utoc container by matching its path.
 pub(crate) fn extract_utoc_file(
     utoc_path: &str,

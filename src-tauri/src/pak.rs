@@ -62,6 +62,22 @@ pub(crate) fn extract_single_file(
     reader::extract_single_file(pak_path, file_name, output_path)
 }
 
+pub(crate) fn extract_pak_files(
+    pak_path: &str,
+    file_names: &[String],
+    output_dir: &str,
+) -> Result<Vec<String>, String> {
+    reader::extract_pak_files(pak_path, file_names, output_dir)
+}
+
+pub(crate) fn extract_utoc_files(
+    utoc_path: &str,
+    file_names: &[String],
+    output_dir: &str,
+) -> Result<Vec<String>, String> {
+    iostore::extract_utoc_files(utoc_path, file_names, output_dir)
+}
+
 pub(crate) fn repack_pak(input_dir: &str, output_pak: &str) -> Result<(), String> {
     writer::repack_pak(input_dir, output_pak)
 }

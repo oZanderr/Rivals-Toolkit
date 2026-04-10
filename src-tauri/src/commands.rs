@@ -65,6 +65,32 @@ pub(crate) async fn extract_single_file(
 }
 
 #[tauri::command]
+pub(crate) async fn extract_pak_files(
+    pak_path: String,
+    file_names: Vec<String>,
+    output_dir: String,
+) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        pak::extract_pak_files(&pak_path, &file_names, &output_dir)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub(crate) async fn extract_utoc_files(
+    utoc_path: String,
+    file_names: Vec<String>,
+    output_dir: String,
+) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        pak::extract_utoc_files(&utoc_path, &file_names, &output_dir)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 pub(crate) async fn repack_pak(input_dir: String, output_pak: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || pak::repack_pak(&input_dir, &output_pak))
         .await

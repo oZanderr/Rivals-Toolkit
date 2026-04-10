@@ -17,6 +17,9 @@ import {
   Layers,
   List,
   CheckCircle2,
+  CheckSquare2,
+  Square,
+  MinusSquare,
   XCircle,
 } from "lucide-react";
 
@@ -81,11 +84,14 @@ export function AssetManager({ gamePath }: Props) {
     count: number;
     utocPath: string;
     outputDir: string;
+    filter?: string[];
   } | null>(null);
   const [legacyProgress, setLegacyProgress] = useState<{
     current: number;
     total: number;
   } | null>(null);
+  const [selectedEntries, setSelectedEntries] = useState<Set<string>>(new Set());
+  const lastClickedIndex = useRef<number | null>(null);
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const filterTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const contentsScrollRef = useRef<HTMLDivElement>(null);
@@ -193,6 +199,8 @@ export function AssetManager({ gamePath }: Props) {
     setFilterText("");
     setDebouncedFilter("");
     setPakContents([]);
+    setSelectedEntries(new Set());
+    lastClickedIndex.current = null;
 
     const info = pakList.find((p) => p.path === pak);
     const isIoStore = info?.has_utoc && info?.has_ucas;
@@ -368,7 +376,7 @@ export function AssetManager({ gamePath }: Props) {
     }
   }
 
-  async function runLegacyExtraction(utocPath: string, outputDir: string) {
+  async function runLegacyExtraction(utocPath: string, outputDir: string, filter: string[] = []) {
     setBusy(true);
     setLegacyProgress(null);
     showNotice("Converting to legacy format\u2026", "info");
@@ -377,7 +385,7 @@ export function AssetManager({ gamePath }: Props) {
         utocPath,
         gameRoot: gamePath,
         outputDir,
-        filter: [],
+        filter,
       });
       const warning = files.find((f) => f.startsWith("__warnings__:"));
       const exported = files.filter((f) => !f.startsWith("__warnings__:"));
@@ -406,6 +414,133 @@ export function AssetManager({ gamePath }: Props) {
       await invoke("cancel_legacy_extraction");
     } catch {
       // Best-effort — extraction loop will stop on next batch regardless
+    }
+  }
+
+  function handleEntryClick(index: number, e: React.MouseEvent) {
+    setSelectedEntries((prev) => {
+      const next = new Set(prev);
+      if (e.shiftKey && lastClickedIndex.current !== null) {
+        const start = Math.min(lastClickedIndex.current, index);
+        const end = Math.max(lastClickedIndex.current, index);
+        for (let i = start; i <= end; i++) {
+          next.add(visible[i].path);
+        }
+      } else if (e.ctrlKey || e.metaKey) {
+        const path = visible[index].path;
+        if (next.has(path)) next.delete(path);
+        else next.add(path);
+      } else {
+        next.clear();
+        next.add(visible[index].path);
+      }
+      return next;
+    });
+    lastClickedIndex.current = index;
+  }
+
+  function toggleSelectAll() {
+    setSelectedEntries((prev) => {
+      if (prev.size === visible.length && visible.every((e) => prev.has(e.path))) {
+        return new Set();
+      }
+      return new Set(visible.map((e) => e.path));
+    });
+  }
+
+  const selectedPakEntries = useMemo(
+    () => pakContents.filter((e) => selectedEntries.has(e.path) && e.source === "pak"),
+    [pakContents, selectedEntries]
+  );
+  const selectedUtocEntries = useMemo(
+    () => pakContents.filter((e) => selectedEntries.has(e.path) && e.source === "utoc"),
+    [pakContents, selectedEntries]
+  );
+
+  async function extractSelected() {
+    if (selectedEntries.size === 0 || !selectedPak) return;
+    const dir = await open({ directory: true, multiple: false });
+    if (!dir || typeof dir !== "string") return;
+
+    const pakBaseName =
+      selectedPak
+        .replace(/\\/g, "/")
+        .split("/")
+        .pop()
+        ?.replace(/\.pak$/i, "") ?? "output";
+    const outputDir = `${dir}\\${pakBaseName}`;
+
+    setBusy(true);
+    showNotice("Extracting selected\u2026", "info");
+    try {
+      let totalFiles = 0;
+
+      if (selectedPakEntries.length > 0) {
+        const names = selectedPakEntries.map((e) => e.path);
+        const extracted = await invoke<string[]>("extract_pak_files", {
+          pakPath: selectedPak,
+          fileNames: names,
+          outputDir,
+        });
+        totalFiles += extracted.length;
+      }
+
+      if (selectedUtocEntries.length > 0) {
+        const utocPath = selectedPak.replace(/\.pak$/i, ".utoc");
+        const names = selectedUtocEntries.map((e) => e.path);
+        const extracted = await invoke<string[]>("extract_utoc_files", {
+          utocPath,
+          fileNames: names,
+          outputDir,
+        });
+        totalFiles += extracted.length;
+      }
+
+      showNotice(`Extracted ${totalFiles} file(s) to ${outputDir}`, "ok", {
+        revealPath: outputDir,
+      });
+    } catch (e: unknown) {
+      showNotice(String(e), "err");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function exportLegacySelected() {
+    if (selectedUtocEntries.length === 0 || !selectedPak) return;
+    const dir = await open({ directory: true, multiple: false });
+    if (!dir || typeof dir !== "string") return;
+
+    const pakBaseName =
+      selectedPak
+        .replace(/\\/g, "/")
+        .split("/")
+        .pop()
+        ?.replace(/\.pak$/i, "") ?? "output";
+    const outputDir = `${dir}\\${pakBaseName}`;
+    const utocPath = selectedPak.replace(/\.pak$/i, ".utoc");
+    const filter = selectedUtocEntries.map((e) => e.path);
+
+    setBusy(true);
+    showNotice("Counting packages\u2026", "info");
+    try {
+      const count = await invoke<number>("count_utoc_legacy_packages", {
+        utocPath,
+        gameRoot: gamePath,
+        filter,
+      });
+      setBusy(false);
+      setNotice(null);
+
+      if (count > 500) {
+        setLegacyConfirm({ count, utocPath, outputDir, filter });
+        return;
+      }
+
+      await runLegacyExtraction(utocPath, outputDir, filter);
+    } catch (e: unknown) {
+      showNotice(String(e), "err");
+      setBusy(false);
     }
   }
 
@@ -460,7 +595,9 @@ export function AssetManager({ gamePath }: Props) {
   const pakName = selectedPak ? selectedPak.split(/[/\\]/).pop() : null;
   const footerText = !selectedPak
     ? "\u00A0"
-    : `${visible.length} file(s)${visible.length !== pakContents.length ? ` of ${pakContents.length}` : ""} inside ${pakName} \u2014 double-click a file to extract`;
+    : selectedEntries.size > 0
+      ? `${selectedEntries.size} selected \u2014 ${visible.length} file(s)${visible.length !== pakContents.length ? ` of ${pakContents.length}` : ""} inside ${pakName}`
+      : `${visible.length} file(s)${visible.length !== pakContents.length ? ` of ${pakContents.length}` : ""} inside ${pakName} \u2014 click to select, double-click to extract`;
 
   return (
     <div className="flex flex-1 min-h-0 flex-col gap-4">
@@ -662,43 +799,92 @@ export function AssetManager({ gamePath }: Props) {
             </div>
 
             <div className="flex gap-1.5">
-              {selectedIsIoStore && (
+              {selectedEntries.size > 0 && selectedIsIoStore && selectedUtocEntries.length > 0 && (
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={exportLegacy}
+                  onClick={exportLegacySelected}
                   disabled={busy || !selectedPak}
-                  title="Convert IoStore assets to legacy .uasset/.uexp for UAssetGUI"
+                  title="Convert selected IoStore assets to legacy format"
                 >
                   <FileOutput size={14} />
-                  Export Legacy
+                  Legacy ({selectedUtocEntries.length})
                 </Button>
               )}
-              <Button
-                variant="green"
-                size="sm"
-                onClick={unpackSelected}
-                disabled={busy || !selectedPak}
-              >
-                <Download size={14} />
-                Extract All
-              </Button>
+              {selectedEntries.size > 0 ? (
+                <Button
+                  variant="green"
+                  size="sm"
+                  onClick={extractSelected}
+                  disabled={busy || !selectedPak}
+                >
+                  <Download size={14} />
+                  Extract ({selectedEntries.size})
+                </Button>
+              ) : (
+                <>
+                  {selectedIsIoStore && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={exportLegacy}
+                      disabled={busy || !selectedPak}
+                      title="Convert IoStore assets to legacy .uasset/.uexp for UAssetGUI"
+                    >
+                      <FileOutput size={14} />
+                      Export Legacy
+                    </Button>
+                  )}
+                  <Button
+                    variant="green"
+                    size="sm"
+                    onClick={unpackSelected}
+                    disabled={busy || !selectedPak}
+                  >
+                    <Download size={14} />
+                    Extract All
+                  </Button>
+                </>
+              )}
             </div>
           </div>
 
-          {/* Filter — always rendered */}
-          <div className="relative shrink-0">
-            <Search
-              size={13}
-              className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground"
-            />
-            <Input
-              className="pl-7 font-mono text-xs"
-              placeholder="Filter files…"
-              value={filterText}
-              onChange={(e) => onFilterChange(e.target.value)}
-              disabled={!selectedPak}
-            />
+          {/* Filter + select-all */}
+          <div className="flex shrink-0 items-center gap-2">
+            {selectedPak && (
+              <button
+                className={cn(
+                  "flex shrink-0 items-center text-muted-foreground hover:text-foreground",
+                  visible.length === 0 && "invisible"
+                )}
+                onClick={toggleSelectAll}
+                title={
+                  selectedEntries.size === visible.length ? "Deselect all" : "Select all visible"
+                }
+              >
+                {selectedEntries.size === 0 ? (
+                  <Square size={16} />
+                ) : selectedEntries.size === visible.length &&
+                  visible.every((e) => selectedEntries.has(e.path)) ? (
+                  <CheckSquare2 size={16} />
+                ) : (
+                  <MinusSquare size={16} />
+                )}
+              </button>
+            )}
+            <div className="relative min-w-0 flex-1">
+              <Search
+                size={13}
+                className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground"
+              />
+              <Input
+                className="pl-7 font-mono text-xs"
+                placeholder="Filter files…"
+                value={filterText}
+                onChange={(e) => onFilterChange(e.target.value)}
+                disabled={!selectedPak}
+              />
+            </div>
           </div>
 
           {/* File list — always rendered */}
@@ -723,17 +909,27 @@ export function AssetManager({ gamePath }: Props) {
               >
                 {contentsVirtualizer.getVirtualItems().map((vRow) => {
                   const entry = visible[vRow.index];
+                  const isChecked = selectedEntries.has(entry.path);
                   return (
                     <div
                       key={vRow.index}
-                      className="absolute left-0 top-0 flex w-full cursor-pointer items-center gap-2 border-b border-border/50 px-3 hover:bg-secondary/50"
+                      className={cn(
+                        "absolute left-0 top-0 flex w-full cursor-pointer items-center gap-2 border-b border-border/50 px-3",
+                        isChecked ? "bg-secondary/80" : "hover:bg-secondary/50"
+                      )}
                       style={{
                         height: `${vRow.size}px`,
                         transform: `translateY(${vRow.start}px)`,
                       }}
+                      onClick={(e) => handleEntryClick(vRow.index, e)}
                       onDoubleClick={() => extractSingleEntry(entry)}
                       title={entry.path}
                     >
+                      {isChecked ? (
+                        <CheckSquare2 size={13} className="shrink-0 text-foreground" />
+                      ) : (
+                        <Square size={13} className="shrink-0 text-muted-foreground/50" />
+                      )}
                       <span className="shrink-0 text-muted-foreground">{fileIcon(entry.path)}</span>
                       <span className="truncate font-mono text-[11px]">{entry.path}</span>
                       {entry.source === "utoc" && (
@@ -782,7 +978,11 @@ export function AssetManager({ gamePath }: Props) {
               className={buttonVariants({ variant: "blue" })}
               onClick={() => {
                 if (legacyConfirm) {
-                  runLegacyExtraction(legacyConfirm.utocPath, legacyConfirm.outputDir);
+                  runLegacyExtraction(
+                    legacyConfirm.utocPath,
+                    legacyConfirm.outputDir,
+                    legacyConfirm.filter
+                  );
                 }
                 setLegacyConfirm(null);
               }}

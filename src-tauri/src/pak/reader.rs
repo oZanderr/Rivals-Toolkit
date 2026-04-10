@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::{fs, io::BufReader, path::Path};
 
 use serde::Serialize;
@@ -124,6 +125,38 @@ pub(super) fn extract_single_file(
     let mut out = fs::File::create(output_path).map_err(|e| e.to_string())?;
     pak.read_file(file_name, &mut reader, &mut out)
         .map_err(|e| e.to_string())
+}
+
+/// Extract multiple files from a pak into an output directory.
+pub(super) fn extract_pak_files(
+    pak_path: &str,
+    file_names: &[String],
+    output_dir: &str,
+) -> Result<Vec<String>, String> {
+    let output = Path::new(output_dir);
+    fs::create_dir_all(output).map_err(|e| e.to_string())?;
+
+    let pak = open_pak(Path::new(pak_path))?;
+    let wanted: HashSet<&str> = file_names.iter().map(|s| s.as_str()).collect();
+    let mut reader = BufReader::new(fs::File::open(pak_path).map_err(|e| e.to_string())?);
+    let mut extracted = Vec::new();
+
+    // Iterate in file-offset order for sequential reads
+    for name in pak.files_by_offset() {
+        let stripped = strip_mount_prefix(name);
+        if !wanted.contains(stripped.as_str()) {
+            continue;
+        }
+        let dest = output.join(&stripped);
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let mut out = fs::File::create(&dest).map_err(|e| e.to_string())?;
+        pak.read_file(name, &mut reader, &mut out)
+            .map_err(|e| e.to_string())?;
+        extracted.push(stripped);
+    }
+    Ok(extracted)
 }
 
 /// List pak files with companion file info (utoc/ucas presence).
