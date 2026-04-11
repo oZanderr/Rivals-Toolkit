@@ -135,5 +135,14 @@
       system-ui,
       -apple-system,
       sans-serif;
+    user-select: none;
+  }
+  /* Allow selection on content that users may want to copy */
+  input,
+  textarea,
+  [data-selectable],
+  code,
+  pre {
+    user-select: text;
   }
 }

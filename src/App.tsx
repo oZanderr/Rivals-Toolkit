@@ -53,13 +53,20 @@ function App() {
       .catch(() => {});
   }, []);
 
-  // Suppress webview's native Ctrl+F on all tabs
+  // Suppress webview defaults: native Ctrl+F and right-click context menu
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       if (e.key === "f" && (e.ctrlKey || e.metaKey)) e.preventDefault();
     }
+    function onContextMenu(e: MouseEvent) {
+      e.preventDefault();
+    }
     document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
+    document.addEventListener("contextmenu", onContextMenu);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      document.removeEventListener("contextmenu", onContextMenu);
+    };
   }, []);
 
   return (
