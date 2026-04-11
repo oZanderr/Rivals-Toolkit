@@ -75,6 +75,7 @@ pub(crate) fn repack_iostore(input_dir: &str, output_utoc: &str) -> Result<(), S
         toc_version,
         Some(container_header_version),
         MOUNT_POINT.into(),
+        Some(retoc::compression::CompressionMethod::Oodle),
     )
     .map_err(|e| e.to_string())?;
 
