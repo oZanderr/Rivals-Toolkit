@@ -1,17 +1,8 @@
 import { useState, useEffect, type ReactNode } from "react";
 
+import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
-import { openPath } from "@tauri-apps/plugin-opener";
-import {
-  House,
-  Package,
-  Settings,
-  Wrench,
-  Play,
-  ExternalLink,
-  FileCode2,
-  Volume2,
-} from "lucide-react";
+import { House, Package, Settings, Wrench, Play, FileCode2, Volume2 } from "lucide-react";
 
 import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
@@ -25,8 +16,6 @@ import { PakIniEditor } from "./components/PakIniEditor";
 import { Titlebar } from "./components/Titlebar";
 
 type Tab = "home" | "mod-tools" | "pak-manager" | "ini-editor" | "settings" | "hitsounds";
-
-const DISCORD_URL = "https://discord.com/invite/F2FYFfVqjs";
 
 interface InstallInfo {
   path: string;
@@ -48,6 +37,7 @@ function App() {
   const [gamePath, setGamePath] = useState("");
   const [installInfo, setInstallInfo] = useState<InstallInfo | null | undefined>(undefined);
   const [mountedTabs, setMountedTabs] = useState<Set<Tab>>(() => new Set(["home"]));
+  const [version, setVersion] = useState("");
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- functional updater is safe; accumulates visited tabs with no external side effects
@@ -57,6 +47,12 @@ function App() {
     });
   }, [activeTab]);
 
+  useEffect(() => {
+    getVersion()
+      .then(setVersion)
+      .catch(() => {});
+  }, []);
+
   // Suppress webview's native Ctrl+F on all tabs
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
@@ -65,14 +61,6 @@ function App() {
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
   }, []);
-
-  async function openDiscord() {
-    try {
-      await openPath(DISCORD_URL);
-    } catch (e) {
-      console.error("Failed to open Discord link:", e);
-    }
-  }
 
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-background text-foreground">
@@ -114,27 +102,16 @@ function App() {
             ))}
           </ul>
 
-          <>
-            <Separator className="mb-3" />
-            <div className="px-4 pb-4">
-              <div className="rounded-sm border border-border/70 bg-background/60 px-2.5 py-2">
-                <span className="block text-[10px] uppercase tracking-widest text-muted-foreground">
-                  About
+          {version && (
+            <>
+              <Separator className="mb-3" />
+              <div className="px-4 pb-4">
+                <span className="block text-center text-[10px] text-muted-foreground/50">
+                  v{version}
                 </span>
-                <span className="block text-[11px] text-muted-foreground">
-                  Join the discord for support.
-                </span>
-                <button
-                  onClick={openDiscord}
-                  className="mt-1.5 inline-flex items-center gap-1 text-[11px] font-medium text-blue-accent-foreground hover:opacity-90"
-                  title="Open Discord server"
-                >
-                  <ExternalLink size={11} />
-                  Oinkers Discord Server
-                </button>
               </div>
-            </div>
-          </>
+            </>
+          )}
         </nav>
 
         {/* Content — lazy-mount & keep-mounted to preserve state across tab switches */}

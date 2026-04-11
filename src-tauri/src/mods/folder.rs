@@ -161,7 +161,7 @@ pub(crate) fn install_from_zip(
     let file = std::fs::File::open(zip_path).map_err(|e| format!("Failed to open zip: {e}"))?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("Invalid zip file: {e}"))?;
 
-    let temp_dir = std::env::temp_dir().join(format!("oinkers_zip_{}", std::process::id()));
+    let temp_dir = std::env::temp_dir().join(format!("rivals_zip_{}", std::process::id()));
     if temp_dir.exists() {
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

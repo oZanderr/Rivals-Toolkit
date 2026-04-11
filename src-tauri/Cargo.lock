@@ -2654,30 +2654,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "oinkers-toolkit"
-version = "0.6.0"
-dependencies = [
- "aes",
- "blake3",
- "dirs 5.0.1",
- "hex",
- "lewton",
- "rayon",
- "rebnk",
- "repak 0.2.3 (git+https://github.com/oZanderr/repak?branch=master)",
- "retoc",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-opener",
- "walkdir",
- "winreg 0.52.0",
- "zip",
-]
-
-[[package]]
 name = "once_cell"
 version = "1.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3508,6 +3484,30 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-sys",
  "windows-sys 0.60.2",
+]
+
+[[package]]
+name = "rivals-toolkit"
+version = "0.6.0"
+dependencies = [
+ "aes",
+ "blake3",
+ "dirs 5.0.1",
+ "hex",
+ "lewton",
+ "rayon",
+ "rebnk",
+ "repak 0.2.3 (git+https://github.com/oZanderr/repak?branch=master)",
+ "retoc",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-opener",
+ "walkdir",
+ "winreg 0.52.0",
+ "zip",
 ]
 
 [[package]]

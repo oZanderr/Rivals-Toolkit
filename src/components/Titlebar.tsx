@@ -26,7 +26,7 @@ export function Titlebar() {
         className="flex flex-1 items-center gap-2 px-3 select-none"
       >
         <img src={icon} alt="" className="size-4 shrink-0" />
-        <span className="text-sm font-semibold leading-none text-foreground">Oinkers Toolkit</span>
+        <span className="text-sm font-semibold leading-none text-foreground">Rivals Toolkit</span>
         <span className="text-sm leading-none text-muted-foreground">|</span>
         <span className="text-sm leading-none text-muted-foreground">
           Marvel Rivals Modding Suite
