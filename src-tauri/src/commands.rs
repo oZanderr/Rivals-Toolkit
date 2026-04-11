@@ -320,7 +320,7 @@ pub(crate) async fn install_from_zip(
 
 #[tauri::command]
 pub(crate) fn validate_wav(path: String) -> Result<wav_to_wem::WavValidation, String> {
-    wav_to_wem::validate_wav(std::path::Path::new(&path)).map_err(|e| e.to_string())
+    wav_to_wem::validate_audio(std::path::Path::new(&path)).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -331,19 +331,25 @@ pub(crate) fn path_exists(path: String) -> bool {
 #[tauri::command]
 pub(crate) async fn build_hitsound_mod(
     game_root: String,
-    head_wav: Option<String>,
-    body_wav: Option<String>,
+    wavs: std::collections::HashMap<String, String>,
     mod_name: String,
     output_dir: String,
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        hitsounds::build_hitsound_mod_to_dir(
-            &game_root,
-            head_wav.as_deref(),
-            body_wav.as_deref(),
-            &mod_name,
-            &output_dir,
-        )
+        hitsounds::build_hitsound_mod_to_dir(&game_root, &wavs, &mod_name, &output_dir)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub(crate) async fn extract_hitsound_wavs(
+    game_root: String,
+    pak_path: String,
+    output_dir: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        hitsounds::extract_hitsound_wavs(&game_root, &pak_path, &output_dir)
     })
     .await
     .map_err(|e| e.to_string())?

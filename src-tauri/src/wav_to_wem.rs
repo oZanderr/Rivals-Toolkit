@@ -1,8 +1,13 @@
-//! WAV → WEM converter for Wwise PCM soundbanks.
+//! Audio ↔ WEM converter for Wwise PCM soundbanks.
 //!
-//! Converts a 16-bit PCM WAV file (mono or stereo) to a WEM file by replacing
-//! the WAV header with a Wwise-compatible RIFF header. Mono inputs are
-//! automatically upmixed to stereo by duplicating each sample.
+//! **Audio → WEM**: Converts a 16-bit PCM WAV or OGG Vorbis file to a WEM file.
+//! WAV headers are replaced with a Wwise-compatible RIFF header; OGG is decoded
+//! to PCM first via lewton. Mono inputs are automatically upmixed to stereo by
+//! duplicating each sample.
+//!
+//! **WEM → WAV**: Converts a Wwise WEM (RIFF with extended chunks) back to a
+//! standard 16-bit PCM WAV by stripping Wwise-specific chunks and writing a
+//! canonical 44-byte WAV header.
 
 use std::fs;
 use std::path::Path;
@@ -12,7 +17,7 @@ pub(crate) enum ConvertError {
     Io(std::io::Error),
     /// Malformed RIFF/WAV structure.
     InvalidWav(String),
-    /// Audio format that cannot be converted (e.g. mono, 24-bit).
+    /// Audio format that cannot be converted (e.g. 24-bit, surround).
     UnsupportedFormat(String),
 }
 
@@ -172,9 +177,43 @@ pub(crate) struct WavValidation {
     pub duration: f64,
 }
 
-/// Convert a WAV file directly to in-memory WEM bytes.
+/// Build a stereo WEM from raw 16-bit PCM bytes.
+/// Mono input is upmixed by duplicating each sample to both channels.
+fn pcm_to_wem(pcm: &[u8], channels: u16, sample_rate: u32) -> Result<(Vec<u8>, u32)> {
+    if channels != 1 && channels != 2 {
+        return Err(ConvertError::UnsupportedFormat(format!(
+            "expected 1 or 2 channels, got {channels}"
+        )));
+    }
+
+    if channels == 1 {
+        let stereo_size = pcm.len() as u32 * 2;
+        let mut out = build_wem_header(stereo_size, sample_rate);
+        out.reserve(stereo_size as usize);
+        for sample in pcm.chunks_exact(2) {
+            out.extend_from_slice(sample); // left
+            out.extend_from_slice(sample); // right
+        }
+        Ok((out, sample_rate))
+    } else {
+        let mut out = build_wem_header(pcm.len() as u32, sample_rate);
+        out.extend_from_slice(pcm);
+        Ok((out, sample_rate))
+    }
+}
+
+/// Convert an audio file (WAV or OGG Vorbis) to in-memory WEM bytes.
+///
+/// Format is detected by magic bytes: `RIFF` = WAV, `OggS` = OGG Vorbis.
 pub(crate) fn convert_to_bytes(input: &Path) -> Result<(Vec<u8>, u32)> {
     let data = fs::read(input)?;
+
+    if data.starts_with(b"OggS") {
+        let decoded =
+            crate::ogg_to_wav::decode_ogg(&data).map_err(ConvertError::UnsupportedFormat)?;
+        return pcm_to_wem(&decoded.pcm_bytes, decoded.channels, decoded.sample_rate);
+    }
+
     let info = parse_wav(&data)?;
 
     if info.channels != 1 && info.channels != 2 {
@@ -198,28 +237,17 @@ pub(crate) fn convert_to_bytes(input: &Path) -> Result<(Vec<u8>, u32)> {
     }
 
     let pcm = &data[info.data_offset..end];
-
-    if info.channels == 1 {
-        // Upmix mono → stereo by duplicating each 16-bit sample.
-        let stereo_size = info.data_size * 2;
-        let mut out = build_wem_header(stereo_size, info.sample_rate);
-        out.reserve(stereo_size as usize);
-        for sample in pcm.chunks_exact(2) {
-            out.extend_from_slice(sample); // left
-            out.extend_from_slice(sample); // right
-        }
-        Ok((out, info.sample_rate))
-    } else {
-        let mut out = build_wem_header(info.data_size, info.sample_rate);
-        out.extend_from_slice(pcm);
-        Ok((out, info.sample_rate))
-    }
+    pcm_to_wem(pcm, info.channels, info.sample_rate)
 }
 
-/// Validate a WAV file without converting it.
-/// Returns (channels, sample_rate, bits_per_sample, duration_secs).
-pub(crate) fn validate_wav(input: &Path) -> Result<WavValidation> {
+/// Validate an audio file (WAV or OGG Vorbis) without converting it.
+pub(crate) fn validate_audio(input: &Path) -> Result<WavValidation> {
     let data = fs::read(input)?;
+
+    if data.starts_with(b"OggS") {
+        return crate::ogg_to_wav::validate_ogg(&data).map_err(ConvertError::UnsupportedFormat);
+    }
+
     let info = parse_wav(&data)?;
 
     let bytes_per_sample = info.bits_per_sample as u32 / 8;
@@ -241,4 +269,61 @@ pub(crate) fn validate_wav(input: &Path) -> Result<WavValidation> {
         bits_per_sample: info.bits_per_sample,
         duration,
     })
+}
+
+/// Convert raw WEM bytes (Wwise RIFF/PCM) to a standard WAV file in memory.
+///
+/// The WEM format uses the same RIFF chunk structure as WAV, so [`parse_wav`]
+/// handles finding the `fmt ` and `data` chunks. We then emit a canonical
+/// 44-byte WAV header followed by the raw PCM data.
+pub(crate) fn wem_to_wav(wem: &[u8]) -> Result<Vec<u8>> {
+    let info = parse_wav(wem)?;
+
+    if info.channels == 0 || info.channels > 2 {
+        return Err(ConvertError::UnsupportedFormat(format!(
+            "expected 1 or 2 channels in WEM, got {}",
+            info.channels
+        )));
+    }
+    if info.bits_per_sample != 16 {
+        return Err(ConvertError::UnsupportedFormat(format!(
+            "expected 16-bit WEM, got {}-bit",
+            info.bits_per_sample
+        )));
+    }
+
+    let end = info.data_offset + info.data_size as usize;
+    if end > wem.len() {
+        return Err(ConvertError::InvalidWav(
+            "data chunk extends past end of WEM".into(),
+        ));
+    }
+
+    let pcm = &wem[info.data_offset..end];
+    let channels = info.channels;
+    let byte_rate = info.sample_rate * channels as u32 * 2; // 16-bit = 2 bytes
+    let block_align = channels * 2;
+    let data_size = info.data_size;
+    let riff_size = 36 + data_size;
+
+    let mut out = Vec::with_capacity(44 + data_size as usize);
+    // RIFF header
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&riff_size.to_le_bytes());
+    out.extend_from_slice(b"WAVE");
+    // fmt chunk
+    out.extend_from_slice(b"fmt ");
+    out.extend_from_slice(&16u32.to_le_bytes()); // chunk size
+    out.extend_from_slice(&1u16.to_le_bytes()); // PCM format
+    out.extend_from_slice(&channels.to_le_bytes());
+    out.extend_from_slice(&info.sample_rate.to_le_bytes());
+    out.extend_from_slice(&byte_rate.to_le_bytes());
+    out.extend_from_slice(&block_align.to_le_bytes());
+    out.extend_from_slice(&info.bits_per_sample.to_le_bytes());
+    // data chunk
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_size.to_le_bytes());
+    out.extend_from_slice(pcm);
+
+    Ok(out)
 }

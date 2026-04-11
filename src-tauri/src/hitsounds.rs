@@ -12,10 +12,16 @@ use crate::wav_to_wem;
 
 static BNK_CACHE: OnceLock<Mutex<HashMap<String, Vec<u8>>>> = OnceLock::new();
 
-const HEAD_WEM_ID: u32 = 681577199;
-const BODY_WEM_ID: u32 = 975983943;
 const BNK_ENTRY_NAME: &str = "Marvel/Content/WwiseAudio/bnk_ui_battle.bnk";
 const BNK_MATCH: &str = "bnk_ui_battle.bnk";
+
+/// All supported hitsound slots: (WEM ID, key used in commands, human label).
+const SOUND_SLOTS: &[(u32, &str, &str)] = &[
+    (975983943, "body_hit", "bodyshot hit"),
+    (681577199, "head_hit", "headshot hit"),
+    (1066162905, "body_kill", "bodyshot kill"),
+    (1011085352, "head_kill", "headshot kill"),
+];
 
 struct TempDirGuard {
     path: PathBuf,
@@ -138,12 +144,11 @@ fn get_or_extract_bnk(game_root: &str) -> Result<Vec<u8>, String> {
 
 pub(crate) fn build_hitsound_mod(
     game_root: &str,
-    head_wav: Option<&str>,
-    body_wav: Option<&str>,
+    wavs: &HashMap<String, String>,
     output_pak: &str,
 ) -> Result<String, String> {
-    if head_wav.is_none() && body_wav.is_none() {
-        return Err("At least one hitsound (body or head) must be provided".into());
+    if wavs.is_empty() {
+        return Err("At least one hitsound must be provided".into());
     }
 
     let _temp_guard = TempDirGuard::create("oinkers_hitsounds")?;
@@ -160,25 +165,19 @@ pub(crate) fn build_hitsound_mod(
     let mut replacements: HashMap<u32, Vec<u8>> = HashMap::new();
     let mut summary_parts: Vec<String> = Vec::new();
 
-    if let Some(wav_path) = body_wav {
-        let (wem_bytes, _) = wav_to_wem::convert_to_bytes(Path::new(wav_path))
-            .map_err(|e| format!("Body WAV conversion failed: {e}"))?;
-        replacements.insert(BODY_WEM_ID, wem_bytes);
-        summary_parts.push("body".to_string());
-    }
+    for &(wem_id, key, label) in SOUND_SLOTS {
+        if let Some(wav_path) = wavs.get(key) {
+            let (wem_bytes, _) = wav_to_wem::convert_to_bytes(Path::new(wav_path))
+                .map_err(|e| format!("{label} WAV conversion failed: {e}"))?;
 
-    if let Some(wav_path) = head_wav {
-        let (wem_bytes, _) = wav_to_wem::convert_to_bytes(Path::new(wav_path))
-            .map_err(|e| format!("Head WAV conversion failed: {e}"))?;
-        replacements.insert(HEAD_WEM_ID, wem_bytes);
-        summary_parts.push("head".to_string());
-    }
+            if !bnk.wems.iter().any(|w| w.id == wem_id) {
+                return Err(format!(
+                    "WEM ID {wem_id} ({label}) not found in BNK; the game may have been updated"
+                ));
+            }
 
-    for (id, label) in [(BODY_WEM_ID, "body"), (HEAD_WEM_ID, "head")] {
-        if replacements.contains_key(&id) && !bnk.wems.iter().any(|w| w.id == id) {
-            return Err(format!(
-                "WEM ID {id} ({label} hitsound) not found in BNK; the game may have been updated"
-            ));
+            replacements.insert(wem_id, wem_bytes);
+            summary_parts.push(label.to_string());
         }
     }
 
@@ -195,19 +194,94 @@ pub(crate) fn build_hitsound_mod(
     Ok(format!("Hitsound mod created with {summary} sound(s)"))
 }
 
+pub(crate) fn extract_hitsound_wavs(
+    game_root: &str,
+    pak_path: &str,
+    output_dir: &str,
+) -> Result<String, String> {
+    let pak_path = Path::new(pak_path);
+    let pak = open_pak(pak_path)?;
+    let files = pak.files();
+
+    let entry = files
+        .iter()
+        .find(|f| f.eq_ignore_ascii_case(BNK_ENTRY_NAME))
+        .or_else(|| {
+            files
+                .iter()
+                .find(|f| f.to_ascii_lowercase().ends_with(BNK_MATCH))
+        })
+        .cloned()
+        .ok_or_else(|| {
+            format!(
+                "{BNK_MATCH} not found in {}; this may not be a hitsound mod",
+                pak_path.display()
+            )
+        })?;
+
+    let bnk_bytes = read_bnk_from_pak(pak_path, &entry)?;
+    let bnk = rebnk::parse_bnk_from_bytes(&bnk_bytes, Path::new(BNK_ENTRY_NAME))
+        .map_err(|e| format!("Failed to parse BNK: {e}"))?;
+
+    // Load original game BNK for comparison
+    let original_bnk = get_or_extract_bnk(game_root)
+        .ok()
+        .and_then(|bytes| rebnk::parse_bnk_from_bytes(&bytes, Path::new(BNK_ENTRY_NAME)).ok());
+
+    // Derive subfolder name from pak filename, stripping version suffix
+    let pak_stem = pak_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("hitsound_mod");
+    let folder_name = pak_stem
+        .strip_suffix("_P")
+        .and_then(|s| s.rsplit_once('_').map(|(base, _)| base))
+        .unwrap_or(pak_stem);
+
+    let out_dir = Path::new(output_dir).join(folder_name);
+    fs::create_dir_all(&out_dir).map_err(|e| format!("Failed to create output directory: {e}"))?;
+
+    let mut extracted: Vec<String> = Vec::new();
+
+    for &(wem_id, key, label) in SOUND_SLOTS {
+        let Some(wem) = bnk.wems.iter().find(|w| w.id == wem_id) else {
+            continue;
+        };
+
+        // Skip WEMs that match the original game data
+        if let Some(ref orig) = original_bnk
+            && let Some(orig_wem) = orig.wems.iter().find(|w| w.id == wem_id)
+            && wem.data == orig_wem.data
+        {
+            continue;
+        }
+
+        let wav_bytes = crate::wav_to_wem::wem_to_wav(&wem.data)
+            .map_err(|e| format!("Failed to convert {label} WEM to WAV: {e}"))?;
+        let out_path = out_dir.join(format!("{key}.wav"));
+        fs::write(&out_path, wav_bytes)
+            .map_err(|e| format!("Failed to write {}: {e}", out_path.display()))?;
+        extracted.push(label.to_string());
+    }
+
+    if extracted.is_empty() {
+        return Err("No modified hitsounds found in this mod".to_string());
+    }
+
+    let summary = extracted.join(" + ");
+    Ok(format!(
+        "Extracted {summary} hitsound(s) to {}",
+        out_dir.display()
+    ))
+}
+
 pub(crate) fn build_hitsound_mod_to_dir(
     game_root: &str,
-    head_wav: Option<&str>,
-    body_wav: Option<&str>,
+    wavs: &HashMap<String, String>,
     mod_name: &str,
     output_dir: &str,
 ) -> Result<String, String> {
     let output_path = Path::new(output_dir).join(format!("{mod_name}_9999999_P.pak"));
-    let result = build_hitsound_mod(
-        game_root,
-        head_wav,
-        body_wav,
-        &output_path.to_string_lossy(),
-    )?;
+    let result = build_hitsound_mod(game_root, wavs, &output_path.to_string_lossy())?;
     Ok(format!("{result} -> {}", output_path.display()))
 }

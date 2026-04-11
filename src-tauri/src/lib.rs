@@ -5,6 +5,7 @@ mod detect;
 mod hitsounds;
 mod launch_record;
 mod mods;
+mod ogg_to_wav;
 mod pak;
 mod pak_tweaks;
 mod paths;
@@ -61,7 +62,8 @@ pub fn run() {
             commands::save_pak_ini,
             commands::validate_wav,
             commands::path_exists,
-            commands::build_hitsound_mod
+            commands::build_hitsound_mod,
+            commands::extract_hitsound_wavs
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
