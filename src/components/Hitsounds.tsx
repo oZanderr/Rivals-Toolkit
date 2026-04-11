@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect, useRef } from "react";
 
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { confirm, open } from "@tauri-apps/plugin-dialog";
+import { open } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   UploadCloud,
@@ -17,8 +17,18 @@ import {
   Target,
 } from "lucide-react";
 
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
@@ -79,6 +89,11 @@ export function Hitsounds({ gamePath, isActive }: Props) {
   const [isDragging, setIsDragging] = useState(false);
   const [hoveredDropSlot, setHoveredDropSlot] = useState<SlotKey | null>(null);
   const [buildResult, setBuildResult] = useState<ResultState>(null);
+  const [replaceConfirm, setReplaceConfirm] = useState<{
+    modName: string;
+    outputDir: string;
+    pakPath: string;
+  } | null>(null);
   const isActiveRef = useRef(isActive);
   const dropProcessingRef = useRef(false);
   const hoveredDropSlotRef = useRef<SlotKey | null>(null);
@@ -222,18 +237,18 @@ export function Hitsounds({ gamePath, isActive }: Props) {
     const outputPakPath = `${selectedOutputDir}\\${normalizedModName}_9999999_P.pak`;
     const alreadyExists = await invoke<boolean>("path_exists", { path: outputPakPath });
     if (alreadyExists) {
-      const shouldReplace = await confirm(
-        `A mod named ${normalizedModName}_9999999_P.pak already exists in this folder. Replace it?`,
-        {
-          title: "oinkers-toolkit",
-          kind: "warning",
-        }
-      );
-      if (!shouldReplace) {
-        return;
-      }
+      setReplaceConfirm({
+        modName: normalizedModName,
+        outputDir: selectedOutputDir,
+        pakPath: outputPakPath,
+      });
+      return;
     }
 
+    await runBuild(normalizedModName, selectedOutputDir, outputPakPath);
+  }
+
+  async function runBuild(normalizedModName: string, outputDir: string, outputPakPath: string) {
     const wavs: Record<string, string> = {};
     for (const key of SLOT_KEYS) {
       const slot = slots[key];
@@ -248,7 +263,7 @@ export function Hitsounds({ gamePath, isActive }: Props) {
         gameRoot: gamePath,
         wavs,
         modName: normalizedModName,
-        outputDir: selectedOutputDir,
+        outputDir,
       });
       setBuildResult({ msg: result, ok: true, revealPath: outputPakPath });
     } catch (e) {
@@ -438,6 +453,43 @@ export function Hitsounds({ gamePath, isActive }: Props) {
           </div>
         )}
       </Card>
+
+      <AlertDialog
+        open={!!replaceConfirm}
+        onOpenChange={(isOpen) => {
+          if (!isOpen) setReplaceConfirm(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Replace Existing Mod</AlertDialogTitle>
+            <AlertDialogDescription>
+              <span className="font-semibold text-foreground">
+                {replaceConfirm?.modName}_9999999_P.pak
+              </span>{" "}
+              already exists in this folder. Do you want to replace it?
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className={buttonVariants({ variant: "blue" })}
+              onClick={() => {
+                if (replaceConfirm) {
+                  runBuild(
+                    replaceConfirm.modName,
+                    replaceConfirm.outputDir,
+                    replaceConfirm.pakPath
+                  );
+                }
+                setReplaceConfirm(null);
+              }}
+            >
+              Replace
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
