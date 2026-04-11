@@ -112,14 +112,16 @@ export function Hitsounds({ gamePath, isActive }: Props) {
       const name = path.split(/[\\/]/).pop() ?? path;
       try {
         const validation = await invoke<WavValidation>("validate_wav", { path });
-        const isCompatible = validation.channels === 2 && validation.bits_per_sample === 16;
+        const isCompatible =
+          (validation.channels === 1 || validation.channels === 2) &&
+          validation.bits_per_sample === 16;
         setter({
           path,
           name,
           validation,
           error: isCompatible
             ? null
-            : `Requires 16-bit stereo (got ${validation.bits_per_sample}-bit, ${validation.channels}ch)`,
+            : `Requires 16-bit mono or stereo (got ${validation.bits_per_sample}-bit, ${validation.channels}ch)`,
         });
       } catch (e) {
         setter({ path, name, validation: null, error: String(e) });
@@ -267,8 +269,8 @@ export function Hitsounds({ gamePath, isActive }: Props) {
         <div>
           <h2 className="text-xl font-bold">Hitsounds</h2>
           <p className="mt-1 text-xs text-muted-foreground">
-            Build a hitsound mod from WAV files. 16-bit stereo PCM at 48kHz recommended, but 44.1kHz
-            should also be fine.
+            Build a hitsound mod from WAV files. 16-bit PCM (mono or stereo) at 48kHz recommended,
+            but 44.1kHz should also be fine. Mono files are automatically converted to stereo.
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2 pt-0.5">

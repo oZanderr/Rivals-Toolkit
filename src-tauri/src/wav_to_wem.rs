@@ -1,7 +1,8 @@
 //! WAV → WEM converter for Wwise PCM soundbanks.
 //!
-//! Converts a 16-bit stereo PCM WAV file to a WEM file by replacing the WAV
-//! header with a Wwise-compatible RIFF header.
+//! Converts a 16-bit PCM WAV file (mono or stereo) to a WEM file by replacing
+//! the WAV header with a Wwise-compatible RIFF header. Mono inputs are
+//! automatically upmixed to stereo by duplicating each sample.
 
 use std::fs;
 use std::path::Path;
@@ -176,9 +177,9 @@ pub(crate) fn convert_to_bytes(input: &Path) -> Result<(Vec<u8>, u32)> {
     let data = fs::read(input)?;
     let info = parse_wav(&data)?;
 
-    if info.channels != 2 {
+    if info.channels != 1 && info.channels != 2 {
         return Err(ConvertError::UnsupportedFormat(format!(
-            "expected 2 channels, got {}",
+            "expected 1 or 2 channels, got {}",
             info.channels
         )));
     }
@@ -197,9 +198,22 @@ pub(crate) fn convert_to_bytes(input: &Path) -> Result<(Vec<u8>, u32)> {
     }
 
     let pcm = &data[info.data_offset..end];
-    let mut out = build_wem_header(info.data_size, info.sample_rate);
-    out.extend_from_slice(pcm);
-    Ok((out, info.sample_rate))
+
+    if info.channels == 1 {
+        // Upmix mono → stereo by duplicating each 16-bit sample.
+        let stereo_size = info.data_size * 2;
+        let mut out = build_wem_header(stereo_size, info.sample_rate);
+        out.reserve(stereo_size as usize);
+        for sample in pcm.chunks_exact(2) {
+            out.extend_from_slice(sample); // left
+            out.extend_from_slice(sample); // right
+        }
+        Ok((out, info.sample_rate))
+    } else {
+        let mut out = build_wem_header(info.data_size, info.sample_rate);
+        out.extend_from_slice(pcm);
+        Ok((out, info.sample_rate))
+    }
 }
 
 /// Validate a WAV file without converting it.
