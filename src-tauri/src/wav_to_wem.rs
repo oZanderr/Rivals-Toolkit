@@ -150,7 +150,7 @@ const STEREO_HEADER_TEMPLATE: [u8; 96] = [
 
 /// Builds the complete WEM file header with RIFF size, sample rate,
 /// avg-bytes/sec, and data-chunk size patched for the given audio.
-fn build_wem_header(pcm_len: u32, sample_rate: u32) -> Vec<u8> {
+pub(crate) fn build_wem_header(pcm_len: u32, sample_rate: u32) -> Vec<u8> {
     let riff_size: u32 = 80 + pcm_len;
 
     let mut header = Vec::with_capacity(104);

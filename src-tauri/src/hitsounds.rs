@@ -23,6 +23,12 @@ const SOUND_SLOTS: &[(u32, &str, &str)] = &[
     (1011085352, "head_kill", "headshot kill"),
 ];
 
+/// WEM IDs that should be replaced with silence when a related slot is provided.
+/// (companion WEM ID, triggering slot key)
+const SILENCE_COMPANIONS: &[(u32, &str)] = &[
+    (1071347262, "body_kill"), // second body kill SFX — silenced to avoid overlap
+];
+
 struct TempDirGuard {
     path: PathBuf,
 }
@@ -43,6 +49,15 @@ impl Drop for TempDirGuard {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.path);
     }
+}
+
+/// Build a short (~10ms) stereo silence WEM at 48kHz.
+fn silence_wem() -> Vec<u8> {
+    // 48000 Hz * 0.01s = 480 frames * 4 bytes/frame (stereo 16-bit) = 1920 bytes
+    let pcm_len: u32 = 1920;
+    let mut wem = wav_to_wem::build_wem_header(pcm_len, 48000);
+    wem.resize(wem.len() + pcm_len as usize, 0);
+    wem
 }
 
 fn find_source_bnk(game_root: &str) -> Result<(PathBuf, String), String> {
@@ -178,6 +193,16 @@ pub(crate) fn build_hitsound_mod(
 
             replacements.insert(wem_id, wem_bytes);
             summary_parts.push(label.to_string());
+        }
+    }
+
+    // Replace companion WEMs with silence when their trigger slot is active
+    for &(companion_id, trigger_key) in SILENCE_COMPANIONS {
+        if wavs.contains_key(trigger_key)
+            && !replacements.contains_key(&companion_id)
+            && bnk.wems.iter().any(|w| w.id == companion_id)
+        {
+            replacements.insert(companion_id, silence_wem());
         }
     }
 
