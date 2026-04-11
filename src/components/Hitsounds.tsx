@@ -2,7 +2,8 @@ import { useState, useCallback, useEffect, useRef } from "react";
 
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { confirm, open } from "@tauri-apps/plugin-dialog";
+import { open } from "@tauri-apps/plugin-dialog";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   UploadCloud,
   FileAudio,
@@ -11,11 +12,23 @@ import {
   Trash2,
   Crosshair,
   Shield,
+  Skull,
   Package,
+  Target,
 } from "lucide-react";
 
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
@@ -34,10 +47,30 @@ interface SlotState {
   error: string | null;
 }
 
+type SlotKey = "body_hit" | "head_hit" | "body_kill" | "head_kill";
+
+interface SlotConfig {
+  key: SlotKey;
+  label: string;
+  group: "hit" | "kill";
+  icon: React.ReactNode;
+}
+
+const SLOT_CONFIGS: SlotConfig[] = [
+  { key: "body_hit", label: "Bodyshot", group: "hit", icon: <Shield size={15} /> },
+  { key: "head_hit", label: "Headshot", group: "hit", icon: <Crosshair size={15} /> },
+  { key: "body_kill", label: "Bodyshot Kill", group: "kill", icon: <Skull size={15} /> },
+  { key: "head_kill", label: "Headshot Kill", group: "kill", icon: <Target size={15} /> },
+];
+
+const SLOT_KEYS: SlotKey[] = SLOT_CONFIGS.map((c) => c.key);
+
 interface Props {
   gamePath: string;
   isActive: boolean;
 }
+
+type ResultState = { msg: string; ok: boolean; revealPath?: string } | null;
 
 function formatSampleRateKHz(sampleRate: number): string {
   const khz = sampleRate / 1000;
@@ -45,55 +78,59 @@ function formatSampleRateKHz(sampleRate: number): string {
 }
 
 export function Hitsounds({ gamePath, isActive }: Props) {
-  const [headSlot, setHeadSlot] = useState<SlotState | null>(null);
-  const [bodySlot, setBodySlot] = useState<SlotState | null>(null);
+  const [slots, setSlots] = useState<Record<SlotKey, SlotState | null>>({
+    body_hit: null,
+    head_hit: null,
+    body_kill: null,
+    head_kill: null,
+  });
   const [modName, setModName] = useState("");
   const [building, setBuilding] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
-  const [hoveredDropSlot, setHoveredDropSlot] = useState<"head" | "body" | null>(null);
-  const [buildResult, setBuildResult] = useState<{ msg: string; ok: boolean } | null>(null);
+  const [hoveredDropSlot, setHoveredDropSlot] = useState<SlotKey | null>(null);
+  const [buildResult, setBuildResult] = useState<ResultState>(null);
+  const [replaceConfirm, setReplaceConfirm] = useState<{
+    modName: string;
+    outputDir: string;
+    pakPath: string;
+  } | null>(null);
   const isActiveRef = useRef(isActive);
   const dropProcessingRef = useRef(false);
-  const hoveredDropSlotRef = useRef<"head" | "body" | null>(null);
-  const headRowRef = useRef<HTMLDivElement | null>(null);
-  const bodyRowRef = useRef<HTMLDivElement | null>(null);
+  const hoveredDropSlotRef = useRef<SlotKey | null>(null);
+  const slotRefs = useRef<Record<SlotKey, HTMLDivElement | null>>({
+    body_hit: null,
+    head_hit: null,
+    body_kill: null,
+    head_kill: null,
+  });
 
   isActiveRef.current = isActive;
 
-  function setHoveredSlot(slot: "head" | "body" | null) {
+  function setSlot(key: SlotKey, value: SlotState | null) {
+    setSlots((prev) => ({ ...prev, [key]: value }));
+  }
+
+  function setHoveredSlot(slot: SlotKey | null) {
     hoveredDropSlotRef.current = slot;
     setHoveredDropSlot((prev) => (prev === slot ? prev : slot));
   }
 
-  function slotFromPosition(position: { x: number; y: number }): "head" | "body" | null {
+  function slotFromPosition(position: { x: number; y: number }): SlotKey | null {
     const dpr = window.devicePixelRatio || 1;
     const x = position.x / dpr;
     const y = position.y / dpr;
 
     const el = document.elementFromPoint(x, y) as HTMLElement | null;
-    const byAttr = el?.closest("[data-drop-slot]")?.getAttribute("data-drop-slot");
-    if (byAttr === "head" || byAttr === "body") return byAttr;
+    const byAttr = el
+      ?.closest("[data-drop-slot]")
+      ?.getAttribute("data-drop-slot") as SlotKey | null;
+    if (byAttr && SLOT_KEYS.includes(byAttr)) return byAttr;
 
-    const headRect = headRowRef.current?.getBoundingClientRect();
-    if (
-      headRect &&
-      x >= headRect.left &&
-      x <= headRect.right &&
-      y >= headRect.top &&
-      y <= headRect.bottom
-    ) {
-      return "head";
-    }
-
-    const bodyRect = bodyRowRef.current?.getBoundingClientRect();
-    if (
-      bodyRect &&
-      x >= bodyRect.left &&
-      x <= bodyRect.right &&
-      y >= bodyRect.top &&
-      y <= bodyRect.bottom
-    ) {
-      return "body";
+    for (const key of SLOT_KEYS) {
+      const rect = slotRefs.current[key]?.getBoundingClientRect();
+      if (rect && x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) {
+        return key;
+      }
     }
 
     return null;
@@ -107,26 +144,25 @@ export function Hitsounds({ gamePath, isActive }: Props) {
     return withoutSuffix.trim();
   }
 
-  const validateAndSet = useCallback(
-    async (path: string, setter: React.Dispatch<React.SetStateAction<SlotState | null>>) => {
-      const name = path.split(/[\\/]/).pop() ?? path;
-      try {
-        const validation = await invoke<WavValidation>("validate_wav", { path });
-        const isCompatible = validation.channels === 2 && validation.bits_per_sample === 16;
-        setter({
-          path,
-          name,
-          validation,
-          error: isCompatible
-            ? null
-            : `Requires 16-bit stereo (got ${validation.bits_per_sample}-bit, ${validation.channels}ch)`,
-        });
-      } catch (e) {
-        setter({ path, name, validation: null, error: String(e) });
-      }
-    },
-    []
-  );
+  const validateAndSet = useCallback(async (path: string, key: SlotKey) => {
+    const name = path.split(/[\\/]/).pop() ?? path;
+    try {
+      const validation = await invoke<WavValidation>("validate_wav", { path });
+      const isCompatible =
+        (validation.channels === 1 || validation.channels === 2) &&
+        validation.bits_per_sample === 16;
+      setSlot(key, {
+        path,
+        name,
+        validation,
+        error: isCompatible
+          ? null
+          : `Incompatible format (${validation.bits_per_sample}-bit, ${validation.channels}ch)`,
+      });
+    } catch (e) {
+      setSlot(key, { path, name, validation: null, error: String(e) });
+    }
+  }, []);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -150,17 +186,16 @@ export function Hitsounds({ gamePath, isActive }: Props) {
           setHoveredSlot(null);
           if (!isActiveRef.current || dropProcessingRef.current) return;
 
-          const wavPaths = event.payload.paths.filter((p) => p.toLowerCase().endsWith(".wav"));
+          const wavPaths = event.payload.paths.filter((p) => {
+            const lower = p.toLowerCase();
+            return lower.endsWith(".wav") || lower.endsWith(".ogg");
+          });
           if (wavPaths.length === 0) return;
           if (!targetSlot) return;
 
           dropProcessingRef.current = true;
           try {
-            if (targetSlot === "head") {
-              await validateAndSet(wavPaths[0], setHeadSlot);
-            } else {
-              await validateAndSet(wavPaths[0], setBodySlot);
-            }
+            await validateAndSet(wavPaths[0], targetSlot);
           } finally {
             dropProcessingRef.current = false;
           }
@@ -175,13 +210,13 @@ export function Hitsounds({ gamePath, isActive }: Props) {
     };
   }, [validateAndSet]);
 
-  async function pickWav(setter: React.Dispatch<React.SetStateAction<SlotState | null>>) {
+  async function pickWav(key: SlotKey) {
     const selected = await open({
       multiple: false,
-      filters: [{ name: "WAV Audio", extensions: ["wav"] }],
+      filters: [{ name: "Audio Files", extensions: ["wav", "ogg"] }],
     });
     if (selected) {
-      await validateAndSet(selected, setter);
+      await validateAndSet(selected, key);
     }
   }
 
@@ -202,15 +237,23 @@ export function Hitsounds({ gamePath, isActive }: Props) {
     const outputPakPath = `${selectedOutputDir}\\${normalizedModName}_9999999_P.pak`;
     const alreadyExists = await invoke<boolean>("path_exists", { path: outputPakPath });
     if (alreadyExists) {
-      const shouldReplace = await confirm(
-        `A mod named ${normalizedModName}_9999999_P.pak already exists in this folder. Replace it?`,
-        {
-          title: "oinkers-toolkit",
-          kind: "warning",
-        }
-      );
-      if (!shouldReplace) {
-        return;
+      setReplaceConfirm({
+        modName: normalizedModName,
+        outputDir: selectedOutputDir,
+        pakPath: outputPakPath,
+      });
+      return;
+    }
+
+    await runBuild(normalizedModName, selectedOutputDir, outputPakPath);
+  }
+
+  async function runBuild(normalizedModName: string, outputDir: string, outputPakPath: string) {
+    const wavs: Record<string, string> = {};
+    for (const key of SLOT_KEYS) {
+      const slot = slots[key];
+      if (slot && !slot.error) {
+        wavs[key] = slot.path;
       }
     }
 
@@ -218,12 +261,11 @@ export function Hitsounds({ gamePath, isActive }: Props) {
     try {
       const result = await invoke<string>("build_hitsound_mod", {
         gameRoot: gamePath,
-        headWav: headSlot?.path ?? null,
-        bodyWav: bodySlot?.path ?? null,
+        wavs,
         modName: normalizedModName,
-        outputDir: selectedOutputDir,
+        outputDir,
       });
-      setBuildResult({ msg: result, ok: true });
+      setBuildResult({ msg: result, ok: true, revealPath: outputPakPath });
     } catch (e) {
       setBuildResult({ msg: String(e), ok: false });
     } finally {
@@ -233,14 +275,8 @@ export function Hitsounds({ gamePath, isActive }: Props) {
 
   useEffect(() => {
     if (!buildResult) return;
-
-    const timeoutId = window.setTimeout(() => {
-      setBuildResult(null);
-    }, 4000);
-
-    return () => {
-      window.clearTimeout(timeoutId);
-    };
+    const timeoutId = window.setTimeout(() => setBuildResult(null), 4000);
+    return () => window.clearTimeout(timeoutId);
   }, [buildResult]);
 
   function formatDuration(secs: number): string {
@@ -249,16 +285,15 @@ export function Hitsounds({ gamePath, isActive }: Props) {
     return m > 0 ? `${m}m ${s}s` : `${s}s`;
   }
 
-  const canBuild =
-    gamePath &&
-    (headSlot || bodySlot) &&
-    !headSlot?.error &&
-    !bodySlot?.error &&
-    normalizeModName(modName).length > 0;
+  const filledSlots = SLOT_KEYS.filter((k) => slots[k] !== null);
+  const hasAnyValid = filledSlots.some((k) => !slots[k]?.error);
+  const hasErrors = filledSlots.some((k) => slots[k]?.error);
 
+  const canBuild = gamePath && hasAnyValid && !hasErrors && normalizeModName(modName).length > 0;
   const isConfigured = Boolean(gamePath);
-  const hasValidSound = Boolean((headSlot && !headSlot.error) || (bodySlot && !bodySlot.error));
-  const hasErrors = Boolean(headSlot?.error || bodySlot?.error);
+
+  const hitSlots = SLOT_CONFIGS.filter((c) => c.group === "hit");
+  const killSlots = SLOT_CONFIGS.filter((c) => c.group === "kill");
 
   return (
     <div className="flex min-h-0 w-full flex-1 flex-col gap-4 overflow-y-auto">
@@ -267,8 +302,9 @@ export function Hitsounds({ gamePath, isActive }: Props) {
         <div>
           <h2 className="text-xl font-bold">Hitsounds</h2>
           <p className="mt-1 text-xs text-muted-foreground">
-            Build a hitsound mod from WAV files. 16-bit stereo PCM at 48kHz recommended, but 44.1kHz
-            should also be fine.
+            Build a hitsound mod from WAV or OGG files. 16-bit PCM, mono or stereo, 48kHz
+            recommended. To extract WAVs from a mod, select its{" "}
+            <span className="font-medium text-foreground">bnk_ui_battle.bnk</span> in Asset Manager.
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2 pt-0.5">
@@ -289,49 +325,73 @@ export function Hitsounds({ gamePath, isActive }: Props) {
               "rounded-full px-2.5 py-1",
               hasErrors
                 ? "border-[var(--red-accent-border)] bg-[var(--red-accent)] text-[var(--red-accent-foreground)]"
-                : hasValidSound
+                : hasAnyValid
                   ? "border-[var(--green-accent-border)] bg-[var(--green-accent)] text-[var(--green-accent-foreground)]"
                   : "border-border bg-background text-muted-foreground"
             )}
           >
-            {hasErrors ? "Validation issues" : hasValidSound ? "Audio ready" : "Awaiting audio"}
+            {hasErrors ? "Validation issues" : hasAnyValid ? "Audio ready" : "Awaiting audio"}
           </Badge>
         </div>
       </div>
 
-      {/* Single unified panel */}
+      {/* Sound slots + build */}
       <Card className="gap-0 overflow-hidden py-0">
-        {/* Bodyshot row */}
-        <SoundRow
-          slotKey="body"
-          rowRef={bodyRowRef}
-          label="Bodyshot"
-          icon={<Shield size={15} />}
-          slot={bodySlot}
-          onPick={() => pickWav(setBodySlot)}
-          onClear={() => setBodySlot(null)}
-          formatDuration={formatDuration}
-          disabled={building}
-          showDropOverlay={isDragging && hoveredDropSlot === "body"}
-          onDragOverRow={() => setHoveredSlot("body")}
-        />
+        {/* Hit sounds group */}
+        <div className="px-5 pt-4 pb-1">
+          <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+            Hit Sounds
+          </span>
+        </div>
+        {hitSlots.map((config, i) => (
+          <div key={config.key}>
+            <SoundRow
+              slotKey={config.key}
+              rowRef={(el) => {
+                slotRefs.current[config.key] = el;
+              }}
+              label={config.label}
+              icon={config.icon}
+              slot={slots[config.key]}
+              onPick={() => pickWav(config.key)}
+              onClear={() => setSlot(config.key, null)}
+              formatDuration={formatDuration}
+              disabled={building}
+              showDropOverlay={isDragging && hoveredDropSlot === config.key}
+              onDragOverRow={() => setHoveredSlot(config.key)}
+            />
+            {i < hitSlots.length - 1 && <div className="mx-5 h-px bg-border" />}
+          </div>
+        ))}
 
-        <div className="mx-5 h-px bg-border" />
+        <div className="h-px bg-border" />
 
-        {/* Headshot row */}
-        <SoundRow
-          slotKey="head"
-          rowRef={headRowRef}
-          label="Headshot"
-          icon={<Crosshair size={15} />}
-          slot={headSlot}
-          onPick={() => pickWav(setHeadSlot)}
-          onClear={() => setHeadSlot(null)}
-          formatDuration={formatDuration}
-          disabled={building}
-          showDropOverlay={isDragging && hoveredDropSlot === "head"}
-          onDragOverRow={() => setHoveredSlot("head")}
-        />
+        {/* Kill sounds group */}
+        <div className="px-5 pt-4 pb-1">
+          <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+            Kill Confirmed Sounds
+          </span>
+        </div>
+        {killSlots.map((config, i) => (
+          <div key={config.key}>
+            <SoundRow
+              slotKey={config.key}
+              rowRef={(el) => {
+                slotRefs.current[config.key] = el;
+              }}
+              label={config.label}
+              icon={config.icon}
+              slot={slots[config.key]}
+              onPick={() => pickWav(config.key)}
+              onClear={() => setSlot(config.key, null)}
+              formatDuration={formatDuration}
+              disabled={building}
+              showDropOverlay={isDragging && hoveredDropSlot === config.key}
+              onDragOverRow={() => setHoveredSlot(config.key)}
+            />
+            {i < killSlots.length - 1 && <div className="mx-5 h-px bg-border" />}
+          </div>
+        ))}
 
         <div className="h-px bg-border" />
 
@@ -368,8 +428,13 @@ export function Hitsounds({ gamePath, isActive }: Props) {
                 "flex items-center gap-1.5 text-xs",
                 buildResult.ok
                   ? "text-[var(--green-accent-foreground)]"
-                  : "text-[var(--red-accent-foreground)]"
+                  : "text-[var(--red-accent-foreground)]",
+                buildResult.revealPath && "cursor-pointer hover:underline"
               )}
+              onClick={
+                buildResult.revealPath ? () => revealItemInDir(buildResult.revealPath!) : undefined
+              }
+              title={buildResult.revealPath ? "Click to reveal in explorer" : undefined}
             >
               {buildResult.ok ? (
                 <CheckCircle2 size={13} className="shrink-0" />
@@ -388,6 +453,43 @@ export function Hitsounds({ gamePath, isActive }: Props) {
           </div>
         )}
       </Card>
+
+      <AlertDialog
+        open={!!replaceConfirm}
+        onOpenChange={(isOpen) => {
+          if (!isOpen) setReplaceConfirm(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Replace Existing Mod</AlertDialogTitle>
+            <AlertDialogDescription>
+              <span className="font-semibold text-foreground">
+                {replaceConfirm?.modName}_9999999_P.pak
+              </span>{" "}
+              already exists in this folder. Do you want to replace it?
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className={buttonVariants({ variant: "blue" })}
+              onClick={() => {
+                if (replaceConfirm) {
+                  runBuild(
+                    replaceConfirm.modName,
+                    replaceConfirm.outputDir,
+                    replaceConfirm.pakPath
+                  );
+                }
+                setReplaceConfirm(null);
+              }}
+            >
+              Replace
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
@@ -405,8 +507,8 @@ function SoundRow({
   showDropOverlay,
   onDragOverRow,
 }: {
-  slotKey: "head" | "body";
-  rowRef: React.RefObject<HTMLDivElement | null>;
+  slotKey: string;
+  rowRef: React.RefCallback<HTMLDivElement>;
   label: string;
   icon: React.ReactNode;
   slot: SlotState | null;
@@ -423,7 +525,7 @@ function SoundRow({
     <div
       ref={rowRef}
       data-drop-slot={slotKey}
-      className="relative flex h-20 items-center gap-4 px-5 transition-colors"
+      className="relative flex h-16 items-center gap-4 px-5 transition-colors"
       onDragOver={(e) => {
         e.preventDefault();
         onDragOverRow();
@@ -433,12 +535,12 @@ function SoundRow({
       {showDropOverlay && (
         <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center gap-2 bg-background/92 backdrop-blur-sm">
           <UploadCloud size={16} className="text-foreground" />
-          <span className="text-xs font-semibold text-foreground">Drop .wav for {label}</span>
+          <span className="text-xs font-semibold text-foreground">Drop audio for {label}</span>
         </div>
       )}
 
       {/* Label column */}
-      <div className="flex w-24 shrink-0 items-center gap-2">
+      <div className="flex w-32 shrink-0 items-center gap-2">
         <span className="text-muted-foreground">{icon}</span>
         <span className="text-sm font-semibold">{label}</span>
       </div>
@@ -481,7 +583,7 @@ function SoundRow({
           className="flex flex-1 items-center gap-2 text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
         >
           <UploadCloud size={13} className="shrink-0" />
-          <span className="text-xs">Drop .wav here or click to browse</span>
+          <span className="text-xs">Drop .wav/.ogg here or click to browse</span>
         </button>
       )}
 

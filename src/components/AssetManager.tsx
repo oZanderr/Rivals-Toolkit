@@ -7,6 +7,7 @@ import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
+  FileAudio,
   FolderOpen,
   PackageOpen,
   Download,
@@ -457,6 +458,15 @@ export function AssetManager({ gamePath }: Props) {
     [pakContents, selectedEntries]
   );
 
+  const hasSelectedBnk = useMemo(
+    () =>
+      [...selectedEntries].some((p) => {
+        const name = p.split("/").pop()?.toLowerCase();
+        return name === "bnk_ui_battle.bnk";
+      }),
+    [selectedEntries]
+  );
+
   async function extractSelected() {
     if (selectedEntries.size === 0 || !selectedPak) return;
     const dir = await open({ directory: true, multiple: false });
@@ -499,6 +509,31 @@ export function AssetManager({ gamePath }: Props) {
       showNotice(`Extracted ${totalFiles} file(s) to ${outputDir}`, "ok", {
         revealPath: outputDir,
       });
+    } catch (e: unknown) {
+      showNotice(String(e), "err");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function extractHitsoundWavs() {
+    if (!selectedPak) return;
+    const dir = await open({ directory: true, multiple: false });
+    if (!dir || typeof dir !== "string") return;
+
+    setBusy(true);
+    showNotice("Extracting hitsound WAVs\u2026", "info");
+    try {
+      const result = await invoke<string>("extract_hitsound_wavs", {
+        gameRoot: gamePath,
+        pakPath: selectedPak,
+        outputDir: dir,
+      });
+      // Derive subfolder name matching backend logic: strip .pak, then _N_P suffix
+      const stem = (selectedPak.split(/[\\/]/).pop() ?? "").replace(/\.pak$/i, "");
+      const folderName = stem.replace(/_\d+_P$/i, "");
+      const subfolderPath = `${dir}\\${folderName}`;
+      showNotice(result, "ok", { revealPath: subfolderPath });
     } catch (e: unknown) {
       showNotice(String(e), "err");
     } finally {
@@ -799,6 +834,18 @@ export function AssetManager({ gamePath }: Props) {
             </div>
 
             <div className="flex gap-1.5">
+              {hasSelectedBnk && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={extractHitsoundWavs}
+                  disabled={busy || !selectedPak || !gamePath}
+                  title="Extract hitsound WAVs from this mod's soundbank"
+                >
+                  <FileAudio size={14} />
+                  Extract Hitsounds
+                </Button>
+              )}
               {selectedEntries.size > 0 && selectedIsIoStore && selectedUtocEntries.length > 0 && (
                 <Button
                   variant="outline"
