@@ -29,6 +29,7 @@ pub fn run() {
             commands::extract_utoc_files,
             commands::repack_pak,
             commands::repack_iostore,
+            commands::cancel_repack_iostore,
             commands::list_utoc_contents,
             commands::extract_utoc,
             commands::extract_utoc_file,

@@ -98,10 +98,19 @@ pub(crate) async fn repack_pak(input_dir: String, output_pak: String) -> Result<
 }
 
 #[tauri::command]
-pub(crate) async fn repack_iostore(input_dir: String, output_utoc: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || pak::repack_iostore(&input_dir, &output_utoc))
+pub(crate) async fn repack_iostore(
+    input_dir: String,
+    output_utoc: String,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || pak::repack_iostore(&input_dir, &output_utoc, app))
         .await
         .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub(crate) fn cancel_repack_iostore() {
+    pak::cancel_repack_iostore();
 }
 
 #[tauri::command]

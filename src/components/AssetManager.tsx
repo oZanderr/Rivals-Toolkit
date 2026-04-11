@@ -91,6 +91,11 @@ export function AssetManager({ gamePath }: Props) {
     current: number;
     total: number;
   } | null>(null);
+  const [repackProgress, setRepackProgress] = useState<{
+    phase: string;
+    current: number;
+    total: number;
+  } | null>(null);
   const [selectedEntries, setSelectedEntries] = useState<Set<string>>(new Set());
   const lastClickedIndex = useRef<number | null>(null);
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -99,13 +104,37 @@ export function AssetManager({ gamePath }: Props) {
 
   // Listen for legacy extraction progress events
   useEffect(() => {
+    let cancelled = false;
     let unlisten: (() => void) | undefined;
     listen<{ current: number; total: number }>("legacy-extraction-progress", (event) => {
       setLegacyProgress(event.payload);
     }).then((fn) => {
-      unlisten = fn;
+      if (cancelled) fn();
+      else unlisten = fn;
     });
-    return () => unlisten?.();
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  // Listen for IoStore repack progress events
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    listen<{ phase: string; current: number; total: number }>(
+      "repack-iostore-progress",
+      (event) => {
+        setRepackProgress(event.payload);
+      }
+    ).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
   }, []);
 
   const showNotice = (
@@ -391,22 +420,23 @@ export function AssetManager({ gamePath }: Props) {
       const warning = files.find((f) => f.startsWith("__warnings__:"));
       const exported = files.filter((f) => !f.startsWith("__warnings__:"));
       if (warning) {
+        setLegacyProgress(null);
         showNotice(
           `Exported ${exported.length} asset(s) to ${outputDir} (some failed to convert)`,
           "err",
           { revealPath: outputDir }
         );
       } else {
+        setLegacyProgress(null);
         showNotice(`Exported ${exported.length} asset(s) to ${outputDir}`, "ok", {
           revealPath: outputDir,
         });
       }
     } catch (e: unknown) {
+      setLegacyProgress(null);
       showNotice(String(e), "err");
     } finally {
       setBusy(false);
-      // Small delay so the final progress event arrives before we clear the bar
-      setTimeout(() => setLegacyProgress(null), 200);
     }
   }
 
@@ -415,6 +445,14 @@ export function AssetManager({ gamePath }: Props) {
       await invoke("cancel_legacy_extraction");
     } catch {
       // Best-effort — extraction loop will stop on next batch regardless
+    }
+  }
+
+  async function cancelRepackIostore() {
+    try {
+      await invoke("cancel_repack_iostore");
+    } catch {
+      // Best-effort
     }
   }
 
@@ -600,8 +638,10 @@ export function AssetManager({ gamePath }: Props) {
       showNotice("Repacking to IoStore\u2026", "info");
       try {
         await invoke("repack_iostore", { inputDir, outputUtoc });
+        setRepackProgress(null);
         showNotice(`Repacked IoStore to: ${outputUtoc}`, "ok", { revealPath: outputUtoc });
       } catch (e: unknown) {
+        setRepackProgress(null);
         showNotice(String(e), "err");
       } finally {
         setBusy(false);
@@ -674,6 +714,25 @@ export function AssetManager({ gamePath }: Props) {
               size="sm"
               className="h-6 px-2 text-[11px]"
               onClick={cancelLegacyExtraction}
+            >
+              Cancel
+            </Button>
+          </div>
+        )}
+        {repackProgress && (
+          <div className="flex min-w-0 items-center gap-2">
+            <Progress
+              value={(repackProgress.current / repackProgress.total) * 100}
+              className="h-2 w-32"
+            />
+            <span className="shrink-0 text-[11px] text-muted-foreground">
+              {repackProgress.current}/{repackProgress.total}
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-6 px-2 text-[11px]"
+              onClick={cancelRepackIostore}
             >
               Cancel
             </Button>
