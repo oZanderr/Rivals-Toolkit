@@ -22,6 +22,17 @@ use retoc::{
 
 const MOUNT_POINT: &str = "../../../";
 
+/// Build a rayon thread pool using half the available cores (minimum 1).
+fn scoped_pool() -> Result<rayon::ThreadPool, String> {
+    let threads = std::thread::available_parallelism()
+        .map(|n| (n.get() / 2).max(1))
+        .unwrap_or(2);
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .map_err(|e| e.to_string())
+}
+
 static LEGACY_CANCEL: AtomicBool = AtomicBool::new(false);
 static REPACK_CANCEL: AtomicBool = AtomicBool::new(false);
 
@@ -272,21 +283,25 @@ pub(crate) fn extract_utoc(utoc_path: &str, output_dir: &str) -> Result<Vec<Stri
         })
         .collect();
 
-    let mut extracted: Vec<String> = chunks
-        .par_iter()
-        .map(|(chunk, stripped)| {
-            let dest = output.join(stripped);
-            if let Some(parent) = dest.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| format!("Failed to create dir for {stripped}: {e}"))?;
-            }
-            let data = chunk
-                .read()
-                .map_err(|e| format!("Failed to read {stripped}: {e}"))?;
-            std::fs::write(&dest, data).map_err(|e| format!("Failed to write {stripped}: {e}"))?;
-            Ok(stripped.clone())
-        })
-        .collect::<Result<Vec<_>, String>>()?;
+    let pool = scoped_pool()?;
+    let mut extracted: Vec<String> = pool.install(|| {
+        chunks
+            .par_iter()
+            .map(|(chunk, stripped)| {
+                let dest = output.join(stripped);
+                if let Some(parent) = dest.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| format!("Failed to create dir for {stripped}: {e}"))?;
+                }
+                let data = chunk
+                    .read()
+                    .map_err(|e| format!("Failed to read {stripped}: {e}"))?;
+                std::fs::write(&dest, data)
+                    .map_err(|e| format!("Failed to write {stripped}: {e}"))?;
+                Ok(stripped.clone())
+            })
+            .collect::<Result<Vec<_>, String>>()
+    })?;
 
     extracted.sort();
     Ok(extracted)
@@ -320,21 +335,25 @@ pub(crate) fn extract_utoc_files(
         })
         .collect();
 
-    let mut extracted: Vec<String> = chunks
-        .par_iter()
-        .map(|(chunk, stripped)| {
-            let dest = output.join(stripped);
-            if let Some(parent) = dest.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| format!("Failed to create dir for {stripped}: {e}"))?;
-            }
-            let data = chunk
-                .read()
-                .map_err(|e| format!("Failed to read {stripped}: {e}"))?;
-            std::fs::write(&dest, data).map_err(|e| format!("Failed to write {stripped}: {e}"))?;
-            Ok(stripped.clone())
-        })
-        .collect::<Result<Vec<_>, String>>()?;
+    let pool = scoped_pool()?;
+    let mut extracted: Vec<String> = pool.install(|| {
+        chunks
+            .par_iter()
+            .map(|(chunk, stripped)| {
+                let dest = output.join(stripped);
+                if let Some(parent) = dest.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| format!("Failed to create dir for {stripped}: {e}"))?;
+                }
+                let data = chunk
+                    .read()
+                    .map_err(|e| format!("Failed to read {stripped}: {e}"))?;
+                std::fs::write(&dest, data)
+                    .map_err(|e| format!("Failed to write {stripped}: {e}"))?;
+                Ok(stripped.clone())
+            })
+            .collect::<Result<Vec<_>, String>>()
+    })?;
 
     extracted.sort();
     Ok(extracted)
@@ -586,37 +605,40 @@ pub(crate) fn extract_utoc_legacy(
     let total = packages.len();
     let completed = std::sync::atomic::AtomicUsize::new(0);
 
-    let results: Vec<Option<Result<String, String>>> = packages
-        .par_iter()
-        .map(|(pkg_id, stripped)| {
-            if LEGACY_CANCEL.load(Ordering::Relaxed) {
-                return None;
-            }
+    let pool = scoped_pool()?;
+    let results: Vec<Option<Result<String, String>>> = pool.install(|| {
+        packages
+            .par_iter()
+            .map(|(pkg_id, stripped)| {
+                if LEGACY_CANCEL.load(Ordering::Relaxed) {
+                    return None;
+                }
 
-            let result = match asset_conversion::build_legacy(
-                &package_context,
-                *pkg_id,
-                UEPath::new(stripped),
-                &writer,
-            ) {
-                Ok(()) => Ok(stripped.clone()),
-                Err(e) => Err(format!("{stripped}: {e}")),
-            };
+                let result = match asset_conversion::build_legacy(
+                    &package_context,
+                    *pkg_id,
+                    UEPath::new(stripped),
+                    &writer,
+                ) {
+                    Ok(()) => Ok(stripped.clone()),
+                    Err(e) => Err(format!("{stripped}: {e}")),
+                };
 
-            let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
-            if done.is_multiple_of(10) || done == total {
-                let _ = app.emit(
-                    "legacy-extraction-progress",
-                    LegacyExtractionProgress {
-                        current: done,
-                        total,
-                    },
-                );
-            }
+                let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                if done.is_multiple_of(10) || done == total {
+                    let _ = app.emit(
+                        "legacy-extraction-progress",
+                        LegacyExtractionProgress {
+                            current: done,
+                            total,
+                        },
+                    );
+                }
 
-            Some(result)
-        })
-        .collect();
+                Some(result)
+            })
+            .collect()
+    });
 
     let mut extracted: Vec<String> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
