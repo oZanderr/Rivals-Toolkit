@@ -218,21 +218,22 @@ pub(crate) fn export_mods_zip(mods_folder: &str, dest_path: &str) -> Result<Stri
         zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
 
     let mut pak_count = 0u32;
-    for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())?.flatten() {
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name.ends_with(".disabled") {
+    for rel_path in super::walk_mod_files(dir) {
+        let rel_str = rel_path.to_string_lossy().replace('\\', "/");
+        if rel_str.ends_with(".disabled") {
             continue;
         }
-        let ext = path.extension().and_then(|x| x.to_str()).unwrap_or("");
+        let full_path = dir.join(&rel_path);
+        let ext = rel_path.extension().and_then(|x| x.to_str()).unwrap_or("");
         if !matches!(ext, "pak" | "ucas" | "utoc") {
             continue;
         }
         if ext == "pak" {
             pak_count += 1;
         }
-        zip.start_file(&name, options).map_err(|e| e.to_string())?;
-        let mut src = std::fs::File::open(&path).map_err(|e| e.to_string())?;
+        zip.start_file(&rel_str, options)
+            .map_err(|e| e.to_string())?;
+        let mut src = std::fs::File::open(&full_path).map_err(|e| e.to_string())?;
         io::copy(&mut src, &mut zip).map_err(|e| e.to_string())?;
     }
 

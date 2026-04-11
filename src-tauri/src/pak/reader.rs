@@ -58,13 +58,10 @@ pub(super) fn list_pak_files(game_root: &str) -> Result<Vec<String>, String> {
 
     let mods_dir = dir.join("~mods");
     let mut mod_paks: Vec<String> = if mods_dir.is_dir() {
-        WalkDir::new(&mods_dir)
-            .max_depth(1)
+        crate::mods::walk_mod_files(&mods_dir)
             .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file())
-            .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("pak"))
-            .map(|e| e.path().to_string_lossy().into_owned())
+            .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("pak"))
+            .map(|p| mods_dir.join(p).to_string_lossy().into_owned())
             .collect()
     } else {
         vec![]

@@ -58,9 +58,8 @@ pub(crate) fn scan_mod_paks(game_root: &str) -> Result<Vec<PakIniInfo>, String> 
     }
 
     let mut results = Vec::new();
-    for entry in fs::read_dir(&mods_dir).map_err(|e| e.to_string())? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let path = entry.path();
+    for rel_path in crate::mods::walk_mod_files(&mods_dir) {
+        let path = mods_dir.join(&rel_path);
         if path.extension().and_then(|x| x.to_str()) != Some("pak") {
             continue;
         }

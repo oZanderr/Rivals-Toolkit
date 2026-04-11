@@ -776,7 +776,9 @@ export function AssetManager({ gamePath }: Props) {
                     const isManual = manualPaks.has(p);
                     const isIoStore = info.has_utoc && info.has_ucas;
                     const fileName = p.split(/[/\\]/).pop();
-                    const displayName = isMod ? `~mods/${fileName}` : fileName;
+                    const modsIdx = p.search(/[/\\]~mods[/\\]/i);
+                    const displayName =
+                      isMod && modsIdx !== -1 ? p.slice(modsIdx + 1).replace(/\\/g, "/") : fileName;
                     return (
                       <li
                         key={p}

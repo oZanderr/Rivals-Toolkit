@@ -10,6 +10,27 @@ static BYPASS_DSOUND: &[u8] = include_bytes!("../resources/bypass/dsound.dll");
 static BYPASS_ASI: &[u8] =
     include_bytes!("../resources/bypass/plugins/MarvelRivalsUTOCSignatureBypass.asi");
 
+/// Recursively collect relative paths of mod-related files (.pak, .ucas, .utoc,
+/// and their `.disabled` variants) under the given root directory.
+pub(crate) fn walk_mod_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    walkdir::WalkDir::new(root)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy();
+            let base = name.strip_suffix(".disabled").unwrap_or(&name);
+            matches!(
+                std::path::Path::new(base)
+                    .extension()
+                    .and_then(|x| x.to_str()),
+                Some("pak" | "ucas" | "utoc")
+            )
+        })
+        .filter_map(|e| e.path().strip_prefix(root).ok().map(|r| r.to_path_buf()))
+        .collect()
+}
+
 /// Check whether a file exists and matches the expected bytes.
 fn file_matches(path: &std::path::Path, expected: &[u8]) -> bool {
     std::fs::read(path)

@@ -1,9 +1,10 @@
-use std::fs;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
 use crate::paths::{binaries_dir, mods_dir};
 
+use super::walk_mod_files;
 use super::{BYPASS_ASI, BYPASS_DSOUND, file_matches};
 
 #[derive(Serialize, Deserialize)]
@@ -41,15 +42,15 @@ pub(crate) fn get_mods_status(game_root: &str) -> ModsStatus {
         file_matches(&dsound_path, BYPASS_DSOUND) && file_matches(&asi_path, BYPASS_ASI);
 
     let mut mod_entries: Vec<ModEntry> = if exists {
-        fs::read_dir(&mods)
+        walk_mod_files(&mods)
             .into_iter()
-            .flatten()
-            .flatten()
-            .filter_map(|e| {
-                let full_name = e.file_name().to_string_lossy().into_owned();
+            .filter_map(|rel_path| {
+                let full_name = rel_path.to_string_lossy().into_owned().replace('\\', "/");
+                let parent = rel_path.parent().unwrap_or(Path::new(""));
                 if full_name.ends_with(".pak") {
-                    let stem = &full_name[..full_name.len() - 4];
-                    let has_companions = mods.join(format!("{stem}.ucas")).exists();
+                    let file_stem = &rel_path.file_name()?.to_string_lossy();
+                    let stem = &file_stem[..file_stem.len() - 4];
+                    let has_companions = mods.join(parent).join(format!("{stem}.ucas")).exists();
                     Some(ModEntry {
                         display_name: full_name.clone(),
                         full_name,
@@ -58,8 +59,12 @@ pub(crate) fn get_mods_status(game_root: &str) -> ModsStatus {
                     })
                 } else if full_name.ends_with(".pak.disabled") {
                     let display_name = full_name[..full_name.len() - ".disabled".len()].to_owned();
-                    let stem = &display_name[..display_name.len() - 4];
-                    let has_companions = mods.join(format!("{stem}.ucas.disabled")).exists();
+                    let file_stem = &rel_path.file_name()?.to_string_lossy();
+                    let stem = &file_stem[..file_stem.len() - ".pak.disabled".len()];
+                    let has_companions = mods
+                        .join(parent)
+                        .join(format!("{stem}.ucas.disabled"))
+                        .exists();
                     Some(ModEntry {
                         display_name,
                         full_name,
