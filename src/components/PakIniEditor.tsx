@@ -269,7 +269,7 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
       if (dp !== null) setActiveFile("device_profiles");
       else if (eng !== null) setActiveFile("engine");
     } catch (e) {
-      showNotice("Failed to extract INI files", "err");
+      showNotice(String(e), "err");
       console.error(e);
     } finally {
       setLoading(false);

@@ -449,7 +449,7 @@ export function Hitsounds({ gamePath, isActive }: Props) {
         {/* Game not detected warning */}
         {!gamePath && (
           <div className="border-t border-[var(--red-accent-border)] bg-[var(--red-accent)] px-5 py-2.5 text-xs text-[var(--red-accent-foreground)]">
-            Game not detected. Visit the Home tab to detect your install first.
+            Game not detected. Set your install path in Settings first.
           </div>
         )}
       </Card>

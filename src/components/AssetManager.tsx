@@ -192,7 +192,7 @@ export function AssetManager({ gamePath }: Props) {
     if (noticeTimer.current) clearTimeout(noticeTimer.current);
 
     if (!gamePath) {
-      showNotice("Set game root on Home tab first.", "err");
+      showNotice("Set game root in Settings first.", "err");
       return;
     }
 
@@ -813,7 +813,7 @@ export function AssetManager({ gamePath }: Props) {
             <p className="shrink-0 text-[11px] text-muted-foreground">
               {gamePath
                 ? "Reads Marvel Rivals Paks folder from your game root."
-                : "Set game root on Home tab to list game paks."}
+                : "Set game root in Settings to list game paks."}
             </p>
 
             <div className="min-h-0 flex-1 overflow-y-auto rounded-md border border-border bg-background">

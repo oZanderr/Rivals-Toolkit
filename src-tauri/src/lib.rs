@@ -9,6 +9,7 @@ mod ogg_to_wav;
 mod pak;
 mod pak_tweaks;
 mod paths;
+mod prefs;
 mod scalability;
 mod update_check;
 mod wav_to_wem;
@@ -66,7 +67,9 @@ pub fn run() {
             commands::path_exists,
             commands::build_hitsound_mod,
             commands::extract_hitsound_wavs,
-            commands::check_for_update
+            commands::check_for_update,
+            commands::get_auto_check_updates,
+            commands::set_auto_check_updates
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

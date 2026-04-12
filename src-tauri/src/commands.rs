@@ -1,5 +1,5 @@
 use crate::{
-    detect, hitsounds, launch_record, mods, pak, pak_tweaks, scalability, update_check,
+    detect, hitsounds, launch_record, mods, pak, pak_tweaks, prefs, scalability, update_check,
     wav_to_wem,
 };
 
@@ -370,10 +370,22 @@ pub(crate) async fn extract_hitsound_wavs(
 #[tauri::command]
 pub(crate) async fn check_for_update(
     current_version: String,
+    force: Option<bool>,
 ) -> Result<update_check::UpdateInfo, String> {
+    let force = force.unwrap_or(false);
     tauri::async_runtime::spawn_blocking(move || {
-        update_check::check_for_update(&current_version)
+        update_check::check_for_update(&current_version, force)
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub(crate) fn get_auto_check_updates() -> bool {
+    prefs::get_auto_check_updates()
+}
+
+#[tauri::command]
+pub(crate) fn set_auto_check_updates(enabled: bool) -> Result<(), String> {
+    prefs::set_auto_check_updates(enabled)
 }

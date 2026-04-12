@@ -81,18 +81,16 @@ fn is_newer(latest: &str, current: &str) -> bool {
     }
 }
 
-pub(crate) fn check_for_update(current_version: &str) -> Result<UpdateInfo, String> {
-    // Return cached result if fresh enough
-    if let Some(mut cached) = read_cache() {
+pub(crate) fn check_for_update(current_version: &str, force: bool) -> Result<UpdateInfo, String> {
+    // Return cached result if fresh enough (unless force=true)
+    if !force && let Some(mut cached) = read_cache() {
         // Re-evaluate against current version in case of app upgrade
         cached.current_version = current_version.to_string();
         cached.update_available = is_newer(&cached.latest_version, current_version);
         return Ok(cached);
     }
 
-    let url = format!(
-        "https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
-    );
+    let url = format!("https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest");
 
     let agent = ureq::Agent::config_builder()
         .timeout_global(Some(REQUEST_TIMEOUT))

@@ -43,8 +43,7 @@ export function Titlebar({ updateInfo }: TitlebarProps) {
             onClick={() => openUrl(updateInfo.release_url)}
             className="flex items-center gap-1 rounded-full bg-blue-500/15 px-2 py-0.5 text-[11px] font-medium text-blue-400 transition-colors hover:bg-blue-500/25"
           >
-            <ArrowUpCircle size={12} />
-            v{updateInfo.latest_version}
+            <ArrowUpCircle size={12} />v{updateInfo.latest_version}
           </button>
         )}
       </div>

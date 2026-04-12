@@ -199,7 +199,7 @@ export function ModTools({ gamePath, isActive }: Props) {
   }, []);
 
   async function installBypass() {
-    if (!gamePath) return showNotice("Set game root on the Home tab first.", "err");
+    if (!gamePath) return showNotice("Set game root in Settings first.", "err");
     try {
       const msg = await invoke<string>("install_signature_bypass", { gameRoot: gamePath });
       showNotice(msg, "ok", 4000);
@@ -210,7 +210,7 @@ export function ModTools({ gamePath, isActive }: Props) {
   }
 
   async function removeBypass() {
-    if (!gamePath) return showNotice("Set game root on the Home tab first.", "err");
+    if (!gamePath) return showNotice("Set game root in Settings first.", "err");
     try {
       const msg = await invoke<string>("remove_signature_bypass", { gameRoot: gamePath });
       showNotice(msg, "ok", 4000);
@@ -331,7 +331,7 @@ export function ModTools({ gamePath, isActive }: Props) {
         {!gamePath && (
           <span className="flex shrink-0 items-center gap-1.5 text-[12px] font-medium text-[var(--color-warn)]">
             <XCircle size={14} strokeWidth={2.5} />
-            Set game root on Home tab first
+            Set game root in Settings first
           </span>
         )}
         <Button

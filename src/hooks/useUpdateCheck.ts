@@ -18,6 +18,8 @@ export function useUpdateCheck() {
     let cancelled = false;
     (async () => {
       try {
+        const autoCheck = await invoke<boolean>("get_auto_check_updates");
+        if (!autoCheck || cancelled) return;
         const currentVersion = await getVersion();
         const info = await invoke<UpdateInfo>("check_for_update", {
           currentVersion,

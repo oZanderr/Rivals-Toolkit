@@ -1,8 +1,16 @@
-import { useState, useEffect, type ReactNode } from "react";
+import { useState, useEffect, useCallback, useRef, type ReactNode } from "react";
 
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
-import { House, Package, Settings, Wrench, Play, FileCode2, Volume2 } from "lucide-react";
+import {
+  Package,
+  Settings as SettingsIcon,
+  SlidersHorizontal,
+  Wrench,
+  Play,
+  FileCode2,
+  Volume2,
+} from "lucide-react";
 
 import { Separator } from "@/components/ui/separator";
 import { useUpdateCheck } from "@/hooks/useUpdateCheck";
@@ -11,12 +19,12 @@ import { cn } from "@/lib/utils";
 import { AssetManager } from "./components/AssetManager";
 import { ConfigTweaks } from "./components/ConfigTweaks";
 import { Hitsounds } from "./components/Hitsounds";
-import { Home } from "./components/Home";
 import { ModTools } from "./components/ModTools";
 import { PakIniEditor } from "./components/PakIniEditor";
+import { Settings } from "./components/Settings";
 import { Titlebar } from "./components/Titlebar";
 
-type Tab = "home" | "mod-tools" | "pak-manager" | "ini-editor" | "settings" | "hitsounds";
+type Tab = "mod-tools" | "pak-manager" | "ini-editor" | "config-tweaks" | "hitsounds" | "settings";
 
 interface InstallInfo {
   path: string;
@@ -25,24 +33,52 @@ interface InstallInfo {
 }
 
 const TABS: { id: Tab; label: string; icon: ReactNode }[] = [
-  { id: "home", label: "Home", icon: <House size={15} /> },
   { id: "mod-tools", label: "Mod Tools", icon: <Wrench size={15} /> },
   { id: "hitsounds", label: "Hitsounds", icon: <Volume2 size={15} /> },
-  { id: "settings", label: "Config Tweaks", icon: <Settings size={15} /> },
+  { id: "config-tweaks", label: "Config Tweaks", icon: <SlidersHorizontal size={15} /> },
   { id: "ini-editor", label: "Pak INI Editor", icon: <FileCode2 size={15} /> },
   { id: "pak-manager", label: "Asset Manager", icon: <Package size={15} /> },
+  { id: "settings", label: "Settings", icon: <SettingsIcon size={15} /> },
 ];
 
 function App() {
-  const [activeTab, setActiveTab] = useState<Tab>("home");
+  const [activeTab, setActiveTab] = useState<Tab>("mod-tools");
   const [gamePath, setGamePath] = useState("");
   const [installInfo, setInstallInfo] = useState<InstallInfo | null | undefined>(undefined);
-  const [mountedTabs, setMountedTabs] = useState<Set<Tab>>(() => new Set(["home"]));
+  const [detecting, setDetecting] = useState(false);
+  const [showDetectBadge, setShowDetectBadge] = useState(false);
+  const [mountedTabs, setMountedTabs] = useState<Set<Tab>>(() => new Set(["mod-tools"]));
   const [version, setVersion] = useState("");
   const updateInfo = useUpdateCheck();
+  const didAutoDetect = useRef(false);
+  const detectBadgeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const detect = useCallback(async () => {
+    setDetecting(true);
+    try {
+      const result = await invoke<InstallInfo | null>("detect_install_path");
+      setInstallInfo(result);
+      if (result) {
+        setGamePath(result.path);
+        if (detectBadgeTimer.current) clearTimeout(detectBadgeTimer.current);
+        setShowDetectBadge(true);
+        detectBadgeTimer.current = setTimeout(() => setShowDetectBadge(false), 4000);
+      }
+    } catch (e) {
+      console.error(e);
+      setInstallInfo(null);
+    } finally {
+      setDetecting(false);
+    }
+  }, []);
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- functional updater is safe; accumulates visited tabs with no external side effects
+    if (didAutoDetect.current) return;
+    didAutoDetect.current = true;
+    detect();
+  }, [detect]);
+
+  useEffect(() => {
     setMountedTabs((prev) => {
       if (prev.has(activeTab)) return prev;
       return new Set(prev).add(activeTab);
@@ -128,23 +164,6 @@ function App() {
 
         {/* Content — lazy-mount & keep-mounted to preserve state across tab switches */}
         <main className="flex min-h-0 flex-1 flex-col overflow-hidden bg-background">
-          {mountedTabs.has("home") && (
-            <div
-              className={cn(
-                "flex flex-1 min-h-0 flex-col overflow-hidden p-5",
-                activeTab !== "home" && "hidden"
-              )}
-            >
-              <Home
-                gamePath={gamePath}
-                setGamePath={setGamePath}
-                setActiveTab={setActiveTab}
-                installInfo={installInfo}
-                setInstallInfo={setInstallInfo}
-                isActive={activeTab === "home"}
-              />
-            </div>
-          )}
           {mountedTabs.has("mod-tools") && (
             <div
               className={cn(
@@ -175,11 +194,11 @@ function App() {
               <PakIniEditor gamePath={gamePath} isActive={activeTab === "ini-editor"} />
             </div>
           )}
-          {mountedTabs.has("settings") && (
+          {mountedTabs.has("config-tweaks") && (
             <div
               className={cn(
                 "flex flex-1 min-h-0 flex-col overflow-hidden p-5",
-                activeTab !== "settings" && "hidden"
+                activeTab !== "config-tweaks" && "hidden"
               )}
             >
               <ConfigTweaks gamePath={gamePath} />
@@ -193,6 +212,23 @@ function App() {
               )}
             >
               <Hitsounds gamePath={gamePath} isActive={activeTab === "hitsounds"} />
+            </div>
+          )}
+          {mountedTabs.has("settings") && (
+            <div
+              className={cn(
+                "flex flex-1 min-h-0 flex-col overflow-hidden p-5",
+                activeTab !== "settings" && "hidden"
+              )}
+            >
+              <Settings
+                gamePath={gamePath}
+                setGamePath={setGamePath}
+                installInfo={installInfo}
+                detect={detect}
+                detecting={detecting}
+                showDetectBadge={showDetectBadge}
+              />
             </div>
           )}
         </main>

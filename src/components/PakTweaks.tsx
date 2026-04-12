@@ -360,6 +360,8 @@ export function PakTweaks({ gamePath, scalabilityContent }: Props) {
       if (isPakMissingError(e)) {
         removePak(pak.pak_path);
         showNotice("That pak file is missing now. Removed it from the list.", "info");
+      } else {
+        showNotice(String(e), "err");
       }
       console.error("Load failed:", e);
     } finally {
@@ -384,6 +386,8 @@ export function PakTweaks({ gamePath, scalabilityContent }: Props) {
       if (isPakMissingError(e)) {
         removePak(pak.pak_path);
         showNotice("That pak file is missing now. Removed it from the list.", "info");
+      } else {
+        showNotice(String(e), "err");
       }
       console.error("Reload failed:", e);
     }
@@ -541,7 +545,7 @@ export function PakTweaks({ gamePath, scalabilityContent }: Props) {
             {!gamePath && (
               <span className="flex items-center gap-1.5 text-[12px] text-[var(--color-warn)]">
                 <XCircle size={14} strokeWidth={2.5} />
-                Set game root on Home tab first
+                Set game root in Settings first
               </span>
             )}
 
