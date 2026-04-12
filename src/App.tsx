@@ -5,6 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { House, Package, Settings, Wrench, Play, FileCode2, Volume2 } from "lucide-react";
 
 import { Separator } from "@/components/ui/separator";
+import { useUpdateCheck } from "@/hooks/useUpdateCheck";
 import { cn } from "@/lib/utils";
 
 import { AssetManager } from "./components/AssetManager";
@@ -38,6 +39,7 @@ function App() {
   const [installInfo, setInstallInfo] = useState<InstallInfo | null | undefined>(undefined);
   const [mountedTabs, setMountedTabs] = useState<Set<Tab>>(() => new Set(["home"]));
   const [version, setVersion] = useState("");
+  const updateInfo = useUpdateCheck();
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- functional updater is safe; accumulates visited tabs with no external side effects
@@ -71,7 +73,7 @@ function App() {
 
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-background text-foreground">
-      <Titlebar />
+      <Titlebar updateInfo={updateInfo} />
       <div className="flex min-h-0 flex-1 overflow-hidden">
         {/* Sidebar */}
         <nav className="flex w-[210px] min-w-[210px] flex-col overflow-x-hidden overflow-y-auto border-r border-border bg-card">
@@ -112,10 +114,13 @@ function App() {
           {version && (
             <>
               <Separator className="mb-3" />
-              <div className="px-4 pb-4">
-                <span className="block text-center text-[10px] text-muted-foreground/50">
-                  v{version}
-                </span>
+              <div className="px-4 pb-4 text-center">
+                <span className="text-[10px] text-muted-foreground/50">v{version}</span>
+                {updateInfo?.update_available && (
+                  <span className="ml-1 text-[10px] font-medium text-blue-400">
+                    (update available)
+                  </span>
+                )}
               </div>
             </>
           )}

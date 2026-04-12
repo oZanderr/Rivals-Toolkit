@@ -10,6 +10,7 @@ mod pak;
 mod pak_tweaks;
 mod paths;
 mod scalability;
+mod update_check;
 mod wav_to_wem;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -64,7 +65,8 @@ pub fn run() {
             commands::validate_wav,
             commands::path_exists,
             commands::build_hitsound_mod,
-            commands::extract_hitsound_wavs
+            commands::extract_hitsound_wavs,
+            commands::check_for_update
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

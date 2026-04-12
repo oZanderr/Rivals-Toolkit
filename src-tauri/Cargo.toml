@@ -34,6 +34,7 @@ dirs = "5"
 zip = { version = "8.2.0", default-features = false, features = ["deflate"] }
 blake3 = "1"
 rayon = "1"
+ureq = { version = "3", features = ["json"] }
 lewton = "0.10"
 
 [profile.release]

@@ -1,4 +1,7 @@
-use crate::{detect, hitsounds, launch_record, mods, pak, pak_tweaks, scalability, wav_to_wem};
+use crate::{
+    detect, hitsounds, launch_record, mods, pak, pak_tweaks, scalability, update_check,
+    wav_to_wem,
+};
 
 #[tauri::command]
 pub(crate) fn get_scalability_path() -> Result<String, String> {
@@ -359,6 +362,17 @@ pub(crate) async fn extract_hitsound_wavs(
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         hitsounds::extract_hitsound_wavs(&game_root, &pak_path, &output_dir)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub(crate) async fn check_for_update(
+    current_version: String,
+) -> Result<update_check::UpdateInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        update_check::check_for_update(&current_version)
     })
     .await
     .map_err(|e| e.to_string())?

@@ -1,11 +1,17 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Minus, Square, X } from "lucide-react";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { ArrowUpCircle, Minus, Square, X } from "lucide-react";
 
 import icon from "@/assets/icon.png";
+import type { UpdateInfo } from "@/hooks/useUpdateCheck";
 
 const appWindow = getCurrentWindow();
 
-export function Titlebar() {
+interface TitlebarProps {
+  updateInfo?: UpdateInfo | null;
+}
+
+export function Titlebar({ updateInfo }: TitlebarProps) {
   const handleTitleMouseDown = async (e: React.MouseEvent<HTMLDivElement>) => {
     if (e.button !== 0) return;
     try {
@@ -31,6 +37,16 @@ export function Titlebar() {
         <span className="text-sm leading-none text-muted-foreground">
           Marvel Rivals Modding Suite
         </span>
+        {updateInfo?.update_available && (
+          <button
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={() => openUrl(updateInfo.release_url)}
+            className="flex items-center gap-1 rounded-full bg-blue-500/15 px-2 py-0.5 text-[11px] font-medium text-blue-400 transition-colors hover:bg-blue-500/25"
+          >
+            <ArrowUpCircle size={12} />
+            v{updateInfo.latest_version}
+          </button>
+        )}
       </div>
       <button
         onClick={() => appWindow.minimize()}
