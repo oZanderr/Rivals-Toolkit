@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, type ReactNode } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from "react";
 
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
@@ -13,7 +13,7 @@ import {
 } from "lucide-react";
 
 import { Separator } from "@/components/ui/separator";
-import { useUpdateCheck } from "@/hooks/useUpdateCheck";
+import { useUpdateCheck, type UpdateInfo } from "@/hooks/useUpdateCheck";
 import { cn } from "@/lib/utils";
 
 import { AssetManager } from "./components/AssetManager";
@@ -23,6 +23,7 @@ import { ModTools } from "./components/ModTools";
 import { PakIniEditor } from "./components/PakIniEditor";
 import { Settings } from "./components/Settings";
 import { Titlebar } from "./components/Titlebar";
+import { UpdateAvailableDialog } from "./components/UpdateAvailableDialog";
 
 type Tab = "mod-tools" | "pak-manager" | "ini-editor" | "config-tweaks" | "hitsounds" | "settings";
 
@@ -49,8 +50,31 @@ function App() {
   const [showDetectBadge, setShowDetectBadge] = useState(false);
   const [mountedTabs, setMountedTabs] = useState<Set<Tab>>(() => new Set(["mod-tools"]));
   const [version, setVersion] = useState("");
-  const updateInfo = useUpdateCheck();
-  const didAutoDetect = useRef(false);
+  const autoUpdateInfo = useUpdateCheck();
+  const [manualUpdateInfo, setManualUpdateInfo] = useState<UpdateInfo | null>(null);
+  const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
+  const activeUpdateInfo = useMemo(
+    () => manualUpdateInfo ?? autoUpdateInfo,
+    [manualUpdateInfo, autoUpdateInfo]
+  );
+
+  useEffect(() => {
+    if (!autoUpdateInfo?.update_available) return;
+    if (installInfo === undefined) return;
+    setUpdateDialogOpen(true);
+  }, [autoUpdateInfo, installInfo]);
+
+  const handleManualUpdateFound = useCallback((info: UpdateInfo) => {
+    setManualUpdateInfo(info);
+    setUpdateDialogOpen(true);
+  }, []);
+
+  const handleUpdateDialogOpenChange = useCallback((open: boolean) => {
+    setUpdateDialogOpen(open);
+    if (!open) setManualUpdateInfo(null);
+  }, []);
+  const didInit = useRef(false);
+  const lastSavedPath = useRef<string | null>(null);
   const detectBadgeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const detect = useCallback(async () => {
@@ -60,6 +84,11 @@ function App() {
       setInstallInfo(result);
       if (result) {
         setGamePath(result.path);
+        lastSavedPath.current = result.path;
+        invoke("set_game_path", {
+          path: result.path,
+          installInfo: result,
+        }).catch(console.error);
         if (detectBadgeTimer.current) clearTimeout(detectBadgeTimer.current);
         setShowDetectBadge(true);
         detectBadgeTimer.current = setTimeout(() => setShowDetectBadge(false), 4000);
@@ -73,10 +102,42 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (didAutoDetect.current) return;
-    didAutoDetect.current = true;
-    detect();
+    if (didInit.current) return;
+    didInit.current = true;
+    (async () => {
+      let saved: string | null = null;
+      try {
+        saved = await invoke<string | null>("get_game_path");
+      } catch (e) {
+        console.error(e);
+      }
+      lastSavedPath.current = saved;
+      if (saved) {
+        setGamePath(saved);
+        try {
+          const info = await invoke<InstallInfo | null>("get_saved_install_info");
+          setInstallInfo(info);
+        } catch (e) {
+          console.error(e);
+        }
+      } else {
+        detect();
+      }
+    })();
   }, [detect]);
+
+  useEffect(() => {
+    const next = gamePath || null;
+    if (lastSavedPath.current === next) return;
+    const t = setTimeout(() => {
+      invoke("set_game_path", { path: next, installInfo: null })
+        .then(() => {
+          lastSavedPath.current = next;
+        })
+        .catch(console.error);
+    }, 400);
+    return () => clearTimeout(t);
+  }, [gamePath]);
 
   useEffect(() => {
     setMountedTabs((prev) => {
@@ -109,7 +170,14 @@ function App() {
 
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-background text-foreground">
-      <Titlebar updateInfo={updateInfo} />
+      <Titlebar />
+      {activeUpdateInfo?.update_available && (
+        <UpdateAvailableDialog
+          updateInfo={activeUpdateInfo}
+          open={updateDialogOpen}
+          onOpenChange={handleUpdateDialogOpenChange}
+        />
+      )}
       <div className="flex min-h-0 flex-1 overflow-hidden">
         {/* Sidebar */}
         <nav className="flex w-52.5 min-w-52.5 flex-col overflow-x-hidden overflow-y-auto border-r border-border bg-card">
@@ -152,11 +220,6 @@ function App() {
               <Separator className="mb-3" />
               <div className="px-4 pb-4 text-center">
                 <span className="text-[10px] text-muted-foreground/50">v{version}</span>
-                {updateInfo?.update_available && (
-                  <span className="ml-1 text-[10px] font-medium text-blue-400">
-                    (update available)
-                  </span>
-                )}
               </div>
             </>
           )}
@@ -228,6 +291,7 @@ function App() {
                 detect={detect}
                 detecting={detecting}
                 showDetectBadge={showDetectBadge}
+                onManualUpdateFound={handleManualUpdateFound}
               />
             </div>
           )}

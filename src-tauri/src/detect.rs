@@ -11,14 +11,14 @@ use epic::find_epic_install;
 use loading_bay::find_loading_bay_install;
 use steam::find_steam_install;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub(crate) enum InstallSource {
     Steam,
     Epic,
     LoadingBay,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct InstallInfo {
     pub(crate) path: String,
     pub(crate) source: InstallSource,

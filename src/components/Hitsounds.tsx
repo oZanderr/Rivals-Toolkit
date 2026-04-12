@@ -94,6 +94,9 @@ export function Hitsounds({ gamePath, isActive }: Props) {
     outputDir: string;
     pakPath: string;
   } | null>(null);
+  const lastReplaceConfirmRef = useRef(replaceConfirm);
+  if (replaceConfirm) lastReplaceConfirmRef.current = replaceConfirm;
+  const displayReplaceConfirm = replaceConfirm ?? lastReplaceConfirmRef.current;
   const isActiveRef = useRef(isActive);
   const dropProcessingRef = useRef(false);
   const hoveredDropSlotRef = useRef<SlotKey | null>(null);
@@ -463,7 +466,7 @@ export function Hitsounds({ gamePath, isActive }: Props) {
             <AlertDialogTitle>Replace Existing Mod</AlertDialogTitle>
             <AlertDialogDescription>
               <span className="font-semibold text-foreground">
-                {replaceConfirm?.modName}_9999999_P.pak
+                {displayReplaceConfirm?.modName}_9999999_P.pak
               </span>{" "}
               already exists in this folder. Do you want to replace it?
             </AlertDialogDescription>

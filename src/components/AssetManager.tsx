@@ -87,6 +87,9 @@ export function AssetManager({ gamePath }: Props) {
     outputDir: string;
     filter?: string[];
   } | null>(null);
+  const lastLegacyConfirmRef = useRef(legacyConfirm);
+  if (legacyConfirm) lastLegacyConfirmRef.current = legacyConfirm;
+  const displayLegacyConfirm = legacyConfirm ?? lastLegacyConfirmRef.current;
   const [legacyProgress, setLegacyProgress] = useState<{
     current: number;
     total: number;
@@ -1074,7 +1077,7 @@ export function AssetManager({ gamePath }: Props) {
             <AlertDialogDescription>
               This container has{" "}
               <span className="font-semibold text-foreground">
-                {legacyConfirm?.count.toLocaleString()}
+                {displayLegacyConfirm?.count.toLocaleString()}
               </span>{" "}
               assets to convert. Legacy conversion decompresses every asset and may use significant
               disk space. Are you sure you want to continue?

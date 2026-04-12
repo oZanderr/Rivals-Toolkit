@@ -1,5 +1,8 @@
+use tauri::State;
+
+use crate::settings::SettingsState;
 use crate::{
-    detect, hitsounds, launch_record, mods, pak, pak_tweaks, prefs, scalability, update_check,
+    detect, hitsounds, launch_record, mods, pak, pak_tweaks, paths, scalability, update_check,
     wav_to_wem,
 };
 
@@ -21,6 +24,11 @@ pub(crate) fn write_scalability(path: String, content: String) -> Result<(), Str
 #[tauri::command]
 pub(crate) fn detect_install_path() -> Option<detect::InstallInfo> {
     detect::detect_game_install()
+}
+
+#[tauri::command]
+pub(crate) fn validate_game_path(path: String) -> Result<bool, String> {
+    Ok(paths::paks_dir(&path).is_dir())
 }
 
 #[tauri::command]
@@ -381,11 +389,40 @@ pub(crate) async fn check_for_update(
 }
 
 #[tauri::command]
-pub(crate) fn get_auto_check_updates() -> bool {
-    prefs::get_auto_check_updates()
+pub(crate) fn get_auto_check_updates(state: State<'_, SettingsState>) -> bool {
+    state.lock().map(|s| s.auto_check_updates).unwrap_or(true)
 }
 
 #[tauri::command]
-pub(crate) fn set_auto_check_updates(enabled: bool) -> Result<(), String> {
-    prefs::set_auto_check_updates(enabled)
+pub(crate) fn set_auto_check_updates(
+    state: State<'_, SettingsState>,
+    enabled: bool,
+) -> Result<(), String> {
+    let mut guard = state.lock().map_err(|e| e.to_string())?;
+    guard.auto_check_updates = enabled;
+    guard.save()
+}
+
+#[tauri::command]
+pub(crate) fn get_game_path(state: State<'_, SettingsState>) -> Option<String> {
+    state.lock().ok().and_then(|s| s.game_path.clone())
+}
+
+#[tauri::command]
+pub(crate) fn get_saved_install_info(
+    state: State<'_, SettingsState>,
+) -> Option<detect::InstallInfo> {
+    state.lock().ok().and_then(|s| s.install_info.clone())
+}
+
+#[tauri::command]
+pub(crate) fn set_game_path(
+    state: State<'_, SettingsState>,
+    path: Option<String>,
+    install_info: Option<detect::InstallInfo>,
+) -> Result<(), String> {
+    let mut guard = state.lock().map_err(|e| e.to_string())?;
+    guard.game_path = path.filter(|p| !p.is_empty());
+    guard.install_info = install_info;
+    guard.save()
 }

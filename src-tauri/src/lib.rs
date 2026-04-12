@@ -9,8 +9,8 @@ mod ogg_to_wav;
 mod pak;
 mod pak_tweaks;
 mod paths;
-mod prefs;
 mod scalability;
+mod settings;
 mod update_check;
 mod wav_to_wem;
 
@@ -20,8 +20,10 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .manage::<settings::SettingsState>(std::sync::Mutex::new(settings::Settings::load()))
         .invoke_handler(tauri::generate_handler![
             commands::detect_install_path,
+            commands::validate_game_path,
             commands::list_pak_files,
             commands::list_pak_files_info,
             commands::list_pak_contents,
@@ -69,7 +71,10 @@ pub fn run() {
             commands::extract_hitsound_wavs,
             commands::check_for_update,
             commands::get_auto_check_updates,
-            commands::set_auto_check_updates
+            commands::set_auto_check_updates,
+            commands::get_game_path,
+            commands::get_saved_install_info,
+            commands::set_game_path
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
