@@ -313,7 +313,7 @@ export function Hitsounds({ gamePath, isActive }: Props) {
             className={cn(
               "rounded-full px-2.5 py-1",
               isConfigured
-                ? "border-[var(--green-accent-border)] bg-[var(--green-accent)] text-[var(--green-accent-foreground)]"
+                ? "border-green-accent-border bg-green-accent text-green-accent-foreground"
                 : "border-border bg-background text-muted-foreground"
             )}
           >
@@ -324,9 +324,9 @@ export function Hitsounds({ gamePath, isActive }: Props) {
             className={cn(
               "rounded-full px-2.5 py-1",
               hasErrors
-                ? "border-[var(--red-accent-border)] bg-[var(--red-accent)] text-[var(--red-accent-foreground)]"
+                ? "border-red-accent-border bg-red-accent text-red-accent-foreground"
                 : hasAnyValid
-                  ? "border-[var(--green-accent-border)] bg-[var(--green-accent)] text-[var(--green-accent-foreground)]"
+                  ? "border-green-accent-border bg-green-accent text-green-accent-foreground"
                   : "border-border bg-background text-muted-foreground"
             )}
           >
@@ -426,9 +426,7 @@ export function Hitsounds({ gamePath, isActive }: Props) {
             <div
               className={cn(
                 "flex items-center gap-1.5 text-xs",
-                buildResult.ok
-                  ? "text-[var(--green-accent-foreground)]"
-                  : "text-[var(--red-accent-foreground)]",
+                buildResult.ok ? "text-green-accent-foreground" : "text-red-accent-foreground",
                 buildResult.revealPath && "cursor-pointer hover:underline"
               )}
               onClick={
@@ -448,7 +446,7 @@ export function Hitsounds({ gamePath, isActive }: Props) {
 
         {/* Game not detected warning */}
         {!gamePath && (
-          <div className="border-t border-[var(--red-accent-border)] bg-[var(--red-accent)] px-5 py-2.5 text-xs text-[var(--red-accent-foreground)]">
+          <div className="border-t border-red-accent-border bg-red-accent px-5 py-2.5 text-xs text-red-accent-foreground">
             Game not detected. Set your install path in Settings first.
           </div>
         )}
@@ -552,7 +550,7 @@ function SoundRow({
             size={14}
             className={cn(
               "shrink-0",
-              slot.error ? "text-[var(--red-accent-foreground)]" : "text-muted-foreground"
+              slot.error ? "text-red-accent-foreground" : "text-muted-foreground"
             )}
           />
           <span className="truncate text-sm font-medium">{slot.name}</span>
@@ -571,9 +569,7 @@ function SoundRow({
             </span>
           )}
           {slot.error && (
-            <span className="shrink-0 text-[11px] text-[var(--red-accent-foreground)]">
-              {slot.error}
-            </span>
+            <span className="shrink-0 text-[11px] text-red-accent-foreground">{slot.error}</span>
           )}
         </div>
       ) : (
@@ -594,9 +590,9 @@ function SoundRow({
           className={cn(
             "rounded-full px-2 py-0.5 text-[10px]",
             slot?.error
-              ? "border-[var(--red-accent-border)] bg-[var(--red-accent)] text-[var(--red-accent-foreground)]"
+              ? "border-red-accent-border bg-red-accent text-red-accent-foreground"
               : isReady
-                ? "border-[var(--green-accent-border)] bg-[var(--green-accent)] text-[var(--green-accent-foreground)]"
+                ? "border-green-accent-border bg-green-accent text-green-accent-foreground"
                 : "border-border bg-background text-muted-foreground"
           )}
         >
@@ -608,7 +604,7 @@ function SoundRow({
             variant="ghost"
             onClick={onClear}
             disabled={disabled}
-            className="text-muted-foreground hover:text-[var(--color-err)]"
+            className="text-muted-foreground hover:text-err"
             title="Remove"
           >
             <Trash2 size={13} />

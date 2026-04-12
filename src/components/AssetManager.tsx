@@ -683,9 +683,9 @@ export function AssetManager({ gamePath }: Props) {
             className={cn(
               "flex min-w-0 items-center gap-1.5 truncate text-[12px] font-medium",
               notice.type === "ok"
-                ? "text-[var(--color-ok)]"
+                ? "text-ok"
                 : notice.type === "err"
-                  ? "text-[var(--color-err)]"
+                  ? "text-err"
                   : "text-muted-foreground",
               notice.revealPath && "cursor-pointer hover:underline"
             )}
@@ -743,7 +743,7 @@ export function AssetManager({ gamePath }: Props) {
             <Select value={repackFormat} onValueChange={(v) => setRepackFormat(v as RepackFormat)}>
               <SelectTrigger
                 size="sm"
-                className="h-8 w-[120px] rounded-r-none border-r-0 text-sm font-medium"
+                className="h-8 w-30 rounded-r-none border-r-0 text-sm font-medium"
               >
                 <SelectValue>
                   <span className="flex items-center gap-1.5">
@@ -782,7 +782,7 @@ export function AssetManager({ gamePath }: Props) {
       </div>
 
       <div className="flex min-h-0 flex-1 flex-row gap-4">
-        <div className="flex min-h-0 w-[clamp(280px,28vw,560px)] min-w-[280px] max-w-[560px] shrink-0 flex-col">
+        <div className="flex min-h-0 w-[clamp(280px,28vw,560px)] min-w-70 max-w-140 shrink-0 flex-col">
           <Card className="flex min-h-0 flex-1 flex-col gap-3 p-3 bg-card">
             <div className="flex shrink-0 items-center justify-between gap-1.5">
               <h3 className="text-sm font-semibold">Game Paks</h3>

@@ -567,8 +567,8 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
           <span
             className={cn(
               "flex items-center gap-1.5 text-[12px] font-medium",
-              notice.type === "ok" && "text-[var(--color-ok)]",
-              notice.type === "err" && "text-[var(--color-err)]",
+              notice.type === "ok" && "text-ok",
+              notice.type === "err" && "text-err",
               notice.type === "info" && "text-muted-foreground"
             )}
           >
@@ -600,7 +600,7 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
               }
             />
           </SelectTrigger>
-          <SelectContent position="popper" className="w-[var(--radix-select-trigger-width)]">
+          <SelectContent position="popper" className="w-(--radix-select-trigger-width)">
             {paks.map((p) => (
               <SelectItem
                 key={p.pak_path}
@@ -649,7 +649,7 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
                     >
                       <FileText size={12} />
                       DefaultDeviceProfiles.ini
-                      {dpDirty && <span className="size-1.5 rounded-full bg-[var(--color-warn)]" />}
+                      {dpDirty && <span className="size-1.5 rounded-full bg-warn" />}
                     </button>
                   )}
                   {selectedPak.has_engine_ini && (
@@ -664,9 +664,7 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
                     >
                       <FileText size={12} />
                       DefaultEngine.ini
-                      {engineDirty && (
-                        <span className="size-1.5 rounded-full bg-[var(--color-warn)]" />
-                      )}
+                      {engineDirty && <span className="size-1.5 rounded-full bg-warn" />}
                     </button>
                   )}
                 </div>
@@ -676,7 +674,7 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
                   {selectedPak.has_device_profiles
                     ? "DefaultDeviceProfiles.ini"
                     : "DefaultEngine.ini"}
-                  {isDirty && <span className="size-1.5 rounded-full bg-[var(--color-warn)]" />}
+                  {isDirty && <span className="size-1.5 rounded-full bg-warn" />}
                 </span>
               )}
             </div>
@@ -803,7 +801,7 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
           <div className="flex items-center justify-between border-t border-border px-3 py-1.5">
             <div className="flex items-center gap-2">
               {isDirty && (
-                <span className="flex items-center gap-1.5 text-[11px] font-medium text-[var(--color-warn)]">
+                <span className="flex items-center gap-1.5 text-[11px] font-medium text-warn">
                   Unsaved changes
                   {dpDirty && engineDirty
                     ? " (both files)"

@@ -299,11 +299,9 @@ export function ModTools({ gamePath, isActive }: Props) {
   return (
     <div ref={outerRef} className="relative flex flex-1 min-h-0 w-full flex-col gap-6">
       {isDragging && (
-        <div className="pointer-events-none absolute inset-0 z-50 flex flex-col items-center justify-center gap-3 rounded-lg border-2 border-dashed border-[var(--color-ok)] bg-background/80 backdrop-blur-sm">
-          <UploadCloud size={36} className="text-[var(--color-ok)]" />
-          <span className="text-sm font-semibold text-[var(--color-ok)]">
-            Drop .pak or .zip to install
-          </span>
+        <div className="pointer-events-none absolute inset-0 z-50 flex flex-col items-center justify-center gap-3 rounded-lg border-2 border-dashed border-ok bg-background/80 backdrop-blur-sm">
+          <UploadCloud size={36} className="text-ok" />
+          <span className="text-sm font-semibold text-ok">Drop .pak or .zip to install</span>
         </div>
       )}
       {/* Header */}
@@ -314,9 +312,9 @@ export function ModTools({ gamePath, isActive }: Props) {
             className={cn(
               "flex min-w-0 items-center gap-1.5 truncate text-[12px] font-medium",
               notice.type === "ok"
-                ? "text-[var(--color-ok)]"
+                ? "text-ok"
                 : notice.type === "err"
-                  ? "text-[var(--color-err)]"
+                  ? "text-err"
                   : "text-muted-foreground"
             )}
           >
@@ -329,7 +327,7 @@ export function ModTools({ gamePath, isActive }: Props) {
           </span>
         )}
         {!gamePath && (
-          <span className="flex shrink-0 items-center gap-1.5 text-[12px] font-medium text-[var(--color-warn)]">
+          <span className="flex shrink-0 items-center gap-1.5 text-[12px] font-medium text-warn">
             <XCircle size={14} strokeWidth={2.5} />
             Set game root in Settings first
           </span>
@@ -474,14 +472,12 @@ export function ModTools({ gamePath, isActive }: Props) {
                       )}
                       {pendingDelete === entry.full_name ? (
                         <div className="flex shrink-0 items-center gap-1">
-                          <span className="text-[11px] font-medium text-[var(--color-err)]">
-                            Delete?
-                          </span>
+                          <span className="text-[11px] font-medium text-err">Delete?</span>
                           <button
                             title="Confirm delete"
                             disabled={busy}
                             onClick={() => deleteMod(entry)}
-                            className="rounded px-1.5 py-0.5 text-[11px] font-semibold bg-[var(--color-err)] text-white hover:opacity-90 transition-opacity"
+                            className="rounded px-1.5 py-0.5 text-[11px] font-semibold bg-err text-white hover:opacity-90 transition-opacity"
                           >
                             Yes
                           </button>
@@ -505,7 +501,7 @@ export function ModTools({ gamePath, isActive }: Props) {
                             title="Delete mod"
                             disabled={busy}
                             onClick={() => deleteMod(entry)}
-                            className="shrink-0 rounded p-1 text-muted-foreground/30 transition-colors hover:text-[var(--color-err)] hover:bg-[var(--color-err)]/10"
+                            className="shrink-0 rounded p-1 text-muted-foreground/30 transition-colors hover:text-err hover:bg-err/10"
                           >
                             <Trash2 size={13} />
                           </button>
@@ -579,7 +575,7 @@ function StatusCard({
         <span
           className={cn(
             "flex items-center gap-1.5 text-sm font-medium",
-            ok ? "text-[var(--color-ok)]" : "text-[var(--color-warn)]"
+            ok ? "text-ok" : "text-warn"
           )}
         >
           {ok ? okIcon : failIcon}

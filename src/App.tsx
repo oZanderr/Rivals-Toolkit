@@ -112,7 +112,7 @@ function App() {
       <Titlebar updateInfo={updateInfo} />
       <div className="flex min-h-0 flex-1 overflow-hidden">
         {/* Sidebar */}
-        <nav className="flex w-[210px] min-w-[210px] flex-col overflow-x-hidden overflow-y-auto border-r border-border bg-card">
+        <nav className="flex w-52.5 min-w-52.5 flex-col overflow-x-hidden overflow-y-auto border-r border-border bg-card">
           <div className="px-2 pt-2 pb-2">
             <button
               onClick={() => installInfo && invoke("launch_game", { installInfo })}
@@ -120,7 +120,7 @@ function App() {
               className={cn(
                 "flex w-full items-center gap-2.5 rounded-sm px-2.5 py-2 text-[13px] font-medium transition-colors",
                 installInfo
-                  ? "text-[var(--green-accent-foreground)] hover:bg-[var(--green-accent)] hover:text-[var(--green-accent-foreground)]"
+                  ? "text-green-accent-foreground hover:bg-green-accent hover:text-green-accent-foreground"
                   : "cursor-not-allowed text-muted-foreground/40"
               )}
               title={installInfo ? `Launch via ${installInfo.source}` : "Game not detected"}

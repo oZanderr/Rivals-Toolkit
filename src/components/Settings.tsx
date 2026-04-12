@@ -147,13 +147,13 @@ export function Settings({
       <div className="flex min-h-8 items-center gap-3">
         <h2 className="text-xl font-bold">Settings</h2>
         {showDetectBadge && installInfo && (
-          <span className="flex items-center gap-1.5 text-[12px] font-medium text-[var(--color-ok)]">
+          <span className="flex items-center gap-1.5 text-[12px] font-medium text-ok">
             <CheckCircle2 size={14} strokeWidth={2.5} />
             Found via {installInfo.source}
           </span>
         )}
         {!showDetectBadge && installInfo === null && (
-          <span className="flex items-center gap-1.5 text-[12px] font-medium text-[var(--color-warn)]">
+          <span className="flex items-center gap-1.5 text-[12px] font-medium text-warn">
             <XCircle size={14} strokeWidth={2.5} />
             Not detected
           </span>
@@ -199,7 +199,7 @@ export function Settings({
               htmlFor="skip-launcher"
               className={cn(
                 "cursor-pointer text-[13px] font-medium",
-                skipLauncherError && "text-[var(--color-err)]"
+                skipLauncherError && "text-err"
               )}
             >
               Skip Launcher
@@ -228,7 +228,7 @@ export function Settings({
             <span
               className={cn(
                 "flex items-center gap-1.5 text-[12px] font-medium",
-                updateBadge.type === "info" ? "text-blue-400" : "text-[var(--color-ok)]"
+                updateBadge.type === "info" ? "text-blue-400" : "text-ok"
               )}
             >
               <CheckCircle2 size={13} strokeWidth={2.5} />
@@ -245,7 +245,7 @@ export function Settings({
             </span>
           )}
           {updateError && (
-            <span className="flex items-center gap-1 text-[12px] font-medium text-[var(--color-err)]">
+            <span className="flex items-center gap-1 text-[12px] font-medium text-err">
               <XCircle size={13} strokeWidth={2.5} />
               {updateError}
             </span>
