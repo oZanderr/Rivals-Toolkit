@@ -293,7 +293,6 @@ export function Hitsounds({ gamePath, isActive }: Props) {
   const hasErrors = filledSlots.some((k) => slots[k]?.error);
 
   const canBuild = gamePath && hasAnyValid && !hasErrors && normalizeModName(modName).length > 0;
-  const isConfigured = Boolean(gamePath);
 
   const hitSlots = SLOT_CONFIGS.filter((c) => c.group === "hit");
   const killSlots = SLOT_CONFIGS.filter((c) => c.group === "kill");
@@ -301,7 +300,7 @@ export function Hitsounds({ gamePath, isActive }: Props) {
   return (
     <div className="flex min-h-0 w-full flex-1 flex-col gap-4 overflow-y-auto">
       {/* Page header */}
-      <div className="flex items-start justify-between gap-4">
+      <div className="flex items-start justify-between gap-4 pt-0.5">
         <div>
           <h2 className="text-xl font-bold">Hitsounds</h2>
           <p className="mt-1 text-xs text-muted-foreground">
@@ -311,17 +310,6 @@ export function Hitsounds({ gamePath, isActive }: Props) {
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2 pt-0.5">
-          <Badge
-            variant="outline"
-            className={cn(
-              "rounded-full px-2.5 py-1",
-              isConfigured
-                ? "border-green-accent-border bg-green-accent text-green-accent-foreground"
-                : "border-border bg-background text-muted-foreground"
-            )}
-          >
-            {isConfigured ? "Game detected" : "Game not detected"}
-          </Badge>
           <Badge
             variant="outline"
             className={cn(

@@ -6,7 +6,7 @@ import {
   Package,
   Settings as SettingsIcon,
   SlidersHorizontal,
-  Wrench,
+  Puzzle,
   Play,
   FileCode2,
   Volume2,
@@ -19,7 +19,7 @@ import { cn } from "@/lib/utils";
 import { AssetManager } from "./components/AssetManager";
 import { ConfigTweaks } from "./components/ConfigTweaks";
 import { Hitsounds } from "./components/Hitsounds";
-import { ModTools } from "./components/ModTools";
+import { Mods } from "./components/Mods";
 import { PakIniEditor } from "./components/PakIniEditor";
 import { Settings } from "./components/Settings";
 import { Titlebar } from "./components/Titlebar";
@@ -34,7 +34,7 @@ interface InstallInfo {
 }
 
 const TABS: { id: Tab; label: string; icon: ReactNode }[] = [
-  { id: "mod-tools", label: "Mod Tools", icon: <Wrench size={15} /> },
+  { id: "mod-tools", label: "Mods", icon: <Puzzle size={15} /> },
   { id: "hitsounds", label: "Hitsounds", icon: <Volume2 size={15} /> },
   { id: "config-tweaks", label: "Config Tweaks", icon: <SlidersHorizontal size={15} /> },
   { id: "ini-editor", label: "Pak INI Editor", icon: <FileCode2 size={15} /> },
@@ -180,13 +180,13 @@ function App() {
       )}
       <div className="flex min-h-0 flex-1 overflow-hidden">
         {/* Sidebar */}
-        <nav className="flex w-52.5 min-w-52.5 flex-col overflow-x-hidden overflow-y-auto border-r border-border bg-card">
+        <nav className="flex w-48 min-w-48 flex-col overflow-x-hidden overflow-y-auto border-r border-border bg-card">
           <div className="px-2 pt-2 pb-2">
             <button
               onClick={() => installInfo && invoke("launch_game", { installInfo })}
               disabled={!installInfo}
               className={cn(
-                "flex w-full items-center gap-2.5 rounded-sm px-2.5 py-2 text-[13px] font-medium transition-colors",
+                "flex w-full items-center gap-2.5 rounded-sm px-2.5 py-2 text-sm font-medium transition-colors",
                 installInfo
                   ? "text-green-accent-foreground hover:bg-green-accent hover:text-green-accent-foreground"
                   : "cursor-not-allowed text-muted-foreground/40"
@@ -204,7 +204,7 @@ function App() {
                 <button
                   onClick={() => setActiveTab(t.id)}
                   className={cn(
-                    "flex w-full items-center gap-2.5 rounded-sm px-2.5 py-2 text-[13px] text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground",
+                    "flex w-full items-center gap-2.5 rounded-sm px-2.5 py-2 text-sm text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground",
                     activeTab === t.id && "bg-secondary font-semibold text-foreground"
                   )}
                 >
@@ -234,7 +234,7 @@ function App() {
                 activeTab !== "mod-tools" && "hidden"
               )}
             >
-              <ModTools gamePath={gamePath} isActive={activeTab === "mod-tools"} />
+              <Mods gamePath={gamePath} isActive={activeTab === "mod-tools"} />
             </div>
           )}
           {mountedTabs.has("pak-manager") && (

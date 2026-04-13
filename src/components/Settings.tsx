@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { CheckCircle2, FolderOpen, RefreshCw, Save, Undo2, XCircle } from "lucide-react";
+import { CheckCircle2, FolderOpen, RefreshCw, Save, ShieldOff, Undo2, XCircle } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -60,6 +60,12 @@ export function Settings({
   } | null>(null);
   const updateBadgeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const [bypassNotice, setBypassNotice] = useState<{
+    msg: string;
+    type: "ok" | "err";
+  } | null>(null);
+  const bypassNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   // Sync draft when parent gamePath changes externally (e.g. detect, initial load)
   useEffect(() => {
     setDraftGamePath(gamePath);
@@ -106,6 +112,19 @@ export function Settings({
         setSavedAutoCheck(true);
       });
   }, []);
+
+  async function removeBypass() {
+    if (bypassNoticeTimer.current) clearTimeout(bypassNoticeTimer.current);
+    try {
+      const msg = await invoke<string>("remove_signature_bypass", {
+        gameRoot: draftGamePath,
+      });
+      setBypassNotice({ msg, type: "ok" });
+    } catch (e: unknown) {
+      setBypassNotice({ msg: String(e), type: "err" });
+    }
+    bypassNoticeTimer.current = setTimeout(() => setBypassNotice(null), 6000);
+  }
 
   async function browse() {
     const selected = await open({ directory: true, multiple: false });
@@ -294,6 +313,40 @@ export function Settings({
           {!draftGamePath && (
             <span className="text-[11px] text-muted-foreground">Set a game path first.</span>
           )}
+        </Card>
+
+        {/* ── Signature Bypass ── */}
+        <Card className="flex flex-col gap-3 bg-card p-3">
+          <div className="flex items-center gap-2">
+            <h3 className="text-sm font-semibold">Signature Bypass</h3>
+            {bypassNotice && (
+              <span
+                className={cn(
+                  "flex items-center gap-1.5 text-[11px] font-medium",
+                  bypassNotice.type === "ok" ? "text-ok" : "text-err"
+                )}
+              >
+                {bypassNotice.type === "ok" ? (
+                  <CheckCircle2 size={13} strokeWidth={2.5} />
+                ) : (
+                  <XCircle size={13} strokeWidth={2.5} />
+                )}
+                {bypassNotice.msg}
+              </span>
+            )}
+          </div>
+          <div className="flex items-center justify-between rounded-md border border-border bg-background px-3 py-2">
+            <div className="flex flex-col gap-0.5">
+              <span className="text-[13px] font-medium">Remove Signature Bypass</span>
+              <span className="text-[11px] text-muted-foreground">
+                Removes dsound.dll and the bypass plugin from the game directory.
+              </span>
+            </div>
+            <Button variant="red" size="sm" onClick={removeBypass} disabled={!draftGamePath}>
+              <ShieldOff size={13} />
+              Remove
+            </Button>
+          </div>
         </Card>
 
         {/* ── Updates ── */}

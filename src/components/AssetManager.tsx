@@ -865,7 +865,7 @@ export function AssetManager({ gamePath }: Props) {
                         )}
                         <span className="flex-1 truncate text-[12px]">{displayName}</span>
                         {isIoStore && (
-                          <span className="shrink-0 rounded bg-purple-500/20 px-1.5 py-0.5 text-[9px] font-semibold uppercase leading-none text-purple-400">
+                          <span className="shrink-0 rounded bg-info/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase leading-none text-info">
                             IoStore
                           </span>
                         )}
@@ -1044,7 +1044,7 @@ export function AssetManager({ gamePath }: Props) {
                       <span className="shrink-0 text-muted-foreground">{fileIcon(entry.path)}</span>
                       <span className="truncate font-mono text-[11px]">{entry.path}</span>
                       {entry.source === "utoc" && (
-                        <span className="ml-auto shrink-0 rounded bg-purple-500/20 px-1 py-0.5 text-[8px] font-semibold uppercase leading-none text-purple-400">
+                        <span className="ml-auto shrink-0 rounded bg-info/15 px-1 py-0.5 text-[8px] font-semibold uppercase leading-none text-info">
                           utoc
                         </span>
                       )}

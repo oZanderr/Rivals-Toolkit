@@ -8,6 +8,12 @@ use super::walk_mod_files;
 use super::{BYPASS_ASI, BYPASS_DSOUND, file_matches};
 
 #[derive(Serialize, Deserialize)]
+pub(crate) enum ModKind {
+    Pak,
+    IoStore,
+}
+
+#[derive(Serialize, Deserialize)]
 pub(crate) struct ModEntry {
     /// Filename on disk, including optional `.disabled` suffix.
     pub full_name: String,
@@ -16,6 +22,13 @@ pub(crate) struct ModEntry {
     pub enabled: bool,
     /// Whether companion `.ucas`/`.utoc` files exist.
     pub has_companions: bool,
+    /// Total size in bytes (pak + companions if present).
+    pub size_bytes: u64,
+    pub kind: ModKind,
+}
+
+fn file_size(p: &Path) -> u64 {
+    std::fs::metadata(p).map(|m| m.len()).unwrap_or(0)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -50,26 +63,53 @@ pub(crate) fn get_mods_status(game_root: &str) -> ModsStatus {
                 if full_name.ends_with(".pak") {
                     let file_stem = &rel_path.file_name()?.to_string_lossy();
                     let stem = &file_stem[..file_stem.len() - 4];
-                    let has_companions = mods.join(parent).join(format!("{stem}.ucas")).exists();
+                    let dir = mods.join(parent);
+                    let ucas = dir.join(format!("{stem}.ucas"));
+                    let utoc = dir.join(format!("{stem}.utoc"));
+                    let has_companions = ucas.exists();
+                    let mut size_bytes =
+                        file_size(&dir.join(&*rel_path.file_name()?.to_string_lossy()));
+                    if has_companions {
+                        size_bytes += file_size(&ucas);
+                        size_bytes += file_size(&utoc);
+                    }
                     Some(ModEntry {
                         display_name: full_name.clone(),
                         full_name,
                         enabled: true,
                         has_companions,
+                        size_bytes,
+                        kind: if has_companions {
+                            ModKind::IoStore
+                        } else {
+                            ModKind::Pak
+                        },
                     })
                 } else if full_name.ends_with(".pak.disabled") {
                     let display_name = full_name[..full_name.len() - ".disabled".len()].to_owned();
                     let file_stem = &rel_path.file_name()?.to_string_lossy();
                     let stem = &file_stem[..file_stem.len() - ".pak.disabled".len()];
-                    let has_companions = mods
-                        .join(parent)
-                        .join(format!("{stem}.ucas.disabled"))
-                        .exists();
+                    let dir = mods.join(parent);
+                    let ucas = dir.join(format!("{stem}.ucas.disabled"));
+                    let utoc = dir.join(format!("{stem}.utoc.disabled"));
+                    let has_companions = ucas.exists();
+                    let mut size_bytes =
+                        file_size(&dir.join(&*rel_path.file_name()?.to_string_lossy()));
+                    if has_companions {
+                        size_bytes += file_size(&ucas);
+                        size_bytes += file_size(&utoc);
+                    }
                     Some(ModEntry {
                         display_name,
                         full_name,
                         enabled: false,
                         has_companions,
+                        size_bytes,
+                        kind: if has_companions {
+                            ModKind::IoStore
+                        } else {
+                            ModKind::Pak
+                        },
                     })
                 } else {
                     None
