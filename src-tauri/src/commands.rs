@@ -306,13 +306,15 @@ pub(crate) fn toggle_mod_enabled(
 }
 
 #[tauri::command]
-pub(crate) async fn export_mods_zip(
+pub(crate) async fn export_mods_archive(
     mods_folder: String,
     dest_path: String,
 ) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || mods::export_mods_zip(&mods_folder, &dest_path))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        mods::export_mods_archive(&mods_folder, &dest_path)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -329,13 +331,15 @@ pub(crate) fn install_mod(
 }
 
 #[tauri::command]
-pub(crate) async fn install_from_zip(
+pub(crate) async fn install_from_archive(
     mods_folder: String,
-    zip_path: String,
+    archive_path: String,
 ) -> Result<Vec<mods::InstallResult>, String> {
-    tauri::async_runtime::spawn_blocking(move || mods::install_from_zip(&mods_folder, &zip_path))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        mods::install_from_archive(&mods_folder, &archive_path)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

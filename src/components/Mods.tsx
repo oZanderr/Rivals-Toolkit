@@ -4,6 +4,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { save } from "@tauri-apps/plugin-dialog";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   Archive,
   FolderOpen,
@@ -55,8 +56,13 @@ type StatusType = "ok" | "err" | "info";
 
 export function Mods({ gamePath, isActive }: Props) {
   const [modsStatus, setModsStatus] = useState<ModsStatus | null>(null);
-  const [notice, setNotice] = useState<{ msg: string; type: StatusType } | null>(null);
+  const [notice, setNotice] = useState<{
+    msg: string;
+    type: StatusType;
+    revealPath?: string;
+  } | null>(null);
   const [busyMods, setBusyMods] = useState<Set<string>>(new Set());
+  const [isExporting, setIsExporting] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -66,11 +72,14 @@ export function Mods({ gamePath, isActive }: Props) {
   const dropProcessingRef = useRef(false);
   const outerRef = useRef<HTMLDivElement>(null);
 
-  const showNotice = useCallback((msg: string, type: StatusType, duration = 6000) => {
-    if (noticeTimer.current) clearTimeout(noticeTimer.current);
-    setNotice({ msg, type });
-    noticeTimer.current = setTimeout(() => setNotice(null), duration);
-  }, []);
+  const showNotice = useCallback(
+    (msg: string, type: StatusType, duration: number = 6000, opts?: { revealPath?: string }) => {
+      if (noticeTimer.current) clearTimeout(noticeTimer.current);
+      setNotice({ msg, type, revealPath: opts?.revealPath });
+      noticeTimer.current = setTimeout(() => setNotice(null), duration);
+    },
+    []
+  );
 
   modsStatusRef.current = modsStatus;
   isActiveRef.current = isActive;
@@ -112,8 +121,11 @@ export function Mods({ gamePath, isActive }: Props) {
           const folder = modsStatusRef.current?.mods_folder_path;
           if (!folder) return;
           const pakPaths = event.payload.paths.filter((p) => p.endsWith(".pak"));
-          const zipPaths = event.payload.paths.filter((p) => p.toLowerCase().endsWith(".zip"));
-          if (pakPaths.length === 0 && zipPaths.length === 0) return;
+          const archivePaths = event.payload.paths.filter((p) => {
+            const lower = p.toLowerCase();
+            return lower.endsWith(".zip") || lower.endsWith(".7z");
+          });
+          if (pakPaths.length === 0 && archivePaths.length === 0) return;
           dropProcessingRef.current = true;
           try {
             let installed = 0;
@@ -137,12 +149,12 @@ export function Mods({ gamePath, isActive }: Props) {
               }
             }
 
-            // Install mods from .zip archives
-            for (const z of zipPaths) {
+            // Install mods from .zip / .7z archives
+            for (const z of archivePaths) {
               try {
                 const results = await invoke<
                   { file_name: string; replaced_disabled: boolean; replaced_enabled: boolean }[]
-                >("install_from_zip", { modsFolder: folder, zipPath: z });
+                >("install_from_archive", { modsFolder: folder, archivePath: z });
                 for (const result of results) {
                   installed++;
                   if (result.replaced_disabled) replacedDisabled++;
@@ -245,20 +257,27 @@ export function Mods({ gamePath, isActive }: Props) {
   }
 
   async function exportZip() {
-    if (!modsStatus) return;
+    if (!modsStatus || isExporting) return;
+    const destPath = await save({
+      defaultPath: "mods.zip",
+      filters: [
+        { name: "Zip Archive", extensions: ["zip"] },
+        { name: "7z Archive", extensions: ["7z"] },
+      ],
+    });
+    if (!destPath) return;
+    setIsExporting(true);
     try {
-      const destPath = await save({
-        defaultPath: "mods.zip",
-        filters: [{ name: "Zip Archive", extensions: ["zip"] }],
-      });
-      if (!destPath) return;
-      const msg = await invoke<string>("export_mods_zip", {
+      const msg = await invoke<string>("export_mods_archive", {
         modsFolder: modsStatus.mods_folder_path,
         destPath,
       });
-      showNotice(msg, "ok", 4000);
+      const fileName = destPath.split(/[\\/]/).pop() ?? destPath;
+      showNotice(`${msg}: ${fileName}`, "ok", 8000, { revealPath: destPath });
     } catch (e: unknown) {
       showNotice(String(e), "err");
+    } finally {
+      setIsExporting(false);
     }
   }
 
@@ -270,7 +289,7 @@ export function Mods({ gamePath, isActive }: Props) {
       {isDragging && (
         <div className="pointer-events-none absolute inset-0 z-50 flex flex-col items-center justify-center gap-3 rounded-lg border-2 border-dashed border-ok bg-background/80 backdrop-blur-sm">
           <UploadCloud size={36} className="text-ok" />
-          <span className="text-sm font-semibold text-ok">Drop .pak or .zip to install</span>
+          <span className="text-sm font-semibold text-ok">Drop .pak, .zip or .7z to install</span>
         </div>
       )}
       {/* Header */}
@@ -284,8 +303,11 @@ export function Mods({ gamePath, isActive }: Props) {
                 ? "text-ok"
                 : notice.type === "err"
                   ? "text-err"
-                  : "text-muted-foreground"
+                  : "text-muted-foreground",
+              notice.revealPath && "cursor-pointer hover:underline"
             )}
+            onClick={notice.revealPath ? () => revealItemInDir(notice.revealPath!) : undefined}
+            title={notice.revealPath ? "Click to reveal in explorer" : undefined}
           >
             {notice.type === "ok" ? (
               <CheckCircle2 className="shrink-0" size={14} strokeWidth={2.5} />
@@ -342,9 +364,13 @@ export function Mods({ gamePath, isActive }: Props) {
               variant="ghost"
               size="icon-sm"
               onClick={exportZip}
-              disabled={enabledCount === 0}
+              disabled={enabledCount === 0 || isExporting}
               title={
-                enabledCount === 0 ? "No enabled mods to export" : "Export enabled mods as zip"
+                enabledCount === 0
+                  ? "No enabled mods to export"
+                  : isExporting
+                    ? "Exporting…"
+                    : "Export enabled mods as .zip or .7z"
               }
             >
               <Archive size={15} />
