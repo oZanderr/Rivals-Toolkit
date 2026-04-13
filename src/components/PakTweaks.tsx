@@ -360,6 +360,8 @@ export function PakTweaks({ gamePath, scalabilityContent }: Props) {
       if (isPakMissingError(e)) {
         removePak(pak.pak_path);
         showNotice("That pak file is missing now. Removed it from the list.", "info");
+      } else {
+        showNotice(String(e), "err");
       }
       console.error("Load failed:", e);
     } finally {
@@ -384,6 +386,8 @@ export function PakTweaks({ gamePath, scalabilityContent }: Props) {
       if (isPakMissingError(e)) {
         removePak(pak.pak_path);
         showNotice("That pak file is missing now. Removed it from the list.", "info");
+      } else {
+        showNotice(String(e), "err");
       }
       console.error("Reload failed:", e);
     }
@@ -502,10 +506,10 @@ export function PakTweaks({ gamePath, scalabilityContent }: Props) {
                     className={cn(
                       "flex min-w-0 items-center gap-1 text-[12px] font-medium",
                       notice.type === "ok"
-                        ? "text-[var(--color-ok)]"
+                        ? "text-ok"
                         : notice.type === "err"
-                          ? "text-[var(--color-err)]"
-                          : "text-[var(--color-warn)]"
+                          ? "text-err"
+                          : "text-warn"
                     )}
                   >
                     {notice.type === "ok" && (
@@ -539,9 +543,9 @@ export function PakTweaks({ gamePath, scalabilityContent }: Props) {
             </div>
 
             {!gamePath && (
-              <span className="flex items-center gap-1.5 text-[12px] text-[var(--color-warn)]">
+              <span className="flex items-center gap-1.5 text-[12px] text-warn">
                 <XCircle size={14} strokeWidth={2.5} />
-                Set game root on Home tab first
+                Set game root in Settings first
               </span>
             )}
 
@@ -786,7 +790,7 @@ function QuickTweakRow({
       className={cn(
         "flex flex-col gap-2 rounded-md border bg-background px-4 py-3",
         disabled && "opacity-50",
-        scalabilityConflict ? "border-[var(--color-warn)]/40" : "border-border/50"
+        scalabilityConflict ? "border-warn/40" : "border-border/50"
       )}
     >
       <div className="flex items-start justify-between gap-4">
@@ -806,12 +810,10 @@ function QuickTweakRow({
             {tweak.description}
           </span>
           {disabledReason && (
-            <span className="text-[11px] leading-snug text-[var(--color-warn)] mt-0.5">
-              {disabledReason}
-            </span>
+            <span className="text-[11px] leading-snug text-warn mt-0.5">{disabledReason}</span>
           )}
           {scalabilityConflict && (
-            <span className="mt-0.5 flex items-center gap-1 text-[11px] leading-snug text-[var(--color-warn)]">
+            <span className="mt-0.5 flex items-center gap-1 text-[11px] leading-snug text-warn">
               <TriangleAlert size={11} className="shrink-0" />
               Still present in Scalability.ini — also apply this fix in the Scalability tab
             </span>

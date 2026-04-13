@@ -1,6 +1,6 @@
-# Oinkers Toolkit
+# Rivals Toolkit
 
-Oinkers Toolkit is a desktop app for working with Marvel Rivals configuration and mod files.
+Rivals Toolkit is a desktop app for working with Marvel Rivals configuration and mod files.
 It combines a React frontend with a Tauri/Rust backend to provide:
 
 - game install detection across launchers

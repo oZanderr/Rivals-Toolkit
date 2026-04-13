@@ -272,9 +272,7 @@ export function ScalabilityTweaks({
                   <span
                     className={cn(
                       "flex items-center gap-1 text-[12px] font-medium",
-                      detectBadge === "Not found"
-                        ? "text-[var(--color-warn)]"
-                        : "text-[var(--color-ok)]"
+                      detectBadge === "Not found" ? "text-warn" : "text-ok"
                     )}
                   >
                     <CheckCircle2 size={13} strokeWidth={2.5} />
@@ -392,9 +390,9 @@ export function ScalabilityTweaks({
               className={cn(
                 "flex items-center gap-1 text-[12px]",
                 status.type === "ok"
-                  ? "text-[var(--color-ok)]"
+                  ? "text-ok"
                   : status.type === "err"
-                    ? "text-[var(--color-err)]"
+                    ? "text-err"
                     : "text-muted-foreground"
               )}
             >
@@ -450,9 +448,7 @@ function TweakRow({
             {tweak.description}
           </span>
           {disabledReason && (
-            <span className="text-[11px] leading-snug text-[var(--color-warn)] mt-0.5">
-              {disabledReason}
-            </span>
+            <span className="text-[11px] leading-snug text-warn mt-0.5">{disabledReason}</span>
           )}
           <div className="mt-1 flex flex-wrap gap-1">
             <TweakCodes tweak={tweak} />

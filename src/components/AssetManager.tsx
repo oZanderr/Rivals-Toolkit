@@ -16,7 +16,7 @@ import {
   Package,
   PackagePlus,
   Layers,
-  List,
+  RefreshCw,
   CheckCircle2,
   CheckSquare2,
   Square,
@@ -87,7 +87,15 @@ export function AssetManager({ gamePath }: Props) {
     outputDir: string;
     filter?: string[];
   } | null>(null);
+  const lastLegacyConfirmRef = useRef(legacyConfirm);
+  if (legacyConfirm) lastLegacyConfirmRef.current = legacyConfirm;
+  const displayLegacyConfirm = legacyConfirm ?? lastLegacyConfirmRef.current;
   const [legacyProgress, setLegacyProgress] = useState<{
+    current: number;
+    total: number;
+  } | null>(null);
+  const [repackProgress, setRepackProgress] = useState<{
+    phase: string;
     current: number;
     total: number;
   } | null>(null);
@@ -97,15 +105,44 @@ export function AssetManager({ gamePath }: Props) {
   const filterTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const contentsScrollRef = useRef<HTMLDivElement>(null);
 
+  // Load game paks on mount
+  useEffect(() => {
+    if (gamePath) listPaks();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Listen for legacy extraction progress events
   useEffect(() => {
+    let cancelled = false;
     let unlisten: (() => void) | undefined;
     listen<{ current: number; total: number }>("legacy-extraction-progress", (event) => {
       setLegacyProgress(event.payload);
     }).then((fn) => {
-      unlisten = fn;
+      if (cancelled) fn();
+      else unlisten = fn;
     });
-    return () => unlisten?.();
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  // Listen for IoStore repack progress events
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    listen<{ phase: string; current: number; total: number }>(
+      "repack-iostore-progress",
+      (event) => {
+        setRepackProgress(event.payload);
+      }
+    ).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
   }, []);
 
   const showNotice = (
@@ -163,7 +200,7 @@ export function AssetManager({ gamePath }: Props) {
     if (noticeTimer.current) clearTimeout(noticeTimer.current);
 
     if (!gamePath) {
-      showNotice("Set game root on Home tab first.", "err");
+      showNotice("Set game root in Settings first.", "err");
       return;
     }
 
@@ -194,7 +231,7 @@ export function AssetManager({ gamePath }: Props) {
     }
   }
 
-  async function inspectPak(pak: string) {
+  async function inspectPak(pak: string, infoOverride?: PakFileInfo) {
     if (pak === selectedPak) return;
     setSelectedPak(pak);
     setFilterText("");
@@ -203,7 +240,7 @@ export function AssetManager({ gamePath }: Props) {
     setSelectedEntries(new Set());
     lastClickedIndex.current = null;
 
-    const info = pakList.find((p) => p.path === pak);
+    const info = infoOverride ?? pakList.find((p) => p.path === pak);
     const isIoStore = info?.has_utoc && info?.has_ucas;
 
     setBusy(true);
@@ -259,7 +296,8 @@ export function AssetManager({ gamePath }: Props) {
         return [...prev, { path: selected, has_utoc: hasUtoc, has_ucas: hasUcas }];
       });
       setManualPaks((prev) => new Set(prev).add(selected));
-      await inspectPak(selected);
+      const info: PakFileInfo = { path: selected, has_utoc: hasUtoc, has_ucas: hasUcas };
+      await inspectPak(selected, info);
     }
   }
 
@@ -391,22 +429,23 @@ export function AssetManager({ gamePath }: Props) {
       const warning = files.find((f) => f.startsWith("__warnings__:"));
       const exported = files.filter((f) => !f.startsWith("__warnings__:"));
       if (warning) {
+        setLegacyProgress(null);
         showNotice(
           `Exported ${exported.length} asset(s) to ${outputDir} (some failed to convert)`,
           "err",
           { revealPath: outputDir }
         );
       } else {
+        setLegacyProgress(null);
         showNotice(`Exported ${exported.length} asset(s) to ${outputDir}`, "ok", {
           revealPath: outputDir,
         });
       }
     } catch (e: unknown) {
+      setLegacyProgress(null);
       showNotice(String(e), "err");
     } finally {
       setBusy(false);
-      // Small delay so the final progress event arrives before we clear the bar
-      setTimeout(() => setLegacyProgress(null), 200);
     }
   }
 
@@ -415,6 +454,14 @@ export function AssetManager({ gamePath }: Props) {
       await invoke("cancel_legacy_extraction");
     } catch {
       // Best-effort — extraction loop will stop on next batch regardless
+    }
+  }
+
+  async function cancelRepackIostore() {
+    try {
+      await invoke("cancel_repack_iostore");
+    } catch {
+      // Best-effort
     }
   }
 
@@ -600,8 +647,10 @@ export function AssetManager({ gamePath }: Props) {
       showNotice("Repacking to IoStore\u2026", "info");
       try {
         await invoke("repack_iostore", { inputDir, outputUtoc });
+        setRepackProgress(null);
         showNotice(`Repacked IoStore to: ${outputUtoc}`, "ok", { revealPath: outputUtoc });
       } catch (e: unknown) {
+        setRepackProgress(null);
         showNotice(String(e), "err");
       } finally {
         setBusy(false);
@@ -643,9 +692,9 @@ export function AssetManager({ gamePath }: Props) {
             className={cn(
               "flex min-w-0 items-center gap-1.5 truncate text-[12px] font-medium",
               notice.type === "ok"
-                ? "text-[var(--color-ok)]"
+                ? "text-ok"
                 : notice.type === "err"
-                  ? "text-[var(--color-err)]"
+                  ? "text-err"
                   : "text-muted-foreground",
               notice.revealPath && "cursor-pointer hover:underline"
             )}
@@ -679,12 +728,31 @@ export function AssetManager({ gamePath }: Props) {
             </Button>
           </div>
         )}
+        {repackProgress && (
+          <div className="flex min-w-0 items-center gap-2">
+            <Progress
+              value={(repackProgress.current / repackProgress.total) * 100}
+              className="h-2 w-32"
+            />
+            <span className="shrink-0 text-[11px] text-muted-foreground">
+              {repackProgress.current}/{repackProgress.total}
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-6 px-2 text-[11px]"
+              onClick={cancelRepackIostore}
+            >
+              Cancel
+            </Button>
+          </div>
+        )}
         <div className="ml-auto flex shrink-0 items-center gap-2">
           <div className="flex items-center">
             <Select value={repackFormat} onValueChange={(v) => setRepackFormat(v as RepackFormat)}>
               <SelectTrigger
                 size="sm"
-                className="h-8 w-[120px] rounded-r-none border-r-0 text-sm font-medium"
+                className="h-8 w-30 rounded-r-none border-r-0 text-sm font-medium"
               >
                 <SelectValue>
                   <span className="flex items-center gap-1.5">
@@ -723,30 +791,28 @@ export function AssetManager({ gamePath }: Props) {
       </div>
 
       <div className="flex min-h-0 flex-1 flex-row gap-4">
-        <div className="flex min-h-0 w-[clamp(280px,28vw,560px)] min-w-[280px] max-w-[560px] shrink-0 flex-col">
+        <div className="flex min-h-0 w-[clamp(280px,28vw,560px)] min-w-70 max-w-140 shrink-0 flex-col">
           <Card className="flex min-h-0 flex-1 flex-col gap-3 p-3 bg-card">
             <div className="flex shrink-0 items-center justify-between gap-1.5">
               <h3 className="text-sm font-semibold">Game Paks</h3>
-              <div className="flex items-center gap-1.5">
+              <div className="flex items-center gap-1">
                 <Button
-                  variant="outline"
-                  size="sm"
+                  variant="ghost"
+                  size="icon-sm"
                   onClick={openPak}
                   disabled={busy}
-                  title="Open Pak"
+                  title="Browse for a pak file"
                 >
-                  <FolderOpen size={14} />
-                  Browse
+                  <FolderOpen size={15} />
                 </Button>
                 <Button
-                  variant="outline"
-                  size="sm"
+                  variant="ghost"
+                  size="icon-sm"
                   onClick={listPaks}
                   disabled={busy}
-                  title="List all paks from your game's Paks folder"
+                  title="Refresh game paks"
                 >
-                  <List size={14} />
-                  List Paks
+                  <RefreshCw size={15} />
                 </Button>
               </div>
             </div>
@@ -754,7 +820,7 @@ export function AssetManager({ gamePath }: Props) {
             <p className="shrink-0 text-[11px] text-muted-foreground">
               {gamePath
                 ? "Reads Marvel Rivals Paks folder from your game root."
-                : "Set game root on Home tab to list game paks."}
+                : "Set game root in Settings to list game paks."}
             </p>
 
             <div className="min-h-0 flex-1 overflow-y-auto rounded-md border border-border bg-background">
@@ -803,7 +869,7 @@ export function AssetManager({ gamePath }: Props) {
                         )}
                         <span className="flex-1 truncate text-[12px]">{displayName}</span>
                         {isIoStore && (
-                          <span className="shrink-0 rounded bg-purple-500/20 px-1.5 py-0.5 text-[9px] font-semibold uppercase leading-none text-purple-400">
+                          <span className="shrink-0 rounded bg-info/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase leading-none text-info">
                             IoStore
                           </span>
                         )}
@@ -982,7 +1048,7 @@ export function AssetManager({ gamePath }: Props) {
                       <span className="shrink-0 text-muted-foreground">{fileIcon(entry.path)}</span>
                       <span className="truncate font-mono text-[11px]">{entry.path}</span>
                       {entry.source === "utoc" && (
-                        <span className="ml-auto shrink-0 rounded bg-purple-500/20 px-1 py-0.5 text-[8px] font-semibold uppercase leading-none text-purple-400">
+                        <span className="ml-auto shrink-0 rounded bg-info/15 px-1 py-0.5 text-[8px] font-semibold uppercase leading-none text-info">
                           utoc
                         </span>
                       )}
@@ -1015,7 +1081,7 @@ export function AssetManager({ gamePath }: Props) {
             <AlertDialogDescription>
               This container has{" "}
               <span className="font-semibold text-foreground">
-                {legacyConfirm?.count.toLocaleString()}
+                {displayLegacyConfirm?.count.toLocaleString()}
               </span>{" "}
               assets to convert. Legacy conversion decompresses every asset and may use significant
               disk space. Are you sure you want to continue?

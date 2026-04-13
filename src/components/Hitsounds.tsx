@@ -94,6 +94,9 @@ export function Hitsounds({ gamePath, isActive }: Props) {
     outputDir: string;
     pakPath: string;
   } | null>(null);
+  const lastReplaceConfirmRef = useRef(replaceConfirm);
+  if (replaceConfirm) lastReplaceConfirmRef.current = replaceConfirm;
+  const displayReplaceConfirm = replaceConfirm ?? lastReplaceConfirmRef.current;
   const isActiveRef = useRef(isActive);
   const dropProcessingRef = useRef(false);
   const hoveredDropSlotRef = useRef<SlotKey | null>(null);
@@ -290,7 +293,6 @@ export function Hitsounds({ gamePath, isActive }: Props) {
   const hasErrors = filledSlots.some((k) => slots[k]?.error);
 
   const canBuild = gamePath && hasAnyValid && !hasErrors && normalizeModName(modName).length > 0;
-  const isConfigured = Boolean(gamePath);
 
   const hitSlots = SLOT_CONFIGS.filter((c) => c.group === "hit");
   const killSlots = SLOT_CONFIGS.filter((c) => c.group === "kill");
@@ -298,7 +300,7 @@ export function Hitsounds({ gamePath, isActive }: Props) {
   return (
     <div className="flex min-h-0 w-full flex-1 flex-col gap-4 overflow-y-auto">
       {/* Page header */}
-      <div className="flex items-start justify-between gap-4">
+      <div className="flex items-start justify-between gap-4 pt-0.5">
         <div>
           <h2 className="text-xl font-bold">Hitsounds</h2>
           <p className="mt-1 text-xs text-muted-foreground">
@@ -312,21 +314,10 @@ export function Hitsounds({ gamePath, isActive }: Props) {
             variant="outline"
             className={cn(
               "rounded-full px-2.5 py-1",
-              isConfigured
-                ? "border-[var(--green-accent-border)] bg-[var(--green-accent)] text-[var(--green-accent-foreground)]"
-                : "border-border bg-background text-muted-foreground"
-            )}
-          >
-            {isConfigured ? "Game detected" : "Game not detected"}
-          </Badge>
-          <Badge
-            variant="outline"
-            className={cn(
-              "rounded-full px-2.5 py-1",
               hasErrors
-                ? "border-[var(--red-accent-border)] bg-[var(--red-accent)] text-[var(--red-accent-foreground)]"
+                ? "border-red-accent-border bg-red-accent text-red-accent-foreground"
                 : hasAnyValid
-                  ? "border-[var(--green-accent-border)] bg-[var(--green-accent)] text-[var(--green-accent-foreground)]"
+                  ? "border-green-accent-border bg-green-accent text-green-accent-foreground"
                   : "border-border bg-background text-muted-foreground"
             )}
           >
@@ -426,9 +417,7 @@ export function Hitsounds({ gamePath, isActive }: Props) {
             <div
               className={cn(
                 "flex items-center gap-1.5 text-xs",
-                buildResult.ok
-                  ? "text-[var(--green-accent-foreground)]"
-                  : "text-[var(--red-accent-foreground)]",
+                buildResult.ok ? "text-green-accent-foreground" : "text-red-accent-foreground",
                 buildResult.revealPath && "cursor-pointer hover:underline"
               )}
               onClick={
@@ -448,8 +437,8 @@ export function Hitsounds({ gamePath, isActive }: Props) {
 
         {/* Game not detected warning */}
         {!gamePath && (
-          <div className="border-t border-[var(--red-accent-border)] bg-[var(--red-accent)] px-5 py-2.5 text-xs text-[var(--red-accent-foreground)]">
-            Game not detected. Visit the Home tab to detect your install first.
+          <div className="border-t border-red-accent-border bg-red-accent px-5 py-2.5 text-xs text-red-accent-foreground">
+            Game not detected. Set your install path in Settings first.
           </div>
         )}
       </Card>
@@ -465,7 +454,7 @@ export function Hitsounds({ gamePath, isActive }: Props) {
             <AlertDialogTitle>Replace Existing Mod</AlertDialogTitle>
             <AlertDialogDescription>
               <span className="font-semibold text-foreground">
-                {replaceConfirm?.modName}_9999999_P.pak
+                {displayReplaceConfirm?.modName}_9999999_P.pak
               </span>{" "}
               already exists in this folder. Do you want to replace it?
             </AlertDialogDescription>
@@ -552,7 +541,7 @@ function SoundRow({
             size={14}
             className={cn(
               "shrink-0",
-              slot.error ? "text-[var(--red-accent-foreground)]" : "text-muted-foreground"
+              slot.error ? "text-red-accent-foreground" : "text-muted-foreground"
             )}
           />
           <span className="truncate text-sm font-medium">{slot.name}</span>
@@ -571,9 +560,7 @@ function SoundRow({
             </span>
           )}
           {slot.error && (
-            <span className="shrink-0 text-[11px] text-[var(--red-accent-foreground)]">
-              {slot.error}
-            </span>
+            <span className="shrink-0 text-[11px] text-red-accent-foreground">{slot.error}</span>
           )}
         </div>
       ) : (
@@ -594,9 +581,9 @@ function SoundRow({
           className={cn(
             "rounded-full px-2 py-0.5 text-[10px]",
             slot?.error
-              ? "border-[var(--red-accent-border)] bg-[var(--red-accent)] text-[var(--red-accent-foreground)]"
+              ? "border-red-accent-border bg-red-accent text-red-accent-foreground"
               : isReady
-                ? "border-[var(--green-accent-border)] bg-[var(--green-accent)] text-[var(--green-accent-foreground)]"
+                ? "border-green-accent-border bg-green-accent text-green-accent-foreground"
                 : "border-border bg-background text-muted-foreground"
           )}
         >
@@ -608,7 +595,7 @@ function SoundRow({
             variant="ghost"
             onClick={onClear}
             disabled={disabled}
-            className="text-muted-foreground hover:text-[var(--color-err)]"
+            className="text-muted-foreground hover:text-err"
             title="Remove"
           >
             <Trash2 size={13} />

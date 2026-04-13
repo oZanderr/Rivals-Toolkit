@@ -1,4 +1,10 @@
-use crate::{detect, hitsounds, launch_record, mods, pak, pak_tweaks, scalability, wav_to_wem};
+use tauri::State;
+
+use crate::settings::SettingsState;
+use crate::{
+    detect, hitsounds, launch_record, mods, pak, pak_tweaks, paths, scalability, update_check,
+    wav_to_wem,
+};
 
 #[tauri::command]
 pub(crate) fn get_scalability_path() -> Result<String, String> {
@@ -18,6 +24,11 @@ pub(crate) fn write_scalability(path: String, content: String) -> Result<(), Str
 #[tauri::command]
 pub(crate) fn detect_install_path() -> Option<detect::InstallInfo> {
     detect::detect_game_install()
+}
+
+#[tauri::command]
+pub(crate) fn validate_game_path(path: String) -> Result<bool, String> {
+    Ok(paths::paks_dir(&path).is_dir())
 }
 
 #[tauri::command]
@@ -98,10 +109,19 @@ pub(crate) async fn repack_pak(input_dir: String, output_pak: String) -> Result<
 }
 
 #[tauri::command]
-pub(crate) async fn repack_iostore(input_dir: String, output_utoc: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || pak::repack_iostore(&input_dir, &output_utoc))
+pub(crate) async fn repack_iostore(
+    input_dir: String,
+    output_utoc: String,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || pak::repack_iostore(&input_dir, &output_utoc, app))
         .await
         .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub(crate) fn cancel_repack_iostore() {
+    pak::cancel_repack_iostore();
 }
 
 #[tauri::command]
@@ -286,13 +306,15 @@ pub(crate) fn toggle_mod_enabled(
 }
 
 #[tauri::command]
-pub(crate) async fn export_mods_zip(
+pub(crate) async fn export_mods_archive(
     mods_folder: String,
     dest_path: String,
 ) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || mods::export_mods_zip(&mods_folder, &dest_path))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        mods::export_mods_archive(&mods_folder, &dest_path)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -309,13 +331,15 @@ pub(crate) fn install_mod(
 }
 
 #[tauri::command]
-pub(crate) async fn install_from_zip(
+pub(crate) async fn install_from_archive(
     mods_folder: String,
-    zip_path: String,
+    archive_path: String,
 ) -> Result<Vec<mods::InstallResult>, String> {
-    tauri::async_runtime::spawn_blocking(move || mods::install_from_zip(&mods_folder, &zip_path))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        mods::install_from_archive(&mods_folder, &archive_path)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -353,4 +377,56 @@ pub(crate) async fn extract_hitsound_wavs(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub(crate) async fn check_for_update(
+    current_version: String,
+    force: Option<bool>,
+) -> Result<update_check::UpdateInfo, String> {
+    let force = force.unwrap_or(false);
+    tauri::async_runtime::spawn_blocking(move || {
+        update_check::check_for_update(&current_version, force)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub(crate) fn get_auto_check_updates(state: State<'_, SettingsState>) -> bool {
+    state.lock().map(|s| s.auto_check_updates).unwrap_or(true)
+}
+
+#[tauri::command]
+pub(crate) fn set_auto_check_updates(
+    state: State<'_, SettingsState>,
+    enabled: bool,
+) -> Result<(), String> {
+    let mut guard = state.lock().map_err(|e| e.to_string())?;
+    guard.auto_check_updates = enabled;
+    guard.save()
+}
+
+#[tauri::command]
+pub(crate) fn get_game_path(state: State<'_, SettingsState>) -> Option<String> {
+    state.lock().ok().and_then(|s| s.game_path.clone())
+}
+
+#[tauri::command]
+pub(crate) fn get_saved_install_info(
+    state: State<'_, SettingsState>,
+) -> Option<detect::InstallInfo> {
+    state.lock().ok().and_then(|s| s.install_info.clone())
+}
+
+#[tauri::command]
+pub(crate) fn set_game_path(
+    state: State<'_, SettingsState>,
+    path: Option<String>,
+    install_info: Option<detect::InstallInfo>,
+) -> Result<(), String> {
+    let mut guard = state.lock().map_err(|e| e.to_string())?;
+    guard.game_path = path.filter(|p| !p.is_empty());
+    guard.install_info = install_info;
+    guard.save()
 }

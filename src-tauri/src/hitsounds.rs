@@ -166,7 +166,7 @@ pub(crate) fn build_hitsound_mod(
         return Err("At least one hitsound must be provided".into());
     }
 
-    let _temp_guard = TempDirGuard::create("oinkers_hitsounds")?;
+    let _temp_guard = TempDirGuard::create("rivals_hitsounds")?;
 
     let bnk_bytes = get_or_extract_bnk(game_root)?;
 

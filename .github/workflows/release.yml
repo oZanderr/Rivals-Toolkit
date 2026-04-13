@@ -99,7 +99,7 @@ jobs:
       - name: Verify release executable exists
         shell: pwsh
         run: |
-          $exePath = "src-tauri/target/release/oinkers-toolkit.exe"
+          $exePath = "src-tauri/target/release/rivals-toolkit.exe"
           if (-not (Test-Path $exePath)) {
             throw "Expected executable not found at $exePath"
           }
@@ -108,14 +108,14 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ steps.vars.outputs.tag }}"
-          $assetBase = "oinkers-toolkit-$tag-windows-x64"
+          $assetBase = "rivals-toolkit-$tag-windows-x64"
           $repoRoot = $env:GITHUB_WORKSPACE
           $releaseDir = Join-Path $repoRoot "src-tauri/target/release"
           $zipPath = Join-Path $releaseDir "$assetBase.zip"
           $stagingRoot = Join-Path $releaseDir "_package"
           $stagingDir = Join-Path $stagingRoot $assetBase
 
-          $exePath = Join-Path $releaseDir "oinkers-toolkit.exe"
+          $exePath = Join-Path $releaseDir "rivals-toolkit.exe"
           $oo2corePath = Join-Path $repoRoot "src-tauri/resources/oo2core_9_win64.dll"
 
           foreach ($required in @($exePath, $oo2corePath)) {
@@ -134,7 +134,7 @@ jobs:
           New-Item -ItemType Directory -Path $stagingDir -Force | Out-Null
 
           # Keep executable name clean while versioning the archive itself.
-          Copy-Item $exePath "$stagingDir/oinkers-toolkit.exe" -Force
+          Copy-Item $exePath "$stagingDir/rivals-toolkit.exe" -Force
           Copy-Item $oo2corePath "$stagingDir/oo2core_9_win64.dll" -Force
 
           Compress-Archive -Path "$stagingDir/*" -DestinationPath $zipPath -CompressionLevel Optimal
@@ -146,7 +146,7 @@ jobs:
           CHANGELOG: ${{ steps.changelog.outputs.text }}
         run: |
           $tag = "${{ steps.vars.outputs.tag }}"
-          $assetName = "oinkers-toolkit-$tag-windows-x64.zip"
+          $assetName = "rivals-toolkit-$tag-windows-x64.zip"
           $assetPath = Join-Path $env:GITHUB_WORKSPACE "src-tauri/target/release/$assetName"
           $notesPath = Join-Path $env:RUNNER_TEMP "release-notes.md"
 
@@ -182,13 +182,13 @@ jobs:
           gh release view "$tag" *> $null
           if ($LASTEXITCODE -ne 0) {
             gh release create "$tag" `
-              --title "Oinkers Toolkit $tag" `
+              --title "Rivals Toolkit $tag" `
               --notes-file "$notesPath" `
               --prerelease=${{ contains(steps.vars.outputs.tag, '-') }}
           }
           else {
             gh release edit "$tag" `
-              --title "Oinkers Toolkit $tag" `
+              --title "Rivals Toolkit $tag" `
               --notes-file "$notesPath"
           }
 
@@ -208,7 +208,7 @@ jobs:
           }
 
           $tag = "${{ steps.vars.outputs.tag }}"
-          $assetName = "oinkers-toolkit-$tag-windows-x64.zip"
+          $assetName = "rivals-toolkit-$tag-windows-x64.zip"
           $repo = "${{ github.repository }}"
           $releaseUrl = "https://github.com/$repo/releases/tag/$tag"
           $downloadUrl = "https://github.com/$repo/releases/download/$tag/$assetName"
@@ -222,7 +222,7 @@ jobs:
           }
 
           $payload = @{
-            thread_name = "Oinkers Toolkit - $tag"
+            thread_name = "Rivals Toolkit - $tag"
             content = ""
             embeds = @(
               @{

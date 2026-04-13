@@ -18,7 +18,7 @@ export function Titlebar() {
   return (
     <div
       data-tauri-drag-region
-      className="flex h-[35px] w-full shrink-0 items-center justify-end border-b border-border bg-card"
+      className="flex h-8.75 w-full shrink-0 items-center justify-end border-b border-border bg-card"
     >
       <div
         data-tauri-drag-region
@@ -26,7 +26,7 @@ export function Titlebar() {
         className="flex flex-1 items-center gap-2 px-3 select-none"
       >
         <img src={icon} alt="" className="size-4 shrink-0" />
-        <span className="text-sm font-semibold leading-none text-foreground">Oinkers Toolkit</span>
+        <span className="text-sm font-semibold leading-none text-foreground">Rivals Toolkit</span>
         <span className="text-sm leading-none text-muted-foreground">|</span>
         <span className="text-sm leading-none text-muted-foreground">
           Marvel Rivals Modding Suite
@@ -34,21 +34,21 @@ export function Titlebar() {
       </div>
       <button
         onClick={() => appWindow.minimize()}
-        className="inline-flex h-[35px] w-[35px] items-center justify-center text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+        className="inline-flex h-8.75 w-8.75 items-center justify-center text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
         title="Minimize"
       >
         <Minus size={14} strokeWidth={2} />
       </button>
       <button
         onClick={() => appWindow.toggleMaximize()}
-        className="inline-flex h-[35px] w-[35px] items-center justify-center text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+        className="inline-flex h-8.75 w-8.75 items-center justify-center text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
         title="Maximize"
       >
         <Square size={11} strokeWidth={2} />
       </button>
       <button
         onClick={() => appWindow.close()}
-        className="inline-flex h-[35px] w-[35px] items-center justify-center rounded-tr text-muted-foreground transition-colors hover:bg-red-600 hover:text-white"
+        className="inline-flex h-8.75 w-8.75 items-center justify-center rounded-tr text-muted-foreground transition-colors hover:bg-red-600 hover:text-white"
         title="Close"
       >
         <X size={14} strokeWidth={2} />

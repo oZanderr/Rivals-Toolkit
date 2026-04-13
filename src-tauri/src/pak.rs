@@ -89,8 +89,16 @@ pub(crate) fn write_pak_bytes(
     writer::write_pak_bytes(output_pak, files)
 }
 
-pub(crate) fn repack_iostore(input_dir: &str, output_utoc: &str) -> Result<(), String> {
-    iostore::repack_iostore(input_dir, output_utoc)
+pub(crate) fn repack_iostore(
+    input_dir: &str,
+    output_utoc: &str,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    iostore::repack_iostore(input_dir, output_utoc, app)
+}
+
+pub(crate) fn cancel_repack_iostore() {
+    iostore::cancel_repack_iostore();
 }
 
 pub(crate) fn list_utoc_contents(utoc_path: &str) -> Result<Vec<String>, String> {

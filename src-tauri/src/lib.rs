@@ -10,6 +10,8 @@ mod pak;
 mod pak_tweaks;
 mod paths;
 mod scalability;
+mod settings;
+mod update_check;
 mod wav_to_wem;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -18,8 +20,10 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .manage::<settings::SettingsState>(std::sync::Mutex::new(settings::Settings::load()))
         .invoke_handler(tauri::generate_handler![
             commands::detect_install_path,
+            commands::validate_game_path,
             commands::list_pak_files,
             commands::list_pak_files_info,
             commands::list_pak_contents,
@@ -29,6 +33,7 @@ pub fn run() {
             commands::extract_utoc_files,
             commands::repack_pak,
             commands::repack_iostore,
+            commands::cancel_repack_iostore,
             commands::list_utoc_contents,
             commands::extract_utoc,
             commands::extract_utoc_file,
@@ -52,10 +57,10 @@ pub fn run() {
             commands::clear_shader_cache,
             commands::launch_game,
             commands::toggle_mod_enabled,
-            commands::export_mods_zip,
+            commands::export_mods_archive,
             commands::delete_mod,
             commands::install_mod,
-            commands::install_from_zip,
+            commands::install_from_archive,
             commands::get_skip_launcher,
             commands::set_skip_launcher,
             commands::extract_pak_ini,
@@ -63,7 +68,13 @@ pub fn run() {
             commands::validate_wav,
             commands::path_exists,
             commands::build_hitsound_mod,
-            commands::extract_hitsound_wavs
+            commands::extract_hitsound_wavs,
+            commands::check_for_update,
+            commands::get_auto_check_updates,
+            commands::set_auto_check_updates,
+            commands::get_game_path,
+            commands::get_saved_install_info,
+            commands::set_game_path
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

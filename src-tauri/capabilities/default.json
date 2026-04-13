@@ -15,6 +15,7 @@
       "allow": [{ "path": "**" }]
     },
     "opener:default",
+    "opener:allow-open-url",
     "dialog:default"
   ]
 }

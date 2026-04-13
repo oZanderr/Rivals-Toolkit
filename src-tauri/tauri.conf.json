@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "oinkers-toolkit",
-  "version": "0.6.0",
-  "identifier": "com.zander.oinkers-toolkit",
+  "productName": "rivals-toolkit",
+  "version": "0.7.0",
+  "identifier": "com.zander.rivals-toolkit",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Oinkers Toolkit",
+        "title": "Rivals Toolkit",
         "width": 1132,
         "height": 792,
         "minWidth": 850,

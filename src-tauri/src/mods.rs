@@ -62,8 +62,8 @@ pub(crate) fn toggle_mod_enabled(
     folder::toggle_mod_enabled(mods_folder, full_name, enabled)
 }
 
-pub(crate) fn export_mods_zip(mods_folder: &str, dest_path: &str) -> Result<String, String> {
-    folder::export_mods_zip(mods_folder, dest_path)
+pub(crate) fn export_mods_archive(mods_folder: &str, dest_path: &str) -> Result<String, String> {
+    folder::export_mods_archive(mods_folder, dest_path)
 }
 
 pub(crate) fn delete_mod(mods_folder: &str, full_name: &str) -> Result<(), String> {
@@ -74,9 +74,9 @@ pub(crate) fn install_mod(mods_folder: &str, source_path: &str) -> Result<Instal
     folder::install_mod(mods_folder, source_path)
 }
 
-pub(crate) fn install_from_zip(
+pub(crate) fn install_from_archive(
     mods_folder: &str,
-    zip_path: &str,
+    archive_path: &str,
 ) -> Result<Vec<InstallResult>, String> {
-    folder::install_from_zip(mods_folder, zip_path)
+    folder::install_from_archive(mods_folder, archive_path)
 }
