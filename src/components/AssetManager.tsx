@@ -16,7 +16,7 @@ import {
   Package,
   PackagePlus,
   Layers,
-  List,
+  RefreshCw,
   CheckCircle2,
   CheckSquare2,
   Square,
@@ -104,6 +104,11 @@ export function AssetManager({ gamePath }: Props) {
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const filterTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const contentsScrollRef = useRef<HTMLDivElement>(null);
+
+  // Load game paks on mount
+  useEffect(() => {
+    if (gamePath) listPaks();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Listen for legacy extraction progress events
   useEffect(() => {
@@ -226,7 +231,7 @@ export function AssetManager({ gamePath }: Props) {
     }
   }
 
-  async function inspectPak(pak: string) {
+  async function inspectPak(pak: string, infoOverride?: PakFileInfo) {
     if (pak === selectedPak) return;
     setSelectedPak(pak);
     setFilterText("");
@@ -235,7 +240,7 @@ export function AssetManager({ gamePath }: Props) {
     setSelectedEntries(new Set());
     lastClickedIndex.current = null;
 
-    const info = pakList.find((p) => p.path === pak);
+    const info = infoOverride ?? pakList.find((p) => p.path === pak);
     const isIoStore = info?.has_utoc && info?.has_ucas;
 
     setBusy(true);
@@ -291,7 +296,8 @@ export function AssetManager({ gamePath }: Props) {
         return [...prev, { path: selected, has_utoc: hasUtoc, has_ucas: hasUcas }];
       });
       setManualPaks((prev) => new Set(prev).add(selected));
-      await inspectPak(selected);
+      const info: PakFileInfo = { path: selected, has_utoc: hasUtoc, has_ucas: hasUcas };
+      await inspectPak(selected, info);
     }
   }
 
@@ -789,26 +795,24 @@ export function AssetManager({ gamePath }: Props) {
           <Card className="flex min-h-0 flex-1 flex-col gap-3 p-3 bg-card">
             <div className="flex shrink-0 items-center justify-between gap-1.5">
               <h3 className="text-sm font-semibold">Game Paks</h3>
-              <div className="flex items-center gap-1.5">
+              <div className="flex items-center gap-1">
                 <Button
-                  variant="outline"
-                  size="sm"
+                  variant="ghost"
+                  size="icon-sm"
                   onClick={openPak}
                   disabled={busy}
-                  title="Open Pak"
+                  title="Browse for a pak file"
                 >
-                  <FolderOpen size={14} />
-                  Browse
+                  <FolderOpen size={15} />
                 </Button>
                 <Button
-                  variant="outline"
-                  size="sm"
+                  variant="ghost"
+                  size="icon-sm"
                   onClick={listPaks}
                   disabled={busy}
-                  title="List all paks from your game's Paks folder"
+                  title="Refresh game paks"
                 >
-                  <List size={14} />
-                  List Paks
+                  <RefreshCw size={15} />
                 </Button>
               </div>
             </div>
