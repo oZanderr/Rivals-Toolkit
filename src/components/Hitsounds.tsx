@@ -29,7 +29,6 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 
@@ -300,16 +299,9 @@ export function Hitsounds({ gamePath, isActive }: Props) {
   return (
     <div className="flex min-h-0 w-full flex-1 flex-col gap-4 overflow-y-auto">
       {/* Page header */}
-      <div className="flex items-start justify-between gap-4 pt-0.5">
-        <div>
-          <h2 className="text-xl font-bold">Hitsounds</h2>
-          <p className="mt-1 text-xs text-muted-foreground">
-            Build a hitsound mod from WAV or OGG files. 16-bit PCM, mono or stereo, 48kHz
-            recommended. To extract WAVs from a mod, select its{" "}
-            <span className="font-medium text-foreground">bnk_ui_battle.bnk</span> in Asset Manager.
-          </p>
-        </div>
-        <div className="flex shrink-0 items-center gap-2 pt-0.5">
+      <div className="flex items-center justify-between gap-4 pt-0.5">
+        <h2 className="text-xl font-bold">Hitsounds</h2>
+        <div className="flex shrink-0 items-center gap-2">
           <Badge
             variant="outline"
             className={cn(
@@ -326,93 +318,88 @@ export function Hitsounds({ gamePath, isActive }: Props) {
         </div>
       </div>
 
-      {/* Sound slots + build */}
-      <Card className="gap-0 overflow-hidden py-0">
-        {/* Hit sounds group */}
-        <div className="px-5 pt-4 pb-1">
-          <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-            Hit Sounds
-          </span>
+      {/* Hit sounds group */}
+      <div className="flex flex-col overflow-hidden rounded-md border border-border">
+        <div className="border-b border-border bg-card px-3 py-2">
+          <h3 className="text-sm font-semibold">Hit Sounds</h3>
         </div>
-        {hitSlots.map((config, i) => (
-          <div key={config.key}>
-            <SoundRow
-              slotKey={config.key}
-              rowRef={(el) => {
-                slotRefs.current[config.key] = el;
-              }}
-              label={config.label}
-              icon={config.icon}
-              slot={slots[config.key]}
-              onPick={() => pickWav(config.key)}
-              onClear={() => setSlot(config.key, null)}
-              formatDuration={formatDuration}
-              disabled={building}
-              showDropOverlay={isDragging && hoveredDropSlot === config.key}
-              onDragOverRow={() => setHoveredSlot(config.key)}
-            />
-            {i < hitSlots.length - 1 && <div className="mx-5 h-px bg-border" />}
-          </div>
+        {hitSlots.map((config) => (
+          <SoundRow
+            key={config.key}
+            slotKey={config.key}
+            rowRef={(el) => {
+              slotRefs.current[config.key] = el;
+            }}
+            label={config.label}
+            icon={config.icon}
+            slot={slots[config.key]}
+            onPick={() => pickWav(config.key)}
+            onClear={() => setSlot(config.key, null)}
+            formatDuration={formatDuration}
+            disabled={building}
+            showDropOverlay={isDragging && hoveredDropSlot === config.key}
+            onDragOverRow={() => setHoveredSlot(config.key)}
+          />
         ))}
+      </div>
 
-        <div className="h-px bg-border" />
-
-        {/* Kill sounds group */}
-        <div className="px-5 pt-4 pb-1">
-          <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-            Kill Confirmed Sounds
-          </span>
+      {/* Kill sounds group */}
+      <div className="flex flex-col overflow-hidden rounded-md border border-border">
+        <div className="border-b border-border bg-card px-3 py-2">
+          <h3 className="text-sm font-semibold">Kill Confirmed Sounds</h3>
         </div>
-        {killSlots.map((config, i) => (
-          <div key={config.key}>
-            <SoundRow
-              slotKey={config.key}
-              rowRef={(el) => {
-                slotRefs.current[config.key] = el;
-              }}
-              label={config.label}
-              icon={config.icon}
-              slot={slots[config.key]}
-              onPick={() => pickWav(config.key)}
-              onClear={() => setSlot(config.key, null)}
-              formatDuration={formatDuration}
-              disabled={building}
-              showDropOverlay={isDragging && hoveredDropSlot === config.key}
-              onDragOverRow={() => setHoveredSlot(config.key)}
-            />
-            {i < killSlots.length - 1 && <div className="mx-5 h-px bg-border" />}
-          </div>
+        {killSlots.map((config) => (
+          <SoundRow
+            key={config.key}
+            slotKey={config.key}
+            rowRef={(el) => {
+              slotRefs.current[config.key] = el;
+            }}
+            label={config.label}
+            icon={config.icon}
+            slot={slots[config.key]}
+            onPick={() => pickWav(config.key)}
+            onClear={() => setSlot(config.key, null)}
+            formatDuration={formatDuration}
+            disabled={building}
+            showDropOverlay={isDragging && hoveredDropSlot === config.key}
+            onDragOverRow={() => setHoveredSlot(config.key)}
+          />
         ))}
+      </div>
 
-        <div className="h-px bg-border" />
-
-        {/* Build section */}
-        <div className="flex flex-col gap-3 px-5 py-5">
-          <label className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-            Mod Name
-          </label>
-          <div className="flex items-center gap-2.5">
+      {/* Build section */}
+      <div className="flex flex-col overflow-hidden rounded-md border border-border">
+        <div className="border-b border-border bg-card px-3 py-2">
+          <h3 className="text-sm font-semibold">Build</h3>
+        </div>
+        <div className="flex flex-col gap-3 p-3">
+          <div className="relative">
             <Input
               value={modName}
               onChange={(e) => {
                 setModName(e.target.value);
                 setBuildResult(null);
               }}
-              className="h-9 flex-1"
+              className="h-9 pr-28"
               placeholder="Enter mod name"
               disabled={building}
             />
-            <span className="shrink-0 text-xs text-muted-foreground">_9999999_P.pak</span>
+            <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 select-none text-xs text-muted-foreground">
+              _9999999_P.pak
+            </span>
           </div>
-          <Button
-            variant="blue"
-            disabled={!canBuild || building}
-            onClick={buildMod}
-            className="h-10 w-full gap-2"
-          >
-            {building ? <Package size={14} className="animate-spin" /> : <Package size={14} />}
-            {building ? "Building..." : "Build Hitsound Mod"}
-          </Button>
+          <div>
+            <Button
+              variant="blue"
+              disabled={!canBuild || building}
+              onClick={buildMod}
+              className="h-10 w-full gap-2"
+            >
+              {building ? <Package size={14} className="animate-spin" /> : <Package size={14} />}
+              {building ? "Building..." : "Build Hitsound Mod"}
+            </Button>
+          </div>
           {buildResult && (
             <div
               className={cn(
@@ -434,14 +421,14 @@ export function Hitsounds({ gamePath, isActive }: Props) {
             </div>
           )}
         </div>
+      </div>
 
-        {/* Game not detected warning */}
-        {!gamePath && (
-          <div className="border-t border-red-accent-border bg-red-accent px-5 py-2.5 text-xs text-red-accent-foreground">
-            Game not detected. Set your install path in Settings first.
-          </div>
-        )}
-      </Card>
+      {/* Game not detected warning */}
+      {!gamePath && (
+        <div className="flex items-center gap-2 rounded-md border border-red-accent-border bg-red-accent px-3 py-2.5 text-xs text-red-accent-foreground">
+          Game not detected. Set your install path in Settings first.
+        </div>
+      )}
 
       <AlertDialog
         open={!!replaceConfirm}
@@ -508,13 +495,11 @@ function SoundRow({
   showDropOverlay: boolean;
   onDragOverRow: () => void;
 }) {
-  const isReady = Boolean(slot && !slot.error);
-
   return (
     <div
       ref={rowRef}
       data-drop-slot={slotKey}
-      className="relative flex h-16 items-center gap-4 px-5 transition-colors"
+      className="relative flex h-14 items-center gap-4 rounded-sm px-3 transition-colors hover:bg-secondary/50"
       onDragOver={(e) => {
         e.preventDefault();
         onDragOverRow();
@@ -576,19 +561,19 @@ function SoundRow({
 
       {/* Right column */}
       <div className="flex shrink-0 items-center gap-2">
-        <Badge
-          variant="outline"
-          className={cn(
-            "rounded-full px-2 py-0.5 text-[10px]",
-            slot?.error
-              ? "border-red-accent-border bg-red-accent text-red-accent-foreground"
-              : isReady
-                ? "border-green-accent-border bg-green-accent text-green-accent-foreground"
-                : "border-border bg-background text-muted-foreground"
-          )}
-        >
-          {slot?.error ? "Invalid" : isReady ? "Ready" : "Empty"}
-        </Badge>
+        {slot && (
+          <Badge
+            variant="outline"
+            className={cn(
+              "rounded-full px-2 py-0.5 text-[10px]",
+              slot.error
+                ? "border-red-accent-border bg-red-accent text-red-accent-foreground"
+                : "border-green-accent-border bg-green-accent text-green-accent-foreground"
+            )}
+          >
+            {slot.error ? "Invalid" : "Ready"}
+          </Badge>
+        )}
         {slot && (
           <Button
             size="icon-xs"

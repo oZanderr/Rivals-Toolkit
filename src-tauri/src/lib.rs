@@ -2,6 +2,7 @@
 
 mod commands;
 mod detect;
+mod game_status;
 mod hitsounds;
 mod launch_record;
 mod mods;
@@ -57,8 +58,10 @@ pub fn run() {
             commands::clear_shader_cache,
             commands::launch_game,
             commands::toggle_mod_enabled,
+            commands::toggle_mods_enabled,
             commands::export_mods_archive,
             commands::delete_mod,
+            commands::delete_mods,
             commands::install_mod,
             commands::install_from_archive,
             commands::get_skip_launcher,
@@ -70,8 +73,11 @@ pub fn run() {
             commands::build_hitsound_mod,
             commands::extract_hitsound_wavs,
             commands::check_for_update,
+            commands::get_game_running,
             commands::get_auto_check_updates,
             commands::set_auto_check_updates,
+            commands::get_recursive_mod_scan,
+            commands::set_recursive_mod_scan,
             commands::get_game_path,
             commands::get_saved_install_info,
             commands::set_game_path

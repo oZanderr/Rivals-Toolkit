@@ -37,6 +37,7 @@ blake3 = "1"
 rayon = "1"
 ureq = { version = "3", features = ["json"] }
 lewton = "0.10"
+sysinfo = { version = "0.33", default-features = false, features = ["system"] }
 
 [profile.release]
 opt-level = 3

@@ -23,7 +23,7 @@ fn is_update_patch_pak_path(path: &str) -> bool {
 }
 
 /// List pak files under game `Paks`, then append `~mods` pak files.
-pub(super) fn list_pak_files(game_root: &str) -> Result<Vec<String>, String> {
+pub(super) fn list_pak_files(game_root: &str, recursive: bool) -> Result<Vec<String>, String> {
     let dir = paks_dir(game_root);
     if !dir.is_dir() {
         return Err(format!("Paks directory not found: {}", dir.display()));
@@ -58,7 +58,7 @@ pub(super) fn list_pak_files(game_root: &str) -> Result<Vec<String>, String> {
 
     let mods_dir = dir.join("~mods");
     let mut mod_paks: Vec<String> = if mods_dir.is_dir() {
-        crate::mods::walk_mod_files(&mods_dir)
+        crate::mods::walk_mod_files(&mods_dir, recursive)
             .into_iter()
             .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("pak"))
             .map(|p| mods_dir.join(p).to_string_lossy().into_owned())
@@ -157,8 +157,11 @@ pub(super) fn extract_pak_files(
 }
 
 /// List pak files with companion file info (utoc/ucas presence).
-pub(super) fn list_pak_files_info(game_root: &str) -> Result<Vec<PakFileInfo>, String> {
-    let paths = list_pak_files(game_root)?;
+pub(super) fn list_pak_files_info(
+    game_root: &str,
+    recursive: bool,
+) -> Result<Vec<PakFileInfo>, String> {
+    let paths = list_pak_files(game_root, recursive)?;
     Ok(paths
         .into_iter()
         .map(|p| {

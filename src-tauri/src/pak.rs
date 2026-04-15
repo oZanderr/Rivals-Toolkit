@@ -19,12 +19,15 @@ static UTOC_LIST_CACHE: LazyLock<ListCache> = LazyLock::new(|| Mutex::new(HashMa
 
 pub(crate) use reader::PakFileInfo;
 
-pub(crate) fn list_pak_files(game_root: &str) -> Result<Vec<String>, String> {
-    reader::list_pak_files(game_root)
+pub(crate) fn list_pak_files(game_root: &str, recursive: bool) -> Result<Vec<String>, String> {
+    reader::list_pak_files(game_root, recursive)
 }
 
-pub(crate) fn list_pak_files_info(game_root: &str) -> Result<Vec<PakFileInfo>, String> {
-    reader::list_pak_files_info(game_root)
+pub(crate) fn list_pak_files_info(
+    game_root: &str,
+    recursive: bool,
+) -> Result<Vec<PakFileInfo>, String> {
+    reader::list_pak_files_info(game_root, recursive)
 }
 
 pub(crate) fn list_pak_contents(pak_path: &str) -> Result<Vec<String>, String> {

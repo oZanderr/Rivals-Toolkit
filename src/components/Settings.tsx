@@ -3,12 +3,20 @@ import { useEffect, useRef, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { CheckCircle2, FolderOpen, RefreshCw, Save, ShieldOff, Undo2, XCircle } from "lucide-react";
+import {
+  CheckCircle2,
+  FolderOpen,
+  RefreshCw,
+  Save,
+  Search,
+  ShieldOff,
+  Trash2,
+  Undo2,
+  XCircle,
+} from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import type { UpdateInfo } from "@/hooks/useUpdateCheck";
 import { cn } from "@/lib/utils";
@@ -47,6 +55,9 @@ export function Settings({
   const [draftAutoCheck, setDraftAutoCheck] = useState<boolean | null>(null);
   const [savedAutoCheck, setSavedAutoCheck] = useState<boolean | null>(null);
 
+  const [draftRecursive, setDraftRecursive] = useState<boolean | null>(null);
+  const [savedRecursive, setSavedRecursive] = useState<boolean | null>(null);
+
   const [saving, setSaving] = useState(false);
   const [pathError, setPathError] = useState<string | null>(null);
   const [savedBadge, setSavedBadge] = useState(false);
@@ -65,6 +76,12 @@ export function Settings({
     type: "ok" | "err";
   } | null>(null);
   const bypassNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const [shaderCacheNotice, setShaderCacheNotice] = useState<{
+    msg: string;
+    type: "ok" | "err";
+  } | null>(null);
+  const shaderCacheTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Sync draft when parent gamePath changes externally (e.g. detect, initial load)
   useEffect(() => {
@@ -113,6 +130,19 @@ export function Settings({
       });
   }, []);
 
+  useEffect(() => {
+    invoke<boolean>("get_recursive_mod_scan")
+      .then((v) => {
+        setDraftRecursive(v);
+        setSavedRecursive(v);
+      })
+      .catch((e) => {
+        console.error(e);
+        setDraftRecursive(true);
+        setSavedRecursive(true);
+      });
+  }, []);
+
   async function removeBypass() {
     if (bypassNoticeTimer.current) clearTimeout(bypassNoticeTimer.current);
     try {
@@ -124,6 +154,17 @@ export function Settings({
       setBypassNotice({ msg: String(e), type: "err" });
     }
     bypassNoticeTimer.current = setTimeout(() => setBypassNotice(null), 6000);
+  }
+
+  async function clearShaderCache() {
+    if (shaderCacheTimer.current) clearTimeout(shaderCacheTimer.current);
+    try {
+      const msg = await invoke<string>("clear_shader_cache");
+      setShaderCacheNotice({ msg, type: "ok" });
+    } catch (e: unknown) {
+      setShaderCacheNotice({ msg: String(e), type: "err" });
+    }
+    shaderCacheTimer.current = setTimeout(() => setShaderCacheNotice(null), 6000);
   }
 
   async function browse() {
@@ -166,7 +207,9 @@ export function Settings({
     draftSkipLauncher !== savedSkipLauncher;
   const autoCheckDirty =
     draftAutoCheck !== null && savedAutoCheck !== null && draftAutoCheck !== savedAutoCheck;
-  const dirty = pathDirty || skipDirty || autoCheckDirty;
+  const recursiveDirty =
+    draftRecursive !== null && savedRecursive !== null && draftRecursive !== savedRecursive;
+  const dirty = pathDirty || skipDirty || autoCheckDirty || recursiveDirty;
 
   async function save() {
     setSaving(true);
@@ -204,6 +247,14 @@ export function Settings({
           console.error(e);
         }
       }
+      if (recursiveDirty && draftRecursive !== null) {
+        try {
+          await invoke("set_recursive_mod_scan", { enabled: draftRecursive });
+          setSavedRecursive(draftRecursive);
+        } catch (e) {
+          console.error(e);
+        }
+      }
       if (savedBadgeTimer.current) clearTimeout(savedBadgeTimer.current);
       setSavedBadge(true);
       savedBadgeTimer.current = setTimeout(() => setSavedBadge(false), 2500);
@@ -216,45 +267,45 @@ export function Settings({
     setDraftGamePath(gamePath);
     setDraftSkipLauncher(savedSkipLauncher);
     setDraftAutoCheck(savedAutoCheck);
+    setDraftRecursive(savedRecursive);
     setPathError(null);
   }
 
   return (
     <div className="flex flex-1 min-h-0 w-full flex-col">
-      <div className="flex flex-1 min-h-0 flex-col gap-4 overflow-y-auto">
-        {/* ── Header ── */}
-        <div className="flex min-h-8 items-center gap-3">
-          <h2 className="text-xl font-bold">Settings</h2>
-        </div>
-
-        {/* ── Game Root ── */}
-        <Card className="flex flex-col gap-3 bg-card p-3">
-          <div className="flex items-center gap-2">
-            <h3 className="text-sm font-semibold">Game Root</h3>
-            {pathError && (
-              <span className="flex items-center gap-1.5 text-[11px] font-medium text-err">
-                <XCircle size={13} strokeWidth={2.5} />
-                {pathError}
-              </span>
-            )}
-            {!pathError && showDetectBadge && installInfo && (
-              <span className="flex items-center gap-1.5 text-[11px] font-medium text-ok">
-                <CheckCircle2 size={13} strokeWidth={2.5} />
-                Found via {installInfo.source}
-              </span>
-            )}
-            {!pathError && !showDetectBadge && installInfo === null && (
-              <span className="flex items-center gap-1.5 text-[11px] font-medium text-warn">
-                <XCircle size={13} strokeWidth={2.5} />
-                Not detected
-              </span>
-            )}
+      <div className="flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable]">
+        <div className="flex flex-col gap-4">
+          {/* ── Header ── */}
+          <div className="flex min-h-8 items-center gap-3">
+            <h2 className="text-xl font-bold">Settings</h2>
           </div>
-          <div className="flex flex-col gap-1.5">
-            <label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-              Install Path
-            </label>
-            <div className="flex gap-2">
+
+          {/* ── Game Root ── */}
+          <div className="flex flex-col overflow-hidden rounded-md border border-border">
+            <div className="border-b border-border bg-card px-3 py-2">
+              <div className="flex items-center gap-2">
+                <h3 className="text-sm font-semibold">Game Root</h3>
+                {pathError && (
+                  <span className="flex items-center gap-1.5 text-[11px] font-medium text-err">
+                    <XCircle size={13} strokeWidth={2.5} />
+                    {pathError}
+                  </span>
+                )}
+                {!pathError && showDetectBadge && installInfo && (
+                  <span className="flex items-center gap-1.5 text-[11px] font-medium text-ok">
+                    <CheckCircle2 size={13} strokeWidth={2.5} />
+                    Found via {installInfo.source}
+                  </span>
+                )}
+                {!pathError && !showDetectBadge && installInfo === null && (
+                  <span className="flex items-center gap-1.5 text-[11px] font-medium text-warn">
+                    <XCircle size={13} strokeWidth={2.5} />
+                    Not detected
+                  </span>
+                )}
+              </div>
+            </div>
+            <div className="relative">
               <Input
                 value={draftGamePath}
                 onChange={(e) => {
@@ -263,152 +314,202 @@ export function Settings({
                 }}
                 placeholder={`e.g. C:\\Program Files (x86)\\Steam\\steamapps\\common\\MarvelRivals`}
                 title={draftGamePath}
-                className="flex-1 font-mono text-xs"
+                className="h-8 pr-20 rounded-none border-0 shadow-none font-mono text-[12px] focus-visible:ring-0 focus-visible:border-0"
               />
-              <Button variant="outline" onClick={browse} className="shrink-0">
-                <FolderOpen size={15} />
-                Browse
+              <div className="absolute right-1 top-1/2 flex -translate-y-1/2 items-center gap-0.5">
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  onClick={browse}
+                  title="Browse for game folder"
+                >
+                  <FolderOpen size={14} />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  onClick={() => detect()}
+                  disabled={detecting}
+                  title="Auto-detect game install"
+                >
+                  <Search size={14} className={cn(detecting && "animate-pulse")} />
+                </Button>
+              </div>
+            </div>
+          </div>
+
+          {/* ── Launch Options ── */}
+          <div className="flex flex-col overflow-hidden rounded-md border border-border">
+            <div className="border-b border-border bg-card px-3 py-2">
+              <h3 className="text-sm font-semibold">Launch Options</h3>
+            </div>
+            <label
+              className="flex items-center gap-3 rounded-sm px-3 py-3 hover:bg-secondary/50"
+              title={skipLauncherError ?? undefined}
+            >
+              <div className="flex flex-1 flex-col gap-0.5">
+                <span className={cn("text-[13px] font-medium", skipLauncherError && "text-err")}>
+                  Skip Launcher
+                </span>
+                <span className="text-[11px] text-muted-foreground">
+                  Skip the launcher window and go straight into the game.
+                </span>
+              </div>
+              <Switch
+                checked={draftSkipLauncher ?? false}
+                onCheckedChange={setDraftSkipLauncher}
+                disabled={!draftGamePath || draftSkipLauncher === null}
+              />
+            </label>
+            {!draftGamePath && (
+              <div className="px-3 py-2">
+                <span className="text-[11px] text-muted-foreground">Set a game path first.</span>
+              </div>
+            )}
+            <div className="flex items-center gap-3 rounded-sm px-3 py-3 hover:bg-secondary/50">
+              <div className="flex flex-1 flex-col gap-0.5">
+                <span className="text-[13px] font-medium">Clear Shader Cache</span>
+                <span className="text-[11px] text-muted-foreground">
+                  Deletes pipeline cache files. Recommended after changing config tweaks.
+                </span>
+                {shaderCacheNotice && (
+                  <span
+                    className={cn(
+                      "mt-0.5 flex items-center gap-1.5 text-[11px] font-medium",
+                      shaderCacheNotice.type === "ok" ? "text-ok" : "text-err"
+                    )}
+                  >
+                    {shaderCacheNotice.type === "ok" ? (
+                      <CheckCircle2 size={13} strokeWidth={2.5} />
+                    ) : (
+                      <XCircle size={13} strokeWidth={2.5} />
+                    )}
+                    {shaderCacheNotice.msg}
+                  </span>
+                )}
+              </div>
+              <Button variant="outline" size="sm" onClick={clearShaderCache}>
+                <Trash2 size={13} />
+                Clear
               </Button>
-              <Button
-                onClick={() => detect()}
-                disabled={detecting}
-                variant="blue"
-                className="shrink-0"
-              >
-                <RefreshCw size={15} className={cn(detecting && "animate-spin")} />
-                Redetect
+            </div>
+          </div>
+
+          {/* ── Mods ── */}
+          <div className="flex flex-col overflow-hidden rounded-md border border-border">
+            <div className="border-b border-border bg-card px-3 py-2">
+              <h3 className="text-sm font-semibold">Mods</h3>
+            </div>
+            <label className="flex items-center gap-3 rounded-sm px-3 py-3 hover:bg-secondary/50">
+              <div className="flex flex-1 flex-col gap-0.5">
+                <span className="text-[13px] font-medium">Scan ~mods subfolders</span>
+                <span className="text-[11px] text-muted-foreground">
+                  Include mods nested in subfolders. Disable to match the game's native top-level
+                  load behavior.
+                </span>
+              </div>
+              <Switch
+                checked={draftRecursive ?? false}
+                onCheckedChange={setDraftRecursive}
+                disabled={draftRecursive === null}
+              />
+            </label>
+          </div>
+
+          {/* ── Signature Bypass ── */}
+          <div className="flex flex-col overflow-hidden rounded-md border border-border">
+            <div className="border-b border-border bg-card px-3 py-2">
+              <h3 className="text-sm font-semibold">Signature Bypass</h3>
+            </div>
+            <div className="flex items-center gap-3 rounded-sm px-3 py-3 hover:bg-secondary/50">
+              <div className="flex flex-1 flex-col gap-0.5">
+                <span className="text-[13px] font-medium">Remove bypass files</span>
+                <span className="text-[11px] text-muted-foreground">
+                  Removes dsound.dll and the bypass plugin from the game directory.
+                </span>
+                {bypassNotice && (
+                  <span
+                    className={cn(
+                      "mt-0.5 flex items-center gap-1.5 text-[11px] font-medium",
+                      bypassNotice.type === "ok" ? "text-ok" : "text-err"
+                    )}
+                  >
+                    {bypassNotice.type === "ok" ? (
+                      <CheckCircle2 size={13} strokeWidth={2.5} />
+                    ) : (
+                      <XCircle size={13} strokeWidth={2.5} />
+                    )}
+                    {bypassNotice.msg}
+                  </span>
+                )}
+              </div>
+              <Button variant="red" size="sm" onClick={removeBypass} disabled={!draftGamePath}>
+                <ShieldOff size={13} />
+                Remove
               </Button>
             </div>
           </div>
-        </Card>
 
-        {/* ── Launch Options ── */}
-        <Card className="flex flex-col gap-3 bg-card p-3">
-          <h3 className="text-sm font-semibold">Launch Options</h3>
-          <div
-            className="flex items-center justify-between rounded-md border border-border bg-background px-3 py-2"
-            title={skipLauncherError ?? undefined}
-          >
-            <div className="flex flex-col gap-0.5">
-              <Label
-                htmlFor="skip-launcher"
-                className={cn(
-                  "cursor-pointer text-[13px] font-medium",
-                  skipLauncherError && "text-err"
-                )}
-              >
-                Skip Launcher
-              </Label>
-              <span className="text-[11px] text-muted-foreground">
-                Skip the launcher window and go straight into the game.
-              </span>
+          {/* ── Updates ── */}
+          <div className="flex flex-col overflow-hidden rounded-md border border-border">
+            <div className="border-b border-border bg-card px-3 py-2">
+              <h3 className="text-sm font-semibold">Updates</h3>
             </div>
-            <Switch
-              id="skip-launcher"
-              checked={draftSkipLauncher ?? false}
-              onCheckedChange={(v) => setDraftSkipLauncher(v)}
-              disabled={!draftGamePath || draftSkipLauncher === null}
-            />
-          </div>
-          {!draftGamePath && (
-            <span className="text-[11px] text-muted-foreground">Set a game path first.</span>
-          )}
-        </Card>
 
-        {/* ── Signature Bypass ── */}
-        <Card className="flex flex-col gap-3 bg-card p-3">
-          <div className="flex items-center gap-2">
-            <h3 className="text-sm font-semibold">Signature Bypass</h3>
-            {bypassNotice && (
-              <span
-                className={cn(
-                  "flex items-center gap-1.5 text-[11px] font-medium",
-                  bypassNotice.type === "ok" ? "text-ok" : "text-err"
+            <label className="flex items-center gap-3 rounded-sm px-3 py-3 hover:bg-secondary/50">
+              <div className="flex flex-1 flex-col gap-0.5">
+                <span className="text-[13px] font-medium">Check for updates on startup</span>
+                <span className="text-[11px] text-muted-foreground">
+                  Automatically check GitHub for new releases when the app launches.
+                </span>
+              </div>
+              <Switch
+                checked={draftAutoCheck ?? false}
+                onCheckedChange={setDraftAutoCheck}
+                disabled={draftAutoCheck === null}
+              />
+            </label>
+
+            <div className="flex items-center gap-3 rounded-sm px-3 py-3 hover:bg-secondary/50">
+              <div className="flex flex-1 flex-col gap-0.5">
+                <span className="text-[13px] font-medium">Check for updates now</span>
+                <span className="text-[11px] text-muted-foreground">
+                  Manually check GitHub for the latest release.
+                </span>
+                {updateBadge && (
+                  <span
+                    className={cn(
+                      "flex items-center gap-1.5 text-[11px] font-medium",
+                      updateBadge.type === "info" ? "text-blue-400" : "text-ok"
+                    )}
+                  >
+                    <CheckCircle2 size={13} strokeWidth={2.5} />
+                    {updateBadge.msg}
+                  </span>
                 )}
-              >
-                {bypassNotice.type === "ok" ? (
-                  <CheckCircle2 size={13} strokeWidth={2.5} />
-                ) : (
-                  <XCircle size={13} strokeWidth={2.5} />
+                {updateError && (
+                  <span className="flex items-center gap-1 text-[11px] font-medium text-err">
+                    <XCircle size={13} strokeWidth={2.5} />
+                    {updateError}
+                  </span>
                 )}
-                {bypassNotice.msg}
-              </span>
-            )}
-          </div>
-          <div className="flex items-center justify-between rounded-md border border-border bg-background px-3 py-2">
-            <div className="flex flex-col gap-0.5">
-              <span className="text-[13px] font-medium">Remove Signature Bypass</span>
-              <span className="text-[11px] text-muted-foreground">
-                Removes dsound.dll and the bypass plugin from the game directory.
-              </span>
+              </div>
+              <Button variant="blue" size="sm" onClick={checkUpdateNow} disabled={updateChecking}>
+                <RefreshCw size={13} className={cn(updateChecking && "animate-spin")} />
+                Check now
+              </Button>
             </div>
-            <Button variant="red" size="sm" onClick={removeBypass} disabled={!draftGamePath}>
-              <ShieldOff size={13} />
-              Remove
-            </Button>
           </div>
-        </Card>
-
-        {/* ── Updates ── */}
-        <Card className="flex flex-col gap-3 bg-card p-3">
-          <div className="flex items-center justify-between">
-            <h3 className="text-sm font-semibold">Updates</h3>
-            {updateBadge && (
-              <span
-                className={cn(
-                  "flex items-center gap-1.5 text-[12px] font-medium",
-                  updateBadge.type === "info" ? "text-blue-400" : "text-ok"
-                )}
-              >
-                <CheckCircle2 size={13} strokeWidth={2.5} />
-                {updateBadge.msg}
-              </span>
-            )}
-            {updateError && (
-              <span className="flex items-center gap-1 text-[12px] font-medium text-err">
-                <XCircle size={13} strokeWidth={2.5} />
-                {updateError}
-              </span>
-            )}
-          </div>
-
-          <div className="flex items-center justify-between rounded-md border border-border bg-background px-3 py-2">
-            <div className="flex flex-col gap-0.5">
-              <Label
-                htmlFor="auto-check-updates"
-                className="cursor-pointer text-[13px] font-medium"
-              >
-                Check for updates on startup
-              </Label>
-              <span className="text-[11px] text-muted-foreground">
-                Automatically check GitHub for new releases when the app launches.
-              </span>
-            </div>
-            <Switch
-              id="auto-check-updates"
-              checked={draftAutoCheck ?? false}
-              onCheckedChange={(v) => setDraftAutoCheck(v)}
-              disabled={draftAutoCheck === null}
-            />
-          </div>
-
-          <div className="flex items-center justify-between rounded-md border border-border bg-background px-3 py-2">
-            <div className="flex flex-col gap-0.5">
-              <span className="text-[13px] font-medium">Check for updates now</span>
-              <span className="text-[11px] text-muted-foreground">
-                Manually check GitHub for the latest release.
-              </span>
-            </div>
-            <Button variant="blue" size="sm" onClick={checkUpdateNow} disabled={updateChecking}>
-              <RefreshCw size={13} className={cn(updateChecking && "animate-spin")} />
-              Check now
-            </Button>
-          </div>
-        </Card>
+        </div>
       </div>
 
-      {/* ── Save bar ── */}
-      <div className="mt-3 flex shrink-0 items-center justify-end gap-2 border-t border-border pt-3">
+      {/* ── Save bar (always rendered to avoid layout shift) ── */}
+      <div
+        className={cn(
+          "flex shrink-0 items-center justify-end gap-2 border-t border-border pt-2 transition-opacity duration-150",
+          dirty || savedBadge ? "opacity-100" : "pointer-events-none opacity-0"
+        )}
+      >
         {savedBadge && !dirty && (
           <span className="mr-auto flex items-center gap-1.5 text-[12px] font-medium text-ok">
             <CheckCircle2 size={13} strokeWidth={2.5} />

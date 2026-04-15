@@ -11,14 +11,13 @@ import {
   X,
   CheckCircle2,
   XCircle,
-  Trash2,
   Info,
   TriangleAlert,
+  Undo2,
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Slider as SliderUI } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
@@ -442,16 +441,6 @@ export function PakTweaks({ gamePath, scalabilityContent }: Props) {
     }
   }
 
-  async function clearShaderCache() {
-    try {
-      const msg = await invoke<string>("clear_shader_cache");
-      showNotice(msg, "ok");
-    } catch (e: unknown) {
-      showNotice("Failed to clear shader cache", "err");
-      console.error("Clear shader cache failed:", e);
-    }
-  }
-
   const dirty = edits.length > 0;
 
   function hasScalabilityConflict(tweak: TweakDefinition): boolean {
@@ -491,15 +480,13 @@ export function PakTweaks({ gamePath, scalabilityContent }: Props) {
   return (
     <div className="flex w-full flex-1 min-h-0 flex-col">
       {/* Scrollable content: pak list + tweak cards */}
-      <div className="flex-1 overflow-y-auto pr-6">
+      <div className="flex-1 overflow-y-auto [scrollbar-gutter:stable]">
         <div className="flex flex-col gap-5">
           {/* Pak list */}
-          <Card className="flex flex-col gap-3 bg-card p-4">
-            <div className="flex items-center justify-between gap-2">
+          <div className="flex flex-col overflow-hidden rounded-md border border-border">
+            <div className="flex items-center justify-between gap-2 border-b border-border bg-card px-3 py-2">
               <div className="flex min-w-0 flex-1 items-center gap-2">
-                <span className="shrink-0 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                  Config Mods
-                </span>
+                <span className="shrink-0 text-sm font-semibold">Config Mods</span>
                 {notice && (
                   <span
                     title={notice.msg}
@@ -525,77 +512,56 @@ export function PakTweaks({ gamePath, scalabilityContent }: Props) {
                   </span>
                 )}
               </div>
-              <div className="flex shrink-0 items-center gap-2">
-                <Button variant="outline" size="sm" onClick={browse}>
+              <div className="flex shrink-0 items-center gap-0.5">
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  onClick={browse}
+                  title="Browse for config mods"
+                >
                   <FolderOpen size={14} />
-                  Browse
                 </Button>
                 <Button
-                  variant="blue"
-                  size="sm"
+                  variant="ghost"
+                  size="icon-sm"
                   onClick={() => scan()}
                   disabled={scanning || !gamePath}
+                  title="Scan for config mods"
                 >
                   <Search size={14} className={cn(scanning && "animate-pulse")} />
-                  Scan
                 </Button>
               </div>
             </div>
 
             {!gamePath && (
-              <span className="flex items-center gap-1.5 text-[12px] text-warn">
-                <XCircle size={14} strokeWidth={2.5} />
-                Set game root in Settings first
-              </span>
-            )}
-
-            {gamePath && paks.length === 0 && (
-              <span className="flex items-start gap-1.5 text-[12px] text-muted-foreground">
-                <Info size={14} className="mt-0.5 shrink-0" />
-                <span>
-                  <strong className="font-semibold text-foreground">No config mods found.</strong>{" "}
-                  Mods that only contain assets won't appear here.
+              <div className="px-3 py-2.5">
+                <span className="flex items-center gap-1.5 text-[12px] text-warn">
+                  <XCircle size={14} strokeWidth={2.5} />
+                  Set game root in Settings first
                 </span>
-              </span>
-            )}
-
-            {/* Single pak — show inline, no list needed */}
-            {paks.length === 1 && selectedPak && (
-              <div className="flex min-w-0 items-center gap-2">
-                <Package size={13} className="shrink-0 text-muted-foreground" />
-                <span className="min-w-0 flex-1 truncate font-mono text-[12px]">
-                  {selectedPak.pak_name}
-                </span>
-                <div className="flex shrink-0 items-center gap-1">
-                  {selectedPak.has_device_profiles && (
-                    <Badge variant="outline" className="text-[10px] px-2 py-0.5">
-                      DeviceProfiles
-                    </Badge>
-                  )}
-                  {selectedPak.has_engine_ini && (
-                    <Badge variant="outline" className="text-[10px] px-2 py-0.5">
-                      Engine
-                    </Badge>
-                  )}
-                  <button
-                    onClick={() => removePak(selectedPak.pak_path)}
-                    className="ml-1 rounded p-1.5 text-muted-foreground/60 transition-colors hover:bg-destructive/15 hover:text-destructive"
-                    title="Remove from list"
-                  >
-                    <X size={14} />
-                  </button>
-                </div>
               </div>
             )}
 
-            {/* Multiple paks — show selectable list */}
-            {paks.length > 1 && (
-              <ul className="flex flex-col divide-y divide-border/50 rounded-md border border-border bg-background">
+            {gamePath && paks.length === 0 && (
+              <div className="px-3 py-2.5">
+                <span className="flex items-start gap-1.5 text-[12px] text-muted-foreground">
+                  <Info size={14} className="mt-0.5 shrink-0" />
+                  <span>
+                    <strong className="font-semibold text-foreground">No config mods found.</strong>{" "}
+                    Mods that only contain assets won't appear here.
+                  </span>
+                </span>
+              </div>
+            )}
+
+            {/* Pak list — unified for any count */}
+            {paks.length > 0 && (
+              <ul className="flex flex-col">
                 {paks.map((pak) => (
                   <li
                     key={pak.pak_path}
                     className={cn(
-                      "flex min-w-0 items-center transition-colors hover:bg-secondary",
+                      "flex min-w-0 items-center transition-colors hover:bg-secondary/50",
                       selectedPak?.pak_path === pak.pak_path && "bg-secondary"
                     )}
                   >
@@ -634,7 +600,7 @@ export function PakTweaks({ gamePath, scalabilityContent }: Props) {
                 ))}
               </ul>
             )}
-          </Card>
+          </div>
 
           {/* Selected pak editor — tweak cards */}
           {selectedPak &&
@@ -651,11 +617,11 @@ export function PakTweaks({ gamePath, scalabilityContent }: Props) {
               return (
                 <div className="grid gap-5 xl:grid-cols-2 2xl:grid-cols-3">
                   {Object.entries(categories).map(([category, defs]) => (
-                    <Card key={category} className="flex flex-col gap-3 bg-card p-4">
-                      <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                        {category}
-                      </span>
-                      <div className="flex flex-col gap-2">
+                    <div key={category} className="overflow-hidden rounded-md border border-border">
+                      <div className="border-b border-border bg-card px-3 py-2">
+                        <span className="text-sm font-semibold">{category}</span>
+                      </div>
+                      <div className="flex flex-col divide-y divide-border/50">
                         {defs.map((tweak) => {
                           const engineOnly =
                             (tweak.kind === "Toggle" && !!tweak.engine_section) ||
@@ -693,7 +659,7 @@ export function PakTweaks({ gamePath, scalabilityContent }: Props) {
                           );
                         })}
                       </div>
-                    </Card>
+                    </div>
                   ))}
                 </div>
               );
@@ -701,63 +667,34 @@ export function PakTweaks({ gamePath, scalabilityContent }: Props) {
         </div>
       </div>
 
-      {/* Apply bar — fixed footer, outside the scroll area */}
-      {selectedPak && !loading && (
-        <div className="flex flex-col gap-3 border-t border-border pt-3 pb-1 mt-5">
-          {/* Pending edits summary */}
-          {selectedPak && !loading && edits.length > 0 && (
-            <div className="flex flex-col gap-1.5">
-              <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                Pending Changes ({edits.length})
-              </span>
-              <div className="flex flex-wrap gap-1">
-                {edits.map((e) => (
-                  <Badge
-                    key={e.key}
-                    variant={e.value === null ? "destructive" : "secondary"}
-                    className="text-[10px] font-mono px-1.5 py-0"
-                  >
-                    {e.value === null ? `- ${e.key}` : `${e.key}=${e.value}`}
-                  </Badge>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Apply */}
-          <div className="flex min-w-0 items-center gap-3">
-            {selectedPak && !loading && (
-              <>
-                <Button
-                  variant="green"
-                  size="sm"
-                  onClick={applyEdits}
-                  disabled={!dirty || applying || edits.length === 0}
-                >
-                  {applying ? <RefreshCw size={14} className="animate-spin" /> : <Save size={14} />}
-                  {applying ? "Repacking…" : dirty ? "Apply & Repack" : "Up to Date"}
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={clearShaderCache}
-                  title="Delete pipeline cache files from %LOCALAPPDATA%\Marvel\Saved"
-                >
-                  <Trash2 size={14} />
-                  Clear Shader Cache
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => selectedPak && forceReloadPak(selectedPak)}
-                  disabled={loading}
-                >
-                  <RefreshCw size={14} />
-                  Reload
-                </Button>
-              </>
-            )}
-          </div>
+      {/* Save bar */}
+      {selectedPak && !loading && dirty && (
+        <div className="mt-3 flex shrink-0 items-center justify-end gap-2 border-t border-border pt-3">
+          <span className="mr-auto flex items-center gap-1.5 text-[12px] font-medium text-warn">
+            <span className="relative flex h-2 w-2">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-warn opacity-60" />
+              <span className="relative inline-flex h-2 w-2 rounded-full bg-warn" />
+            </span>
+            Unsaved changes
+          </span>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => selectedPak && forceReloadPak(selectedPak)}
+            disabled={loading}
+          >
+            <Undo2 size={14} />
+            Discard
+          </Button>
+          <Button
+            variant="blue"
+            size="sm"
+            onClick={applyEdits}
+            disabled={!dirty || applying || edits.length === 0}
+          >
+            {applying ? <RefreshCw size={14} className="animate-spin" /> : <Save size={14} />}
+            {applying ? "Repacking…" : "Save"}
+          </Button>
         </div>
       )}
     </div>
@@ -788,9 +725,9 @@ function QuickTweakRow({
   return (
     <div
       className={cn(
-        "flex flex-col gap-2 rounded-md border bg-background px-4 py-3",
+        "flex flex-col gap-2 px-3 py-3",
         disabled && "opacity-50",
-        scalabilityConflict ? "border-warn/40" : "border-border/50"
+        scalabilityConflict && "bg-warn/5"
       )}
     >
       <div className="flex items-start justify-between gap-4">

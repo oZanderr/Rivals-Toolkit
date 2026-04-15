@@ -3,16 +3,17 @@ import { useState, useEffect, useCallback, useMemo, useRef, type ReactNode } fro
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import {
+  Blocks,
   Package,
   Settings as SettingsIcon,
   SlidersHorizontal,
-  Puzzle,
   Play,
   FileCode2,
   Volume2,
 } from "lucide-react";
 
 import { Separator } from "@/components/ui/separator";
+import { useGameRunning } from "@/hooks/useGameRunning";
 import { useUpdateCheck, type UpdateInfo } from "@/hooks/useUpdateCheck";
 import { cn } from "@/lib/utils";
 
@@ -34,7 +35,7 @@ interface InstallInfo {
 }
 
 const TABS: { id: Tab; label: string; icon: ReactNode }[] = [
-  { id: "mod-tools", label: "Mods", icon: <Puzzle size={15} /> },
+  { id: "mod-tools", label: "Mods", icon: <Blocks size={15} /> },
   { id: "hitsounds", label: "Hitsounds", icon: <Volume2 size={15} /> },
   { id: "config-tweaks", label: "Config Tweaks", icon: <SlidersHorizontal size={15} /> },
   { id: "ini-editor", label: "Pak INI Editor", icon: <FileCode2 size={15} /> },
@@ -51,6 +52,11 @@ function App() {
   const [mountedTabs, setMountedTabs] = useState<Set<Tab>>(() => new Set(["mod-tools"]));
   const [version, setVersion] = useState("");
   const autoUpdateInfo = useUpdateCheck();
+  const {
+    isRunning: gameRunning,
+    ready: gameStatusReady,
+    markLaunched,
+  } = useGameRunning(activeTab === "mod-tools");
   const [manualUpdateInfo, setManualUpdateInfo] = useState<UpdateInfo | null>(null);
   const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
   const activeUpdateInfo = useMemo(
@@ -180,24 +186,7 @@ function App() {
       )}
       <div className="flex min-h-0 flex-1 overflow-hidden">
         {/* Sidebar */}
-        <nav className="flex w-48 min-w-48 flex-col overflow-x-hidden overflow-y-auto border-r border-border bg-card">
-          <div className="px-2 pt-2 pb-2">
-            <button
-              onClick={() => installInfo && invoke("launch_game", { installInfo })}
-              disabled={!installInfo}
-              className={cn(
-                "flex w-full items-center gap-2.5 rounded-sm px-2.5 py-2 text-sm font-medium transition-colors",
-                installInfo
-                  ? "text-green-accent-foreground hover:bg-green-accent hover:text-green-accent-foreground"
-                  : "cursor-not-allowed text-muted-foreground/40"
-              )}
-              title={installInfo ? `Launch via ${installInfo.source}` : "Game not detected"}
-            >
-              <Play size={15} />
-              Launch Game
-            </button>
-          </div>
-          <Separator className="mx-2 w-auto" />
+        <nav className="flex w-48 min-w-48 flex-col overflow-x-hidden overflow-y-auto border-r border-border bg-sidebar">
           <ul className="flex flex-1 flex-col gap-0.5 px-2 pt-2">
             {TABS.map((t) => (
               <li key={t.id}>
@@ -215,14 +204,41 @@ function App() {
             ))}
           </ul>
 
-          {version && (
-            <>
-              <Separator className="mb-3" />
-              <div className="px-4 pb-4 text-center">
-                <span className="text-[10px] text-muted-foreground/50">v{version}</span>
-              </div>
-            </>
-          )}
+          <div className="px-2 pb-2">
+            <button
+              onClick={() => {
+                if (!installInfo) return;
+                markLaunched();
+                invoke("launch_game", { installInfo }).catch(console.error);
+              }}
+              disabled={!installInfo || !gameStatusReady || gameRunning}
+              className={cn(
+                "flex w-full items-center gap-2.5 rounded-sm px-2.5 py-2 text-sm font-medium transition-colors",
+                installInfo && gameStatusReady && !gameRunning
+                  ? "text-green-accent-foreground hover:bg-green-accent hover:text-green-accent-foreground"
+                  : "cursor-not-allowed text-muted-foreground/40"
+              )}
+              title={
+                !gameStatusReady
+                  ? "Checking game status…"
+                  : gameRunning
+                    ? "Marvel Rivals is already running"
+                    : installInfo
+                      ? `Launch via ${installInfo.source}`
+                      : "Game not detected"
+              }
+            >
+              <Play size={15} />
+              Launch Game
+            </button>
+          </div>
+
+          <Separator className="mb-3" />
+          <div className="px-4 pb-4 text-center">
+            <span className="text-[10px] text-muted-foreground/50">
+              {version ? `v${version}` : "\u00A0"}
+            </span>
+          </div>
         </nav>
 
         {/* Content — lazy-mount & keep-mounted to preserve state across tab switches */}
@@ -234,7 +250,12 @@ function App() {
                 activeTab !== "mod-tools" && "hidden"
               )}
             >
-              <Mods gamePath={gamePath} isActive={activeTab === "mod-tools"} />
+              <Mods
+                gamePath={gamePath}
+                isActive={activeTab === "mod-tools"}
+                gameRunning={gameRunning}
+                pathLoading={installInfo === undefined}
+              />
             </div>
           )}
           {mountedTabs.has("pak-manager") && (

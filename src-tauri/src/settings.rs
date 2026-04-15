@@ -15,6 +15,8 @@ fn settings_path() -> Option<PathBuf> {
 pub(crate) struct Settings {
     #[serde(default = "default_true")]
     pub(crate) auto_check_updates: bool,
+    #[serde(default = "default_true")]
+    pub(crate) recursive_mod_scan: bool,
     #[serde(default)]
     pub(crate) game_path: Option<String>,
     #[serde(default)]
@@ -29,6 +31,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             auto_check_updates: true,
+            recursive_mod_scan: true,
             game_path: None,
             install_info: None,
         }

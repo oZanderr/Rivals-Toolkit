@@ -42,7 +42,7 @@ pub(crate) struct ModsStatus {
     pub conflicts_resolved: u32,
 }
 
-pub(crate) fn get_mods_status(game_root: &str) -> ModsStatus {
+pub(crate) fn get_mods_status(game_root: &str, recursive: bool) -> ModsStatus {
     let mods = mods_dir(game_root);
     let exists = mods.exists();
 
@@ -55,7 +55,7 @@ pub(crate) fn get_mods_status(game_root: &str) -> ModsStatus {
         file_matches(&dsound_path, BYPASS_DSOUND) && file_matches(&asi_path, BYPASS_ASI);
 
     let mut mod_entries: Vec<ModEntry> = if exists {
-        walk_mod_files(&mods)
+        walk_mod_files(&mods, recursive)
             .into_iter()
             .filter_map(|rel_path| {
                 let full_name = rel_path.to_string_lossy().into_owned().replace('\\', "/");

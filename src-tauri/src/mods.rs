@@ -2,7 +2,7 @@ mod bypass;
 mod folder;
 mod status;
 
-pub(crate) use folder::InstallResult;
+pub(crate) use folder::{BulkOpResult, InstallResult};
 pub(crate) use status::ModsStatus;
 
 // Bypass files bundled at compile time.
@@ -10,10 +10,16 @@ static BYPASS_DSOUND: &[u8] = include_bytes!("../resources/bypass/dsound.dll");
 static BYPASS_ASI: &[u8] =
     include_bytes!("../resources/bypass/plugins/MarvelRivalsUTOCSignatureBypass.asi");
 
-/// Recursively collect relative paths of mod-related files (.pak, .ucas, .utoc,
-/// and their `.disabled` variants) under the given root directory.
-pub(crate) fn walk_mod_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
-    walkdir::WalkDir::new(root)
+/// Collect relative paths of mod-related files (.pak, .ucas, .utoc, and their
+/// `.disabled` variants) under the given root directory. When `recursive` is
+/// false, only direct children of `root` are scanned (matches UE's native
+/// `~mods` load behavior).
+pub(crate) fn walk_mod_files(root: &std::path::Path, recursive: bool) -> Vec<std::path::PathBuf> {
+    let mut walker = walkdir::WalkDir::new(root);
+    if !recursive {
+        walker = walker.max_depth(1);
+    }
+    walker
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
@@ -38,8 +44,8 @@ fn file_matches(path: &std::path::Path, expected: &[u8]) -> bool {
         .unwrap_or(false)
 }
 
-pub(crate) fn get_mods_status(game_root: &str) -> ModsStatus {
-    status::get_mods_status(game_root)
+pub(crate) fn get_mods_status(game_root: &str, recursive: bool) -> ModsStatus {
+    status::get_mods_status(game_root, recursive)
 }
 
 pub(crate) fn install_signature_bypass(game_root: &str) -> Result<String, String> {
@@ -62,12 +68,28 @@ pub(crate) fn toggle_mod_enabled(
     folder::toggle_mod_enabled(mods_folder, full_name, enabled)
 }
 
-pub(crate) fn export_mods_archive(mods_folder: &str, dest_path: &str) -> Result<String, String> {
-    folder::export_mods_archive(mods_folder, dest_path)
+pub(crate) fn export_mods_archive(
+    mods_folder: &str,
+    dest_path: &str,
+    recursive: bool,
+) -> Result<String, String> {
+    folder::export_mods_archive(mods_folder, dest_path, recursive)
 }
 
 pub(crate) fn delete_mod(mods_folder: &str, full_name: &str) -> Result<(), String> {
     folder::delete_mod(mods_folder, full_name)
+}
+
+pub(crate) fn toggle_mods_enabled(
+    mods_folder: &str,
+    names: &[String],
+    enabled: bool,
+) -> BulkOpResult {
+    folder::toggle_mods_enabled(mods_folder, names, enabled)
+}
+
+pub(crate) fn delete_mods(mods_folder: &str, names: &[String]) -> BulkOpResult {
+    folder::delete_mods(mods_folder, names)
 }
 
 pub(crate) fn install_mod(mods_folder: &str, source_path: &str) -> Result<InstallResult, String> {

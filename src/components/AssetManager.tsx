@@ -35,7 +35,6 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Button, buttonVariants } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import {
@@ -501,7 +500,10 @@ export function AssetManager({ gamePath }: Props) {
     [pakContents, selectedEntries]
   );
   const selectedUtocEntries = useMemo(
-    () => pakContents.filter((e) => selectedEntries.has(e.path) && e.source === "utoc"),
+    () =>
+      pakContents.filter(
+        (e) => selectedEntries.has(e.path) && e.source === "utoc" && !e.path.endsWith(".ubulk")
+      ),
     [pakContents, selectedEntries]
   );
 
@@ -792,8 +794,8 @@ export function AssetManager({ gamePath }: Props) {
 
       <div className="flex min-h-0 flex-1 flex-row gap-4">
         <div className="flex min-h-0 w-[clamp(280px,28vw,560px)] min-w-70 max-w-140 shrink-0 flex-col">
-          <Card className="flex min-h-0 flex-1 flex-col gap-3 p-3 bg-card">
-            <div className="flex shrink-0 items-center justify-between gap-1.5">
+          <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-md border border-border">
+            <div className="flex shrink-0 items-center justify-between gap-1.5 border-b border-border bg-card px-3 py-2">
               <h3 className="text-sm font-semibold">Game Paks</h3>
               <div className="flex items-center gap-1">
                 <Button
@@ -817,13 +819,7 @@ export function AssetManager({ gamePath }: Props) {
               </div>
             </div>
 
-            <p className="shrink-0 text-[11px] text-muted-foreground">
-              {gamePath
-                ? "Reads Marvel Rivals Paks folder from your game root."
-                : "Set game root in Settings to list game paks."}
-            </p>
-
-            <div className="min-h-0 flex-1 overflow-y-auto rounded-md border border-border bg-background">
+            <div className="min-h-0 flex-1 overflow-y-auto">
               {pakList.length === 0 ? (
                 <div className="flex h-full flex-col items-center justify-center gap-2 p-4 text-center">
                   <FolderOpen size={28} className="text-muted-foreground/40" />
@@ -869,7 +865,7 @@ export function AssetManager({ gamePath }: Props) {
                         )}
                         <span className="flex-1 truncate text-[12px]">{displayName}</span>
                         {isIoStore && (
-                          <span className="shrink-0 rounded bg-info/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase leading-none text-info">
+                          <span className="shrink-0 rounded bg-ok/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase leading-none text-ok">
                             IoStore
                           </span>
                         )}
@@ -879,134 +875,140 @@ export function AssetManager({ gamePath }: Props) {
                 </ul>
               )}
             </div>
-          </Card>
+          </div>
         </div>
 
-        <Card className="flex min-h-0 min-w-0 flex-1 flex-col gap-3 p-3 bg-card">
-          {/* Header — fixed two-line height so toggling subtitle doesn't shift */}
-          <div className="flex shrink-0 items-center justify-between gap-2 overflow-hidden">
-            <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-              <h3 className="truncate text-sm font-semibold" title={selectedPak || ""}>
-                {pakName ?? "Contents"}
-              </h3>
-              {/* Always reserve subtitle line height; invisible when nothing selected */}
-              <span
-                className={cn(
-                  "truncate text-[11px] text-muted-foreground",
-                  !selectedPak && "invisible"
-                )}
-                title={selectedPak || ""}
-              >
-                {selectedPak || "\u00A0"}
-              </span>
-            </div>
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-md border border-border">
+          {/* Header zone */}
+          <div className="flex shrink-0 flex-col gap-2 border-b border-border bg-card px-3 py-2">
+            {/* Title + actions */}
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+                <h3 className="truncate text-sm font-semibold" title={selectedPak || ""}>
+                  {pakName ?? "Contents"}
+                </h3>
+                <span
+                  className={cn(
+                    "truncate text-[11px] text-muted-foreground",
+                    !selectedPak && "invisible"
+                  )}
+                  title={selectedPak || ""}
+                >
+                  {selectedPak || "\u00A0"}
+                </span>
+              </div>
 
-            <div className="flex gap-1.5">
-              {hasSelectedBnk && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={extractHitsoundWavs}
-                  disabled={busy || !selectedPak || !gamePath}
-                  title="Extract hitsound WAVs from this mod's soundbank"
-                >
-                  <FileAudio size={14} />
-                  Extract Hitsounds
-                </Button>
-              )}
-              {selectedEntries.size > 0 && selectedIsIoStore && selectedUtocEntries.length > 0 && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={exportLegacySelected}
-                  disabled={busy || !selectedPak}
-                  title="Convert selected IoStore assets to legacy format"
-                >
-                  <FileOutput size={14} />
-                  Legacy ({selectedUtocEntries.length})
-                </Button>
-              )}
-              {selectedEntries.size > 0 ? (
-                <Button
-                  variant="green"
-                  size="sm"
-                  onClick={extractSelected}
-                  disabled={busy || !selectedPak}
-                >
-                  <Download size={14} />
-                  Extract ({selectedEntries.size})
-                </Button>
-              ) : (
-                <>
-                  {selectedIsIoStore && (
+              <div className="flex shrink-0 items-center gap-1 overflow-visible py-1 -my-1 pr-1 -mr-1">
+                {hasSelectedBnk && (
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    onClick={extractHitsoundWavs}
+                    disabled={busy || !selectedPak || !gamePath}
+                    title="Extract hitsound WAVs from this mod's soundbank"
+                  >
+                    <FileAudio size={15} />
+                  </Button>
+                )}
+                {selectedEntries.size > 0 &&
+                  selectedIsIoStore &&
+                  selectedUtocEntries.length > 0 && (
                     <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={exportLegacy}
+                      variant="ghost"
+                      size="icon-sm"
+                      className="relative"
+                      onClick={exportLegacySelected}
                       disabled={busy || !selectedPak}
-                      title="Convert IoStore assets to legacy .uasset/.uexp for UAssetGUI"
+                      title={`Convert ${selectedUtocEntries.length} selected IoStore assets to legacy format`}
                     >
-                      <FileOutput size={14} />
-                      Export Legacy
+                      <FileOutput size={15} />
+                      <span className="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-foreground px-1 text-[8px] font-bold leading-none text-background">
+                        {selectedUtocEntries.length}
+                      </span>
                     </Button>
                   )}
+                {selectedEntries.size > 0 ? (
                   <Button
-                    variant="green"
-                    size="sm"
-                    onClick={unpackSelected}
+                    variant="ghost"
+                    size="icon-sm"
+                    className="relative"
+                    onClick={extractSelected}
                     disabled={busy || !selectedPak}
+                    title={`Extract ${selectedEntries.size} selected files`}
                   >
-                    <Download size={14} />
-                    Extract All
+                    <Download size={15} />
+                    <span className="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-foreground px-1 text-[8px] font-bold leading-none text-background">
+                      {selectedEntries.size}
+                    </span>
                   </Button>
-                </>
-              )}
-            </div>
-          </div>
-
-          {/* Filter + select-all */}
-          <div className="flex shrink-0 items-center gap-2">
-            {selectedPak && (
-              <button
-                className={cn(
-                  "flex shrink-0 items-center text-muted-foreground hover:text-foreground",
-                  visible.length === 0 && "invisible"
-                )}
-                onClick={toggleSelectAll}
-                title={
-                  selectedEntries.size === visible.length ? "Deselect all" : "Select all visible"
-                }
-              >
-                {selectedEntries.size === 0 ? (
-                  <Square size={16} />
-                ) : selectedEntries.size === visible.length &&
-                  visible.every((e) => selectedEntries.has(e.path)) ? (
-                  <CheckSquare2 size={16} />
                 ) : (
-                  <MinusSquare size={16} />
+                  <>
+                    {selectedIsIoStore && (
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        onClick={exportLegacy}
+                        disabled={busy || !selectedPak}
+                        title="Convert IoStore assets to legacy .uasset/.uexp for UAssetGUI"
+                      >
+                        <FileOutput size={15} />
+                      </Button>
+                    )}
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      onClick={unpackSelected}
+                      disabled={busy || !selectedPak}
+                      title="Extract all files"
+                    >
+                      <Download size={15} />
+                    </Button>
+                  </>
                 )}
-              </button>
-            )}
-            <div className="relative min-w-0 flex-1">
-              <Search
-                size={13}
-                className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground"
-              />
-              <Input
-                className="pl-7 font-mono text-xs"
-                placeholder="Filter files…"
-                value={filterText}
-                onChange={(e) => onFilterChange(e.target.value)}
-                disabled={!selectedPak}
-              />
+              </div>
+            </div>
+
+            {/* Filter + select-all */}
+            <div className="flex items-center gap-2">
+              {selectedPak && (
+                <button
+                  className={cn(
+                    "flex shrink-0 items-center text-muted-foreground hover:text-foreground",
+                    visible.length === 0 && "invisible"
+                  )}
+                  onClick={toggleSelectAll}
+                  title={
+                    selectedEntries.size === visible.length ? "Deselect all" : "Select all visible"
+                  }
+                >
+                  {selectedEntries.size === 0 ? (
+                    <Square size={16} />
+                  ) : selectedEntries.size === visible.length &&
+                    visible.every((e) => selectedEntries.has(e.path)) ? (
+                    <CheckSquare2 size={16} />
+                  ) : (
+                    <MinusSquare size={16} />
+                  )}
+                </button>
+              )}
+              <div className="relative min-w-0 flex-1">
+                <Search
+                  size={13}
+                  className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground"
+                />
+                <Input
+                  className="pl-7 font-mono text-xs"
+                  placeholder="Filter files…"
+                  value={filterText}
+                  onChange={(e) => onFilterChange(e.target.value)}
+                  disabled={!selectedPak}
+                />
+              </div>
             </div>
           </div>
 
           {/* File list — always rendered */}
-          <div
-            ref={contentsScrollRef}
-            className="min-h-0 flex-1 overflow-y-auto rounded-md border border-border bg-background"
-          >
+          <div ref={contentsScrollRef} className="min-h-0 flex-1 overflow-y-auto">
             {!selectedPak ? (
               <div className="flex h-full flex-col items-center justify-center gap-2 p-4 text-center">
                 <PackageOpen size={28} className="text-muted-foreground/40" />
@@ -1048,7 +1050,7 @@ export function AssetManager({ gamePath }: Props) {
                       <span className="shrink-0 text-muted-foreground">{fileIcon(entry.path)}</span>
                       <span className="truncate font-mono text-[11px]">{entry.path}</span>
                       {entry.source === "utoc" && (
-                        <span className="ml-auto shrink-0 rounded bg-info/15 px-1 py-0.5 text-[8px] font-semibold uppercase leading-none text-info">
+                        <span className="ml-auto shrink-0 rounded bg-ok/15 px-1 py-0.5 text-[8px] font-semibold uppercase leading-none text-ok">
                           utoc
                         </span>
                       )}
@@ -1059,14 +1061,15 @@ export function AssetManager({ gamePath }: Props) {
             )}
           </div>
 
-          {/* Footer — always rendered to avoid layout shift */}
-          <p
-            className="shrink-0 truncate text-[11px] text-muted-foreground"
-            title={selectedPak ? footerText : undefined}
-          >
-            {footerText}
-          </p>
-        </Card>
+          {/* Footer */}
+          {selectedPak && footerText && (
+            <div className="shrink-0 border-t border-border bg-card px-3 py-1.5">
+              <p className="truncate text-[11px] text-muted-foreground" title={footerText}>
+                {footerText}
+              </p>
+            </div>
+          )}
+        </div>
       </div>
 
       <AlertDialog

@@ -12,6 +12,18 @@ pub(crate) struct InstallResult {
     pub replaced_enabled: bool,
 }
 
+#[derive(Serialize)]
+pub(crate) struct BulkFailure {
+    pub full_name: String,
+    pub error: String,
+}
+
+#[derive(Serialize)]
+pub(crate) struct BulkOpResult {
+    pub successes: u32,
+    pub failures: Vec<BulkFailure>,
+}
+
 pub(crate) fn open_mods_folder(game_root: &str) -> Result<(), String> {
     let mods = mods_dir(game_root);
     if !mods.exists() {
@@ -71,6 +83,48 @@ pub(crate) fn toggle_mod_enabled(
         }
     }
     Ok(())
+}
+
+/// Toggle multiple mods in sequence, collecting per-item failures.
+pub(crate) fn toggle_mods_enabled(
+    mods_folder: &str,
+    names: &[String],
+    enabled: bool,
+) -> BulkOpResult {
+    let mut successes = 0u32;
+    let mut failures = Vec::new();
+    for name in names {
+        match toggle_mod_enabled(mods_folder, name, enabled) {
+            Ok(()) => successes += 1,
+            Err(e) => failures.push(BulkFailure {
+                full_name: name.clone(),
+                error: e,
+            }),
+        }
+    }
+    BulkOpResult {
+        successes,
+        failures,
+    }
+}
+
+/// Delete multiple mods in sequence, collecting per-item failures.
+pub(crate) fn delete_mods(mods_folder: &str, names: &[String]) -> BulkOpResult {
+    let mut successes = 0u32;
+    let mut failures = Vec::new();
+    for name in names {
+        match delete_mod(mods_folder, name) {
+            Ok(()) => successes += 1,
+            Err(e) => failures.push(BulkFailure {
+                full_name: name.clone(),
+                error: e,
+            }),
+        }
+    }
+    BulkOpResult {
+        successes,
+        failures,
+    }
 }
 
 /// Delete a mod and its companion `.ucas`/`.utoc` files.
@@ -276,10 +330,10 @@ fn extract_7z(archive_path: &str, temp_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn collect_export_files(dir: &Path) -> (Vec<(std::path::PathBuf, String)>, u32) {
+fn collect_export_files(dir: &Path, recursive: bool) -> (Vec<(std::path::PathBuf, String)>, u32) {
     let mut files = Vec::new();
     let mut pak_count = 0u32;
-    for rel_path in super::walk_mod_files(dir) {
+    for rel_path in super::walk_mod_files(dir, recursive) {
         let rel_str = rel_path.to_string_lossy().replace('\\', "/");
         if rel_str.ends_with(".disabled") {
             continue;
@@ -297,10 +351,14 @@ fn collect_export_files(dir: &Path) -> (Vec<(std::path::PathBuf, String)>, u32) 
     (files, pak_count)
 }
 
-pub(crate) fn export_mods_archive(mods_folder: &str, dest_path: &str) -> Result<String, String> {
+pub(crate) fn export_mods_archive(
+    mods_folder: &str,
+    dest_path: &str,
+    recursive: bool,
+) -> Result<String, String> {
     let format = archive_format(dest_path)?;
     let dir = Path::new(mods_folder);
-    let (files, pak_count) = collect_export_files(dir);
+    let (files, pak_count) = collect_export_files(dir, recursive);
 
     match format {
         ArchiveFormat::Zip => export_zip(dest_path, &files)?,

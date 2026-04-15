@@ -2,8 +2,8 @@ use tauri::State;
 
 use crate::settings::SettingsState;
 use crate::{
-    detect, hitsounds, launch_record, mods, pak, pak_tweaks, paths, scalability, update_check,
-    wav_to_wem,
+    detect, game_status, hitsounds, launch_record, mods, pak, pak_tweaks, paths, scalability,
+    update_check, wav_to_wem,
 };
 
 #[tauri::command]
@@ -32,13 +32,19 @@ pub(crate) fn validate_game_path(path: String) -> Result<bool, String> {
 }
 
 #[tauri::command]
-pub(crate) fn list_pak_files(game_root: String) -> Result<Vec<String>, String> {
-    pak::list_pak_files(&game_root)
+pub(crate) fn list_pak_files(
+    state: State<'_, SettingsState>,
+    game_root: String,
+) -> Result<Vec<String>, String> {
+    pak::list_pak_files(&game_root, recursive_mod_scan(&state))
 }
 
 #[tauri::command]
-pub(crate) fn list_pak_files_info(game_root: String) -> Result<Vec<pak::PakFileInfo>, String> {
-    pak::list_pak_files_info(&game_root)
+pub(crate) fn list_pak_files_info(
+    state: State<'_, SettingsState>,
+    game_root: String,
+) -> Result<Vec<pak::PakFileInfo>, String> {
+    pak::list_pak_files_info(&game_root, recursive_mod_scan(&state))
 }
 
 #[tauri::command]
@@ -188,8 +194,11 @@ pub(crate) fn cancel_legacy_extraction() {
 }
 
 #[tauri::command]
-pub(crate) fn get_mods_status(game_root: String) -> mods::ModsStatus {
-    mods::get_mods_status(&game_root)
+pub(crate) fn get_mods_status(
+    state: State<'_, SettingsState>,
+    game_root: String,
+) -> mods::ModsStatus {
+    mods::get_mods_status(&game_root, recursive_mod_scan(&state))
 }
 
 #[tauri::command]
@@ -233,9 +242,11 @@ pub(crate) async fn inspect_pak_path(
 
 #[tauri::command]
 pub(crate) async fn scan_mod_paks_for_ini(
+    state: State<'_, SettingsState>,
     game_root: String,
 ) -> Result<Vec<pak_tweaks::PakIniInfo>, String> {
-    tauri::async_runtime::spawn_blocking(move || pak_tweaks::scan_mod_paks(&game_root))
+    let recursive = recursive_mod_scan(&state);
+    tauri::async_runtime::spawn_blocking(move || pak_tweaks::scan_mod_paks(&game_root, recursive))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -297,21 +308,31 @@ pub(crate) fn set_skip_launcher(game_root: String, skip: bool) -> Result<(), Str
 }
 
 #[tauri::command]
+pub(crate) fn get_game_running() -> bool {
+    game_status::is_game_running()
+}
+
+#[tauri::command]
 pub(crate) fn toggle_mod_enabled(
     mods_folder: String,
     full_name: String,
     enabled: bool,
 ) -> Result<(), String> {
+    if game_status::is_game_running() {
+        return Err(game_status::game_running_error());
+    }
     mods::toggle_mod_enabled(&mods_folder, &full_name, enabled)
 }
 
 #[tauri::command]
 pub(crate) async fn export_mods_archive(
+    state: State<'_, SettingsState>,
     mods_folder: String,
     dest_path: String,
 ) -> Result<String, String> {
+    let recursive = recursive_mod_scan(&state);
     tauri::async_runtime::spawn_blocking(move || {
-        mods::export_mods_archive(&mods_folder, &dest_path)
+        mods::export_mods_archive(&mods_folder, &dest_path, recursive)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -319,7 +340,37 @@ pub(crate) async fn export_mods_archive(
 
 #[tauri::command]
 pub(crate) fn delete_mod(mods_folder: String, full_name: String) -> Result<(), String> {
+    if game_status::is_game_running() {
+        return Err(game_status::game_running_error());
+    }
     mods::delete_mod(&mods_folder, &full_name)
+}
+
+#[tauri::command]
+pub(crate) fn toggle_mods_enabled(
+    mods_folder: String,
+    full_names: Vec<String>,
+    enabled: bool,
+) -> Result<mods::BulkOpResult, String> {
+    if game_status::is_game_running() {
+        return Err(game_status::game_running_error());
+    }
+    Ok(mods::toggle_mods_enabled(
+        &mods_folder,
+        &full_names,
+        enabled,
+    ))
+}
+
+#[tauri::command]
+pub(crate) fn delete_mods(
+    mods_folder: String,
+    full_names: Vec<String>,
+) -> Result<mods::BulkOpResult, String> {
+    if game_status::is_game_running() {
+        return Err(game_status::game_running_error());
+    }
+    Ok(mods::delete_mods(&mods_folder, &full_names))
 }
 
 #[tauri::command]
@@ -327,6 +378,9 @@ pub(crate) fn install_mod(
     mods_folder: String,
     source_path: String,
 ) -> Result<mods::InstallResult, String> {
+    if game_status::is_game_running() {
+        return Err(game_status::game_running_error());
+    }
     mods::install_mod(&mods_folder, &source_path)
 }
 
@@ -335,6 +389,9 @@ pub(crate) async fn install_from_archive(
     mods_folder: String,
     archive_path: String,
 ) -> Result<Vec<mods::InstallResult>, String> {
+    if game_status::is_game_running() {
+        return Err(game_status::game_running_error());
+    }
     tauri::async_runtime::spawn_blocking(move || {
         mods::install_from_archive(&mods_folder, &archive_path)
     })
@@ -404,6 +461,26 @@ pub(crate) fn set_auto_check_updates(
 ) -> Result<(), String> {
     let mut guard = state.lock().map_err(|e| e.to_string())?;
     guard.auto_check_updates = enabled;
+    guard.save()
+}
+
+/// Read the recursive-mod-scan flag from settings, defaulting to true on lock failure.
+fn recursive_mod_scan(state: &State<'_, SettingsState>) -> bool {
+    state.lock().map(|s| s.recursive_mod_scan).unwrap_or(true)
+}
+
+#[tauri::command]
+pub(crate) fn get_recursive_mod_scan(state: State<'_, SettingsState>) -> bool {
+    recursive_mod_scan(&state)
+}
+
+#[tauri::command]
+pub(crate) fn set_recursive_mod_scan(
+    state: State<'_, SettingsState>,
+    enabled: bool,
+) -> Result<(), String> {
+    let mut guard = state.lock().map_err(|e| e.to_string())?;
+    guard.recursive_mod_scan = enabled;
     guard.save()
 }
 

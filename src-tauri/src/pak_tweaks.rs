@@ -51,14 +51,14 @@ pub(crate) fn inspect_single_pak(pak_path: &str) -> Result<Option<PakIniInfo>, S
 }
 
 /// Scan `~mods` and return paks that contain tweakable INI files.
-pub(crate) fn scan_mod_paks(game_root: &str) -> Result<Vec<PakIniInfo>, String> {
+pub(crate) fn scan_mod_paks(game_root: &str, recursive: bool) -> Result<Vec<PakIniInfo>, String> {
     let mods_dir = mods_dir(game_root);
     if !mods_dir.is_dir() {
         return Ok(Vec::new());
     }
 
     let mut results = Vec::new();
-    for rel_path in crate::mods::walk_mod_files(&mods_dir) {
+    for rel_path in crate::mods::walk_mod_files(&mods_dir, recursive) {
         let path = mods_dir.join(&rel_path);
         if path.extension().and_then(|x| x.to_str()) != Some("pak") {
             continue;

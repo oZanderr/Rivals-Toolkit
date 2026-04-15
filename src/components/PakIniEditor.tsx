@@ -29,7 +29,6 @@ import {
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import {
   Select,
@@ -566,24 +565,23 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
         {notice && (
           <span
             className={cn(
-              "flex items-center gap-1.5 text-[12px] font-medium",
+              "flex min-w-0 items-center gap-1 text-[12px] font-medium",
               notice.type === "ok" && "text-ok",
               notice.type === "err" && "text-err",
               notice.type === "info" && "text-muted-foreground"
             )}
           >
-            {notice.type === "ok" ? (
-              <CheckCircle2 size={13} strokeWidth={2.5} />
-            ) : notice.type === "err" ? (
-              <XCircle size={13} strokeWidth={2.5} />
-            ) : null}
-            {notice.msg}
+            {notice.type === "ok" && (
+              <CheckCircle2 size={13} strokeWidth={2.5} className="shrink-0" />
+            )}
+            {notice.type === "err" && <XCircle size={13} strokeWidth={2.5} className="shrink-0" />}
+            <span className="truncate">{notice.msg}</span>
           </span>
         )}
       </div>
 
       {/* ── Pak selection ── */}
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-1">
         <Select
           value={selectedPak?.pak_path ?? ""}
           onValueChange={(value) => {
@@ -613,25 +611,23 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
             ))}
           </SelectContent>
         </Select>
-        <Button variant="outline" size="sm" onClick={browse} className="shrink-0">
+        <Button variant="ghost" size="icon-sm" onClick={browse} title="Browse for pak file">
           <FolderOpen size={14} />
-          Browse
         </Button>
         <Button
+          variant="ghost"
+          size="icon-sm"
           onClick={() => scan()}
           disabled={scanning || !gamePath}
-          variant="blue"
-          size="sm"
-          className="shrink-0"
+          title="Scan for config mods"
         >
           <RefreshCw size={14} className={cn(scanning && "animate-spin")} />
-          Scan
         </Button>
       </div>
 
       {/* ── Editor area ── */}
       {selectedPak && !loading && currentContent !== null && (
-        <Card className="flex flex-1 min-h-0 flex-col bg-card p-0 overflow-hidden">
+        <div className="flex flex-1 min-h-0 flex-col rounded-md border border-border overflow-hidden">
           {/* File tabs + toolbar */}
           <div className="flex items-center justify-between border-b border-border px-3 py-1.5">
             <div className="flex items-center gap-2">
@@ -669,7 +665,7 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
                   )}
                 </div>
               ) : (
-                <span className="flex items-center gap-1.5 text-[12px] font-medium text-muted-foreground">
+                <span className="flex items-center gap-1.5 text-[12px] font-medium text-foreground">
                   <FileText size={12} />
                   {selectedPak.has_device_profiles
                     ? "DefaultDeviceProfiles.ini"
@@ -797,48 +793,48 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
           {/* CodeMirror editor */}
           <div ref={editorContainerRef} className="flex-1 min-h-0 w-full overflow-hidden" />
 
-          {/* Footer bar */}
-          <div className="flex items-center justify-between border-t border-border px-3 py-1.5">
-            <div className="flex items-center gap-2">
-              {isDirty && (
-                <span className="flex items-center gap-1.5 text-[11px] font-medium text-warn">
-                  Unsaved changes
-                  {dpDirty && engineDirty
-                    ? " (both files)"
-                    : dpDirty
-                      ? " (DeviceProfiles)"
-                      : " (Engine)"}
+          {/* Save bar — inside the editor border */}
+          {isDirty && (
+            <div className="flex items-center justify-end gap-2 border-t border-border px-3 py-1.5">
+              <span className="mr-auto flex items-center gap-1.5 text-[11px] font-medium text-warn">
+                <span className="relative flex h-2 w-2">
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-warn opacity-60" />
+                  <span className="relative inline-flex h-2 w-2 rounded-full bg-warn" />
                 </span>
-              )}
-            </div>
-            <div className="flex items-center gap-2">
+                Unsaved
+                {dpDirty && engineDirty
+                  ? " (both files)"
+                  : dpDirty
+                    ? " (DeviceProfiles)"
+                    : " (Engine)"}
+              </span>
               <Button variant="ghost" size="sm" onClick={reload} disabled={saving}>
                 <RefreshCw size={13} />
                 Reload
               </Button>
-              <Button variant="green" size="sm" onClick={save} disabled={!isDirty || saving}>
+              <Button variant="blue" size="sm" onClick={save} disabled={!isDirty || saving}>
                 {saving ? <RefreshCw size={13} className="animate-spin" /> : <Save size={13} />}
-                {saving ? "Repacking..." : "Save & Repack"}
+                {saving ? "Repacking..." : "Save"}
               </Button>
             </div>
-          </div>
-        </Card>
+          )}
+        </div>
       )}
 
       {/* Loading state */}
       {loading && (
-        <Card className="flex flex-1 min-h-0 items-center justify-center bg-card">
+        <div className="flex flex-1 min-h-0 items-center justify-center rounded-md border border-border">
           <RefreshCw size={20} className="animate-spin text-muted-foreground" />
-        </Card>
+        </div>
       )}
 
       {/* Empty state */}
       {!selectedPak && !loading && (
-        <Card className="flex flex-1 min-h-0 items-center justify-center bg-card">
+        <div className="flex flex-1 min-h-0 items-center justify-center rounded-md border border-border">
           <span className="text-[13px] text-muted-foreground">
             Select a config mod pak to start editing
           </span>
-        </Card>
+        </div>
       )}
     </div>
   );

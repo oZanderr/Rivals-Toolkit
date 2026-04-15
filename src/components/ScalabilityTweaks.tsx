@@ -2,20 +2,9 @@ import { useState, useEffect, useCallback, useRef } from "react";
 
 import { invoke } from "@tauri-apps/api/core";
 import { openPath } from "@tauri-apps/plugin-opener";
-import {
-  Save,
-  RefreshCw,
-  CheckCircle2,
-  XCircle,
-  Trash2,
-  FolderOpen,
-  Search,
-  Info,
-} from "lucide-react";
+import { Save, CheckCircle2, XCircle, FolderOpen, Search, Info, Undo2 } from "lucide-react";
 
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
@@ -187,15 +176,6 @@ export function ScalabilityTweaks({
     }
   }
 
-  async function clearShaderCache() {
-    try {
-      const msg = await invoke<string>("clear_shader_cache");
-      showStatus(msg, "ok");
-    } catch (e: unknown) {
-      showStatus(String(e), "err");
-    }
-  }
-
   // Group definitions by category (exclude pak-only tweaks)
   const scalabilityDefs = definitions.filter((d) => !d.pak_only);
 
@@ -259,15 +239,13 @@ export function ScalabilityTweaks({
 
   return (
     <div className="flex flex-1 min-h-0 flex-col gap-5">
-      <div className="flex-1 overflow-y-auto pr-6">
+      <div className="flex-1 overflow-y-auto [scrollbar-gutter:stable]">
         <div className="flex flex-col gap-5">
           {/* Config file location */}
-          <Card className="flex flex-col gap-3 p-4 bg-card">
-            <div className="flex items-center justify-between">
+          <div className="flex flex-col overflow-hidden rounded-md border border-border">
+            <div className="flex items-center justify-between border-b border-border bg-card px-3 py-2">
               <div className="flex items-center gap-2">
-                <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                  Config File
-                </span>
+                <span className="text-sm font-semibold">Config File</span>
                 {detectBadge && (
                   <span
                     className={cn(
@@ -290,24 +268,35 @@ export function ScalabilityTweaks({
                 Show in Explorer
               </Button>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="relative">
               <Input
-                className="h-8 font-mono text-[12px]"
+                className="h-8 pr-16 rounded-none border-0 shadow-none font-mono text-[12px] focus-visible:ring-0 focus-visible:border-0"
                 value={filePath}
                 onChange={(e) => setFilePath(e.target.value)}
                 placeholder="Path to Scalability.ini\u2026"
                 title={filePath}
               />
-              <Button variant="outline" size="sm" onClick={onBrowse}>
-                <FolderOpen size={14} />
-                Browse
-              </Button>
-              <Button variant="blue" size="sm" onClick={onDetect} disabled={detecting}>
-                <Search size={14} className={cn(detecting && "animate-pulse")} />
-                Redetect
-              </Button>
+              <div className="absolute right-1 top-1/2 flex -translate-y-1/2 items-center gap-0.5">
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  onClick={onBrowse}
+                  title="Browse for config file"
+                >
+                  <FolderOpen size={14} />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  onClick={onDetect}
+                  disabled={detecting}
+                  title="Auto-detect config file"
+                >
+                  <Search size={14} className={cn(detecting && "animate-pulse")} />
+                </Button>
+              </div>
             </div>
-          </Card>
+          </div>
 
           {fileExists === false && (
             <div className="flex items-start gap-2.5 rounded-md border border-border bg-muted/40 px-4 py-3 text-[12px] text-muted-foreground">
@@ -322,11 +311,11 @@ export function ScalabilityTweaks({
 
           <div className="grid gap-5 xl:grid-cols-2 2xl:grid-cols-3">
             {Object.entries(categories).map(([category, tweaks]) => (
-              <Card key={category} className="flex flex-col gap-4 bg-card p-4">
-                <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                  {category}
-                </span>
-                <div className="flex flex-col gap-3">
+              <div key={category} className="overflow-hidden rounded-md border border-border">
+                <div className="border-b border-border bg-card px-3 py-2">
+                  <span className="text-sm font-semibold">{category}</span>
+                </div>
+                <div className="flex flex-col divide-y divide-border/50">
                   {tweaks.map((tweak) => {
                     const isOn = enabled[tweak.id] ?? false;
                     const lockedOn = tweak.kind === "RemoveLines" && tweak.remove_only && isOn;
@@ -346,49 +335,19 @@ export function ScalabilityTweaks({
                     );
                   })}
                 </div>
-              </Card>
+              </div>
             ))}
           </div>
         </div>
       </div>
 
-      {/* Apply bar — fixed footer, outside the scroll area */}
-      <div className="flex flex-col gap-3 border-t border-border pt-3 pb-1">
-        {pendingChanges.length > 0 && (
-          <div className="flex flex-col gap-1.5">
-            <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-              Pending Changes ({pendingChanges.length})
-            </span>
-            <div className="flex flex-wrap gap-1">
-              {pendingChanges.map((c) => (
-                <Badge
-                  key={c.id}
-                  variant={c.kind === "remove" ? "destructive" : "secondary"}
-                  className="text-[10px] font-mono px-1.5 py-0"
-                >
-                  {c.kind === "remove" ? `- ${c.display}` : c.display}
-                </Badge>
-              ))}
-            </div>
-          </div>
-        )}
-        <div className="flex items-center gap-3">
-          <Button variant="green" size="sm" onClick={applyAndSave} disabled={!dirty}>
-            <Save size={14} />
-            {dirty ? "Apply & Save" : "Up to Date"}
-          </Button>
-          <Button variant="outline" size="sm" onClick={clearShaderCache}>
-            <Trash2 size={14} />
-            Clear Shader Cache
-          </Button>
-          <Button variant="ghost" size="sm" onClick={onReload}>
-            <RefreshCw size={14} />
-            Reload
-          </Button>
-          {status && (
+      {/* Save bar */}
+      {(dirty || status) && (
+        <div className="flex shrink-0 items-center justify-end gap-2 border-t border-border pt-2">
+          {status && !dirty && (
             <span
               className={cn(
-                "flex items-center gap-1 text-[12px]",
+                "mr-auto flex items-center gap-1.5 text-[12px] font-medium",
                 status.type === "ok"
                   ? "text-ok"
                   : status.type === "err"
@@ -396,13 +355,30 @@ export function ScalabilityTweaks({
                     : "text-muted-foreground"
               )}
             >
-              {status.type === "ok" && <CheckCircle2 size={13} />}
-              {status.type === "err" && <XCircle size={13} />}
+              {status.type === "ok" && <CheckCircle2 size={13} strokeWidth={2.5} />}
+              {status.type === "err" && <XCircle size={13} strokeWidth={2.5} />}
               {status.msg}
             </span>
           )}
+          {dirty && (
+            <span className="mr-auto flex items-center gap-1.5 text-[12px] font-medium text-warn">
+              <span className="relative flex h-2 w-2">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-warn opacity-60" />
+                <span className="relative inline-flex h-2 w-2 rounded-full bg-warn" />
+              </span>
+              Unsaved changes
+            </span>
+          )}
+          <Button variant="outline" size="sm" onClick={onReload} disabled={!dirty}>
+            <Undo2 size={14} />
+            Discard
+          </Button>
+          <Button variant="blue" size="sm" onClick={applyAndSave} disabled={!dirty}>
+            <Save size={14} />
+            Save
+          </Button>
         </div>
-      </div>
+      )}
     </div>
   );
 }
@@ -429,12 +405,7 @@ function TweakRow({
   onValueChange,
 }: TweakRowProps) {
   return (
-    <div
-      className={cn(
-        "flex flex-col gap-2 rounded-md border border-border/50 bg-background px-4 py-3",
-        disabled && "opacity-50"
-      )}
-    >
+    <div className={cn("flex flex-col gap-2 px-3 py-3", disabled && "opacity-50")}>
       {/* Top line: label + switch */}
       <div className="flex items-start justify-between gap-4">
         <div className="flex flex-col gap-0.5">
