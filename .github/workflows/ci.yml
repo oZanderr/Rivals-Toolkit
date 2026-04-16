@@ -31,9 +31,6 @@ jobs:
           node-version: 24
           cache: pnpm
 
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
-
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
@@ -48,10 +45,4 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
         run: pnpm tauri build --no-bundle
-
-      - name: Print sccache stats
-        run: sccache --show-stats

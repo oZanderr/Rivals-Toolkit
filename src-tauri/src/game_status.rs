@@ -30,5 +30,5 @@ pub(crate) fn is_game_running() -> bool {
 
 /// Short English error for mutating ops attempted while the game is running.
 pub(crate) fn game_running_error() -> String {
-    "Marvel Rivals is running — close the game before modifying mods.".to_string()
+    "Marvel Rivals is running! Close the game before modifying mods.".to_string()
 }

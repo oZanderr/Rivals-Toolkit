@@ -157,6 +157,76 @@ pub(crate) fn delete_mod(mods_folder: &str, full_name: &str) -> Result<(), Strin
     Ok(())
 }
 
+/// Rename a mod and its companion `.ucas`/`.utoc` files.
+///
+/// `full_name` is the current filename (e.g. `Foo.pak` or `Foo.pak.disabled`).
+/// `new_base` is the desired stem without extension (e.g. `Bar`).
+/// Returns the new `full_name` so the frontend can update its state.
+pub(crate) fn rename_mod(
+    mods_folder: &str,
+    full_name: &str,
+    new_base: &str,
+) -> Result<String, String> {
+    let new_base = new_base.trim();
+    if new_base.is_empty() {
+        return Err("Name cannot be empty.".to_string());
+    }
+    if new_base.contains(['/', '\\', '\0']) {
+        return Err("Name contains invalid characters.".to_string());
+    }
+
+    let dir = Path::new(mods_folder);
+
+    // Determine current stem and whether the mod is disabled.
+    let (old_stem, disabled) = if let Some(s) = full_name.strip_suffix(".pak.disabled") {
+        (s, true)
+    } else if let Some(s) = full_name.strip_suffix(".pak") {
+        (s, false)
+    } else {
+        return Err(format!("Unexpected mod filename: {full_name}"));
+    };
+
+    let new_full_name = if disabled {
+        format!("{new_base}.pak.disabled")
+    } else {
+        format!("{new_base}.pak")
+    };
+
+    // No-op if name unchanged.
+    if new_full_name == full_name {
+        return Ok(new_full_name);
+    }
+
+    // Check for collisions — both enabled and disabled variants.
+    for candidate in [
+        format!("{new_base}.pak"),
+        format!("{new_base}.pak.disabled"),
+    ] {
+        if dir.join(&candidate).exists() {
+            return Err(format!("A mod named \"{candidate}\" already exists."));
+        }
+    }
+
+    // Rename the main .pak file.
+    std::fs::rename(dir.join(full_name), dir.join(&new_full_name))
+        .map_err(|e| format!("Failed to rename pak: {e}"))?;
+
+    // Rename companion files (.ucas, .utoc and their .disabled variants).
+    for ext in COMPANION_EXTS {
+        for suffix in ["", ".disabled"] {
+            let old_companion = format!("{old_stem}.{ext}{suffix}");
+            let new_companion = format!("{new_base}.{ext}{suffix}");
+            let old_path = dir.join(&old_companion);
+            if old_path.exists() {
+                std::fs::rename(&old_path, dir.join(&new_companion))
+                    .map_err(|e| format!("Failed to rename {old_companion}: {e}"))?;
+            }
+        }
+    }
+
+    Ok(new_full_name)
+}
+
 /// Install a mod pak from an external path into the mods folder.
 /// Also copies any adjacent companion files (.ucas/.utoc) with the same stem.
 /// If a `.disabled` version with the same name already exists it is removed first.

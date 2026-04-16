@@ -10,7 +10,6 @@ import {
   Save,
   Search,
   ShieldOff,
-  Trash2,
   Undo2,
   XCircle,
 } from "lucide-react";
@@ -76,12 +75,6 @@ export function Settings({
     type: "ok" | "err";
   } | null>(null);
   const bypassNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const [shaderCacheNotice, setShaderCacheNotice] = useState<{
-    msg: string;
-    type: "ok" | "err";
-  } | null>(null);
-  const shaderCacheTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Sync draft when parent gamePath changes externally (e.g. detect, initial load)
   useEffect(() => {
@@ -154,17 +147,6 @@ export function Settings({
       setBypassNotice({ msg: String(e), type: "err" });
     }
     bypassNoticeTimer.current = setTimeout(() => setBypassNotice(null), 6000);
-  }
-
-  async function clearShaderCache() {
-    if (shaderCacheTimer.current) clearTimeout(shaderCacheTimer.current);
-    try {
-      const msg = await invoke<string>("clear_shader_cache");
-      setShaderCacheNotice({ msg, type: "ok" });
-    } catch (e: unknown) {
-      setShaderCacheNotice({ msg: String(e), type: "err" });
-    }
-    shaderCacheTimer.current = setTimeout(() => setShaderCacheNotice(null), 6000);
   }
 
   async function browse() {
@@ -366,33 +348,6 @@ export function Settings({
                 <span className="text-[11px] text-muted-foreground">Set a game path first.</span>
               </div>
             )}
-            <div className="flex items-center gap-3 rounded-sm px-3 py-3 hover:bg-secondary/50">
-              <div className="flex flex-1 flex-col gap-0.5">
-                <span className="text-[13px] font-medium">Clear Shader Cache</span>
-                <span className="text-[11px] text-muted-foreground">
-                  Deletes pipeline cache files. Recommended after changing config tweaks.
-                </span>
-                {shaderCacheNotice && (
-                  <span
-                    className={cn(
-                      "mt-0.5 flex items-center gap-1.5 text-[11px] font-medium",
-                      shaderCacheNotice.type === "ok" ? "text-ok" : "text-err"
-                    )}
-                  >
-                    {shaderCacheNotice.type === "ok" ? (
-                      <CheckCircle2 size={13} strokeWidth={2.5} />
-                    ) : (
-                      <XCircle size={13} strokeWidth={2.5} />
-                    )}
-                    {shaderCacheNotice.msg}
-                  </span>
-                )}
-              </div>
-              <Button variant="outline" size="sm" onClick={clearShaderCache}>
-                <Trash2 size={13} />
-                Clear
-              </Button>
-            </div>
           </div>
 
           {/* ── Mods ── */}
@@ -404,8 +359,7 @@ export function Settings({
               <div className="flex flex-1 flex-col gap-0.5">
                 <span className="text-[13px] font-medium">Scan ~mods subfolders</span>
                 <span className="text-[11px] text-muted-foreground">
-                  Include mods nested in subfolders. Disable to match the game's native top-level
-                  load behavior.
+                  Include mods nested in subfolders. This matches the game's native load behavior.
                 </span>
               </div>
               <Switch

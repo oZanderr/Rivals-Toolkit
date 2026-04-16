@@ -1,9 +1,11 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
-import { FileText, Package } from "lucide-react";
+import { CheckCircle2, FileText, Package, Trash2, UploadCloud, XCircle } from "lucide-react";
 
+import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 import { PakTweaks } from "./PakTweaks";
@@ -13,10 +15,12 @@ type SubTab = "scalability" | "pak-config";
 
 interface Props {
   gamePath: string;
+  isActive: boolean;
 }
 
-export function ConfigTweaks({ gamePath }: Props) {
+export function ConfigTweaks({ gamePath, isActive }: Props) {
   const [subTab, setSubTab] = useState<SubTab>("scalability");
+  const [isDragging, setIsDragging] = useState(false);
 
   const [filePath, setFilePath] = useState("");
   const [content, setContent] = useState("");
@@ -28,9 +32,79 @@ export function ConfigTweaks({ gamePath }: Props) {
   const detectBadgeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const detectPathRef = useRef(detectPath);
 
+  const [shaderNotice, setShaderNotice] = useState<{
+    msg: string;
+    type: "ok" | "err";
+  } | null>(null);
+  const shaderTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearShaderCache = useCallback(async () => {
+    if (shaderTimer.current) clearTimeout(shaderTimer.current);
+    try {
+      const msg = await invoke<string>("clear_shader_cache");
+      setShaderNotice({ msg, type: "ok" });
+    } catch (e: unknown) {
+      setShaderNotice({ msg: String(e), type: "err" });
+    }
+    shaderTimer.current = setTimeout(() => setShaderNotice(null), 6000);
+  }, []);
+
+  const isActiveRef = useRef(isActive);
+  isActiveRef.current = isActive;
+  const subTabRef = useRef(subTab);
+  subTabRef.current = subTab;
+  const fileExistsRef = useRef(fileExists);
+  fileExistsRef.current = fileExists;
+
   detectPathRef.current = detectPath;
   useEffect(() => {
     detectPathRef.current();
+  }, []);
+
+  // Drag-and-drop: accept .ini on scalability sub-tab, .pak on pak-config sub-tab.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    getCurrentWindow()
+      .onDragDropEvent(async (event) => {
+        if (event.payload.type === "enter") {
+          if (isActiveRef.current) setIsDragging(true);
+        } else if (event.payload.type === "drop") {
+          setIsDragging(false);
+          if (!isActiveRef.current) return;
+          if (subTabRef.current === "scalability") {
+            const iniPaths = event.payload.paths.filter((p) => p.toLowerCase().endsWith(".ini"));
+            if (iniPaths.length === 0) return;
+            const droppedPath = iniPaths[0];
+            try {
+              const text = await invoke<string>("read_scalability", { path: droppedPath });
+              // If no scalability.ini exists yet, install to default path
+              if (!fileExistsRef.current) {
+                const defaultPath = await invoke<string>("get_scalability_path");
+                await invoke("write_scalability", { path: defaultPath, content: text });
+                setFilePath(defaultPath);
+                setContent(text);
+                setScalabilityContent(text);
+                setFileExists(true);
+                setReloadSignal((s) => s + 1);
+              } else {
+                setFilePath(droppedPath);
+                setContent(text);
+                setScalabilityContent(text);
+                setFileExists(true);
+                setReloadSignal((s) => s + 1);
+              }
+            } catch {
+              // Silently ignore unreadable files
+            }
+          }
+        } else if (event.payload.type === "leave") {
+          setIsDragging(false);
+        }
+      })
+      .then((fn) => {
+        unlisten = fn;
+      });
+    return () => unlisten?.();
   }, []);
 
   /** Redetect the Scalability.ini path only — does not reset tweak states */
@@ -100,6 +174,32 @@ export function ConfigTweaks({ gamePath }: Props) {
       {/* Header */}
       <div className="flex min-h-8 items-center gap-3">
         <h2 className="text-xl font-bold">Config Tweaks</h2>
+        {shaderNotice && (
+          <span
+            className={cn(
+              "flex items-center gap-1.5 text-[12px] font-medium",
+              shaderNotice.type === "ok" ? "text-ok" : "text-err"
+            )}
+          >
+            {shaderNotice.type === "ok" ? (
+              <CheckCircle2 size={13} strokeWidth={2.5} />
+            ) : (
+              <XCircle size={13} strokeWidth={2.5} />
+            )}
+            {shaderNotice.msg}
+          </span>
+        )}
+        <div className="ml-auto">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={clearShaderCache}
+            title="Recommended after changing config tweaks"
+          >
+            <Trash2 size={13} />
+            Clear Shader Cache
+          </Button>
+        </div>
       </div>
 
       {/* Sub-tab bar */}
@@ -122,7 +222,20 @@ export function ConfigTweaks({ gamePath }: Props) {
       </div>
 
       {/* ── Scalability tab ── */}
-      <div className={cn("flex flex-1 min-h-0 flex-col", subTab !== "scalability" && "hidden")}>
+      <div
+        className={cn(
+          "relative flex flex-1 min-h-0 flex-col",
+          subTab !== "scalability" && "hidden"
+        )}
+      >
+        {isDragging && subTab === "scalability" && (
+          <div className="pointer-events-none absolute inset-0 z-50 flex flex-col items-center justify-center gap-3 rounded-lg border-2 border-dashed border-ok bg-background/80 backdrop-blur-sm">
+            <UploadCloud size={36} className="text-ok" />
+            <span className="text-sm font-semibold text-ok">
+              Drop .ini to load scalability config
+            </span>
+          </div>
+        )}
         <ScalabilityTweaks
           filePath={filePath}
           setFilePath={setFilePath}
@@ -144,7 +257,11 @@ export function ConfigTweaks({ gamePath }: Props) {
 
       {/* ── Pak Config tab ── */}
       <div className={cn("flex flex-1 min-h-0 flex-col", subTab !== "pak-config" && "hidden")}>
-        <PakTweaks gamePath={gamePath} scalabilityContent={scalabilityContent} />
+        <PakTweaks
+          gamePath={gamePath}
+          scalabilityContent={scalabilityContent}
+          isActive={isActive && subTab === "pak-config"}
+        />
       </div>
     </div>
   );

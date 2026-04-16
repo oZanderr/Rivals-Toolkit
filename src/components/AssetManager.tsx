@@ -64,9 +64,11 @@ interface ContentEntry {
 
 interface Props {
   gamePath: string;
+  pendingPak?: string | null;
+  onPendingPakConsumed?: () => void;
 }
 
-export function AssetManager({ gamePath }: Props) {
+export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Props) {
   const [pakList, setPakList] = useState<PakFileInfo[]>([]);
   const [selectedPak, setSelectedPak] = useState<string>("");
   const [pakContents, setPakContents] = useState<ContentEntry[]>([]);
@@ -143,6 +145,14 @@ export function AssetManager({ gamePath }: Props) {
       unlisten?.();
     };
   }, []);
+
+  // Navigate to a specific pak when triggered from another tab (e.g. Mods → "View in Asset Manager")
+  useEffect(() => {
+    if (!pendingPak) return;
+    if (pakList.length === 0) return;
+    inspectPak(pendingPak);
+    onPendingPakConsumed?.();
+  }, [pendingPak, pakList]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const showNotice = (
     msg: string,
@@ -239,8 +249,15 @@ export function AssetManager({ gamePath }: Props) {
     setSelectedEntries(new Set());
     lastClickedIndex.current = null;
 
-    const info = infoOverride ?? pakList.find((p) => p.path === pak);
-    const isIoStore = info?.has_utoc && info?.has_ucas;
+    let info = infoOverride ?? pakList.find((p) => p.path === pak);
+    if (!info) {
+      const [hasUtoc, hasUcas] = await Promise.all([
+        invoke<boolean>("path_exists", { path: pak.replace(/\.pak$/i, ".utoc") }),
+        invoke<boolean>("path_exists", { path: pak.replace(/\.pak$/i, ".ucas") }),
+      ]);
+      info = { path: pak, has_utoc: hasUtoc, has_ucas: hasUcas };
+    }
+    const isIoStore = info.has_utoc && info.has_ucas;
 
     setBusy(true);
     try {

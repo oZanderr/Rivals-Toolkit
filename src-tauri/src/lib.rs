@@ -57,6 +57,7 @@ pub fn run() {
             commands::apply_pak_tweak_edits,
             commands::clear_shader_cache,
             commands::launch_game,
+            commands::rename_mod,
             commands::toggle_mod_enabled,
             commands::toggle_mods_enabled,
             commands::export_mods_archive,

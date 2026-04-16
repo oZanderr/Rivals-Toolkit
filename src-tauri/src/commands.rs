@@ -339,6 +339,18 @@ pub(crate) async fn export_mods_archive(
 }
 
 #[tauri::command]
+pub(crate) fn rename_mod(
+    mods_folder: String,
+    full_name: String,
+    new_base: String,
+) -> Result<String, String> {
+    if game_status::is_game_running() {
+        return Err(game_status::game_running_error());
+    }
+    mods::rename_mod(&mods_folder, &full_name, &new_base)
+}
+
+#[tauri::command]
 pub(crate) fn delete_mod(mods_folder: String, full_name: String) -> Result<(), String> {
     if game_status::is_game_running() {
         return Err(game_status::game_running_error());
