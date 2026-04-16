@@ -1,6 +1,6 @@
 [package]
 name = "rivals-toolkit"
-version = "0.7.0"
+version = "0.8.0"
 description = "Toolkit for Marvel Rivals configuration and mod files"
 authors = ["Zander"]
 edition = "2024"
