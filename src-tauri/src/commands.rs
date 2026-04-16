@@ -202,6 +202,17 @@ pub(crate) fn get_mods_status(
 }
 
 #[tauri::command]
+pub(crate) async fn check_mod_conflicts(
+    state: State<'_, SettingsState>,
+    game_root: String,
+) -> Result<mods::ConflictReport, String> {
+    let recursive = recursive_mod_scan(&state);
+    tauri::async_runtime::spawn_blocking(move || mods::check_conflicts(&game_root, recursive))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 pub(crate) fn install_signature_bypass(game_root: String) -> Result<String, String> {
     mods::install_signature_bypass(&game_root)
 }

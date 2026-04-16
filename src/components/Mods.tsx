@@ -54,6 +54,24 @@ interface ModEntry {
   kind: "Pak" | "IoStore";
 }
 
+interface AssetConflict {
+  asset: string;
+  mods: string[];
+}
+
+interface ConflictGroup {
+  mod_name: string;
+  display_name: string;
+  conflicts_with: string[];
+  conflicting_asset_count: number;
+}
+
+interface ConflictReport {
+  groups: ConflictGroup[];
+  asset_conflicts: AssetConflict[];
+  mods_scanned: number;
+}
+
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   const kb = bytes / 1024;
@@ -108,6 +126,8 @@ export function Mods({
   const [bulkBusy, setBulkBusy] = useState(false);
   const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
   const [renamingMod, setRenamingMod] = useState<string | null>(null);
+  const [conflictReport, setConflictReport] = useState<ConflictReport | null>(null);
+  const [conflictDetailOpen, setConflictDetailOpen] = useState(false);
   const lastClickedIndex = useRef<number | null>(null);
   const listRef = useRef<HTMLUListElement>(null);
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -143,6 +163,15 @@ export function Mods({
             `Removed ${s.conflicts_resolved} outdated disabled mod${s.conflicts_resolved !== 1 ? "s" : ""} (replaced by enabled version)`,
             "info"
           );
+        // Check for asset-level conflicts between enabled mods.
+        const enabledMods = s.mod_entries.filter((m) => m.enabled);
+        if (enabledMods.length >= 2) {
+          invoke<ConflictReport>("check_mod_conflicts", { gameRoot: gamePath })
+            .then(setConflictReport)
+            .catch(() => setConflictReport(null));
+        } else {
+          setConflictReport(null);
+        }
       } catch (e: unknown) {
         showNotice(String(e), "err");
       }
@@ -585,6 +614,15 @@ export function Mods({
     selectedEntries.length > 0 && selectedEntries.every((e) => e.enabled);
   const allDisabledInSelection =
     selectedEntries.length > 0 && selectedEntries.every((e) => !e.enabled);
+  const conflictsByMod = useMemo(() => {
+    const map = new Map<string, ConflictGroup>();
+    if (!conflictReport) return map;
+    for (const g of conflictReport.groups) map.set(g.display_name, g);
+    return map;
+  }, [conflictReport]);
+
+  const conflictCount = conflictReport?.groups.length ?? 0;
+
   const selectAllState: boolean | "indeterminate" =
     totalCount > 0 && selected.size === totalCount
       ? true
@@ -652,6 +690,25 @@ export function Mods({
           </span>
           <Button variant="green" size="xs" onClick={installBypass} disabled={!gamePath}>
             Install Bypass
+          </Button>
+        </div>
+      )}
+
+      {/* Conflicts banner */}
+      {conflictCount > 0 && (
+        <div className="flex items-center gap-2.5 rounded-md border border-warn/20 bg-warn/5 px-3 py-2">
+          <AlertTriangle size={15} className="shrink-0 text-warn" />
+          <span className="flex-1 text-[12px] text-warn">
+            {conflictCount} mod{conflictCount !== 1 ? "s" : ""} ha
+            {conflictCount !== 1 ? "ve" : "s"} asset conflicts, the alphabetically first pak wins
+          </span>
+          <Button
+            variant="ghost"
+            size="xs"
+            className="text-warn hover:text-warn hover:bg-warn/10"
+            onClick={() => setConflictDetailOpen(true)}
+          >
+            View Details
           </Button>
         </div>
       )}
@@ -876,6 +933,14 @@ export function Mods({
                               IoStore
                             </span>
                           )}
+                          {conflictsByMod.has(entry.display_name) && (
+                            <span
+                              className="shrink-0 rounded bg-warn/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase leading-none text-warn cursor-help"
+                              title={`Conflicts with: ${conflictsByMod.get(entry.display_name)!.conflicts_with.join(", ")}`}
+                            >
+                              Conflict
+                            </span>
+                          )}
                           <span className="shrink-0 w-12 text-right font-mono text-[11px] text-muted-foreground/60 tabular-nums">
                             {formatBytes(entry.size_bytes)}
                           </span>
@@ -1007,6 +1072,51 @@ export function Mods({
             >
               Delete {selected.size}
             </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={conflictDetailOpen} onOpenChange={setConflictDetailOpen}>
+        <AlertDialogContent className="max-w-lg max-h-[80vh] flex flex-col">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Mod Asset Conflicts</AlertDialogTitle>
+            <AlertDialogDescription>
+              {conflictReport?.asset_conflicts.length ?? 0} asset
+              {conflictReport?.asset_conflicts.length !== 1 ? "s" : ""} modified by multiple mods.
+              The alphabetically first pak file wins.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="flex-1 overflow-y-auto -mx-6 px-6 space-y-3">
+            {conflictReport?.asset_conflicts.map((c) => (
+              <div
+                key={c.asset}
+                className="rounded border border-border bg-secondary/30 p-2.5 text-[12px]"
+              >
+                <p className="truncate font-mono text-[11px] text-muted-foreground" title={c.asset}>
+                  {c.asset}
+                </p>
+                <div className="mt-1.5 flex flex-col gap-0.5">
+                  {c.mods.map((mod, i) => (
+                    <span key={mod} className="flex items-center gap-1.5">
+                      <span className="truncate">{mod}</span>
+                      {i === 0 && (
+                        <span className="shrink-0 rounded bg-ok/15 px-1 py-0.5 text-[9px] font-semibold uppercase leading-none text-ok">
+                          Active
+                        </span>
+                      )}
+                      {i > 0 && (
+                        <span className="shrink-0 rounded bg-muted px-1 py-0.5 text-[9px] font-semibold uppercase leading-none text-muted-foreground">
+                          Overridden
+                        </span>
+                      )}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Close</AlertDialogCancel>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

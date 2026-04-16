@@ -39,6 +39,7 @@ jobs:
         with:
           workspaces: |
             src-tauri -> target
+          shared-key: tauri-release
           cache-on-failure: true
 
       - name: Install frontend dependencies
