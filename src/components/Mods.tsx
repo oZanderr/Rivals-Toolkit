@@ -9,6 +9,8 @@ import {
   AlertTriangle,
   Archive,
   FolderOpen,
+  PackageOpen,
+  Pencil,
   RefreshCw,
   Shield,
   CheckCircle2,
@@ -80,11 +82,18 @@ interface Props {
   isActive: boolean;
   gameRunning: boolean;
   pathLoading?: boolean;
+  onViewInAssetManager?: (pakPath: string) => void;
 }
 
 type StatusType = "ok" | "err" | "info";
 
-export function Mods({ gamePath, isActive, gameRunning, pathLoading }: Props) {
+export function Mods({
+  gamePath,
+  isActive,
+  gameRunning,
+  pathLoading,
+  onViewInAssetManager,
+}: Props) {
   const [modsStatus, setModsStatus] = useState<ModsStatus | null>(null);
   const [notice, setNotice] = useState<{
     msg: string;
@@ -98,6 +107,7 @@ export function Mods({ gamePath, isActive, gameRunning, pathLoading }: Props) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [bulkBusy, setBulkBusy] = useState(false);
   const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
+  const [renamingMod, setRenamingMod] = useState<string | null>(null);
   const lastClickedIndex = useRef<number | null>(null);
   const listRef = useRef<HTMLUListElement>(null);
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -471,6 +481,41 @@ export function Mods({ gamePath, isActive, gameRunning, pathLoading }: Props) {
     }
   }
 
+  async function renameMod(entry: ModEntry, newBase: string) {
+    if (!modsStatus) return;
+    const trimmed = newBase.trim();
+    if (!trimmed) {
+      setRenamingMod(null);
+      return;
+    }
+    // Strip .pak extension if user typed it
+    const cleanBase = trimmed.replace(/\.pak$/i, "");
+    setBusyMods((prev) => new Set(prev).add(entry.full_name));
+    try {
+      await invoke<string>("rename_mod", {
+        modsFolder: modsStatus.mods_folder_path,
+        fullName: entry.full_name,
+        newBase: cleanBase,
+      });
+      setRenamingMod(null);
+      await refresh(true);
+    } catch (e: unknown) {
+      showNotice(String(e), "err");
+    } finally {
+      setBusyMods((prev) => {
+        const next = new Set(prev);
+        next.delete(entry.full_name);
+        return next;
+      });
+    }
+  }
+
+  function viewInAssetManager(entry: ModEntry) {
+    if (!modsStatus || !onViewInAssetManager) return;
+    const sep = modsStatus.mods_folder_path.includes("\\") ? "\\" : "/";
+    onViewInAssetManager(`${modsStatus.mods_folder_path}${sep}${entry.full_name}`);
+  }
+
   // Keyboard shortcuts: Delete, Ctrl/Cmd+A, Escape. Only when tab is active and
   // focus is inside the list (or nothing is focused in an input/textarea).
   useEffect(() => {
@@ -593,7 +638,7 @@ export function Mods({ gamePath, isActive, gameRunning, pathLoading }: Props) {
         <div className="flex items-center gap-2.5 rounded-md border border-warn/20 bg-warn/5 px-3 py-2">
           <AlertTriangle size={15} className="shrink-0 text-warn" />
           <span className="flex-1 text-[12px] text-warn">
-            Marvel Rivals is running — mod operations are disabled. Close the game to modify mods.
+            Marvel Rivals is running! Close the game to modify mods.
           </span>
         </div>
       )}
@@ -801,10 +846,37 @@ export function Mods({ gamePath, isActive, gameRunning, pathLoading }: Props) {
                             !entry.enabled && "opacity-40"
                           )}
                         >
-                          <span className="min-w-0 flex-1 truncate">
-                            <ModName displayName={entry.display_name} />
+                          <span
+                            className="min-w-0 flex-1 truncate"
+                            onDoubleClick={(e) => {
+                              e.stopPropagation();
+                              if (
+                                !busy &&
+                                !bulkBusy &&
+                                !gameRunning &&
+                                renamingMod !== entry.full_name
+                              ) {
+                                setRenamingMod(entry.full_name);
+                              }
+                            }}
+                            title="Double-click to rename"
+                          >
+                            {renamingMod === entry.full_name ? (
+                              <RenameInput
+                                displayName={entry.display_name}
+                                onCommit={(v) => renameMod(entry, v)}
+                                onCancel={() => setRenamingMod(null)}
+                              />
+                            ) : (
+                              <ModName displayName={entry.display_name} />
+                            )}
                           </span>
-                          <span className="shrink-0 font-mono text-[11px] text-muted-foreground/60 tabular-nums">
+                          {entry.kind === "IoStore" && (
+                            <span className="shrink-0 rounded bg-ok/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase leading-none text-ok">
+                              IoStore
+                            </span>
+                          )}
+                          <span className="shrink-0 w-12 text-right font-mono text-[11px] text-muted-foreground/60 tabular-nums">
                             {formatBytes(entry.size_bytes)}
                           </span>
                         </span>
@@ -870,6 +942,20 @@ export function Mods({ gamePath, isActive, gameRunning, pathLoading }: Props) {
                         Disable all others
                       </ContextMenuItem>
                       <ContextMenuSeparator />
+                      <ContextMenuItem
+                        disabled={busy || bulkBusy || gameRunning}
+                        onSelect={() => setRenamingMod(entry.full_name)}
+                      >
+                        <Pencil />
+                        Rename
+                      </ContextMenuItem>
+                      <ContextMenuItem
+                        disabled={!entry.enabled}
+                        onSelect={() => viewInAssetManager(entry)}
+                      >
+                        <PackageOpen />
+                        View in Asset Manager
+                      </ContextMenuItem>
                       <ContextMenuItem onSelect={() => revealMod(entry)}>
                         <FolderOpen />
                         Show in folder
@@ -938,6 +1024,62 @@ function ModName({ displayName }: { displayName: string }) {
       <span className="font-semibold">{base}</span>
       {suffix && <span className="font-mono text-muted-foreground/40">{suffix}</span>}
     </>
+  );
+}
+
+function RenameInput({
+  displayName,
+  onCommit,
+  onCancel,
+}: {
+  displayName: string;
+  onCommit: (value: string) => void;
+  onCancel: () => void;
+}) {
+  // Split into editable base and preserved suffix (_NNNNN_P)
+  const match = displayName.match(/^(.+?)(_\d+_P)?\.pak$/);
+  const base = match ? match[1] : displayName;
+  const suffix = match?.[2] ?? "";
+  const ref = useRef<HTMLInputElement>(null);
+  const committed = useRef(false);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (el) {
+      el.focus();
+      el.select();
+    }
+  }, []);
+
+  const commit = (value: string) => {
+    if (committed.current) return;
+    committed.current = true;
+    onCommit(value + suffix);
+  };
+
+  return (
+    <span className="flex items-center gap-0 rounded border border-primary bg-background focus-within:ring-1 focus-within:ring-primary">
+      <input
+        ref={ref}
+        defaultValue={base}
+        className="min-w-0 flex-1 bg-transparent px-1.5 py-0.5 text-[13px] font-semibold outline-none"
+        onClick={(e) => e.stopPropagation()}
+        onKeyDown={(e) => {
+          e.stopPropagation();
+          if (e.key === "Enter") {
+            commit((e.target as HTMLInputElement).value);
+          } else if (e.key === "Escape") {
+            onCancel();
+          }
+        }}
+        onBlur={(e) => commit(e.target.value)}
+      />
+      {suffix && (
+        <span className="shrink-0 pr-1.5 font-mono text-[13px] text-muted-foreground/40">
+          {suffix}
+        </span>
+      )}
+    </span>
   );
 }
 

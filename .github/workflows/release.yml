@@ -46,10 +46,10 @@ jobs:
           $prevTag = git tag --sort=-creatordate | Where-Object { $_ -ne $tag } | Select-Object -First 1
 
           if ($prevTag) {
-            $changeLines = git --no-pager log --reverse --no-merges --pretty=format:"- %s (%h)" "$prevTag..$tag"
+            $changeLines = git --no-pager log --reverse --no-merges --pretty=format:"- %s" "$prevTag..$tag"
           }
           else {
-            $changeLines = git --no-pager log --reverse --no-merges --pretty=format:"- %s (%h)" "$tag"
+            $changeLines = git --no-pager log --reverse --no-merges --pretty=format:"- %s" "$tag"
           }
 
           if (-not $changeLines) {
@@ -74,9 +74,6 @@ jobs:
           node-version: 24
           cache: pnpm
 
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
-
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
@@ -91,9 +88,6 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build Windows executable (no bundles)
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
         run: pnpm tauri build --no-bundle
 
       - name: Verify release executable exists

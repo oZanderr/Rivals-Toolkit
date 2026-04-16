@@ -96,6 +96,14 @@ pub(crate) fn install_mod(mods_folder: &str, source_path: &str) -> Result<Instal
     folder::install_mod(mods_folder, source_path)
 }
 
+pub(crate) fn rename_mod(
+    mods_folder: &str,
+    full_name: &str,
+    new_base: &str,
+) -> Result<String, String> {
+    folder::rename_mod(mods_folder, full_name, new_base)
+}
+
 pub(crate) fn install_from_archive(
     mods_folder: &str,
     archive_path: &str,

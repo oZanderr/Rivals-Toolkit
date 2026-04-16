@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   Package,
@@ -8,6 +9,7 @@ import {
   Save,
   Search,
   FolderOpen,
+  UploadCloud,
   X,
   CheckCircle2,
   XCircle,
@@ -114,9 +116,10 @@ interface PakCacheEntry {
 interface Props {
   gamePath: string;
   scalabilityContent: string;
+  isActive?: boolean;
 }
 
-export function PakTweaks({ gamePath, scalabilityContent }: Props) {
+export function PakTweaks({ gamePath, scalabilityContent, isActive }: Props) {
   const [paks, setPaks] = useState<PakIniInfo[]>([]);
   const [selectedPak, setSelectedPak] = useState<PakIniInfo | null>(null);
   const [tweakStates, setTweakStates] = useState<TweakState[]>([]);
@@ -163,6 +166,48 @@ export function PakTweaks({ gamePath, scalabilityContent }: Props) {
   useEffect(() => {
     invoke<TweakDefinition[]>("get_tweak_definitions").then(setDefinitions);
   }, []);
+
+  // Drag-and-drop: accept .pak files (same as browse).
+  const [isDragging, setIsDragging] = useState(false);
+  const isActiveRef = useRef(isActive);
+  isActiveRef.current = isActive;
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    getCurrentWindow()
+      .onDragDropEvent(async (event) => {
+        if (event.payload.type === "enter") {
+          if (isActiveRef.current) setIsDragging(true);
+        } else if (event.payload.type === "drop") {
+          setIsDragging(false);
+          if (!isActiveRef.current) return;
+          const pakPaths = event.payload.paths.filter((p) => p.toLowerCase().endsWith(".pak"));
+          if (pakPaths.length === 0) return;
+          try {
+            const info = await invoke<PakIniInfo | null>("inspect_pak_path", {
+              pakPath: pakPaths[0],
+            });
+            if (!info) {
+              showNotice("No tweakable INI found in that pak", "err");
+              return;
+            }
+            setPaks((prev) =>
+              prev.find((p) => p.pak_path === info.pak_path) ? prev : [...prev, info]
+            );
+            await selectPak(info);
+          } catch (e: unknown) {
+            showNotice("Failed to read pak", "err");
+            console.error(e);
+          }
+        } else if (event.payload.type === "leave") {
+          setIsDragging(false);
+        }
+      })
+      .then((fn) => {
+        unlisten = fn;
+      });
+    return () => unlisten?.();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   function toggleQuickTweak(id: string) {
     const def = definitions.find((d) => d.id === id);
@@ -339,11 +384,8 @@ export function PakTweaks({ gamePath, scalabilityContent }: Props) {
       return;
     }
 
-    // Cache miss — fetch from backend
+    // Cache miss — fetch from backend, keep showing previous state during load
     setSelectedPak(pak);
-    setTweakStates([]);
-    setSavedTweakStates([]);
-    setEdits([]);
     setLoading(true);
     try {
       const states = await invoke<TweakState[]>("detect_pak_tweaks", { pakPath: pak.pak_path });
@@ -356,6 +398,10 @@ export function PakTweaks({ gamePath, scalabilityContent }: Props) {
         edits: [],
       });
     } catch (e: unknown) {
+      // Clear on failure so stale state doesn't linger
+      setTweakStates([]);
+      setSavedTweakStates([]);
+      setEdits([]);
       if (isPakMissingError(e)) {
         removePak(pak.pak_path);
         showNotice("That pak file is missing now. Removed it from the list.", "info");
@@ -478,7 +524,13 @@ export function PakTweaks({ gamePath, scalabilityContent }: Props) {
   }
 
   return (
-    <div className="flex w-full flex-1 min-h-0 flex-col">
+    <div className="relative flex w-full flex-1 min-h-0 flex-col">
+      {isDragging && (
+        <div className="pointer-events-none absolute inset-0 z-50 flex flex-col items-center justify-center gap-3 rounded-lg border-2 border-dashed border-ok bg-background/80 backdrop-blur-sm">
+          <UploadCloud size={36} className="text-ok" />
+          <span className="text-sm font-semibold text-ok">Drop .pak to inspect</span>
+        </div>
+      )}
       {/* Scrollable content: pak list + tweak cards */}
       <div className="flex-1 overflow-y-auto [scrollbar-gutter:stable]">
         <div className="flex flex-col gap-5">
@@ -604,7 +656,7 @@ export function PakTweaks({ gamePath, scalabilityContent }: Props) {
 
           {/* Selected pak editor — tweak cards */}
           {selectedPak &&
-            !loading &&
+            tweakStates.length > 0 &&
             (() => {
               const categories = definitions.reduce<Record<string, TweakDefinition[]>>(
                 (acc, def) => {
@@ -669,32 +721,48 @@ export function PakTweaks({ gamePath, scalabilityContent }: Props) {
 
       {/* Save bar */}
       {selectedPak && !loading && dirty && (
-        <div className="mt-3 flex shrink-0 items-center justify-end gap-2 border-t border-border pt-3">
-          <span className="mr-auto flex items-center gap-1.5 text-[12px] font-medium text-warn">
-            <span className="relative flex h-2 w-2">
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-warn opacity-60" />
-              <span className="relative inline-flex h-2 w-2 rounded-full bg-warn" />
+        <div className="mt-3 flex shrink-0 flex-col gap-2 border-t border-border pt-3">
+          <div className="flex flex-col gap-1.5">
+            <span className="text-[11px] font-semibold uppercase text-muted-foreground">
+              Pending Changes ({edits.length})
             </span>
-            Unsaved changes
-          </span>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => selectedPak && forceReloadPak(selectedPak)}
-            disabled={loading}
-          >
-            <Undo2 size={14} />
-            Discard
-          </Button>
-          <Button
-            variant="blue"
-            size="sm"
-            onClick={applyEdits}
-            disabled={!dirty || applying || edits.length === 0}
-          >
-            {applying ? <RefreshCw size={14} className="animate-spin" /> : <Save size={14} />}
-            {applying ? "Repacking…" : "Save"}
-          </Button>
+            <div className="flex flex-wrap gap-1.5">
+              {edits.map((edit) => (
+                <Badge
+                  key={edit.key}
+                  variant="outline"
+                  className={cn(
+                    "rounded-sm px-1.5 py-0 text-[11px] font-mono",
+                    edit.value === null
+                      ? "border-destructive/40 bg-destructive/10 text-destructive"
+                      : "border-ok/40 bg-ok/10 text-ok"
+                  )}
+                >
+                  {edit.value === null ? `- ${edit.key}` : `${edit.key}=${edit.value}`}
+                </Badge>
+              ))}
+            </div>
+          </div>
+          <div className="flex items-center justify-end gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => selectedPak && forceReloadPak(selectedPak)}
+              disabled={loading}
+            >
+              <Undo2 size={14} />
+              Discard
+            </Button>
+            <Button
+              variant="blue"
+              size="sm"
+              onClick={applyEdits}
+              disabled={!dirty || applying || edits.length === 0}
+            >
+              {applying ? <RefreshCw size={14} className="animate-spin" /> : <Save size={14} />}
+              {applying ? "Repacking…" : "Save"}
+            </Button>
+          </div>
         </div>
       )}
     </div>

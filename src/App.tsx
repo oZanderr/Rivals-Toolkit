@@ -145,6 +145,13 @@ function App() {
     return () => clearTimeout(t);
   }, [gamePath]);
 
+  const [pendingAssetPak, setPendingAssetPak] = useState<string | null>(null);
+
+  const navigateToAssetManager = useCallback((pakPath: string) => {
+    setPendingAssetPak(pakPath);
+    setActiveTab("pak-manager");
+  }, []);
+
   useEffect(() => {
     setMountedTabs((prev) => {
       if (prev.has(activeTab)) return prev;
@@ -235,7 +242,7 @@ function App() {
 
           <Separator className="mb-3" />
           <div className="px-4 pb-4 text-center">
-            <span className="text-[10px] text-muted-foreground/50">
+            <span className="text-[10px] text-muted-foreground/70">
               {version ? `v${version}` : "\u00A0"}
             </span>
           </div>
@@ -255,6 +262,7 @@ function App() {
                 isActive={activeTab === "mod-tools"}
                 gameRunning={gameRunning}
                 pathLoading={installInfo === undefined}
+                onViewInAssetManager={navigateToAssetManager}
               />
             </div>
           )}
@@ -265,7 +273,11 @@ function App() {
                 activeTab !== "pak-manager" && "hidden"
               )}
             >
-              <AssetManager gamePath={gamePath} />
+              <AssetManager
+                gamePath={gamePath}
+                pendingPak={pendingAssetPak}
+                onPendingPakConsumed={() => setPendingAssetPak(null)}
+              />
             </div>
           )}
           {mountedTabs.has("ini-editor") && (
@@ -285,7 +297,7 @@ function App() {
                 activeTab !== "config-tweaks" && "hidden"
               )}
             >
-              <ConfigTweaks gamePath={gamePath} />
+              <ConfigTweaks gamePath={gamePath} isActive={activeTab === "config-tweaks"} />
             </div>
           )}
           {mountedTabs.has("hitsounds") && (

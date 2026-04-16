@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { Save, CheckCircle2, XCircle, FolderOpen, Search, Info, Undo2 } from "lucide-react";
 
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -343,11 +344,11 @@ export function ScalabilityTweaks({
 
       {/* Save bar */}
       {(dirty || status) && (
-        <div className="flex shrink-0 items-center justify-end gap-2 border-t border-border pt-2">
+        <div className="flex shrink-0 flex-col gap-2 border-t border-border pt-2">
           {status && !dirty && (
             <span
               className={cn(
-                "mr-auto flex items-center gap-1.5 text-[12px] font-medium",
+                "flex items-center gap-1.5 text-[12px] font-medium",
                 status.type === "ok"
                   ? "text-ok"
                   : status.type === "err"
@@ -361,22 +362,38 @@ export function ScalabilityTweaks({
             </span>
           )}
           {dirty && (
-            <span className="mr-auto flex items-center gap-1.5 text-[12px] font-medium text-warn">
-              <span className="relative flex h-2 w-2">
-                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-warn opacity-60" />
-                <span className="relative inline-flex h-2 w-2 rounded-full bg-warn" />
+            <div className="flex flex-col gap-1.5">
+              <span className="text-[11px] font-semibold uppercase text-muted-foreground">
+                Pending Changes ({pendingChanges.length})
               </span>
-              Unsaved changes
-            </span>
+              <div className="flex flex-wrap gap-1.5">
+                {pendingChanges.map((change) => (
+                  <Badge
+                    key={change.id}
+                    variant="outline"
+                    className={cn(
+                      "rounded-sm px-1.5 py-0 text-[11px] font-mono",
+                      change.kind === "remove"
+                        ? "border-destructive/40 bg-destructive/10 text-destructive"
+                        : "border-ok/40 bg-ok/10 text-ok"
+                    )}
+                  >
+                    {change.kind === "remove" ? `- ${change.display}` : change.display}
+                  </Badge>
+                ))}
+              </div>
+            </div>
           )}
-          <Button variant="outline" size="sm" onClick={onReload} disabled={!dirty}>
-            <Undo2 size={14} />
-            Discard
-          </Button>
-          <Button variant="blue" size="sm" onClick={applyAndSave} disabled={!dirty}>
-            <Save size={14} />
-            Save
-          </Button>
+          <div className="flex items-center justify-end gap-2">
+            <Button variant="outline" size="sm" onClick={onReload} disabled={!dirty}>
+              <Undo2 size={14} />
+              Discard
+            </Button>
+            <Button variant="blue" size="sm" onClick={applyAndSave} disabled={!dirty}>
+              <Save size={14} />
+              Save
+            </Button>
+          </div>
         </div>
       )}
     </div>

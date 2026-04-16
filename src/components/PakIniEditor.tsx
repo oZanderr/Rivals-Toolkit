@@ -11,6 +11,7 @@ import {
   type ViewUpdate,
 } from "@codemirror/view";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   CheckCircle2,
@@ -25,6 +26,7 @@ import {
   ChevronDown,
   Replace,
   ReplaceAll,
+  UploadCloud,
   X,
 } from "lucide-react";
 
@@ -154,6 +156,11 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
   const editorContainerRef = useRef<HTMLDivElement>(null);
   const editorViewRef = useRef<EditorView | null>(null);
 
+  // ── Drag-and-drop ──
+  const [isDragging, setIsDragging] = useState(false);
+  const isActiveRef = useRef(isActive);
+  isActiveRef.current = isActive;
+
   // ── Notices ──
   const [notice, setNotice] = useState<{ msg: string; type: NoticeType } | null>(null);
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -230,6 +237,44 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
       console.error(e);
     }
   }
+
+  // Drag-and-drop: accept .pak files to add to the list (same as browse).
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    getCurrentWindow()
+      .onDragDropEvent(async (event) => {
+        if (event.payload.type === "enter") {
+          if (isActiveRef.current) setIsDragging(true);
+        } else if (event.payload.type === "drop") {
+          setIsDragging(false);
+          if (!isActiveRef.current) return;
+          const pakPaths = event.payload.paths.filter((p) => p.toLowerCase().endsWith(".pak"));
+          if (pakPaths.length === 0) return;
+          try {
+            const info = await invoke<PakIniInfo | null>("inspect_pak_path", {
+              pakPath: pakPaths[0],
+            });
+            if (!info) {
+              showNotice("No INI files found in that pak", "err");
+              return;
+            }
+            setPaks((prev) =>
+              prev.find((p) => p.pak_path === info.pak_path) ? prev : [...prev, info]
+            );
+            await loadPak(info);
+          } catch (e) {
+            showNotice("Failed to read pak", "err");
+            console.error(e);
+          }
+        } else if (event.payload.type === "leave") {
+          setIsDragging(false);
+        }
+      })
+      .then((fn) => {
+        unlisten = fn;
+      });
+    return () => unlisten?.();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function loadPak(pak: PakIniInfo) {
     setSelectedPak(pak);
@@ -558,7 +603,13 @@ export function PakIniEditor({ gamePath, isActive }: Props) {
   const hasBothFiles = selectedPak?.has_device_profiles && selectedPak?.has_engine_ini;
 
   return (
-    <div className="flex flex-1 min-h-0 w-full flex-col gap-4">
+    <div className="relative flex flex-1 min-h-0 w-full flex-col gap-4">
+      {isDragging && (
+        <div className="pointer-events-none absolute inset-0 z-50 flex flex-col items-center justify-center gap-3 rounded-lg border-2 border-dashed border-ok bg-background/80 backdrop-blur-sm">
+          <UploadCloud size={36} className="text-ok" />
+          <span className="text-sm font-semibold text-ok">Drop .pak to inspect</span>
+        </div>
+      )}
       {/* ── Header ── */}
       <div className="flex min-h-8 items-center gap-3">
         <h2 className="text-xl font-bold">Pak INI Editor</h2>

@@ -24,8 +24,8 @@ function extractChangelog(raw: string | null): string | null {
   } else {
     section = raw;
   }
-  const stripped = section.replace(/\s*\(\b[0-9a-f]{7,40}\b\)\s*$/gm, "").trim();
-  return stripped.length > 0 ? stripped : null;
+  const trimmed = section.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 export function UpdateAvailableDialog({ updateInfo, open, onOpenChange }: Props) {
