@@ -46,10 +46,10 @@ jobs:
           $prevTag = git tag --sort=-creatordate | Where-Object { $_ -ne $tag } | Select-Object -First 1
 
           if ($prevTag) {
-            $changeLines = git --no-pager log --reverse --no-merges --pretty=format:"- %s (%h)" "$prevTag..$tag"
+            $changeLines = git --no-pager log --reverse --no-merges --pretty=format:"- %s" "$prevTag..$tag"
           }
           else {
-            $changeLines = git --no-pager log --reverse --no-merges --pretty=format:"- %s (%h)" "$tag"
+            $changeLines = git --no-pager log --reverse --no-merges --pretty=format:"- %s" "$tag"
           }
 
           if (-not $changeLines) {
