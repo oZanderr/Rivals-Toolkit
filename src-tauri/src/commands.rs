@@ -422,6 +422,75 @@ pub(crate) async fn install_from_archive(
     .map_err(|e| e.to_string())?
 }
 
+// ── Mod profiles ──────────────────────────────────────────────────────
+
+#[tauri::command]
+pub(crate) fn list_mod_profiles(
+    state: State<'_, SettingsState>,
+) -> Result<Vec<crate::settings::ModProfile>, String> {
+    mods::profiles::list_profiles(&state)
+}
+
+#[tauri::command]
+pub(crate) fn save_mod_profile(
+    state: State<'_, SettingsState>,
+    name: String,
+    game_root: String,
+) -> Result<crate::settings::ModProfile, String> {
+    let recursive = recursive_mod_scan(&state);
+    mods::profiles::save_profile(&state, &name, &game_root, recursive)
+}
+
+#[tauri::command]
+pub(crate) fn delete_mod_profile(
+    state: State<'_, SettingsState>,
+    name: String,
+) -> Result<(), String> {
+    mods::profiles::delete_profile(&state, &name)
+}
+
+#[tauri::command]
+pub(crate) fn rename_mod_profile(
+    state: State<'_, SettingsState>,
+    old_name: String,
+    new_name: String,
+) -> Result<(), String> {
+    mods::profiles::rename_profile(&state, &old_name, &new_name)
+}
+
+#[tauri::command]
+pub(crate) fn overwrite_mod_profile(
+    state: State<'_, SettingsState>,
+    name: String,
+    game_root: String,
+) -> Result<crate::settings::ModProfile, String> {
+    let recursive = recursive_mod_scan(&state);
+    mods::profiles::overwrite_profile(&state, &name, &game_root, recursive)
+}
+
+#[tauri::command]
+pub(crate) fn preview_mod_profile(
+    state: State<'_, SettingsState>,
+    name: String,
+    game_root: String,
+) -> Result<mods::ProfileDiff, String> {
+    let recursive = recursive_mod_scan(&state);
+    mods::profiles::preview_profile(&state, &name, &game_root, recursive)
+}
+
+#[tauri::command]
+pub(crate) fn apply_mod_profile(
+    state: State<'_, SettingsState>,
+    name: String,
+    game_root: String,
+) -> Result<mods::ProfileApplyResult, String> {
+    if game_status::is_game_running() {
+        return Err(game_status::game_running_error());
+    }
+    let recursive = recursive_mod_scan(&state);
+    mods::profiles::apply_profile(&state, &name, &game_root, recursive)
+}
+
 #[tauri::command]
 pub(crate) fn validate_wav(path: String) -> Result<wav_to_wem::WavValidation, String> {
     wav_to_wem::validate_audio(std::path::Path::new(&path)).map_err(|e| e.to_string())

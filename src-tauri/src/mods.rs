@@ -1,10 +1,13 @@
 mod bypass;
 pub(crate) mod conflicts;
 mod folder;
+pub(crate) mod profiles;
 mod status;
 
 pub(crate) use conflicts::ConflictReport;
 pub(crate) use folder::{BulkOpResult, InstallResult};
+pub(crate) use profiles::ProfileApplyResult;
+pub(crate) use profiles::ProfileDiff;
 pub(crate) use status::ModsStatus;
 
 // Bypass files bundled at compile time.

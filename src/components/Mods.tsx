@@ -8,10 +8,14 @@ import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   AlertTriangle,
   Archive,
+  Check,
   FolderOpen,
+  Layers,
   PackageOpen,
   Pencil,
+  Plus,
   RefreshCw,
+  RotateCcw,
   Shield,
   CheckCircle2,
   XCircle,
@@ -42,6 +46,7 @@ import {
   ContextMenuSeparator,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 
@@ -70,6 +75,19 @@ interface ConflictReport {
   groups: ConflictGroup[];
   asset_conflicts: AssetConflict[];
   mods_scanned: number;
+}
+
+interface ModProfile {
+  name: string;
+  enabled_mods: string[];
+  created_at: number;
+  modified_at: number;
+}
+
+interface ProfileApplyResult {
+  successes: number;
+  failed: number;
+  missing: string[];
 }
 
 function formatBytes(bytes: number): string {
@@ -128,6 +146,11 @@ export function Mods({
   const [renamingMod, setRenamingMod] = useState<string | null>(null);
   const [conflictReport, setConflictReport] = useState<ConflictReport | null>(null);
   const [conflictDetailOpen, setConflictDetailOpen] = useState(false);
+  const [profiles, setProfiles] = useState<ModProfile[]>([]);
+  const [profilesOpen, setProfilesOpen] = useState(false);
+  const [profileBusy, setProfileBusy] = useState(false);
+  const [newProfileName, setNewProfileName] = useState("");
+  const [savingProfile, setSavingProfile] = useState(false);
   const lastClickedIndex = useRef<number | null>(null);
   const listRef = useRef<HTMLUListElement>(null);
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -180,9 +203,19 @@ export function Mods({
   );
   refreshRef.current = refresh;
 
+  const refreshProfiles = useCallback(async () => {
+    try {
+      const p = await invoke<ModProfile[]>("list_mod_profiles");
+      setProfiles(p);
+    } catch {
+      setProfiles([]);
+    }
+  }, []);
+
   useEffect(() => {
     if (gamePath) refresh(true);
-  }, [gamePath, refresh]);
+    refreshProfiles();
+  }, [gamePath, refresh, refreshProfiles]);
 
   // Drop selected entries that no longer exist after a refresh.
   useEffect(() => {
@@ -545,6 +578,70 @@ export function Mods({
     onViewInAssetManager(`${modsStatus.mods_folder_path}${sep}${entry.full_name}`);
   }
 
+  // ── Profile actions ───────────────────────────────────────────────
+
+  async function saveProfile() {
+    const trimmed = newProfileName.trim();
+    if (!trimmed || !gamePath) return;
+    setSavingProfile(true);
+    try {
+      await invoke<ModProfile>("save_mod_profile", { name: trimmed, gameRoot: gamePath });
+      setNewProfileName("");
+      await refreshProfiles();
+      showNotice(`Saved profile "${trimmed}"`, "ok", 4000);
+    } catch (e: unknown) {
+      showNotice(String(e), "err");
+    } finally {
+      setSavingProfile(false);
+    }
+  }
+
+  async function deleteProfile(name: string) {
+    try {
+      await invoke("delete_mod_profile", { name });
+      await refreshProfiles();
+      showNotice(`Deleted profile "${name}"`, "ok", 4000);
+    } catch (e: unknown) {
+      showNotice(String(e), "err");
+    }
+  }
+
+  async function overwriteProfile(name: string) {
+    if (!gamePath) return;
+    try {
+      await invoke<ModProfile>("overwrite_mod_profile", { name, gameRoot: gamePath });
+      await refreshProfiles();
+      showNotice(`Updated profile "${name}" with current mods`, "ok", 4000);
+    } catch (e: unknown) {
+      showNotice(String(e), "err");
+    }
+  }
+
+  async function applyProfile(name: string) {
+    if (!gamePath || profileBusy) return;
+    setProfileBusy(true);
+    setProfilesOpen(false);
+    try {
+      const res = await invoke<ProfileApplyResult>("apply_mod_profile", {
+        name,
+        gameRoot: gamePath,
+      });
+      await refresh(true);
+      if (res.successes === 0 && res.failed === 0) {
+        showNotice(`Profile "${name}" already active`, "ok", 3000);
+      } else {
+        const parts: string[] = [`${res.successes} mod${res.successes !== 1 ? "s" : ""} updated`];
+        if (res.failed > 0) parts.push(`${res.failed} failed`);
+        if (res.missing.length > 0) parts.push(`${res.missing.length} missing`);
+        showNotice(`Profile "${name}" applied: ${parts.join(", ")}`, res.failed > 0 ? "err" : "ok");
+      }
+    } catch (e: unknown) {
+      showNotice(String(e), "err");
+    } finally {
+      setProfileBusy(false);
+    }
+  }
+
   // Keyboard shortcuts: Delete, Ctrl/Cmd+A, Escape. Only when tab is active and
   // focus is inside the list (or nothing is focused in an input/textarea).
   useEffect(() => {
@@ -622,6 +719,19 @@ export function Mods({
   }, [conflictReport]);
 
   const conflictCount = conflictReport?.groups.length ?? 0;
+
+  const activeProfileName = useMemo(() => {
+    if (!modsStatus || profiles.length === 0) return null;
+    const currentEnabled = new Set(
+      modsStatus.mod_entries.filter((e) => e.enabled).map((e) => e.display_name)
+    );
+    return (
+      profiles.find((p) => {
+        if (p.enabled_mods.length !== currentEnabled.size) return false;
+        return p.enabled_mods.every((m) => currentEnabled.has(m));
+      })?.name ?? null
+    );
+  }, [modsStatus, profiles]);
 
   const selectAllState: boolean | "indeterminate" =
     totalCount > 0 && selected.size === totalCount
@@ -812,6 +922,98 @@ export function Mods({
                 >
                   <Archive size={15} />
                 </Button>
+                <Popover open={profilesOpen} onOpenChange={setProfilesOpen}>
+                  <PopoverTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      disabled={!gamePath}
+                      title="Mod profiles"
+                    >
+                      <Layers size={15} />
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent align="end" className="w-64 p-0">
+                    <div className="flex items-center justify-between border-b border-border px-3 py-2">
+                      <span className="text-sm font-semibold">Profiles</span>
+                    </div>
+                    {profiles.length === 0 ? (
+                      <p className="px-3 py-4 text-center text-[12px] text-muted-foreground">
+                        No profiles yet. Save your current mod setup as a profile.
+                      </p>
+                    ) : (
+                      <ul className="max-h-52 overflow-y-auto">
+                        {profiles.map((p) => {
+                          const isActive = activeProfileName === p.name;
+                          return (
+                            <ContextMenu key={p.name}>
+                              <ContextMenuTrigger asChild>
+                                <li
+                                  onClick={() => {
+                                    if (!isActive) applyProfile(p.name);
+                                  }}
+                                  className={cn(
+                                    "flex items-center gap-2 border-b border-border/50 px-3 py-2 last:border-none transition-colors select-none",
+                                    isActive
+                                      ? "bg-primary/10"
+                                      : "cursor-pointer hover:bg-secondary/40"
+                                  )}
+                                >
+                                  <span className="w-4 shrink-0 flex items-center justify-center">
+                                    {isActive && <Check size={13} className="text-ok" />}
+                                  </span>
+                                  <span
+                                    className={cn(
+                                      "min-w-0 flex-1 truncate text-[13px]",
+                                      isActive && "font-semibold"
+                                    )}
+                                  >
+                                    {p.name}
+                                  </span>
+                                  <span className="shrink-0 text-[10px] text-muted-foreground tabular-nums">
+                                    {p.enabled_mods.length} mod
+                                    {p.enabled_mods.length !== 1 ? "s" : ""}
+                                  </span>
+                                </li>
+                              </ContextMenuTrigger>
+                              <ContextMenuContent>
+                                <ContextMenuItem onSelect={() => overwriteProfile(p.name)}>
+                                  <RotateCcw />
+                                  Overwrite with current
+                                </ContextMenuItem>
+                                <ContextMenuSeparator />
+                                <ContextMenuItem destructive onSelect={() => deleteProfile(p.name)}>
+                                  <Trash2 />
+                                  Delete
+                                </ContextMenuItem>
+                              </ContextMenuContent>
+                            </ContextMenu>
+                          );
+                        })}
+                      </ul>
+                    )}
+                    <div className="flex items-center gap-1.5 border-t border-border px-3 py-2">
+                      <input
+                        value={newProfileName}
+                        onChange={(e) => setNewProfileName(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") saveProfile();
+                        }}
+                        placeholder="New profile name…"
+                        className="min-w-0 flex-1 bg-transparent text-[12px] outline-none placeholder:text-muted-foreground/50"
+                      />
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        onClick={saveProfile}
+                        disabled={!newProfileName.trim() || savingProfile || !gamePath}
+                        title="Save current mods as profile"
+                      >
+                        <Plus size={14} />
+                      </Button>
+                    </div>
+                  </PopoverContent>
+                </Popover>
                 <Button
                   variant="ghost"
                   size="icon-sm"
