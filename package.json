@@ -23,6 +23,7 @@
     "@codemirror/commands": "^6.10.3",
     "@codemirror/state": "^6.6.0",
     "@codemirror/view": "^6.41.0",
+    "@radix-ui/react-popover": "^1.1.15",
     "@tailwindcss/vite": "^4.2.2",
     "@tanstack/react-virtual": "^3.13.23",
     "@tauri-apps/api": "^2",
@@ -59,6 +60,10 @@
     "vite": "^8.0.8"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["esbuild", "lefthook", "unrs-resolver"]
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "lefthook",
+      "unrs-resolver"
+    ]
   }
 }

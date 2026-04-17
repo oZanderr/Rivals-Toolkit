@@ -7,6 +7,17 @@ use crate::detect::InstallInfo;
 
 const FILE_NAME: &str = "settings.json";
 
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct ModProfile {
+    pub name: String,
+    /// Display names of mods that should be enabled (e.g. "MyMod.pak").
+    pub enabled_mods: Vec<String>,
+    #[serde(default)]
+    pub created_at: u64,
+    #[serde(default)]
+    pub modified_at: u64,
+}
+
 fn settings_path() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("rivals-toolkit").join(FILE_NAME))
 }
@@ -21,6 +32,8 @@ pub(crate) struct Settings {
     pub(crate) game_path: Option<String>,
     #[serde(default)]
     pub(crate) install_info: Option<InstallInfo>,
+    #[serde(default)]
+    pub(crate) mod_profiles: Vec<ModProfile>,
 }
 
 fn default_true() -> bool {
@@ -34,6 +47,7 @@ impl Default for Settings {
             recursive_mod_scan: true,
             game_path: None,
             install_info: None,
+            mod_profiles: Vec::new(),
         }
     }
 }

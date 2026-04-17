@@ -84,8 +84,13 @@ pub(crate) fn check_conflicts(game_root: &str, recursive: bool) -> Result<Confli
         };
 
         for asset in assets {
+            let lower = asset.to_lowercase();
+            // Skip patched_files entries — these are metadata, not real asset conflicts.
+            if lower.contains("patched_files") {
+                continue;
+            }
             asset_to_mods
-                .entry(asset.to_lowercase())
+                .entry(lower)
                 .or_default()
                 .push(display.clone());
         }
