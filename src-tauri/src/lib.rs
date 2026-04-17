@@ -42,6 +42,7 @@ pub fn run() {
             commands::extract_utoc_legacy,
             commands::cancel_legacy_extraction,
             commands::get_mods_status,
+            commands::check_mod_conflicts,
             commands::install_signature_bypass,
             commands::remove_signature_bypass,
             commands::open_mods_folder,

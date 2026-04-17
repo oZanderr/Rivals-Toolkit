@@ -1,7 +1,9 @@
 mod bypass;
+pub(crate) mod conflicts;
 mod folder;
 mod status;
 
+pub(crate) use conflicts::ConflictReport;
 pub(crate) use folder::{BulkOpResult, InstallResult};
 pub(crate) use status::ModsStatus;
 
@@ -109,4 +111,8 @@ pub(crate) fn install_from_archive(
     archive_path: &str,
 ) -> Result<Vec<InstallResult>, String> {
     folder::install_from_archive(mods_folder, archive_path)
+}
+
+pub(crate) fn check_conflicts(game_root: &str, recursive: bool) -> Result<ConflictReport, String> {
+    conflicts::check_conflicts(game_root, recursive)
 }
