@@ -20,18 +20,9 @@ use retoc::{
     FSFileWriter, FSHAHash, FileReaderTrait, UEPath, UEPathBuf,
 };
 
-const MOUNT_POINT: &str = "../../../";
+use crate::concurrency;
 
-/// Build a rayon thread pool using half the available cores (minimum 1).
-fn scoped_pool() -> Result<rayon::ThreadPool, String> {
-    let threads = std::thread::available_parallelism()
-        .map(|n| (n.get() / 2).max(1))
-        .unwrap_or(2);
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(threads)
-        .build()
-        .map_err(|e| e.to_string())
-}
+const MOUNT_POINT: &str = "../../../";
 
 static LEGACY_CANCEL: AtomicBool = AtomicBool::new(false);
 static REPACK_CANCEL: AtomicBool = AtomicBool::new(false);
@@ -247,20 +238,17 @@ fn open_base_game_paks(
 }
 
 /// List asset paths inside a .utoc container, stripped of the mount point prefix.
+/// Directory-index-only: skips chunk metadata and the .ucas sibling, so disabled
+/// mods and containers with malformed post-index metadata still enumerate.
 pub(crate) fn list_utoc_contents(utoc_path: &str) -> Result<Vec<String>, String> {
-    let store = open_utoc(utoc_path)?;
-    let mut paths: Vec<String> = Vec::new();
-
-    for chunk in store.chunks() {
-        if let Some(full_path) = chunk.path() {
-            let stripped = full_path
-                .strip_prefix(MOUNT_POINT)
-                .unwrap_or(&full_path)
-                .to_string();
-            paths.push(stripped);
-        }
-    }
-
+    let file = std::fs::File::open(utoc_path).map_err(|e| e.to_string())?;
+    let mut reader = std::io::BufReader::new(file);
+    let config = make_config()?;
+    let raw = retoc::read_toc_paths(&mut reader, config).map_err(|e| e.to_string())?;
+    let mut paths: Vec<String> = raw
+        .into_iter()
+        .map(|p| p.strip_prefix(MOUNT_POINT).unwrap_or(&p).to_string())
+        .collect();
     paths.sort();
     Ok(paths)
 }
@@ -283,7 +271,7 @@ pub(crate) fn extract_utoc(utoc_path: &str, output_dir: &str) -> Result<Vec<Stri
         })
         .collect();
 
-    let pool = scoped_pool()?;
+    let pool = &*concurrency::POOL;
     let mut extracted: Vec<String> = pool.install(|| {
         chunks
             .par_iter()
@@ -335,7 +323,7 @@ pub(crate) fn extract_utoc_files(
         })
         .collect();
 
-    let pool = scoped_pool()?;
+    let pool = &*concurrency::POOL;
     let mut extracted: Vec<String> = pool.install(|| {
         chunks
             .par_iter()
@@ -387,20 +375,16 @@ pub(crate) fn extract_utoc_file(
 }
 
 /// Collect asset paths from a .utoc container (standalone, no base-game merge).
+/// Directory-index-only; the subsequent extract step opens the full container.
 fn collect_target_paths(utoc_path: &str) -> Result<HashSet<String>, String> {
-    let store = open_utoc(utoc_path)?;
-    let paths: HashSet<String> = store
-        .chunks()
-        .filter_map(|chunk| {
-            let full_path = chunk.path()?;
-            let stripped = full_path
-                .strip_prefix(MOUNT_POINT)
-                .unwrap_or(&full_path)
-                .to_string();
-            Some(stripped)
-        })
-        .collect();
-    Ok(paths)
+    let file = std::fs::File::open(utoc_path).map_err(|e| e.to_string())?;
+    let mut reader = std::io::BufReader::new(file);
+    let config = make_config()?;
+    let raw = retoc::read_toc_paths(&mut reader, config).map_err(|e| e.to_string())?;
+    Ok(raw
+        .into_iter()
+        .map(|p| p.strip_prefix(MOUNT_POINT).unwrap_or(&p).to_string())
+        .collect())
 }
 
 type PackageList = Vec<(retoc::FPackageId, String)>;
@@ -605,7 +589,7 @@ pub(crate) fn extract_utoc_legacy(
     let total = packages.len();
     let completed = std::sync::atomic::AtomicUsize::new(0);
 
-    let pool = scoped_pool()?;
+    let pool = &*concurrency::POOL;
     let results: Vec<Option<Result<String, String>>> = pool.install(|| {
         packages
             .par_iter()

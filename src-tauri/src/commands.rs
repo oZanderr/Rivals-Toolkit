@@ -1,4 +1,4 @@
-use tauri::State;
+use tauri::{Manager, State};
 
 use crate::settings::SettingsState;
 use crate::{
@@ -194,11 +194,101 @@ pub(crate) fn cancel_legacy_extraction() {
 }
 
 #[tauri::command]
-pub(crate) fn get_mods_status(
-    state: State<'_, SettingsState>,
+pub(crate) async fn get_mods_status(
+    app: tauri::AppHandle,
     game_root: String,
-) -> mods::ModsStatus {
-    mods::get_mods_status(&game_root, recursive_mod_scan(&state))
+) -> Result<mods::ModsStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<SettingsState>();
+        let recursive = recursive_mod_scan(&state);
+        let mut status = mods::get_mods_status(&game_root, recursive);
+        mods::heroes::enrich_status_with_heroes(&state, &mut status);
+        status
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub(crate) fn list_known_heroes() -> Vec<mods::heroes::CharacterSummary> {
+    mods::heroes::list_known_characters()
+}
+
+#[tauri::command]
+pub(crate) fn get_character_data_info() -> mods::character_sync::CharacterDataInfo {
+    mods::character_sync::current_info()
+}
+
+#[tauri::command]
+pub(crate) async fn sync_character_data(
+    state: State<'_, SettingsState>,
+) -> Result<mods::character_sync::SyncResult, String> {
+    let result = tauri::async_runtime::spawn_blocking(mods::character_sync::sync_from_remote)
+        .await
+        .map_err(|e| e.to_string())??;
+
+    if let Ok(mut guard) = state.lock() {
+        // Bumping the stamp triggers per-entry recompute on next enrich (cache
+        // entries with the old stamp are treated as misses), so we keep the
+        // existing cache instead of wiping it wholesale.
+        guard.last_character_data_sync = result.fetched_at;
+        if let Err(e) = guard.save() {
+            eprintln!("rivals-toolkit: failed to persist updated catalogue stamp: {e}");
+        }
+    }
+
+    Ok(result)
+}
+
+const CHARACTER_SYNC_INTERVAL_SECS: u64 = 24 * 60 * 60;
+
+#[tauri::command]
+pub(crate) fn should_auto_sync_character_data(state: State<'_, SettingsState>) -> bool {
+    let Ok(guard) = state.lock() else {
+        return false;
+    };
+    if !guard.auto_sync_character_data {
+        return false;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    now.saturating_sub(guard.last_character_data_sync) >= CHARACTER_SYNC_INTERVAL_SECS
+}
+
+#[tauri::command]
+pub(crate) fn get_auto_sync_character_data(state: State<'_, SettingsState>) -> bool {
+    state
+        .lock()
+        .map(|s| s.auto_sync_character_data)
+        .unwrap_or(true)
+}
+
+#[tauri::command]
+pub(crate) fn set_auto_sync_character_data(
+    state: State<'_, SettingsState>,
+    enabled: bool,
+) -> Result<(), String> {
+    let mut guard = state.lock().map_err(|e| e.to_string())?;
+    guard.auto_sync_character_data = enabled;
+    guard.save()
+}
+
+#[tauri::command]
+pub(crate) async fn rescan_mod_heroes(
+    app: tauri::AppHandle,
+    game_root: String,
+    full_name: String,
+    display_name: String,
+) -> Result<Vec<mods::heroes::HeroMatch>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<SettingsState>();
+        let mods_folder = paths::mods_dir(&game_root);
+        mods::heroes::rescan_mod_heroes(&state, &mods_folder, &full_name, &display_name)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

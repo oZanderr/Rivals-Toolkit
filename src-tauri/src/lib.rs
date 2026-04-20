@@ -1,6 +1,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 
 mod commands;
+mod concurrency;
 mod detect;
 mod game_status;
 mod hitsounds;
@@ -42,6 +43,13 @@ pub fn run() {
             commands::extract_utoc_legacy,
             commands::cancel_legacy_extraction,
             commands::get_mods_status,
+            commands::list_known_heroes,
+            commands::get_character_data_info,
+            commands::sync_character_data,
+            commands::should_auto_sync_character_data,
+            commands::get_auto_sync_character_data,
+            commands::set_auto_sync_character_data,
+            commands::rescan_mod_heroes,
             commands::check_mod_conflicts,
             commands::list_mod_profiles,
             commands::save_mod_profile,

@@ -28,7 +28,7 @@ export function useUpdateCheck() {
           setUpdateInfo(info);
         }
       } catch {
-        // Network failure or API error — silent skip
+        // Network failure or API error. Silent skip.
       }
     })();
     return () => {

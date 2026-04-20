@@ -177,8 +177,7 @@ pub(crate) fn rename_mod(
 
     let dir = Path::new(mods_folder);
 
-    // Determine current stem and whether the mod is disabled.
-    let (old_stem, disabled) = if let Some(s) = full_name.strip_suffix(".pak.disabled") {
+    let (old_rel_stem, disabled) = if let Some(s) = full_name.strip_suffix(".pak.disabled") {
         (s, true)
     } else if let Some(s) = full_name.strip_suffix(".pak") {
         (s, false)
@@ -186,36 +185,44 @@ pub(crate) fn rename_mod(
         return Err(format!("Unexpected mod filename: {full_name}"));
     };
 
-    let new_full_name = if disabled {
-        format!("{new_base}.pak.disabled")
-    } else {
-        format!("{new_base}.pak")
+    // Keep the mod in its current subdirectory; only the filename changes.
+    let parent_rel = Path::new(full_name)
+        .parent()
+        .unwrap_or_else(|| Path::new(""));
+    let join_rel = |name: &str| -> String {
+        if parent_rel.as_os_str().is_empty() {
+            name.to_string()
+        } else {
+            format!("{}/{name}", parent_rel.to_string_lossy().replace('\\', "/"))
+        }
     };
 
-    // No-op if name unchanged.
+    let new_full_name = if disabled {
+        join_rel(&format!("{new_base}.pak.disabled"))
+    } else {
+        join_rel(&format!("{new_base}.pak"))
+    };
+
     if new_full_name == full_name {
         return Ok(new_full_name);
     }
 
-    // Check for collisions — both enabled and disabled variants.
     for candidate in [
-        format!("{new_base}.pak"),
-        format!("{new_base}.pak.disabled"),
+        join_rel(&format!("{new_base}.pak")),
+        join_rel(&format!("{new_base}.pak.disabled")),
     ] {
         if dir.join(&candidate).exists() {
             return Err(format!("A mod named \"{candidate}\" already exists."));
         }
     }
 
-    // Rename the main .pak file.
     std::fs::rename(dir.join(full_name), dir.join(&new_full_name))
         .map_err(|e| format!("Failed to rename pak: {e}"))?;
 
-    // Rename companion files (.ucas, .utoc and their .disabled variants).
     for ext in COMPANION_EXTS {
         for suffix in ["", ".disabled"] {
-            let old_companion = format!("{old_stem}.{ext}{suffix}");
-            let new_companion = format!("{new_base}.{ext}{suffix}");
+            let old_companion = format!("{old_rel_stem}.{ext}{suffix}");
+            let new_companion = join_rel(&format!("{new_base}.{ext}{suffix}"));
             let old_path = dir.join(&old_companion);
             if old_path.exists() {
                 std::fs::rename(&old_path, dir.join(&new_companion))

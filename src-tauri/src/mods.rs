@@ -1,6 +1,8 @@
 mod bypass;
+pub(crate) mod character_sync;
 pub(crate) mod conflicts;
 mod folder;
+pub(crate) mod heroes;
 pub(crate) mod profiles;
 mod status;
 
@@ -47,6 +49,33 @@ fn file_matches(path: &std::path::Path, expected: &[u8]) -> bool {
     std::fs::read(path)
         .map(|data| data == expected)
         .unwrap_or(false)
+}
+
+/// Total on-disk size of a mod pak plus companion `.ucas`/`.utoc` when present.
+/// Mirrors the size reported in `ModEntry::size_bytes` so hero-cache validation
+/// compares like-for-like across status enrichment and explicit rescans.
+pub(crate) fn mod_size_on_disk(mods_folder: &std::path::Path, full_name: &str) -> u64 {
+    let pak_path = mods_folder.join(full_name);
+    let pak_size = std::fs::metadata(&pak_path).map(|m| m.len()).unwrap_or(0);
+
+    let (stem, suffix) = if let Some(s) = full_name.strip_suffix(".pak.disabled") {
+        (s, ".disabled")
+    } else if let Some(s) = full_name.strip_suffix(".pak") {
+        (s, "")
+    } else {
+        return pak_size;
+    };
+
+    let ucas = mods_folder.join(format!("{stem}.ucas{suffix}"));
+    // Gate on .ucas existence so we match status.rs's has_companions semantics
+    // exactly (a lone .utoc without .ucas is not treated as an IoStore mod).
+    if !ucas.exists() {
+        return pak_size;
+    }
+    let utoc = mods_folder.join(format!("{stem}.utoc{suffix}"));
+    let ucas_size = std::fs::metadata(&ucas).map(|m| m.len()).unwrap_or(0);
+    let utoc_size = std::fs::metadata(&utoc).map(|m| m.len()).unwrap_or(0);
+    pak_size + ucas_size + utoc_size
 }
 
 pub(crate) fn get_mods_status(game_root: &str, recursive: bool) -> ModsStatus {

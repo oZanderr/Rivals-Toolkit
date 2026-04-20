@@ -9,6 +9,7 @@ import {
   AlertTriangle,
   Archive,
   Check,
+  CloudDownload,
   FolderOpen,
   Layers,
   PackageOpen,
@@ -25,6 +26,7 @@ import {
   PowerOff,
   Copy,
   X,
+  Users,
 } from "lucide-react";
 
 import {
@@ -47,8 +49,44 @@ import {
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
+
+interface HeroMatch {
+  character_id: number;
+  character_name: string;
+  skin_ids: number[];
+  skin_names: string[];
+}
+
+interface CharacterSummary {
+  id: number;
+  name: string;
+}
+
+interface CharacterDataInfo {
+  character_count: number;
+  generated_at: string | null;
+  origin: string;
+  source: string | null;
+  user_file_mtime: number | null;
+  user_file_present: boolean;
+}
+
+interface SyncResult {
+  character_count: number;
+  generated_at: string | null;
+  fetched_at: number;
+  bytes: number;
+  source_url: string;
+}
 
 interface ModEntry {
   full_name: string;
@@ -57,6 +95,7 @@ interface ModEntry {
   has_companions: boolean;
   size_bytes: number;
   kind: "Pak" | "IoStore";
+  heroes: HeroMatch[];
 }
 
 interface AssetConflict {
@@ -98,6 +137,26 @@ function formatBytes(bytes: number): string {
   if (mb < 1024) return `${mb.toFixed(mb < 10 ? 1 : 0)} MB`;
   const gb = mb / 1024;
   return `${gb.toFixed(gb < 10 ? 2 : 1)} GB`;
+}
+
+function formatRelativeTime(unixSecs: number): string {
+  const diff = Date.now() / 1000 - unixSecs;
+  if (diff < 60) return "just now";
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  return `${Math.floor(diff / 86400)}d ago`;
+}
+
+function formatSyncTooltip(info: CharacterDataInfo | null, syncing: boolean): string {
+  if (syncing) return "Syncing hero data…";
+  if (!info) return "Sync hero data";
+  const lines = [`${info.character_count} characters loaded`];
+  if (info.user_file_present && info.user_file_mtime) {
+    lines.push(`Last synced ${formatRelativeTime(info.user_file_mtime)}`);
+  } else {
+    lines.push("Using bundled data. Click to fetch latest.");
+  }
+  return lines.join("\n");
 }
 
 interface ModsStatus {
@@ -148,6 +207,10 @@ export function Mods({
   const [conflictDetailOpen, setConflictDetailOpen] = useState(false);
   const [profiles, setProfiles] = useState<ModProfile[]>([]);
   const [profilesOpen, setProfilesOpen] = useState(false);
+  const [knownHeroes, setKnownHeroes] = useState<CharacterSummary[]>([]);
+  const [heroFilter, setHeroFilter] = useState<string>("all");
+  const [characterDataInfo, setCharacterDataInfo] = useState<CharacterDataInfo | null>(null);
+  const [syncingCharacterData, setSyncingCharacterData] = useState(false);
   const [profileBusy, setProfileBusy] = useState(false);
   const [newProfileName, setNewProfileName] = useState("");
   const [savingProfile, setSavingProfile] = useState(false);
@@ -216,6 +279,41 @@ export function Mods({
     if (gamePath) refresh(true);
     refreshProfiles();
   }, [gamePath, refresh, refreshProfiles]);
+
+  const loadKnownHeroes = useCallback(() => {
+    invoke<CharacterSummary[]>("list_known_heroes")
+      .then(setKnownHeroes)
+      .catch(() => setKnownHeroes([]));
+    invoke<CharacterDataInfo>("get_character_data_info")
+      .then(setCharacterDataInfo)
+      .catch(() => setCharacterDataInfo(null));
+  }, []);
+
+  useEffect(() => {
+    loadKnownHeroes();
+  }, [loadKnownHeroes]);
+
+  const autoSyncFiredRef = useRef(false);
+  useEffect(() => {
+    if (autoSyncFiredRef.current) return;
+    autoSyncFiredRef.current = true;
+    let cancelled = false;
+    (async () => {
+      try {
+        const should = await invoke<boolean>("should_auto_sync_character_data");
+        if (!should || cancelled) return;
+        await invoke<SyncResult>("sync_character_data");
+        if (cancelled) return;
+        loadKnownHeroes();
+        await refreshRef.current?.(true);
+      } catch {
+        // Network or backend failure. Silent skip; manual button still available.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [loadKnownHeroes]);
 
   // Drop selected entries that no longer exist after a refresh.
   useEffect(() => {
@@ -703,6 +801,58 @@ export function Mods({
   const enabledCount = modsStatus?.mod_entries.filter((m) => m.enabled).length ?? 0;
   const totalCount = modsStatus?.mod_entries.length ?? 0;
 
+  const filteredEntries = useMemo<ModEntry[]>(() => {
+    if (!modsStatus) return [];
+    if (heroFilter === "all") return modsStatus.mod_entries;
+    if (heroFilter === "unknown") {
+      return modsStatus.mod_entries.filter((e) => e.heroes.length === 0);
+    }
+    const targetId = Number(heroFilter);
+    if (!Number.isFinite(targetId)) return modsStatus.mod_entries;
+    return modsStatus.mod_entries.filter((e) => e.heroes.some((h) => h.character_id === targetId));
+  }, [modsStatus, heroFilter]);
+  const filteredCount = filteredEntries.length;
+
+  async function syncCharacterData() {
+    if (syncingCharacterData) return;
+    setSyncingCharacterData(true);
+    try {
+      const result = await invoke<SyncResult>("sync_character_data");
+      loadKnownHeroes();
+      if (gamePath) await refresh(true);
+      showNotice(`Synced ${result.character_count} characters from upstream`, "ok", 4000);
+    } catch (e: unknown) {
+      showNotice(`Hero data sync failed: ${String(e)}`, "err");
+    } finally {
+      setSyncingCharacterData(false);
+    }
+  }
+
+  async function rescanHeroes(entry: ModEntry) {
+    if (!gamePath) return;
+    try {
+      const heroes = await invoke<HeroMatch[]>("rescan_mod_heroes", {
+        gameRoot: gamePath,
+        fullName: entry.full_name,
+        displayName: entry.display_name,
+      });
+      setModsStatus((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          mod_entries: prev.mod_entries.map((e) =>
+            e.full_name === entry.full_name ? { ...e, heroes } : e
+          ),
+        };
+      });
+      const summary =
+        heroes.length === 0 ? "no heroes detected" : heroes.map((h) => h.character_name).join(", ");
+      showNotice(`Rescanned ${entry.display_name}: ${summary}`, "ok", 4000);
+    } catch (e: unknown) {
+      showNotice(String(e), "err");
+    }
+  }
+
   const selectedEntries = useMemo(() => {
     if (!modsStatus || selected.size === 0) return [] as ModEntry[];
     return modsStatus.mod_entries.filter((e) => selected.has(e.full_name));
@@ -791,7 +941,6 @@ export function Mods({
         </div>
       )}
 
-      {/* Bypass banner — only if not installed */}
       {modsStatus && !modsStatus.sig_bypass_installed && (
         <div className="flex items-center gap-2.5 rounded-md border border-warn/20 bg-warn/5 px-3 py-2">
           <Shield size={15} className="shrink-0 text-warn" />
@@ -893,8 +1042,45 @@ export function Mods({
                 <h3 className="text-sm font-semibold">Installed Mods</h3>
                 {modsStatus && (
                   <span className="text-[12px] text-muted-foreground">
-                    ({enabledCount}/{totalCount} active)
+                    {heroFilter === "all"
+                      ? `(${enabledCount}/${totalCount} active)`
+                      : `(${filteredCount} of ${totalCount} shown)`}
                   </span>
+                )}
+                {modsStatus && totalCount > 0 && (
+                  <Select value={heroFilter} onValueChange={setHeroFilter}>
+                    <SelectTrigger
+                      size="sm"
+                      className="ml-1 h-7 w-42.5 text-[12px]"
+                      title="Filter mods by hero"
+                    >
+                      <Users size={12} className="text-muted-foreground" />
+                      <SelectValue placeholder="All heroes" />
+                    </SelectTrigger>
+                    <SelectContent className="max-h-72">
+                      <SelectItem value="all">All heroes</SelectItem>
+                      <SelectItem value="unknown">Unknown / no match</SelectItem>
+                      {knownHeroes.map((h) => (
+                        <SelectItem key={h.id} value={String(h.id)}>
+                          {h.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                )}
+                {modsStatus && totalCount > 0 && (
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    onClick={syncCharacterData}
+                    disabled={syncingCharacterData}
+                    title={formatSyncTooltip(characterDataInfo, syncingCharacterData)}
+                  >
+                    <CloudDownload
+                      size={14}
+                      className={cn(syncingCharacterData && "animate-pulse")}
+                    />
+                  </Button>
                 )}
               </div>
               <div className="flex items-center -mr-1">
@@ -1064,7 +1250,12 @@ export function Mods({
             </div>
           ) : (
             <ul ref={listRef}>
-              {modsStatus.mod_entries.map((entry, index) => {
+              {filteredEntries.length === 0 && heroFilter !== "all" && (
+                <li className="flex h-12 items-center justify-center text-[12px] text-muted-foreground">
+                  No mods match this filter.
+                </li>
+              )}
+              {filteredEntries.map((entry, index) => {
                 const busy = busyMods.has(entry.full_name);
                 const isSelected = selected.has(entry.full_name);
                 return (
@@ -1133,6 +1324,30 @@ export function Mods({
                           {entry.kind === "IoStore" && (
                             <span className="shrink-0 rounded bg-ok/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase leading-none text-ok">
                               IoStore
+                            </span>
+                          )}
+                          {entry.heroes.slice(0, 2).map((h) => (
+                            <span
+                              key={h.character_id}
+                              className="shrink-0 rounded bg-primary/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase leading-none text-primary cursor-help truncate max-w-25"
+                              title={
+                                h.skin_names.length > 0
+                                  ? `${h.character_name}: ${h.skin_names.join(", ")}`
+                                  : `${h.character_name} (character match)`
+                              }
+                            >
+                              {h.character_name}
+                            </span>
+                          ))}
+                          {entry.heroes.length > 2 && (
+                            <span
+                              className="shrink-0 rounded bg-primary/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase leading-none text-primary cursor-help"
+                              title={entry.heroes
+                                .slice(2)
+                                .map((h) => h.character_name)
+                                .join(", ")}
+                            >
+                              +{entry.heroes.length - 2}
                             </span>
                           )}
                           {conflictsByMod.has(entry.display_name) && (
@@ -1230,6 +1445,10 @@ export function Mods({
                       <ContextMenuItem onSelect={() => copyPath(entry)}>
                         <Copy />
                         Copy path
+                      </ContextMenuItem>
+                      <ContextMenuItem onSelect={() => rescanHeroes(entry)}>
+                        <RefreshCw />
+                        Rescan heroes
                       </ContextMenuItem>
                       <ContextMenuSeparator />
                       <ContextMenuItem
@@ -1348,9 +1567,13 @@ function RenameInput({
   onCommit: (value: string) => void;
   onCancel: () => void;
 }) {
-  // Split into editable base and preserved suffix (_NNNNN_P)
-  const match = displayName.match(/^(.+?)(_\d+_P)?\.pak$/);
-  const base = match ? match[1] : displayName;
+  // Peel the parent subdirectory off; it stays fixed, only the filename is editable.
+  const slashIdx = displayName.lastIndexOf("/");
+  const parentPrefix = slashIdx >= 0 ? displayName.slice(0, slashIdx + 1) : "";
+  const leaf = slashIdx >= 0 ? displayName.slice(slashIdx + 1) : displayName;
+  // Split leaf into editable base and preserved suffix (_NNNNN_P).
+  const match = leaf.match(/^(.+?)(_\d+_P)?\.pak$/);
+  const base = match ? match[1] : leaf;
   const suffix = match?.[2] ?? "";
   const ref = useRef<HTMLInputElement>(null);
   const committed = useRef(false);
@@ -1371,6 +1594,11 @@ function RenameInput({
 
   return (
     <span className="flex items-center gap-0 rounded border border-primary bg-background focus-within:ring-1 focus-within:ring-primary">
+      {parentPrefix && (
+        <span className="shrink-0 pl-1.5 font-mono text-[13px] text-muted-foreground/60">
+          {parentPrefix}
+        </span>
+      )}
       <input
         ref={ref}
         defaultValue={base}

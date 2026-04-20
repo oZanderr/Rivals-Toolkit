@@ -4,8 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::paths::{binaries_dir, mods_dir};
 
+use super::heroes::HeroMatch;
 use super::walk_mod_files;
-use super::{BYPASS_ASI, BYPASS_DSOUND, file_matches};
+use super::{BYPASS_ASI, BYPASS_DSOUND, file_matches, mod_size_on_disk};
 
 #[derive(Serialize, Deserialize)]
 pub(crate) enum ModKind {
@@ -25,10 +26,8 @@ pub(crate) struct ModEntry {
     /// Total size in bytes (pak + companions if present).
     pub size_bytes: u64,
     pub kind: ModKind,
-}
-
-fn file_size(p: &Path) -> u64 {
-    std::fs::metadata(p).map(|m| m.len()).unwrap_or(0)
+    #[serde(default)]
+    pub heroes: Vec<HeroMatch>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -64,15 +63,8 @@ pub(crate) fn get_mods_status(game_root: &str, recursive: bool) -> ModsStatus {
                     let file_stem = &rel_path.file_name()?.to_string_lossy();
                     let stem = &file_stem[..file_stem.len() - 4];
                     let dir = mods.join(parent);
-                    let ucas = dir.join(format!("{stem}.ucas"));
-                    let utoc = dir.join(format!("{stem}.utoc"));
-                    let has_companions = ucas.exists();
-                    let mut size_bytes =
-                        file_size(&dir.join(&*rel_path.file_name()?.to_string_lossy()));
-                    if has_companions {
-                        size_bytes += file_size(&ucas);
-                        size_bytes += file_size(&utoc);
-                    }
+                    let has_companions = dir.join(format!("{stem}.ucas")).exists();
+                    let size_bytes = mod_size_on_disk(&mods, &full_name);
                     Some(ModEntry {
                         display_name: full_name.clone(),
                         full_name,
@@ -84,21 +76,15 @@ pub(crate) fn get_mods_status(game_root: &str, recursive: bool) -> ModsStatus {
                         } else {
                             ModKind::Pak
                         },
+                        heroes: Vec::new(),
                     })
                 } else if full_name.ends_with(".pak.disabled") {
                     let display_name = full_name[..full_name.len() - ".disabled".len()].to_owned();
                     let file_stem = &rel_path.file_name()?.to_string_lossy();
                     let stem = &file_stem[..file_stem.len() - ".pak.disabled".len()];
                     let dir = mods.join(parent);
-                    let ucas = dir.join(format!("{stem}.ucas.disabled"));
-                    let utoc = dir.join(format!("{stem}.utoc.disabled"));
-                    let has_companions = ucas.exists();
-                    let mut size_bytes =
-                        file_size(&dir.join(&*rel_path.file_name()?.to_string_lossy()));
-                    if has_companions {
-                        size_bytes += file_size(&ucas);
-                        size_bytes += file_size(&utoc);
-                    }
+                    let has_companions = dir.join(format!("{stem}.ucas.disabled")).exists();
+                    let size_bytes = mod_size_on_disk(&mods, &full_name);
                     Some(ModEntry {
                         display_name,
                         full_name,
@@ -110,6 +96,7 @@ pub(crate) fn get_mods_status(game_root: &str, recursive: bool) -> ModsStatus {
                         } else {
                             ModKind::Pak
                         },
+                        heroes: Vec::new(),
                     })
                 } else {
                     None

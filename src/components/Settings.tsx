@@ -56,6 +56,8 @@ export function Settings({
 
   const [draftRecursive, setDraftRecursive] = useState<boolean | null>(null);
   const [savedRecursive, setSavedRecursive] = useState<boolean | null>(null);
+  const [draftAutoSyncHeroes, setDraftAutoSyncHeroes] = useState<boolean | null>(null);
+  const [savedAutoSyncHeroes, setSavedAutoSyncHeroes] = useState<boolean | null>(null);
 
   const [saving, setSaving] = useState(false);
   const [pathError, setPathError] = useState<string | null>(null);
@@ -136,6 +138,19 @@ export function Settings({
       });
   }, []);
 
+  useEffect(() => {
+    invoke<boolean>("get_auto_sync_character_data")
+      .then((v) => {
+        setDraftAutoSyncHeroes(v);
+        setSavedAutoSyncHeroes(v);
+      })
+      .catch((e) => {
+        console.error(e);
+        setDraftAutoSyncHeroes(true);
+        setSavedAutoSyncHeroes(true);
+      });
+  }, []);
+
   async function removeBypass() {
     if (bypassNoticeTimer.current) clearTimeout(bypassNoticeTimer.current);
     try {
@@ -191,7 +206,11 @@ export function Settings({
     draftAutoCheck !== null && savedAutoCheck !== null && draftAutoCheck !== savedAutoCheck;
   const recursiveDirty =
     draftRecursive !== null && savedRecursive !== null && draftRecursive !== savedRecursive;
-  const dirty = pathDirty || skipDirty || autoCheckDirty || recursiveDirty;
+  const autoSyncHeroesDirty =
+    draftAutoSyncHeroes !== null &&
+    savedAutoSyncHeroes !== null &&
+    draftAutoSyncHeroes !== savedAutoSyncHeroes;
+  const dirty = pathDirty || skipDirty || autoCheckDirty || recursiveDirty || autoSyncHeroesDirty;
 
   async function save() {
     setSaving(true);
@@ -237,6 +256,14 @@ export function Settings({
           console.error(e);
         }
       }
+      if (autoSyncHeroesDirty && draftAutoSyncHeroes !== null) {
+        try {
+          await invoke("set_auto_sync_character_data", { enabled: draftAutoSyncHeroes });
+          setSavedAutoSyncHeroes(draftAutoSyncHeroes);
+        } catch (e) {
+          console.error(e);
+        }
+      }
       if (savedBadgeTimer.current) clearTimeout(savedBadgeTimer.current);
       setSavedBadge(true);
       savedBadgeTimer.current = setTimeout(() => setSavedBadge(false), 2500);
@@ -250,6 +277,7 @@ export function Settings({
     setDraftSkipLauncher(savedSkipLauncher);
     setDraftAutoCheck(savedAutoCheck);
     setDraftRecursive(savedRecursive);
+    setDraftAutoSyncHeroes(savedAutoSyncHeroes);
     setPathError(null);
   }
 
@@ -366,6 +394,19 @@ export function Settings({
                 checked={draftRecursive ?? false}
                 onCheckedChange={setDraftRecursive}
                 disabled={draftRecursive === null}
+              />
+            </label>
+            <label className="flex items-center gap-3 rounded-sm px-3 py-3 hover:bg-secondary/50">
+              <div className="flex flex-1 flex-col gap-0.5">
+                <span className="text-[13px] font-medium">Auto-sync hero data</span>
+                <span className="text-[11px] text-muted-foreground">
+                  Fetch the latest character/skin list from GitHub on launch (once per day).
+                </span>
+              </div>
+              <Switch
+                checked={draftAutoSyncHeroes ?? false}
+                onCheckedChange={setDraftAutoSyncHeroes}
+                disabled={draftAutoSyncHeroes === null}
               />
             </label>
           </div>

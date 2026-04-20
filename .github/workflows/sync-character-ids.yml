@@ -1,0 +1,41 @@
+name: Sync character IDs
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-character-ids
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Run character ID sync
+        run: node scripts/sync-character-ids.mjs
+
+      - name: Commit and push if changed
+        run: |
+          if git diff --quiet src-tauri/data/character_ids.json; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src-tauri/data/character_ids.json
+          git commit -m "chore: refresh character_ids.json"
+          git push
