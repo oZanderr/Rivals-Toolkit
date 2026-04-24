@@ -1,3 +1,5 @@
+//! INI parsing and CVar edit application for pak-embedded config files.
+
 use super::{PakTweakEdit, PakTweakState};
 
 #[derive(Clone, Copy)]
@@ -122,6 +124,30 @@ fn remove_cvar_key(lines: &mut Vec<String>, key_lower: &str) {
     });
 }
 
+/// Remove matching CVar lines only within the section starting at `section_start` (header index).
+/// Stops at the next section header or end of file.
+fn remove_cvar_key_in_section(lines: &mut Vec<String>, section_start: usize, key_lower: &str) {
+    let mut i = section_start + 1;
+    while i < lines.len() {
+        let t = lines[i].trim();
+        if t.starts_with('[') {
+            break;
+        }
+        if t.starts_with(';') || t.is_empty() {
+            i += 1;
+            continue;
+        }
+        match parse_cvar_line(t) {
+            Some((k, _)) if k.to_ascii_lowercase() == key_lower => {
+                lines.remove(i);
+            }
+            _ => {
+                i += 1;
+            }
+        }
+    }
+}
+
 /// Format a CVar assignment line.
 fn format_cvar_line(key: &str, val: &str, preserve_prefix: bool) -> String {
     if preserve_prefix {
@@ -216,7 +242,7 @@ fn apply_device_profiles_edits(lines: &mut Vec<String>, edits: &[PakTweakEdit]) 
                 lines.insert(insert_at, format_cvar_line(&edit.key, val, true));
             }
             (None, Some(_)) => {
-                remove_cvar_key(lines, &key_lower);
+                remove_cvar_key_in_section(lines, start, &key_lower);
             }
             (None, None) => {}
         }

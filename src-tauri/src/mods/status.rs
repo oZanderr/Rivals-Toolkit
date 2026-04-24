@@ -1,3 +1,5 @@
+//! Reads and represents the installed state of mod pak files.
+
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};

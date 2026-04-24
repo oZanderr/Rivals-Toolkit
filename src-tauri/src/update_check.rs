@@ -1,7 +1,12 @@
+//! GitHub release polling with a short cache, used by the auto-update prompt on app launch.
+
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use tauri::State;
+
+use crate::settings::SettingsState;
 
 const GITHUB_OWNER: &str = "oZanderr";
 const GITHUB_REPO: &str = "Rivals-Toolkit";
@@ -81,7 +86,7 @@ fn is_newer(latest: &str, current: &str) -> bool {
     }
 }
 
-pub(crate) fn check_for_update(current_version: &str, force: bool) -> Result<UpdateInfo, String> {
+fn fetch_update_info(current_version: &str, force: bool) -> Result<UpdateInfo, String> {
     // Return cached result if fresh enough (unless force=true)
     if !force && let Some(mut cached) = read_cache() {
         // Re-evaluate against current version in case of app upgrade
@@ -134,4 +139,30 @@ pub(crate) fn check_for_update(current_version: &str, force: bool) -> Result<Upd
 
     write_cache(&info);
     Ok(info)
+}
+
+#[tauri::command]
+pub(crate) async fn check_for_update(
+    current_version: String,
+    force: Option<bool>,
+) -> Result<UpdateInfo, String> {
+    let force = force.unwrap_or(false);
+    tauri::async_runtime::spawn_blocking(move || fetch_update_info(&current_version, force))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub(crate) fn get_auto_check_updates(state: State<'_, SettingsState>) -> bool {
+    state.lock().map(|s| s.auto_check_updates).unwrap_or(true)
+}
+
+#[tauri::command]
+pub(crate) fn set_auto_check_updates(
+    state: State<'_, SettingsState>,
+    enabled: bool,
+) -> Result<(), String> {
+    let mut guard = state.lock().map_err(|e| e.to_string())?;
+    guard.auto_check_updates = enabled;
+    guard.save()
 }

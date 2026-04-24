@@ -1,8 +1,11 @@
+//! Persistent app settings stored under the user config dir, with shared accessors used by all command modules.
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
+use tauri::State;
 
 use crate::detect::InstallInfo;
 use crate::mods::heroes::HeroMatch;
@@ -131,3 +134,45 @@ impl Settings {
 }
 
 pub(crate) type SettingsState = Mutex<Settings>;
+
+/// Read the recursive-mod-scan flag from settings, defaulting to true on lock failure.
+pub(crate) fn recursive_mod_scan(state: &State<'_, SettingsState>) -> bool {
+    state.lock().map(|s| s.recursive_mod_scan).unwrap_or(true)
+}
+
+#[tauri::command]
+pub(crate) fn get_recursive_mod_scan(state: State<'_, SettingsState>) -> bool {
+    recursive_mod_scan(&state)
+}
+
+#[tauri::command]
+pub(crate) fn set_recursive_mod_scan(
+    state: State<'_, SettingsState>,
+    enabled: bool,
+) -> Result<(), String> {
+    let mut guard = state.lock().map_err(|e| e.to_string())?;
+    guard.recursive_mod_scan = enabled;
+    guard.save()
+}
+
+#[tauri::command]
+pub(crate) fn get_game_path(state: State<'_, SettingsState>) -> Option<String> {
+    state.lock().ok().and_then(|s| s.game_path.clone())
+}
+
+#[tauri::command]
+pub(crate) fn get_saved_install_info(state: State<'_, SettingsState>) -> Option<InstallInfo> {
+    state.lock().ok().and_then(|s| s.install_info.clone())
+}
+
+#[tauri::command]
+pub(crate) fn set_game_path(
+    state: State<'_, SettingsState>,
+    path: Option<String>,
+    install_info: Option<InstallInfo>,
+) -> Result<(), String> {
+    let mut guard = state.lock().map_err(|e| e.to_string())?;
+    guard.game_path = path.filter(|p| !p.is_empty());
+    guard.install_info = install_info;
+    guard.save()
+}

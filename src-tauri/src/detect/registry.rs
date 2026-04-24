@@ -1,3 +1,5 @@
+//! Windows registry helpers for reading HKLM and HKCU string values.
+
 use winreg::{
     RegKey,
     enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE},

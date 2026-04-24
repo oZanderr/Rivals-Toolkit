@@ -1,3 +1,5 @@
+//! Detects Marvel Rivals installation via Steam registry entries and library folders.
+
 use std::{fs, path::PathBuf};
 
 use super::registry::hklm_str;

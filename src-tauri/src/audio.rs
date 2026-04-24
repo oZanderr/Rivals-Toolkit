@@ -1,9 +1,4 @@
-//! Audio decode/encode pipeline for the hitsound builder.
-//!
-//! Public API is the encode/decode/validate trio plus a few WEM helpers reused
-//! by the hitsound module. Format-specific code lives in submodules:
-//! [`pcm`] for shared types and gain math, [`wav`] for RIFF parsing,
-//! [`wem`] for the Wwise container, and [`ogg`] for OGG Vorbis decoding.
+//! Audio decode/encode pipeline for the hitsound builder. Detects WAV/OGG by magic bytes and packs to Wwise WEM with optional gain.
 
 mod ogg;
 mod pcm;
@@ -99,4 +94,9 @@ pub(crate) fn validate_audio(input: &Path) -> Result<WavValidation> {
         bits_per_sample: info.bits_per_sample,
         duration,
     })
+}
+
+#[tauri::command]
+pub(crate) fn validate_wav(path: String) -> std::result::Result<WavValidation, String> {
+    validate_audio(Path::new(&path)).map_err(|e| e.to_string())
 }

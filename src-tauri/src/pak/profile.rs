@@ -1,3 +1,5 @@
+//! Marvel Rivals pak profile: AES key, compression, mount point, and version constants.
+
 use aes::cipher::KeyInit;
 
 /// AES-256 key used by Marvel Rivals pak files.

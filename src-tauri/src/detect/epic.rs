@@ -1,3 +1,5 @@
+//! Detects Marvel Rivals installation via Epic Games Store metadata.
+
 use std::{fs, path::PathBuf};
 
 use serde_json::Value;

@@ -1,3 +1,5 @@
+//! Detects asset conflicts between installed mod pak files.
+
 use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};

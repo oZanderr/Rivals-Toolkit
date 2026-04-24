@@ -1,9 +1,7 @@
+//! Shared rayon thread pool sized to half the available cores so parallel scans don't starve the Tauri runtime threads.
+
 use std::sync::LazyLock;
 
-/// Shared rayon pool sized to half the available cores so parallel work does
-/// not starve the Tauri runtime threads. Build is fatal: a missing pool means
-/// no parallel scans can run, so panic at first access rather than thread an
-/// error through every call site.
 #[allow(clippy::expect_used)]
 pub(crate) static POOL: LazyLock<rayon::ThreadPool> = LazyLock::new(|| {
     let threads = std::thread::available_parallelism()

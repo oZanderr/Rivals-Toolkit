@@ -24,6 +24,7 @@ import { Label } from "@/components/ui/label";
 import { Slider as SliderUI } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { Tip } from "@/components/ui/tooltip";
+import { emitPakChanged, onPakChanged } from "@/lib/pakEvents";
 import { cn } from "@/lib/utils";
 
 // ── Types matching Rust backend ──────────────────────────────────────
@@ -209,6 +210,20 @@ export function PakTweaks({ gamePath, scalabilityContent, isActive }: Props) {
       });
     return () => unlisten?.();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // External pak mutation: invalidate cache and reload if current pak is affected.
+  useEffect(() => {
+    return onPakChanged((e) => {
+      if (e.source === "PakTweaks") return;
+      pakCache.current.delete(e.pakPath);
+      if (selectedPak?.pak_path !== e.pakPath) return;
+      if (edits.length > 0) {
+        showNotice("Pak changed elsewhere; reload manually to discard edits", "info", 6000);
+        return;
+      }
+      forceReloadPak(selectedPak);
+    });
+  }, [selectedPak, edits.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function toggleQuickTweak(id: string) {
     const def = definitions.find((d) => d.id === id);
@@ -474,6 +489,7 @@ export function PakTweaks({ gamePath, scalabilityContent, isActive }: Props) {
         edits,
       });
       showNotice(msg, "ok");
+      emitPakChanged({ pakPath: selectedPak.pak_path, source: "PakTweaks" });
       await forceReloadPak(selectedPak);
     } catch (e: unknown) {
       if (isPakMissingError(e)) {

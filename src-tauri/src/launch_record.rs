@@ -1,3 +1,5 @@
+//! Read/write the game's `launch_record` file to control whether the launcher is skipped on game start.
+
 use std::fs;
 
 use crate::paths::launch_record_path;
@@ -8,8 +10,9 @@ const SKIP_LAUNCHER_VALUE_ALT: &str = "-1";
 
 /// Returns `true` if the launcher is set to be skipped (value `"0"`).
 /// Missing file is treated as the default: launcher enabled.
-pub(crate) fn get_skip_launcher(game_root: &str) -> Result<bool, String> {
-    let path = launch_record_path(game_root);
+#[tauri::command]
+pub(crate) fn get_skip_launcher(game_root: String) -> Result<bool, String> {
+    let path = launch_record_path(&game_root);
     match fs::read_to_string(&path) {
         Ok(content) => match content.trim() {
             SKIP_LAUNCHER_VALUE | SKIP_LAUNCHER_VALUE_ALT => Ok(true),
@@ -24,8 +27,9 @@ pub(crate) fn get_skip_launcher(game_root: &str) -> Result<bool, String> {
 }
 
 /// Writes `"0"` (skip) or `"6"` (use launcher) to the `launch_record` file.
-pub(crate) fn set_skip_launcher(game_root: &str, skip: bool) -> Result<(), String> {
-    let path = launch_record_path(game_root);
+#[tauri::command]
+pub(crate) fn set_skip_launcher(game_root: String, skip: bool) -> Result<(), String> {
+    let path = launch_record_path(&game_root);
     if let Ok(meta) = fs::metadata(&path)
         && meta.permissions().readonly()
     {

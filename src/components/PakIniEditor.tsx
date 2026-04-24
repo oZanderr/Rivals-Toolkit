@@ -22,11 +22,13 @@ import {
   Search,
   FolderOpen,
   FileText,
+  ListRestart,
   CaseSensitive,
   ChevronUp,
   ChevronDown,
   Replace,
   ReplaceAll,
+  Undo2,
   UploadCloud,
   X,
 } from "lucide-react";
@@ -41,6 +43,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Tip } from "@/components/ui/tooltip";
+import { emitPakChanged, onPakChanged } from "@/lib/pakEvents";
 import { cn } from "@/lib/utils";
 
 // ── Types matching Rust backend ─────────────────────────────────────
@@ -158,6 +161,8 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
   // ── CodeMirror ──
   const editorContainerRef = useRef<HTMLDivElement>(null);
   const editorViewRef = useRef<EditorView | null>(null);
+  // Bumped on disk reload / pak switch to force editor recreation.
+  const [pakEpoch, setPakEpoch] = useState(0);
 
   // ── Drag-and-drop ──
   const [isDragging, setIsDragging] = useState(false);
@@ -279,7 +284,22 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
     return () => unlisten?.();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // External pak mutation: reload if affecting current pak and clean.
+  useEffect(() => {
+    if (!selectedPak) return;
+    return onPakChanged((e) => {
+      if (e.source === "PakIniEditor") return;
+      if (e.pakPath !== selectedPak.pak_path) return;
+      if (isDirty) {
+        showNotice("Pak changed elsewhere; reload manually to discard edits", "info", 6000);
+        return;
+      }
+      loadPak(selectedPak);
+    });
+  }, [selectedPak, isDirty]); // eslint-disable-line react-hooks/exhaustive-deps
+
   async function loadPak(pak: PakIniInfo) {
+    const isPakSwitch = selectedPak?.pak_path !== pak.pak_path;
     setSelectedPak(pak);
     setDpContent(null);
     setEngineContent(null);
@@ -311,10 +331,17 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
       setSavedDp(normDp);
       setEngineContent(normEng);
       setSavedEngine(normEng);
+      setPakEpoch((n) => n + 1);
 
-      // Auto-select the first available file
-      if (dp !== null) setActiveFile("device_profiles");
-      else if (eng !== null) setActiveFile("engine");
+      // Preserve user's active file across disk reloads; only auto-select when current choice is unavailable or switching paks.
+      if (isPakSwitch) {
+        if (dp !== null) setActiveFile("device_profiles");
+        else if (eng !== null) setActiveFile("engine");
+      } else if (activeFile === "device_profiles" && dp === null && eng !== null) {
+        setActiveFile("engine");
+      } else if (activeFile === "engine" && eng === null && dp !== null) {
+        setActiveFile("device_profiles");
+      }
     } catch (e) {
       showNotice(String(e), "err");
       console.error(e);
@@ -327,6 +354,19 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
     if (!selectedPak) return;
     await loadPak(selectedPak);
     showNotice("Reloaded from disk", "ok");
+  }
+
+  function discard() {
+    if (!isDirty) return;
+    const view = editorViewRef.current;
+    const target = activeFile === "device_profiles" ? savedDp : savedEngine;
+    if (view && target !== null) {
+      view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: target },
+      });
+    }
+    setDpContent(savedDp);
+    setEngineContent(savedEngine);
   }
 
   async function save() {
@@ -353,9 +393,11 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
         files,
       });
       showNotice(msg, "ok");
+      emitPakChanged({ pakPath: selectedPak.pak_path, source: "PakIniEditor" });
 
-      // Reload from repacked pak to verify round-trip
-      await loadPak(selectedPak);
+      // Sync saved snapshot to current buffer; skip disk round-trip to preserve cursor and active file.
+      if (dpContent !== null) setSavedDp(dpContent);
+      if (engineContent !== null) setSavedEngine(engineContent);
     } catch (e) {
       showNotice(String(e), "err", 8000);
       console.error(e);
@@ -534,9 +576,9 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
       view.destroy();
       editorViewRef.current = null;
     };
-    // Only recreate when switching files or loading new content from disk
+    // Only recreate when switching files or loading new content from disk (pakEpoch bump)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeFile, savedDp, savedEngine]);
+  }, [activeFile, pakEpoch]);
 
   // ── Sync search config + auto-jump (single atomic dispatch) ──
   useEffect(() => {
@@ -672,7 +714,11 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
             onClick={() => scan()}
             disabled={scanning || !gamePath}
           >
-            <RefreshCw size={14} className={cn(scanning && "animate-spin")} />
+            {scanning ? (
+              <RefreshCw size={14} className="animate-spin" />
+            ) : (
+              <ListRestart size={14} />
+            )}
           </Button>
         </Tip>
       </div>
@@ -728,6 +774,11 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
             </div>
 
             <div className="flex items-center gap-1">
+              <Tip content="Reload from disk">
+                <Button variant="ghost" size="sm" onClick={reload} disabled={loading || saving}>
+                  <RefreshCw size={13} />
+                </Button>
+              </Tip>
               <Tip content="Search & Replace (Ctrl+F)">
                 <Button
                   variant="ghost"
@@ -848,7 +899,7 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
           {/* CodeMirror editor */}
           <div ref={editorContainerRef} className="flex-1 min-h-0 w-full overflow-hidden" />
 
-          {/* Save bar — inside the editor border */}
+          {/* Save bar — only visible when there are pending edits */}
           {isDirty && (
             <div className="flex items-center justify-end gap-2 border-t border-border px-3 py-1.5">
               {gameRunning ? (
@@ -870,9 +921,9 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
                       : " (Engine)"}
                 </span>
               )}
-              <Button variant="ghost" size="sm" onClick={reload} disabled={saving || gameRunning}>
-                <RefreshCw size={13} />
-                Reload
+              <Button variant="ghost" size="sm" onClick={discard} disabled={saving}>
+                <Undo2 size={13} />
+                Discard
               </Button>
               <Button
                 variant="blue"

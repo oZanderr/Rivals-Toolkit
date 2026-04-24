@@ -1,3 +1,5 @@
+//! Fetch the latest character_ids.json from GitHub so hero detection stays current with new releases.
+
 #![allow(clippy::redundant_pub_crate)]
 
 use std::io::Read;
@@ -6,8 +8,13 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use tauri::State;
+
+use crate::settings::SettingsState;
 
 use super::heroes::{RawCatalogue, catalogue_data, reload_catalogue, user_catalogue_path};
+
+const CHARACTER_SYNC_INTERVAL_SECS: u64 = 24 * 60 * 60;
 
 const REMOTE_URL: &str = "https://raw.githubusercontent.com/oZanderr/Rivals-Toolkit/main/src-tauri/data/character_ids.json";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
@@ -146,6 +153,62 @@ pub(crate) fn sync_from_remote() -> Result<SyncResult, String> {
         bytes: body.len(),
         source_url: REMOTE_URL.to_string(),
     })
+}
+
+#[tauri::command]
+pub(crate) fn get_character_data_info() -> CharacterDataInfo {
+    current_info()
+}
+
+#[tauri::command]
+pub(crate) async fn sync_character_data(
+    state: State<'_, SettingsState>,
+) -> Result<SyncResult, String> {
+    let result = tauri::async_runtime::spawn_blocking(sync_from_remote)
+        .await
+        .map_err(|e| e.to_string())??;
+
+    if let Ok(mut guard) = state.lock() {
+        guard.last_character_data_sync = result.fetched_at;
+        if let Err(e) = guard.save() {
+            eprintln!("rivals-toolkit: failed to persist updated catalogue stamp: {e}");
+        }
+    }
+
+    Ok(result)
+}
+
+#[tauri::command]
+pub(crate) fn should_auto_sync_character_data(state: State<'_, SettingsState>) -> bool {
+    let Ok(guard) = state.lock() else {
+        return false;
+    };
+    if !guard.auto_sync_character_data {
+        return false;
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    now.saturating_sub(guard.last_character_data_sync) >= CHARACTER_SYNC_INTERVAL_SECS
+}
+
+#[tauri::command]
+pub(crate) fn get_auto_sync_character_data(state: State<'_, SettingsState>) -> bool {
+    state
+        .lock()
+        .map(|s| s.auto_sync_character_data)
+        .unwrap_or(true)
+}
+
+#[tauri::command]
+pub(crate) fn set_auto_sync_character_data(
+    state: State<'_, SettingsState>,
+    enabled: bool,
+) -> Result<(), String> {
+    let mut guard = state.lock().map_err(|e| e.to_string())?;
+    guard.auto_sync_character_data = enabled;
+    guard.save()
 }
 
 #[cfg(test)]

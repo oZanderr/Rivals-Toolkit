@@ -1,3 +1,5 @@
+//! Detect which heroes/skins a mod targets by scanning pak/utoc entries against the bundled character catalogue.
+
 #![allow(clippy::redundant_pub_crate)]
 
 use std::collections::{HashMap, HashSet};
@@ -7,9 +9,12 @@ use std::sync::{Arc, Mutex, RwLock};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use tauri::{AppHandle, Manager};
+
 use crate::concurrency;
 use crate::pak;
-use crate::settings::{ModHeroCacheEntry, Settings};
+use crate::paths;
+use crate::settings::{ModHeroCacheEntry, Settings, SettingsState};
 
 use super::status::{ModEntry, ModsStatus};
 
@@ -457,7 +462,7 @@ fn prune_cache(state: &Mutex<Settings>, entries: &[ModEntry]) {
 /// Force recomputation of heroes for a single mod, bypassing the cache.
 /// Derives the total on-disk size (pak + companions) at scan time via the
 /// shared helper so the cached entry matches what status enrichment computes.
-pub(crate) fn rescan_mod_heroes(
+pub(crate) fn rescan_heroes_for_mod(
     state: &Mutex<Settings>,
     mods_folder: &Path,
     full_name: &str,
@@ -505,6 +510,27 @@ pub(crate) fn rescan_mod_heroes(
             ))
         }
     }
+}
+
+#[tauri::command]
+pub(crate) fn list_known_heroes() -> Vec<CharacterSummary> {
+    list_known_characters()
+}
+
+#[tauri::command]
+pub(crate) async fn rescan_mod_heroes(
+    app: AppHandle,
+    game_root: String,
+    full_name: String,
+    display_name: String,
+) -> Result<Vec<HeroMatch>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<SettingsState>();
+        let mods_folder = paths::mods_dir(&game_root);
+        rescan_heroes_for_mod(&state, &mods_folder, &full_name, &display_name)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[cfg(test)]

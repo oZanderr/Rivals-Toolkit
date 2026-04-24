@@ -1,3 +1,5 @@
+//! File system helpers for listing and managing the ~mods folder.
+
 use std::io;
 use std::path::Path;
 

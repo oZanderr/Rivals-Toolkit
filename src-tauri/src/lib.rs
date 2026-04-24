@@ -1,7 +1,8 @@
+//! Rivals Toolkit Tauri backend. Crate root that wires every domain's commands into the Tauri invoke handler.
+
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 
 mod audio;
-mod commands;
 mod concurrency;
 mod detect;
 mod game_status;
@@ -13,6 +14,7 @@ mod pak_tweaks;
 mod paths;
 mod scalability;
 mod settings;
+mod tweaks;
 mod update_check;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -23,80 +25,94 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage::<settings::SettingsState>(std::sync::Mutex::new(settings::Settings::load()))
         .invoke_handler(tauri::generate_handler![
-            commands::detect_install_path,
-            commands::validate_game_path,
-            commands::list_pak_files,
-            commands::list_pak_files_info,
-            commands::list_pak_contents,
-            commands::unpack_pak,
-            commands::extract_single_file,
-            commands::extract_pak_files,
-            commands::extract_utoc_files,
-            commands::repack_pak,
-            commands::repack_iostore,
-            commands::cancel_repack_iostore,
-            commands::list_utoc_contents,
-            commands::extract_utoc,
-            commands::extract_utoc_file,
-            commands::count_utoc_legacy_packages,
-            commands::extract_utoc_legacy,
-            commands::cancel_legacy_extraction,
-            commands::get_mods_status,
-            commands::list_known_heroes,
-            commands::get_character_data_info,
-            commands::sync_character_data,
-            commands::should_auto_sync_character_data,
-            commands::get_auto_sync_character_data,
-            commands::set_auto_sync_character_data,
-            commands::rescan_mod_heroes,
-            commands::check_mod_conflicts,
-            commands::list_mod_profiles,
-            commands::save_mod_profile,
-            commands::delete_mod_profile,
-            commands::rename_mod_profile,
-            commands::overwrite_mod_profile,
-            commands::preview_mod_profile,
-            commands::apply_mod_profile,
-            commands::install_signature_bypass,
-            commands::remove_signature_bypass,
-            commands::open_mods_folder,
-            commands::get_scalability_path,
-            commands::read_scalability,
-            commands::write_scalability,
-            commands::get_tweak_definitions,
-            commands::detect_tweaks,
-            commands::apply_tweaks,
-            commands::scan_mod_paks_for_ini,
-            commands::inspect_pak_path,
-            commands::detect_pak_tweaks,
-            commands::apply_pak_tweak_edits,
-            commands::clear_shader_cache,
-            commands::launch_game,
-            commands::rename_mod,
-            commands::toggle_mod_enabled,
-            commands::toggle_mods_enabled,
-            commands::export_mods_archive,
-            commands::delete_mod,
-            commands::delete_mods,
-            commands::install_mod,
-            commands::install_from_archive,
-            commands::get_skip_launcher,
-            commands::set_skip_launcher,
-            commands::extract_pak_ini,
-            commands::save_pak_ini,
-            commands::validate_wav,
-            commands::path_exists,
-            commands::build_hitsound_mod,
-            commands::extract_hitsound_wavs,
-            commands::check_for_update,
-            commands::get_game_running,
-            commands::get_auto_check_updates,
-            commands::set_auto_check_updates,
-            commands::get_recursive_mod_scan,
-            commands::set_recursive_mod_scan,
-            commands::get_game_path,
-            commands::get_saved_install_info,
-            commands::set_game_path
+            // detect
+            detect::detect_install_path,
+            detect::launch_game,
+            // paths
+            paths::validate_game_path,
+            paths::path_exists,
+            // game_status
+            game_status::get_game_running,
+            launch_record::get_skip_launcher,
+            launch_record::set_skip_launcher,
+            // settings
+            settings::get_recursive_mod_scan,
+            settings::set_recursive_mod_scan,
+            settings::get_game_path,
+            settings::get_saved_install_info,
+            settings::set_game_path,
+            // update_check
+            update_check::check_for_update,
+            update_check::get_auto_check_updates,
+            update_check::set_auto_check_updates,
+            // audio
+            audio::validate_wav,
+            // hitsounds
+            hitsounds::build_hitsound_mod,
+            hitsounds::extract_hitsound_wavs,
+            // pak
+            pak::commands::list_pak_files,
+            pak::commands::list_pak_files_info,
+            pak::commands::list_pak_contents,
+            pak::commands::unpack_pak,
+            pak::commands::extract_single_file,
+            pak::commands::extract_pak_files,
+            pak::commands::extract_utoc_files,
+            pak::commands::repack_pak,
+            pak::commands::repack_iostore,
+            pak::commands::cancel_repack_iostore,
+            pak::commands::list_utoc_contents,
+            pak::commands::extract_utoc,
+            pak::commands::extract_utoc_file,
+            pak::commands::count_utoc_legacy_packages,
+            pak::commands::extract_utoc_legacy,
+            pak::commands::cancel_legacy_extraction,
+            // pak_tweaks
+            pak_tweaks::commands::inspect_pak_path,
+            pak_tweaks::commands::scan_mod_paks_for_ini,
+            pak_tweaks::commands::detect_pak_tweaks,
+            pak_tweaks::commands::apply_pak_tweak_edits,
+            pak_tweaks::commands::extract_pak_ini,
+            pak_tweaks::commands::save_pak_ini,
+            // scalability
+            scalability::commands::get_scalability_path,
+            scalability::commands::read_scalability,
+            scalability::commands::write_scalability,
+            scalability::commands::get_tweak_definitions,
+            scalability::commands::detect_tweaks,
+            scalability::commands::apply_tweaks,
+            tweaks::shader_cache::clear_shader_cache,
+            // mods
+            mods::commands::get_mods_status,
+            mods::commands::check_mod_conflicts,
+            mods::commands::install_signature_bypass,
+            mods::commands::remove_signature_bypass,
+            mods::commands::open_mods_folder,
+            mods::commands::toggle_mod_enabled,
+            mods::commands::toggle_mods_enabled,
+            mods::commands::export_mods_archive,
+            mods::commands::rename_mod,
+            mods::commands::delete_mod,
+            mods::commands::delete_mods,
+            mods::commands::install_mod,
+            mods::commands::install_from_archive,
+            // mods/heroes
+            mods::heroes::list_known_heroes,
+            mods::heroes::rescan_mod_heroes,
+            // mods/character_sync
+            mods::character_sync::get_character_data_info,
+            mods::character_sync::sync_character_data,
+            mods::character_sync::should_auto_sync_character_data,
+            mods::character_sync::get_auto_sync_character_data,
+            mods::character_sync::set_auto_sync_character_data,
+            // mods/profiles
+            mods::profiles::list_mod_profiles,
+            mods::profiles::save_mod_profile,
+            mods::profiles::delete_mod_profile,
+            mods::profiles::rename_mod_profile,
+            mods::profiles::overwrite_mod_profile,
+            mods::profiles::preview_mod_profile,
+            mods::profiles::apply_mod_profile,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

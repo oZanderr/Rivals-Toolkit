@@ -1,3 +1,5 @@
+//! Marvel Rivals install detection across Steam, Epic Games, and Loading Bay launchers.
+
 mod epic;
 mod loading_bay;
 mod registry;
@@ -58,4 +60,14 @@ pub(crate) fn detect_game_install() -> Option<InstallInfo> {
                 )
             })
         })
+}
+
+#[tauri::command]
+pub(crate) fn detect_install_path() -> Option<InstallInfo> {
+    detect_game_install()
+}
+
+#[tauri::command]
+pub(crate) fn launch_game(install_info: InstallInfo) -> Result<(), String> {
+    install_info.launch_game()
 }

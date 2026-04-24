@@ -163,7 +163,7 @@ pub(crate) struct HitsoundInput {
     pub gain_db: f32,
 }
 
-pub(crate) fn build_hitsound_mod(
+fn build_hitsound_pak(
     game_root: &str,
     wavs: &HashMap<String, HitsoundInput>,
     output_pak: &str,
@@ -226,7 +226,7 @@ pub(crate) fn build_hitsound_mod(
     Ok(format!("Hitsound mod created with {summary} sound(s)"))
 }
 
-pub(crate) fn extract_hitsound_wavs(
+fn extract_hitsound_pak(
     game_root: &str,
     pak_path: &str,
     output_dir: &str,
@@ -307,13 +307,50 @@ pub(crate) fn extract_hitsound_wavs(
     ))
 }
 
-pub(crate) fn build_hitsound_mod_to_dir(
-    game_root: &str,
-    wavs: &HashMap<String, HitsoundInput>,
-    mod_name: &str,
-    output_dir: &str,
+#[derive(serde::Deserialize)]
+pub(crate) struct HitsoundInputDto {
+    path: String,
+    #[serde(default)]
+    gain_db: f32,
+}
+
+#[tauri::command]
+pub(crate) async fn build_hitsound_mod(
+    game_root: String,
+    wavs: HashMap<String, HitsoundInputDto>,
+    mod_name: String,
+    output_dir: String,
 ) -> Result<String, String> {
-    let output_path = Path::new(output_dir).join(format!("{mod_name}_9999999_P.pak"));
-    let result = build_hitsound_mod(game_root, wavs, &output_path.to_string_lossy())?;
-    Ok(format!("{result} -> {}", output_path.display()))
+    let inputs: HashMap<String, HitsoundInput> = wavs
+        .into_iter()
+        .map(|(k, v)| {
+            (
+                k,
+                HitsoundInput {
+                    path: v.path,
+                    gain_db: v.gain_db,
+                },
+            )
+        })
+        .collect();
+    tauri::async_runtime::spawn_blocking(move || {
+        let output_path = Path::new(&output_dir).join(format!("{mod_name}_9999999_P.pak"));
+        let result = build_hitsound_pak(&game_root, &inputs, &output_path.to_string_lossy())?;
+        Ok::<_, String>(format!("{result} -> {}", output_path.display()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub(crate) async fn extract_hitsound_wavs(
+    game_root: String,
+    pak_path: String,
+    output_dir: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        extract_hitsound_pak(&game_root, &pak_path, &output_dir)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }

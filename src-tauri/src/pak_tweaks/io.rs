@@ -1,4 +1,10 @@
-use std::{fs, io::BufReader, path::Path};
+//! Pak file I/O primitives plus the `with_unpacked_pak` crash-safe lifecycle wrapper.
+
+use std::{
+    fs,
+    io::BufReader,
+    path::{Path, PathBuf},
+};
 use walkdir::WalkDir;
 
 use crate::pak::crypto::{make_aes_key, open_pak};
@@ -117,5 +123,62 @@ pub(super) fn repack_dir_to_pak(input_dir: &Path, output_pak: &Path) -> Result<(
     }
 
     pak_writer.write_index().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+struct TempDirGuard {
+    path: PathBuf,
+}
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+/// Unpack `pak_path` into a sibling temp directory, invoke `modify` against that
+/// directory, repack into a sibling temp pak, then atomically swap it in.
+///
+/// `modify` receives the temp directory root and returns any error to abort the
+/// operation before touching the original pak. On swap failure the original is
+/// restored from the `.bak` backup.
+pub(super) fn with_unpacked_pak<F>(pak_path: &Path, modify: F) -> Result<(), String>
+where
+    F: FnOnce(&Path) -> Result<(), String>,
+{
+    if !pak_path.exists() {
+        return Err(format!("Pak file not found: {}", pak_path.display()));
+    }
+
+    let stem = pak_path
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let parent = pak_path.parent().unwrap_or_else(|| Path::new("."));
+
+    let temp_dir = parent.join(format!(".{}_temp", stem));
+    let _ = fs::remove_dir_all(&temp_dir);
+    let _guard = TempDirGuard {
+        path: temp_dir.clone(),
+    };
+
+    unpack_to_dir(pak_path, &temp_dir)?;
+    modify(&temp_dir)?;
+
+    let temp_pak = parent.join(format!(".{}_repacked.pak", stem));
+    repack_dir_to_pak(&temp_dir, &temp_pak)?;
+
+    let backup = parent.join(format!(".{}.bak", stem));
+    fs::rename(pak_path, &backup).map_err(|e| format!("Failed to back up original pak: {}", e))?;
+    if let Err(e) = fs::rename(&temp_pak, pak_path) {
+        let _ = fs::rename(&backup, pak_path);
+        return Err(format!(
+            "Failed to replace pak with repacked version: {}",
+            e
+        ));
+    }
+    let _ = fs::remove_file(&backup);
+
     Ok(())
 }

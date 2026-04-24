@@ -1,3 +1,5 @@
+//! Installs and removes the signature bypass files that allow unsigned pak mods to load.
+
 use std::fs;
 
 use crate::paths::{binaries_dir, mods_dir};

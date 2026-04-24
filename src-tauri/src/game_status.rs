@@ -1,3 +1,5 @@
+//! Detects whether the Marvel Rivals process is running to block mutating operations on locked pak files.
+
 use std::sync::{LazyLock, Mutex};
 
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
@@ -31,4 +33,9 @@ pub(crate) fn is_game_running() -> bool {
 /// Short English error for mutating ops attempted while the game is running.
 pub(crate) fn game_running_error() -> String {
     "Marvel Rivals is running! Close the game before modifying mods.".to_string()
+}
+
+#[tauri::command]
+pub(crate) fn get_game_running() -> bool {
+    is_game_running()
 }

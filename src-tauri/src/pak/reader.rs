@@ -1,3 +1,5 @@
+//! Pak file listing, inspection, and content extraction.
+
 use std::collections::HashSet;
 use std::{fs, io::BufReader, path::Path};
 

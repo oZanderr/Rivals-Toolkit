@@ -1,3 +1,5 @@
+//! Detects Marvel Rivals installation via the Loading Bay launcher.
+
 use std::path::PathBuf;
 
 use super::registry::hkcu_str;

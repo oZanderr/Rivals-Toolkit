@@ -1,3 +1,6 @@
+//! Pak and IoStore (utoc/ucas) read/write/extract/repack via forked repak/retoc/rebnk crates.
+
+pub(crate) mod commands;
 pub(crate) mod crypto;
 mod iostore;
 pub(crate) mod profile;

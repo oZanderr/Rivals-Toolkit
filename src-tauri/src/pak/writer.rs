@@ -1,3 +1,5 @@
+//! Pak file creation and repacking from directory trees.
+
 use std::{fs, io::BufWriter, path::Path};
 
 use walkdir::WalkDir;

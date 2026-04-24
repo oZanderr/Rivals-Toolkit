@@ -1,3 +1,5 @@
+//! Tweak catalogue types and the full list of supported scalability tweaks.
+
 use serde::{Deserialize, Serialize};
 
 /// One line pattern used by a `RemoveLines` tweak.

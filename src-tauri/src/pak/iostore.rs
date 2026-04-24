@@ -1,3 +1,5 @@
+//! IoStore (utoc/ucas) read, extract, and repack operations.
+
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;

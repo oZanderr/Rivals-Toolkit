@@ -1,3 +1,5 @@
+//! AES key construction and pak file opening with the Marvel Rivals encryption key.
+
 use std::{fs, io::BufReader, path::Path};
 
 use super::profile::RIVALS_PROFILE;

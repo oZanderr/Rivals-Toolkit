@@ -1,10 +1,14 @@
+//! Saved mod loadouts: snapshot the current enabled set, diff against current state, apply to disk.
+
 use std::collections::HashSet;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use tauri::State;
 
-use crate::settings::{ModProfile, Settings};
+use crate::game_status;
+use crate::settings::{ModProfile, Settings, SettingsState, recursive_mod_scan};
 
 use super::folder;
 use super::status::get_mods_status;
@@ -249,4 +253,71 @@ pub(crate) fn apply_profile(
         failed: total_failed,
         missing: diff.missing,
     })
+}
+
+#[tauri::command]
+pub(crate) fn list_mod_profiles(
+    state: State<'_, SettingsState>,
+) -> Result<Vec<ModProfile>, String> {
+    list_profiles(&state)
+}
+
+#[tauri::command]
+pub(crate) fn save_mod_profile(
+    state: State<'_, SettingsState>,
+    name: String,
+    game_root: String,
+) -> Result<ModProfile, String> {
+    let recursive = recursive_mod_scan(&state);
+    save_profile(&state, &name, &game_root, recursive)
+}
+
+#[tauri::command]
+pub(crate) fn delete_mod_profile(
+    state: State<'_, SettingsState>,
+    name: String,
+) -> Result<(), String> {
+    delete_profile(&state, &name)
+}
+
+#[tauri::command]
+pub(crate) fn rename_mod_profile(
+    state: State<'_, SettingsState>,
+    old_name: String,
+    new_name: String,
+) -> Result<(), String> {
+    rename_profile(&state, &old_name, &new_name)
+}
+
+#[tauri::command]
+pub(crate) fn overwrite_mod_profile(
+    state: State<'_, SettingsState>,
+    name: String,
+    game_root: String,
+) -> Result<ModProfile, String> {
+    let recursive = recursive_mod_scan(&state);
+    overwrite_profile(&state, &name, &game_root, recursive)
+}
+
+#[tauri::command]
+pub(crate) fn preview_mod_profile(
+    state: State<'_, SettingsState>,
+    name: String,
+    game_root: String,
+) -> Result<ProfileDiff, String> {
+    let recursive = recursive_mod_scan(&state);
+    preview_profile(&state, &name, &game_root, recursive)
+}
+
+#[tauri::command]
+pub(crate) fn apply_mod_profile(
+    state: State<'_, SettingsState>,
+    name: String,
+    game_root: String,
+) -> Result<ProfileApplyResult, String> {
+    if game_status::is_game_running() {
+        return Err(game_status::game_running_error());
+    }
+    let recursive = recursive_mod_scan(&state);
+    apply_profile(&state, &name, &game_root, recursive)
 }
