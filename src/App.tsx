@@ -14,10 +14,10 @@ import {
 
 import { AssetManager } from "./components/AssetManager";
 import { ConfigTweaks } from "./components/ConfigTweaks";
-import { Hitsounds } from "./components/Hitsounds";
 import { Mods } from "./components/Mods";
 import { PakIniEditor } from "./components/PakIniEditor";
 import { Settings } from "./components/Settings";
+import { Sounds } from "./components/Sounds";
 import { Titlebar } from "./components/Titlebar";
 import { UpdateAvailableDialog } from "./components/UpdateAvailableDialog";
 
@@ -28,7 +28,7 @@ import { useUpdateCheck, type UpdateInfo } from "@/hooks/useUpdateCheck";
 import { useWebviewDefaults } from "@/hooks/useWebviewDefaults";
 import { cn } from "@/lib/utils";
 
-type Tab = "mod-tools" | "pak-manager" | "ini-editor" | "config-tweaks" | "hitsounds" | "settings";
+type Tab = "mod-tools" | "pak-manager" | "ini-editor" | "config-tweaks" | "sounds" | "settings";
 
 interface InstallInfo {
   path: string;
@@ -38,7 +38,7 @@ interface InstallInfo {
 
 const TABS: { id: Tab; label: string; icon: ReactNode }[] = [
   { id: "mod-tools", label: "Mods", icon: <Puzzle size={15} /> },
-  { id: "hitsounds", label: "Hitsounds", icon: <Volume2 size={15} /> },
+  { id: "sounds", label: "Sounds", icon: <Volume2 size={15} /> },
   { id: "config-tweaks", label: "Config Tweaks", icon: <SlidersHorizontal size={15} /> },
   { id: "ini-editor", label: "Pak INI Editor", icon: <FileCode2 size={15} /> },
   { id: "pak-manager", label: "Asset Manager", icon: <Package size={15} /> },
@@ -292,14 +292,14 @@ function App() {
                 <ConfigTweaks gamePath={gamePath} isActive={activeTab === "config-tweaks"} />
               </div>
             )}
-            {mountedTabs.has("hitsounds") && (
+            {mountedTabs.has("sounds") && (
               <div
                 className={cn(
                   "flex flex-1 min-h-0 flex-col overflow-hidden p-5",
-                  activeTab !== "hitsounds" && "hidden"
+                  activeTab !== "sounds" && "hidden"
                 )}
               >
-                <Hitsounds gamePath={gamePath} isActive={activeTab === "hitsounds"} />
+                <Sounds gamePath={gamePath} isActive={activeTab === "sounds"} />
               </div>
             )}
             {mountedTabs.has("settings") && (

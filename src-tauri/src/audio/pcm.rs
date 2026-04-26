@@ -35,6 +35,26 @@ pub(crate) struct WavValidation {
     pub sample_rate: u32,
     pub bits_per_sample: u16,
     pub duration: f64,
+    /// Peak sample amplitude in dBFS (0 = full-scale, -inf = silent).
+    /// Used by the UI to predict post-gain clipping before building.
+    pub peak_dbfs: f32,
+}
+
+/// Scan 16-bit LE PCM and return the peak in dBFS (negative for sub-peak,
+/// `f32::NEG_INFINITY` for silent input).
+pub(crate) fn peak_dbfs_i16_le(pcm: &[u8]) -> f32 {
+    let mut peak: i32 = 0;
+    for chunk in pcm.chunks_exact(2) {
+        let s = i16::from_le_bytes([chunk[0], chunk[1]]);
+        let abs = (s as i32).unsigned_abs() as i32;
+        if abs > peak {
+            peak = abs;
+        }
+    }
+    if peak == 0 {
+        return f32::NEG_INFINITY;
+    }
+    20.0 * (peak as f32 / i16::MAX as f32).log10()
 }
 
 /// Convert a gain in decibels to a linear sample multiplier.

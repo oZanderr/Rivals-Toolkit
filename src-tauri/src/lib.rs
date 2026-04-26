@@ -6,7 +6,6 @@ mod audio;
 mod concurrency;
 mod detect;
 mod game_status;
-mod hitsounds;
 mod launch_record;
 mod mods;
 mod pak;
@@ -14,6 +13,7 @@ mod pak_tweaks;
 mod paths;
 mod scalability;
 mod settings;
+mod sounds;
 mod tweaks;
 mod update_check;
 
@@ -47,9 +47,9 @@ pub fn run() {
             update_check::set_auto_check_updates,
             // audio
             audio::validate_wav,
-            // hitsounds
-            hitsounds::build_hitsound_mod,
-            hitsounds::extract_hitsound_wavs,
+            // sounds
+            sounds::build_sound_mod,
+            sounds::extract_sound_wavs,
             // pak
             pak::commands::list_pak_files,
             pak::commands::list_pak_files_info,

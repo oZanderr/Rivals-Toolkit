@@ -59,6 +59,7 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Tip } from "@/components/ui/tooltip";
+import { normalizeFolderPath, onModsChanged } from "@/lib/modsEvents";
 import { cn } from "@/lib/utils";
 
 interface HeroMatch {
@@ -251,6 +252,15 @@ export function Mods({
     if (gamePath) refresh(true);
     refreshProfiles();
   }, [gamePath, refresh, refreshProfiles]);
+
+  useEffect(() => {
+    return onModsChanged((event) => {
+      const folder = modsStatusRef.current?.mods_folder_path;
+      if (!folder) return;
+      if (normalizeFolderPath(event.modsFolder) !== normalizeFolderPath(folder)) return;
+      refreshRef.current?.(true);
+    });
+  }, []);
 
   const loadKnownHeroes = useCallback(() => {
     invoke<CharacterSummary[]>("list_known_heroes")

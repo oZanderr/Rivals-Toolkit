@@ -628,15 +628,15 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
     }
   }
 
-  async function extractHitsoundWavs() {
+  async function extractSoundWavs() {
     if (!selectedPak) return;
     const dir = await open({ directory: true, multiple: false });
     if (!dir || typeof dir !== "string") return;
 
     setBusy(true);
-    showNotice("Extracting hitsound WAVs\u2026", "info");
+    showNotice("Extracting sound WAVs\u2026", "info");
     try {
-      const result = await invoke<string>("extract_hitsound_wavs", {
+      const result = await invoke<string>("extract_sound_wavs", {
         gameRoot: gamePath,
         pakPath: selectedPak,
         outputDir: dir,
@@ -1005,11 +1005,11 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
 
               <div className="flex shrink-0 items-center gap-1 overflow-visible py-1 -my-1 pr-1 -mr-1">
                 {hasSelectedBnk && (
-                  <Tip content="Extract hitsound WAVs from this mod's soundbank">
+                  <Tip content="Extract sound WAVs from this mod's soundbank">
                     <Button
                       variant="ghost"
                       size="icon-sm"
-                      onClick={extractHitsoundWavs}
+                      onClick={extractSoundWavs}
                       disabled={busy || !selectedPak || !gamePath}
                     >
                       <FileAudio size={15} />

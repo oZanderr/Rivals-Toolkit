@@ -1,4 +1,4 @@
-//! Audio decode/encode pipeline for the hitsound builder. Detects WAV/OGG by magic bytes and packs to Wwise WEM with optional gain.
+//! Audio decode/encode pipeline for the sound mod builder. Detects WAV/OGG by magic bytes and packs to Wwise WEM with optional gain.
 
 mod ogg;
 mod pcm;
@@ -11,7 +11,7 @@ use std::path::Path;
 pub(crate) use pcm::{ConvertError, WavValidation};
 pub(crate) use wem::{build_wem_header, wem_to_wav};
 
-use pcm::{Result, apply_gain_in_place, db_to_linear, needs_scaling};
+use pcm::{Result, apply_gain_in_place, db_to_linear, needs_scaling, peak_dbfs_i16_le};
 use wav::parse_riff;
 use wem::pcm_to_wem;
 
@@ -88,11 +88,25 @@ pub(crate) fn validate_audio(input: &Path) -> Result<WavValidation> {
         0.0
     };
 
+    // Peak scan only meaningful for the 16-bit PCM we know how to convert.
+    // For other bit depths the converter rejects the file anyway.
+    let peak_dbfs = if info.bits_per_sample == 16 {
+        let end = info.data_offset + info.data_size as usize;
+        if end <= data.len() {
+            peak_dbfs_i16_le(&data[info.data_offset..end])
+        } else {
+            f32::NEG_INFINITY
+        }
+    } else {
+        f32::NEG_INFINITY
+    };
+
     Ok(WavValidation {
         channels: info.channels,
         sample_rate: info.sample_rate,
         bits_per_sample: info.bits_per_sample,
         duration,
+        peak_dbfs,
     })
 }
 

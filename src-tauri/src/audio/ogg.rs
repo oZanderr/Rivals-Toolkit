@@ -45,7 +45,7 @@ pub(super) fn decode_ogg(data: &[u8]) -> Result<DecodedOgg, String> {
     })
 }
 
-/// Validate an OGG Vorbis buffer without fully decoding (reads headers + counts samples).
+/// Validate an OGG Vorbis buffer (reads headers, counts samples, scans peak).
 pub(super) fn validate_ogg(data: &[u8]) -> Result<WavValidation, String> {
     let mut reader = OggStreamReader::new(Cursor::new(data))
         .map_err(|e| format!("Failed to open OGG stream: {e}"))?;
@@ -54,11 +54,18 @@ pub(super) fn validate_ogg(data: &[u8]) -> Result<WavValidation, String> {
     let sample_rate = reader.ident_hdr.audio_sample_rate;
 
     let mut total_samples: u64 = 0;
+    let mut peak: i32 = 0;
     while let Some(packet) = reader
         .read_dec_packet_itl()
         .map_err(|e| format!("OGG decode error: {e}"))?
     {
         total_samples += packet.len() as u64;
+        for s in &packet {
+            let abs = (*s as i32).unsigned_abs() as i32;
+            if abs > peak {
+                peak = abs;
+            }
+        }
     }
 
     let total_frames = if channels > 0 {
@@ -71,11 +78,17 @@ pub(super) fn validate_ogg(data: &[u8]) -> Result<WavValidation, String> {
     } else {
         0.0
     };
+    let peak_dbfs = if peak == 0 {
+        f32::NEG_INFINITY
+    } else {
+        20.0 * (peak as f32 / i16::MAX as f32).log10()
+    };
 
     Ok(WavValidation {
         channels,
         sample_rate,
         bits_per_sample: 16,
         duration,
+        peak_dbfs,
     })
 }
