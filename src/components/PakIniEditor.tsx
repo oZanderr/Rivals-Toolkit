@@ -43,6 +43,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Tip } from "@/components/ui/tooltip";
+import { normalizeFolderPath, onModsChanged } from "@/lib/modsEvents";
 import { emitPakChanged, onPakChanged } from "@/lib/pakEvents";
 import { cn } from "@/lib/utils";
 
@@ -210,11 +211,33 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
         const results = await invoke<PakIniInfo[]>("scan_mod_paks_for_ini", {
           gameRoot: gamePath,
         });
-        setPaks(results);
-        if (results.length === 0) {
+        // Re-inspect manually-browsed paks not in the folder scan; drop those that no longer have INI entries.
+        const manualOnly = paks.filter((p) => !results.find((r) => r.pak_path === p.pak_path));
+        const inspectedManual = await Promise.all(
+          manualOnly.map(async (pak) => {
+            try {
+              return await invoke<PakIniInfo | null>("inspect_pak_path", {
+                pakPath: pak.pak_path,
+              });
+            } catch {
+              return null;
+            }
+          })
+        );
+        const retainedManual = inspectedManual.filter((p): p is PakIniInfo => p !== null);
+        const merged = [...results, ...retainedManual];
+        setPaks(merged);
+        if (selectedPak && !merged.find((p) => p.pak_path === selectedPak.pak_path)) {
+          setSelectedPak(null);
+          setDpContent(null);
+          setEngineContent(null);
+          setSavedDp(null);
+          setSavedEngine(null);
+        }
+        if (merged.length === 0) {
           if (!silent) showNotice("No config mods found", "info");
         } else if (!silent) {
-          showNotice(`Found ${results.length} config mod${results.length !== 1 ? "s" : ""}`, "ok");
+          showNotice(`Found ${merged.length} config mod${merged.length !== 1 ? "s" : ""}`, "ok");
         }
       } catch (e) {
         console.error("Scan failed:", e);
@@ -223,7 +246,7 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
         setScanning(false);
       }
     },
-    [gamePath]
+    [gamePath, paks, selectedPak]
   );
 
   async function browse() {
@@ -625,6 +648,18 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
       scan(true);
     }
   }, [isActive, gamePath, scan]);
+
+  // Re-scan when ~mods composition changes elsewhere; prunes deleted paks and adds new config mods.
+  const scanRef = useRef(scan);
+  scanRef.current = scan;
+  useEffect(() => {
+    return onModsChanged((event) => {
+      if (!gamePath) return;
+      const modsFolder = `${gamePath}\\MarvelGame\\Marvel\\Content\\Paks\\~mods`;
+      if (normalizeFolderPath(event.modsFolder) !== normalizeFolderPath(modsFolder)) return;
+      scanRef.current(true);
+    });
+  }, [gamePath]);
 
   // Auto-select when exactly one config mod is found
   useEffect(() => {

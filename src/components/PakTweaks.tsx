@@ -24,6 +24,7 @@ import { Label } from "@/components/ui/label";
 import { Slider as SliderUI } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { Tip } from "@/components/ui/tooltip";
+import { normalizeFolderPath, onModsChanged } from "@/lib/modsEvents";
 import { emitPakChanged, onPakChanged } from "@/lib/pakEvents";
 import { cn } from "@/lib/utils";
 
@@ -162,6 +163,16 @@ export function PakTweaks({ gamePath, scalabilityContent, isActive }: Props) {
   scanRef.current = scan;
   useEffect(() => {
     if (gamePath) scanRef.current(true);
+  }, [gamePath]);
+
+  // Re-scan when ~mods composition changes elsewhere (mod install/delete, repack, recursive toggle).
+  useEffect(() => {
+    return onModsChanged((event) => {
+      if (!gamePath) return;
+      const modsFolder = `${gamePath}\\MarvelGame\\Marvel\\Content\\Paks\\~mods`;
+      if (normalizeFolderPath(event.modsFolder) !== normalizeFolderPath(modsFolder)) return;
+      scanRef.current(true);
+    });
   }, [gamePath]);
 
   // Load tweak definitions once

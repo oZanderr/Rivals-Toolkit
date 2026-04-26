@@ -58,6 +58,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Tip } from "@/components/ui/tooltip";
+import { emitModsChanged, normalizeFolderPath, onModsChanged } from "@/lib/modsEvents";
 import { cn } from "@/lib/utils";
 
 type RepackFormat = "pak" | "iostore";
@@ -120,11 +121,22 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const filterTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const contentsScrollRef = useRef<HTMLDivElement>(null);
+  const listPaksRef = useRef<() => Promise<void>>(null!);
 
   // Load game paks on mount
   useEffect(() => {
     if (gamePath) listPaks();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Re-list paks when ~mods composition changes elsewhere (mod install/delete, repack, recursive toggle).
+  useEffect(() => {
+    return onModsChanged((event) => {
+      if (!gamePath) return;
+      const modsFolder = `${gamePath}\\MarvelGame\\Marvel\\Content\\Paks\\~mods`;
+      if (normalizeFolderPath(event.modsFolder) !== normalizeFolderPath(modsFolder)) return;
+      listPaksRef.current();
+    });
+  }, [gamePath]);
 
   // Listen for legacy extraction progress events
   useEffect(() => {
@@ -218,6 +230,8 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
     estimateSize: () => 30,
     overscan: 20,
   });
+
+  listPaksRef.current = listPaks;
 
   async function listPaks() {
     setNotice(null);
@@ -811,6 +825,10 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
         await invoke("repack_iostore", { inputDir, outputUtoc });
         setRepackProgress(null);
         showNotice(`Repacked IoStore to: ${outputUtoc}`, "ok", { revealPath: outputUtoc });
+        emitModsChanged({
+          modsFolder: outputUtoc.replace(/[\\/][^\\/]+$/, ""),
+          source: "AssetManager",
+        });
       } catch (e: unknown) {
         setRepackProgress(null);
         showNotice(String(e), "err");
@@ -830,6 +848,10 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
       try {
         await invoke("repack_pak", { inputDir, outputPak });
         showNotice(`Repacked to: ${outputPak}`, "ok", { revealPath: outputPak });
+        emitModsChanged({
+          modsFolder: outputPak.replace(/[\\/][^\\/]+$/, ""),
+          source: "AssetManager",
+        });
       } catch (e: unknown) {
         showNotice(String(e), "err");
       } finally {

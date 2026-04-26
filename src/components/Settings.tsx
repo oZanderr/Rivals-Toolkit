@@ -20,6 +20,7 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Tip } from "@/components/ui/tooltip";
 import type { UpdateInfo } from "@/hooks/useUpdateCheck";
+import { emitModsChanged } from "@/lib/modsEvents";
 import { cn } from "@/lib/utils";
 
 interface InstallInfo {
@@ -314,6 +315,12 @@ export function Settings({
         try {
           await invoke("set_recursive_mod_scan", { enabled: draftRecursive });
           setSavedRecursive(draftRecursive);
+          if (draftGamePath) {
+            emitModsChanged({
+              modsFolder: `${draftGamePath}\\MarvelGame\\Marvel\\Content\\Paks\\~mods`,
+              source: "Settings",
+            });
+          }
         } catch (e) {
           console.error(e);
         }

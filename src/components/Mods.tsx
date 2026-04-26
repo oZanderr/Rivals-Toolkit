@@ -59,7 +59,7 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Tip } from "@/components/ui/tooltip";
-import { normalizeFolderPath, onModsChanged } from "@/lib/modsEvents";
+import { emitModsChanged, normalizeFolderPath, onModsChanged } from "@/lib/modsEvents";
 import { cn } from "@/lib/utils";
 
 interface HeroMatch {
@@ -255,11 +255,17 @@ export function Mods({
 
   useEffect(() => {
     return onModsChanged((event) => {
+      if (event.source === "Mods") return;
       const folder = modsStatusRef.current?.mods_folder_path;
       if (!folder) return;
       if (normalizeFolderPath(event.modsFolder) !== normalizeFolderPath(folder)) return;
       refreshRef.current?.(true);
     });
+  }, []);
+
+  const emitChange = useCallback(() => {
+    const folder = modsStatusRef.current?.mods_folder_path;
+    if (folder) emitModsChanged({ modsFolder: folder, source: "Mods" });
   }, []);
 
   const loadKnownHeroes = useCallback(() => {
@@ -375,6 +381,7 @@ export function Mods({
             if (errors.length > 0) showNotice(errors[0], "err");
             else if (installed > 0) {
               await refreshRef.current(true);
+              emitChange();
               const n = (c: number, s: string) => `${c} ${s}${c !== 1 ? "s" : ""}`;
               const parts: string[] = [];
               if (replacedEnabled > 0) parts.push(`updated ${n(replacedEnabled, "existing mod")}`);
@@ -403,6 +410,7 @@ export function Mods({
       const msg = await invoke<string>("install_signature_bypass", { gameRoot: gamePath });
       showNotice(msg, "ok", 4000);
       await refresh(true);
+      emitChange();
     } catch (e: unknown) {
       showNotice(String(e), "err");
     }
@@ -431,6 +439,7 @@ export function Mods({
         fullName: entry.full_name,
       });
       await refresh(true);
+      emitChange();
     } catch (e: unknown) {
       showNotice(String(e), "err");
     } finally {
@@ -452,6 +461,7 @@ export function Mods({
         enabled: !entry.enabled,
       });
       await refresh(true);
+      emitChange();
     } catch (e: unknown) {
       showNotice(String(e), "err");
     } finally {
@@ -517,6 +527,7 @@ export function Mods({
         enabled,
       });
       await refresh(true);
+      emitChange();
       const verb = enabled ? "Enabled" : "Disabled";
       if (res.failures.length === 0) {
         showNotice(`${verb} ${res.successes} mod${res.successes !== 1 ? "s" : ""}`, "ok");
@@ -555,6 +566,7 @@ export function Mods({
       });
       clearSelection();
       await refresh(true);
+      emitChange();
       if (res.failures.length === 0) {
         showNotice(`Deleted ${res.successes} mod${res.successes !== 1 ? "s" : ""}`, "ok");
       } else {
@@ -588,6 +600,7 @@ export function Mods({
         enabled: false,
       });
       await refresh(true);
+      emitChange();
       if (res.failures.length === 0) {
         showNotice(`Disabled ${res.successes} other mod${res.successes !== 1 ? "s" : ""}`, "ok");
       } else {
@@ -638,6 +651,7 @@ export function Mods({
       });
       setRenamingMod(null);
       await refresh(true);
+      emitChange();
     } catch (e: unknown) {
       showNotice(String(e), "err");
     } finally {
@@ -704,6 +718,7 @@ export function Mods({
         gameRoot: gamePath,
       });
       await refresh(true);
+      emitChange();
       if (res.successes === 0 && res.failed === 0) {
         showNotice(`Profile "${name}" already active`, "ok", 3000);
       } else {
@@ -797,6 +812,57 @@ export function Mods({
   }, [modsStatus, heroFilter, searchQuery]);
   const filteredCount = filteredEntries.length;
   const filtersActive = heroFilter !== "all" || searchQuery.trim().length > 0;
+
+  async function bulkRescanHeroes() {
+    if (!gamePath || selectedEntries.length === 0) return;
+    setBulkBusy(true);
+    let ok = 0;
+    let fail = 0;
+    try {
+      for (const entry of selectedEntries) {
+        try {
+          const heroes = await invoke<HeroMatch[]>("rescan_mod_heroes", {
+            gameRoot: gamePath,
+            fullName: entry.full_name,
+            displayName: entry.display_name,
+          });
+          setModsStatus((prev) => {
+            if (!prev) return prev;
+            return {
+              ...prev,
+              mod_entries: prev.mod_entries.map((e) =>
+                e.full_name === entry.full_name ? { ...e, heroes } : e
+              ),
+            };
+          });
+          ok += 1;
+        } catch {
+          fail += 1;
+        }
+      }
+      const msg =
+        fail === 0
+          ? `Rescanned ${ok} mod${ok === 1 ? "" : "s"}`
+          : `Rescanned ${ok}, ${fail} failed`;
+      showNotice(msg, fail === 0 ? "ok" : "err", 4000);
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
+  async function bulkCopyPaths() {
+    if (!modsStatus || selectedEntries.length === 0) return;
+    const sep = modsStatus.mods_folder_path.includes("\\") ? "\\" : "/";
+    const paths = selectedEntries
+      .map((e) => `${modsStatus.mods_folder_path}${sep}${e.full_name}`)
+      .join("\n");
+    try {
+      await navigator.clipboard.writeText(paths);
+      showNotice(`Copied ${selectedEntries.length} paths`, "ok", 2000);
+    } catch (e: unknown) {
+      showNotice(String(e), "err");
+    }
+  }
 
   async function rescanHeroes(entry: ModEntry) {
     if (!gamePath) return;
@@ -1239,6 +1305,7 @@ export function Mods({
               {filteredEntries.map((entry, index) => {
                 const busy = busyMods.has(entry.full_name);
                 const isSelected = selected.has(entry.full_name);
+                const isMulti = isSelected && selected.size > 1;
                 return (
                   <ContextMenu key={entry.full_name}>
                     <ContextMenuTrigger asChild>
@@ -1394,53 +1461,83 @@ export function Mods({
                       </li>
                     </ContextMenuTrigger>
                     <ContextMenuContent>
-                      <ContextMenuItem
-                        disabled={busy || bulkBusy || gameRunning}
-                        onSelect={() => toggleMod(entry)}
-                      >
-                        {entry.enabled ? <PowerOff /> : <Power />}
-                        {entry.enabled ? "Disable" : "Enable"}
-                      </ContextMenuItem>
-                      <ContextMenuItem
-                        disabled={busy || bulkBusy || gameRunning}
-                        onSelect={() => disableAllOthers(entry)}
-                      >
-                        <PowerOff />
-                        Disable all others
-                      </ContextMenuItem>
-                      <ContextMenuSeparator />
-                      <ContextMenuItem
-                        disabled={busy || bulkBusy || gameRunning}
-                        onSelect={() => setRenamingMod(entry.full_name)}
-                      >
-                        <Pencil />
-                        Rename
-                      </ContextMenuItem>
-                      <ContextMenuItem
-                        disabled={!entry.enabled}
-                        onSelect={() => viewInAssetManager(entry)}
-                      >
-                        <PackageOpen />
-                        View in Asset Manager
-                      </ContextMenuItem>
-                      <ContextMenuItem onSelect={() => revealMod(entry)}>
-                        <FolderOpen />
-                        Show in folder
-                      </ContextMenuItem>
-                      <ContextMenuItem onSelect={() => copyPath(entry)}>
-                        <Copy />
-                        Copy path
-                      </ContextMenuItem>
-                      <ContextMenuItem onSelect={() => rescanHeroes(entry)}>
-                        <RefreshCw />
-                        Rescan heroes
-                      </ContextMenuItem>
+                      {isMulti ? (
+                        <>
+                          <ContextMenuItem
+                            disabled={bulkBusy || allEnabledInSelection || gameRunning}
+                            onSelect={() => bulkToggle(true)}
+                          >
+                            <Power />
+                            Enable {selected.size} selected
+                          </ContextMenuItem>
+                          <ContextMenuItem
+                            disabled={bulkBusy || allDisabledInSelection || gameRunning}
+                            onSelect={() => bulkToggle(false)}
+                          >
+                            <PowerOff />
+                            Disable {selected.size} selected
+                          </ContextMenuItem>
+                          <ContextMenuSeparator />
+                          <ContextMenuItem onSelect={bulkCopyPaths}>
+                            <Copy />
+                            Copy {selected.size} paths
+                          </ContextMenuItem>
+                          <ContextMenuItem disabled={bulkBusy} onSelect={bulkRescanHeroes}>
+                            <RefreshCw />
+                            Rescan heroes for {selected.size} mods
+                          </ContextMenuItem>
+                        </>
+                      ) : (
+                        <>
+                          <ContextMenuItem
+                            disabled={busy || bulkBusy || gameRunning}
+                            onSelect={() => toggleMod(entry)}
+                          >
+                            {entry.enabled ? <PowerOff /> : <Power />}
+                            {entry.enabled ? "Disable" : "Enable"}
+                          </ContextMenuItem>
+                          <ContextMenuItem
+                            disabled={busy || bulkBusy || gameRunning}
+                            onSelect={() => disableAllOthers(entry)}
+                          >
+                            <PowerOff />
+                            Disable all others
+                          </ContextMenuItem>
+                          <ContextMenuSeparator />
+                          <ContextMenuItem
+                            disabled={busy || bulkBusy || gameRunning}
+                            onSelect={() => setRenamingMod(entry.full_name)}
+                          >
+                            <Pencil />
+                            Rename
+                          </ContextMenuItem>
+                          <ContextMenuItem
+                            disabled={!entry.enabled}
+                            onSelect={() => viewInAssetManager(entry)}
+                          >
+                            <PackageOpen />
+                            View in Asset Manager
+                          </ContextMenuItem>
+                          <ContextMenuItem onSelect={() => revealMod(entry)}>
+                            <FolderOpen />
+                            Show in folder
+                          </ContextMenuItem>
+                          <ContextMenuItem onSelect={() => copyPath(entry)}>
+                            <Copy />
+                            Copy path
+                          </ContextMenuItem>
+                          <ContextMenuItem onSelect={() => rescanHeroes(entry)}>
+                            <RefreshCw />
+                            Rescan heroes
+                          </ContextMenuItem>
+                        </>
+                      )}
                       <ContextMenuSeparator />
                       <ContextMenuItem
                         destructive
                         disabled={busy || bulkBusy || gameRunning}
                         onSelect={() => {
-                          if (selected.size > 1 && selected.has(entry.full_name)) {
+                          if (isMulti) {
                             setBulkDeleteOpen(true);
                           } else {
                             setPendingDelete(entry.full_name);
@@ -1448,7 +1545,7 @@ export function Mods({
                         }}
                       >
                         <Trash2 />
-                        Delete
+                        {isMulti ? `Delete ${selected.size} selected` : "Delete"}
                       </ContextMenuItem>
                     </ContextMenuContent>
                   </ContextMenu>

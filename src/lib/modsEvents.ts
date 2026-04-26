@@ -1,4 +1,4 @@
-export type ModsEventSource = "Sounds";
+export type ModsEventSource = "Mods" | "Sounds" | "AssetManager" | "Settings";
 
 export interface ModsChangedEvent {
   modsFolder: string;
