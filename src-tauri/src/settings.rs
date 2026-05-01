@@ -9,8 +9,19 @@ use tauri::State;
 
 use crate::detect::InstallInfo;
 use crate::mods::heroes::HeroMatch;
+use crate::tweaks::TweakSetting;
 
 const FILE_NAME: &str = "settings.json";
+
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct TweakProfile {
+    pub name: String,
+    pub settings: Vec<TweakSetting>,
+    #[serde(default)]
+    pub created_at: u64,
+    #[serde(default)]
+    pub modified_at: u64,
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct ModProfile {
@@ -59,6 +70,8 @@ pub(crate) struct Settings {
     #[serde(default)]
     pub(crate) mod_profiles: Vec<ModProfile>,
     #[serde(default)]
+    pub(crate) tweak_profiles: Vec<TweakProfile>,
+    #[serde(default)]
     pub(crate) mod_hero_cache: HashMap<String, ModHeroCacheEntry>,
     #[serde(default)]
     pub(crate) mod_hero_cache_version: u32,
@@ -83,6 +96,7 @@ impl Default for Settings {
             game_path: None,
             install_info: None,
             mod_profiles: Vec::new(),
+            tweak_profiles: Vec::new(),
             mod_hero_cache: HashMap::new(),
             mod_hero_cache_version: MOD_HERO_CACHE_VERSION,
         }

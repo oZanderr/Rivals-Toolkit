@@ -81,6 +81,46 @@ pub(crate) fn find_key_value_in_section(content: &str, section: &str, key: &str)
     found
 }
 
+/// Whether any non-comment line in `content` matches the full `pattern`, ignoring
+/// section structure. Pattern can be `key=value` (full match required) or just `key`
+/// (key-only match). Handles `+CVars=` prefix on both pattern and lines.
+pub(crate) fn pattern_present_anywhere(content: &str, pattern: &str) -> bool {
+    let inner_pattern = if pattern.to_ascii_lowercase().starts_with("+cvars=") {
+        &pattern["+CVars=".len()..]
+    } else {
+        pattern
+    };
+    let (pattern_key, pattern_val): (String, Option<String>) = match inner_pattern.split_once('=') {
+        Some((k, v)) => (k.trim().to_ascii_lowercase(), Some(v.trim().to_string())),
+        None => (inner_pattern.trim().to_ascii_lowercase(), None),
+    };
+
+    for line in content.lines() {
+        let t = line.trim();
+        if t.starts_with(';') || t.is_empty() {
+            continue;
+        }
+        let inner_line = if t.to_ascii_lowercase().starts_with("+cvars=") {
+            &t["+CVars=".len()..]
+        } else {
+            t
+        };
+        let (line_key, line_val) = match inner_line.split_once('=') {
+            Some((k, v)) => (k.trim().to_ascii_lowercase(), Some(v.trim().to_string())),
+            None => (inner_line.trim().to_ascii_lowercase(), None),
+        };
+        if line_key != pattern_key {
+            continue;
+        }
+        match (&pattern_val, &line_val) {
+            (Some(pv), Some(lv)) if pv == lv => return true,
+            (None, _) => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
 /// Whether any non-comment assignment to `key_lower` exists within `[section]`.
 pub(crate) fn key_present_in_section(content: &str, section: &str, key_lower: &str) -> bool {
     let target_lower = format!("[{}]", section).to_ascii_lowercase();

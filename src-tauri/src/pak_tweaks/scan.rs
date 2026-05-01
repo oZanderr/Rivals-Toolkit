@@ -75,7 +75,7 @@ pub(crate) fn detect_pak_tweaks(pak_path: &str) -> Result<Vec<TweakState>, Strin
         .collect::<Vec<_>>()
         .join("\n");
 
-    Ok(crate::tweaks::detect_tweaks(&synthetic))
+    Ok(crate::tweaks::detect_tweaks_unscoped(&synthetic))
 }
 
 /// Extract a single file from a pak as a UTF-8 string.

@@ -29,7 +29,8 @@ pub(crate) fn apply_pak_tweaks(pak_path: &str, edits: &[PakTweakEdit]) -> Result
         Ok(())
     })?;
 
-    Ok(format!("Applied {} edit(s) to {}", edit_count, pak_name))
+    let label = if edit_count == 1 { "edit" } else { "edits" };
+    Ok(format!("Applied {edit_count} {label} to {pak_name}"))
 }
 
 /// Replace raw INI file contents in a pak and repack in place.
@@ -109,10 +110,21 @@ fn apply_device_profiles_edits(
         if !eng_edits.is_empty() {
             let eng_rel = strip_mount_prefix(eng_entry);
             let eng_file = temp_dir.join(eng_rel);
-            if let Ok(content) = fs::read_to_string(&eng_file) {
-                let modified = apply_edits_to_ini(&content, &eng_edits, IniType::Engine);
-                let _ = fs::write(&eng_file, &modified);
-            }
+            let content = fs::read_to_string(&eng_file).map_err(|e| {
+                format!(
+                    "Failed to read Engine INI for mirror edits {}: {}",
+                    eng_file.display(),
+                    e
+                )
+            })?;
+            let modified = apply_edits_to_ini(&content, &eng_edits, IniType::Engine);
+            fs::write(&eng_file, &modified).map_err(|e| {
+                format!(
+                    "Failed to write mirrored Engine INI {}: {}",
+                    eng_file.display(),
+                    e
+                )
+            })?;
         }
     }
 

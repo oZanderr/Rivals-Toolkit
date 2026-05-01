@@ -652,3 +652,282 @@ pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
         },
     ]
 }
+
+#[cfg(test)]
+mod validator_tests {
+    //! Catalogue invariants. Failing here means a malformed entry would ship —
+    //! detection or apply would silently break for that tweak in production.
+    use super::*;
+    use std::collections::HashSet;
+
+    /// Extract `(key, value)` from a pattern like `r.X=0` or `+CVars=r.X=0`.
+    /// Returns `(key, Some(value))` or `(key, None)` when the pattern omits a value.
+    fn split_pattern(pattern: &str) -> (String, Option<String>) {
+        let inner = if pattern.to_ascii_lowercase().starts_with("+cvars=") {
+            &pattern["+CVars=".len()..]
+        } else {
+            pattern
+        };
+        match inner.split_once('=') {
+            Some((k, v)) => (k.trim().to_string(), Some(v.trim().to_string())),
+            None => (inner.trim().to_string(), None),
+        }
+    }
+
+    fn assert_id_basics(def: &TweakDefinition) {
+        assert!(
+            !def.id.trim().is_empty(),
+            "tweak id must not be empty/whitespace"
+        );
+        assert!(
+            !def.label.trim().is_empty(),
+            "{}: label must not be empty",
+            def.id
+        );
+        assert!(
+            !def.category.trim().is_empty(),
+            "{}: category must not be empty",
+            def.id
+        );
+    }
+
+    #[test]
+    fn ids_are_unique() {
+        let cat = tweak_catalogue();
+        let mut seen: HashSet<&str> = HashSet::new();
+        for def in &cat {
+            assert!(
+                seen.insert(def.id.as_str()),
+                "duplicate tweak id: {}",
+                def.id
+            );
+        }
+    }
+
+    #[test]
+    fn all_have_non_empty_id_label_category() {
+        for def in &tweak_catalogue() {
+            assert_id_basics(def);
+        }
+    }
+
+    #[test]
+    fn remove_lines_invariants() {
+        for def in &tweak_catalogue() {
+            let TweakKind::RemoveLines { lines, .. } = &def.kind else {
+                continue;
+            };
+            assert!(
+                !lines.is_empty(),
+                "{}: RemoveLines.lines must not be empty",
+                def.id
+            );
+            for (i, line) in lines.iter().enumerate() {
+                let (key, _) = split_pattern(&line.pattern);
+                assert!(
+                    !key.is_empty(),
+                    "{}: line[{}] pattern has no key: {:?}",
+                    def.id,
+                    i,
+                    line.pattern
+                );
+                if let Some(rw) = &line.replace_with {
+                    let (rw_key, rw_val) = split_pattern(rw);
+                    assert!(
+                        !rw_key.is_empty(),
+                        "{}: line[{}] replace_with has no key: {:?}",
+                        def.id,
+                        i,
+                        rw
+                    );
+                    assert!(
+                        rw_val.is_some(),
+                        "{}: line[{}] replace_with must include a value: {:?}",
+                        def.id,
+                        i,
+                        rw
+                    );
+                    assert!(
+                        rw_key.eq_ignore_ascii_case(&key),
+                        "{}: line[{}] replace_with key {:?} does not match pattern key {:?}",
+                        def.id,
+                        i,
+                        rw_key,
+                        key
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn toggle_invariants() {
+        for def in &tweak_catalogue() {
+            let TweakKind::Toggle {
+                key,
+                on_value,
+                off_value,
+                ..
+            } = &def.kind
+            else {
+                continue;
+            };
+            assert!(
+                !key.trim().is_empty(),
+                "{}: Toggle.key must not be empty",
+                def.id
+            );
+            assert!(
+                !on_value.trim().is_empty(),
+                "{}: Toggle.on_value must not be empty",
+                def.id
+            );
+            if let Some(off) = off_value {
+                assert!(
+                    !off.trim().is_empty(),
+                    "{}: Toggle.off_value present but empty",
+                    def.id
+                );
+                assert_ne!(
+                    on_value, off,
+                    "{}: Toggle.on_value == off_value (no observable toggle)",
+                    def.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn slider_invariants() {
+        for def in &tweak_catalogue() {
+            let TweakKind::Slider {
+                key,
+                min,
+                max,
+                step,
+                default_value,
+                ..
+            } = &def.kind
+            else {
+                continue;
+            };
+            assert!(
+                !key.trim().is_empty(),
+                "{}: Slider.key must not be empty",
+                def.id
+            );
+            assert!(
+                min < max,
+                "{}: Slider min ({}) must be < max ({})",
+                def.id,
+                min,
+                max
+            );
+            assert!(
+                *step > 0.0,
+                "{}: Slider step ({}) must be > 0",
+                def.id,
+                step
+            );
+            assert!(
+                default_value >= min && default_value <= max,
+                "{}: Slider default ({}) outside [{}, {}]",
+                def.id,
+                default_value,
+                min,
+                max
+            );
+        }
+    }
+
+    #[test]
+    fn batch_toggle_invariants() {
+        for def in &tweak_catalogue() {
+            let TweakKind::BatchToggle { entries, .. } = &def.kind else {
+                continue;
+            };
+            assert!(
+                !entries.is_empty(),
+                "{}: BatchToggle.entries must not be empty",
+                def.id
+            );
+            // Within one BatchToggle, keys should be unique to avoid edits
+            // overwriting each other in the apply queue.
+            let mut seen: HashSet<String> = HashSet::new();
+            for (i, entry) in entries.iter().enumerate() {
+                assert!(
+                    !entry.key.trim().is_empty(),
+                    "{}: entry[{}] key must not be empty",
+                    def.id,
+                    i
+                );
+                assert!(
+                    !entry.on_value.trim().is_empty(),
+                    "{}: entry[{}] on_value must not be empty",
+                    def.id,
+                    i
+                );
+                if let Some(off) = &entry.off_value {
+                    assert_ne!(
+                        &entry.on_value, off,
+                        "{}: entry[{}] on_value == off_value",
+                        def.id, i
+                    );
+                }
+                let key_lower = entry.key.to_ascii_lowercase();
+                assert!(
+                    seen.insert(key_lower),
+                    "{}: BatchToggle has duplicate key {:?}",
+                    def.id,
+                    entry.key
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pak_only_tweaks_dont_use_scalability_section() {
+        // pak_only: true means the tweak only edits pak INI files. Putting a
+        // scalability_section on it would suggest Scalability.ini editing, which
+        // contradicts the pak_only flag.
+        for def in &tweak_catalogue() {
+            if !def.pak_only {
+                continue;
+            }
+            match &def.kind {
+                TweakKind::Toggle {
+                    scalability_section: Some(s),
+                    ..
+                }
+                | TweakKind::Slider {
+                    scalability_section: Some(s),
+                    ..
+                } => panic!(
+                    "{}: pak_only tweak should not have scalability_section ({:?})",
+                    def.id, s
+                ),
+                TweakKind::RemoveLines { lines, .. } => {
+                    for (i, line) in lines.iter().enumerate() {
+                        if let Some(s) = &line.scalability_section {
+                            panic!(
+                                "{}: pak_only tweak line[{}] has scalability_section ({:?})",
+                                def.id, i, s
+                            );
+                        }
+                    }
+                }
+                TweakKind::BatchToggle { entries, .. } => {
+                    for (i, entry) in entries.iter().enumerate() {
+                        if let Some(s) = &entry.scalability_section {
+                            panic!(
+                                "{}: pak_only tweak entry[{}] has scalability_section ({:?})",
+                                def.id, i, s
+                            );
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}

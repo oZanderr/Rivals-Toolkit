@@ -2,16 +2,21 @@ import { useEffect, useRef, useState } from "react";
 
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import {
   CheckCircle2,
   CloudDownload,
+  Download,
   FolderOpen,
+  Pencil,
   RefreshCw,
   Save,
   Search,
   ShieldOff,
+  Trash2,
   Undo2,
+  Upload,
+  X,
   XCircle,
 } from "lucide-react";
 
@@ -22,7 +27,21 @@ import { Tip } from "@/components/ui/tooltip";
 import type { UpdateInfo } from "@/hooks/useUpdateCheck";
 import { emitModsChanged } from "@/lib/modsEvents";
 import { setShowHeroIcons } from "@/lib/showHeroIcons";
+import { emitTweakProfilesChanged, onTweakProfilesChanged } from "@/lib/tweakProfileEvents";
 import { cn } from "@/lib/utils";
+
+interface TweakSetting {
+  id: string;
+  enabled: boolean;
+  value: string | null;
+}
+
+interface TweakProfile {
+  name: string;
+  settings: TweakSetting[];
+  created_at: number;
+  modified_at: number;
+}
 
 interface InstallInfo {
   path: string;
@@ -108,6 +127,15 @@ export function Settings({
     type: "ok" | "err";
   } | null>(null);
   const bypassNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const [tweakProfiles, setTweakProfiles] = useState<TweakProfile[]>([]);
+  const [profileNotice, setProfileNotice] = useState<{
+    msg: string;
+    type: "ok" | "err";
+  } | null>(null);
+  const profileNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [renamingProfile, setRenamingProfile] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
 
   const [characterDataInfo, setCharacterDataInfo] = useState<CharacterDataInfo | null>(null);
   const [syncingHeroes, setSyncingHeroes] = useState(false);
@@ -208,6 +236,117 @@ export function Settings({
       .then(setCharacterDataInfo)
       .catch(() => setCharacterDataInfo(null));
   }, []);
+
+  const refreshTweakProfiles = async () => {
+    try {
+      const list = await invoke<TweakProfile[]>("list_tweak_profiles");
+      setTweakProfiles(list);
+    } catch {
+      setTweakProfiles([]);
+    }
+  };
+
+  useEffect(() => {
+    refreshTweakProfiles();
+    return onTweakProfilesChanged(refreshTweakProfiles);
+  }, []);
+
+  function showProfileNotice(msg: string, type: "ok" | "err") {
+    if (profileNoticeTimer.current) clearTimeout(profileNoticeTimer.current);
+    setProfileNotice({ msg, type });
+    profileNoticeTimer.current = setTimeout(() => setProfileNotice(null), 6000);
+  }
+
+  async function exportTweakProfile(name: string) {
+    try {
+      const safeName = name.replace(/[<>:"/\\|?*]/g, "_").trim() || "preset";
+      const target = await saveDialog({
+        title: `Export preset "${name}"`,
+        defaultPath: `${safeName}.preset.json`,
+        filters: [{ name: "Config preset", extensions: ["preset.json", "json"] }],
+      });
+      if (!target) return;
+      await invoke("export_tweak_profile_to_file", { name, path: target });
+      showProfileNotice(`Exported "${name}"`, "ok");
+    } catch (e) {
+      showProfileNotice(String(e), "err");
+    }
+  }
+
+  async function importTweakProfile() {
+    try {
+      const picked = await open({
+        title: "Import config preset",
+        multiple: false,
+        filters: [{ name: "Config preset", extensions: ["preset.json", "json"] }],
+      });
+      if (typeof picked !== "string") return;
+
+      let nameOverride: string | undefined;
+      let originalName: string | null = null;
+      for (let attempt = 0; attempt < 100; attempt++) {
+        try {
+          const profile = await invoke<TweakProfile>("import_tweak_profile_from_file", {
+            path: picked,
+            nameOverride,
+          });
+          await refreshTweakProfiles();
+          emitTweakProfilesChanged();
+          if (originalName && profile.name !== originalName) {
+            showProfileNotice(
+              `Imported as "${profile.name}" (renamed from "${originalName}")`,
+              "ok"
+            );
+          } else {
+            showProfileNotice(`Imported "${profile.name}"`, "ok");
+          }
+          return;
+        } catch (e) {
+          const msg = String(e);
+          const match = msg.match(/Profile "(.+?)" already exists/);
+          if (!match) throw e;
+          if (originalName === null) originalName = match[1];
+          nameOverride = `${originalName} (${attempt + 2})`;
+        }
+      }
+      throw new Error("Could not find an available name for this preset");
+    } catch (e) {
+      showProfileNotice(String(e), "err");
+    }
+  }
+
+  async function deleteTweakProfile(name: string) {
+    try {
+      await invoke("delete_tweak_profile", { name });
+      await refreshTweakProfiles();
+      emitTweakProfilesChanged();
+      showProfileNotice(`Deleted "${name}"`, "ok");
+    } catch (e) {
+      showProfileNotice(String(e), "err");
+    }
+  }
+
+  async function commitRename(oldName: string) {
+    const trimmed = renameDraft.trim();
+    if (!trimmed || trimmed === oldName) {
+      setRenamingProfile(null);
+      setRenameDraft("");
+      return;
+    }
+    try {
+      const profile = await invoke<TweakProfile>("rename_tweak_profile", {
+        oldName,
+        newName: trimmed,
+      });
+      setRenamingProfile(null);
+      setRenameDraft("");
+      await refreshTweakProfiles();
+      emitTweakProfilesChanged();
+      showProfileNotice(`Renamed to "${profile.name}"`, "ok");
+    } catch (e) {
+      showProfileNotice(String(e), "err");
+    }
+  }
 
   async function syncHeroesNow() {
     if (syncingHeroes) return;
@@ -555,6 +694,137 @@ export function Settings({
                 disabled={draftAutoSyncHeroes === null}
               />
             </div>
+          </div>
+
+          {/* ── Config Presets ── */}
+          <div className="flex flex-col overflow-hidden rounded-md border border-border">
+            <div className="flex items-center gap-2 border-b border-border bg-card px-3 py-2">
+              <h3 className="shrink-0 text-sm font-semibold">Config Presets</h3>
+              {profileNotice && (
+                <Tip content={profileNotice.msg}>
+                  <span
+                    className={cn(
+                      "flex min-w-0 items-center gap-1 text-[12px] font-medium",
+                      profileNotice.type === "ok" ? "text-ok" : "text-err"
+                    )}
+                  >
+                    {profileNotice.type === "ok" ? (
+                      <CheckCircle2 size={13} strokeWidth={2.5} className="shrink-0" />
+                    ) : (
+                      <XCircle size={13} strokeWidth={2.5} className="shrink-0" />
+                    )}
+                    <span className="truncate">{profileNotice.msg}</span>
+                  </span>
+                </Tip>
+              )}
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={importTweakProfile}
+                className="ml-auto shrink-0"
+              >
+                <Upload size={13} />
+                Import
+              </Button>
+            </div>
+            {tweakProfiles.length === 0 ? (
+              <p className="px-3 py-4 text-center text-[12px] text-muted-foreground">
+                No presets yet. Save tweaks as a preset from the Pak Config or Config Tweaks tab.
+              </p>
+            ) : (
+              <ul className="divide-y divide-border/50">
+                {[...tweakProfiles]
+                  .sort((a, b) => b.modified_at - a.modified_at)
+                  .map((p) => {
+                    const isRenaming = renamingProfile === p.name;
+                    return (
+                      <li
+                        key={p.name}
+                        className="flex items-center gap-1 px-3 py-2 hover:bg-secondary/40"
+                      >
+                        {isRenaming ? (
+                          <input
+                            autoFocus
+                            value={renameDraft}
+                            onChange={(e) => setRenameDraft(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") commitRename(p.name);
+                              if (e.key === "Escape") {
+                                setRenamingProfile(null);
+                                setRenameDraft("");
+                              }
+                            }}
+                            placeholder="New preset name…"
+                            className="h-7 min-w-0 flex-1 rounded-md border border-border bg-background px-3 text-[12px] outline-none placeholder:text-muted-foreground/50 focus:border-primary"
+                          />
+                        ) : (
+                          <span className="min-w-0 flex-1 truncate text-[13px]">{p.name}</span>
+                        )}
+                        {isRenaming ? (
+                          <>
+                            <Tip content="Save (Enter)">
+                              <Button
+                                variant="blue"
+                                size="icon-sm"
+                                onClick={() => commitRename(p.name)}
+                                disabled={!renameDraft.trim() || renameDraft.trim() === p.name}
+                              >
+                                <Save size={13} />
+                              </Button>
+                            </Tip>
+                            <Tip content="Cancel (Esc)">
+                              <Button
+                                variant="ghost"
+                                size="icon-sm"
+                                onClick={() => {
+                                  setRenamingProfile(null);
+                                  setRenameDraft("");
+                                }}
+                              >
+                                <X size={13} />
+                              </Button>
+                            </Tip>
+                          </>
+                        ) : (
+                          <>
+                            <Tip content="Rename preset">
+                              <Button
+                                variant="ghost"
+                                size="icon-sm"
+                                onClick={() => {
+                                  setRenamingProfile(p.name);
+                                  setRenameDraft(p.name);
+                                }}
+                              >
+                                <Pencil size={13} />
+                              </Button>
+                            </Tip>
+                            <Tip content="Export preset to JSON file">
+                              <Button
+                                variant="ghost"
+                                size="icon-sm"
+                                onClick={() => exportTweakProfile(p.name)}
+                              >
+                                <Download size={13} />
+                              </Button>
+                            </Tip>
+                            <Tip content="Delete preset">
+                              <Button
+                                variant="ghost"
+                                size="icon-sm"
+                                className="text-destructive hover:bg-destructive/15 hover:text-destructive"
+                                onClick={() => deleteTweakProfile(p.name)}
+                              >
+                                <Trash2 size={13} />
+                              </Button>
+                            </Tip>
+                          </>
+                        )}
+                      </li>
+                    );
+                  })}
+              </ul>
+            )}
           </div>
 
           {/* ── Signature Bypass ── */}

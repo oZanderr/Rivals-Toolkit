@@ -5,6 +5,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   Package,
+  Pencil,
   RefreshCw,
   Save,
   Search,
@@ -14,6 +15,8 @@ import {
   CheckCircle2,
   XCircle,
   Info,
+  Plus,
+  Trash2,
   TriangleAlert,
   Undo2,
 } from "lucide-react";
@@ -21,11 +24,19 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Slider as SliderUI } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { Tip } from "@/components/ui/tooltip";
 import { normalizeFolderPath, onModsChanged } from "@/lib/modsEvents";
 import { emitPakChanged, onPakChanged } from "@/lib/pakEvents";
+import { emitTweakProfilesChanged, onTweakProfilesChanged } from "@/lib/tweakProfileEvents";
 import { cn } from "@/lib/utils";
 
 // ── Types matching Rust backend ──────────────────────────────────────
@@ -43,6 +54,19 @@ interface PakTweakEdit {
   key: string;
   value: string | null;
   engine_section?: string;
+}
+
+interface TweakSetting {
+  id: string;
+  enabled: boolean;
+  value: string | null;
+}
+
+interface TweakPreset {
+  name: string;
+  settings: TweakSetting[];
+  created_at: number;
+  modified_at: number;
 }
 
 // Matches scalability::TweakState on the Rust side
@@ -137,6 +161,12 @@ export function PakTweaks({ gamePath, scalabilityContent, isActive }: Props) {
   const scanRef = useRef(scan);
   // Tweak definitions (for rendering controls)
   const [definitions, setDefinitions] = useState<TweakDefinition[]>([]);
+  const [presets, setPresets] = useState<TweakPreset[]>([]);
+  const [selectedPreset, setSelectedPreset] = useState<string>("");
+  const [appliedPresetAt, setAppliedPresetAt] = useState<number | null>(null);
+  const [savingAs, setSavingAs] = useState(false);
+  const [renamingAs, setRenamingAs] = useState(false);
+  const [newPresetName, setNewPresetName] = useState("");
 
   const isPakMissingError = (err: unknown): boolean => {
     const text = String(err).toLowerCase();
@@ -300,6 +330,230 @@ export function PakTweaks({ gamePath, scalabilityContent, isActive }: Props) {
         }
         break;
       }
+    }
+  }
+
+  const refreshPresets = async () => {
+    try {
+      const list = await invoke<TweakPreset[]>("list_tweak_profiles");
+      setPresets(list);
+      setSelectedPreset((prev) => (list.some((p) => p.name === prev) ? prev : ""));
+    } catch {
+      setPresets([]);
+      setSelectedPreset("");
+      setAppliedPresetAt(null);
+    }
+  };
+
+  useEffect(() => {
+    refreshPresets();
+    return onTweakProfilesChanged(refreshPresets);
+  }, []);
+
+  // Clear stale selection when current preset disappears from list
+  useEffect(() => {
+    if (selectedPreset && !presets.some((p) => p.name === selectedPreset)) {
+      setSelectedPreset("");
+      setAppliedPresetAt(null);
+    }
+  }, [presets, selectedPreset]);
+
+  function buildCurrentSettings(): TweakSetting[] {
+    return definitions.map((def) => {
+      const state = tweakStates.find((s) => s.id === def.id);
+      return {
+        id: def.id,
+        enabled: state?.active ?? false,
+        value: state?.current_value ?? null,
+      };
+    });
+  }
+
+  function applyPresetToCurrentPak(preset: TweakPreset) {
+    if (!selectedPak) {
+      setAppliedPresetAt(null);
+      return;
+    }
+
+    // Build a map for fast lookup
+    const presetMap = new Map(preset.settings.map((s) => [s.id, s]));
+
+    // Optimistic state update for UI: only override tweaks present in preset.
+    // Leave others at their current state (disk-loaded or user-modified).
+    const newStates: TweakState[] = tweakStates.map((s) => {
+      const target = presetMap.get(s.id);
+      if (!target) return s;
+      return {
+        id: s.id,
+        active: target.enabled,
+        current_value: target.value,
+      };
+    });
+    setTweakStates(newStates);
+
+    // Build edit list by diffing preset entries against savedTweakStates.
+    // Tweaks not in preset are left untouched (no edit queued for them).
+    const newEdits: PakTweakEdit[] = [...edits];
+    const upsertEdit = (
+      key: string,
+      value: string | null,
+      originalValue: string | null | undefined,
+      engineSection?: string
+    ) => {
+      const idx = newEdits.findIndex((e) => e.key.toLowerCase() === key.toLowerCase());
+      if (originalValue !== undefined && value === originalValue) {
+        if (idx >= 0) newEdits.splice(idx, 1);
+        return;
+      }
+      if (idx >= 0) newEdits[idx] = { key, value, engine_section: engineSection };
+      else newEdits.push({ key, value, engine_section: engineSection });
+    };
+
+    for (const def of definitions) {
+      const target = presetMap.get(def.id);
+      if (!target) continue; // Skip tweaks not in preset
+      const newEnabled = target.enabled;
+      const savedState = savedTweakStates.find((s) => s.id === def.id);
+      const isSavedActive = savedState?.active ?? false;
+
+      switch (def.kind) {
+        case "RemoveLines": {
+          for (const line of def.lines) {
+            const eqIdx = line.pattern.indexOf("=");
+            const key = eqIdx >= 0 ? line.pattern.substring(0, eqIdx) : line.pattern;
+            const patternVal = eqIdx >= 0 ? line.pattern.substring(eqIdx + 1) : "0";
+            let replaceVal: string | null = null;
+            if (line.replace_with != null) {
+              const rwEqIdx = line.replace_with.indexOf("=");
+              replaceVal =
+                rwEqIdx >= 0 ? line.replace_with.substring(rwEqIdx + 1) : line.replace_with;
+            }
+            const originalVal = isSavedActive ? replaceVal : patternVal;
+            const newVal = newEnabled ? replaceVal : patternVal;
+            upsertEdit(key, newVal, originalVal, line.engine_section ?? undefined);
+          }
+          break;
+        }
+        case "Toggle": {
+          const originalVal = isSavedActive ? def.on_value : (def.off_value ?? null);
+          upsertEdit(
+            def.key,
+            newEnabled ? def.on_value : (def.off_value ?? null),
+            originalVal,
+            def.engine_section
+          );
+          break;
+        }
+        case "Slider": {
+          const targetVal = target.value ?? String(def.default_value);
+          const offVal = def.write_default_on_disable ? String(def.default_value) : null;
+          const originalVal = isSavedActive
+            ? (savedState?.current_value ?? String(def.default_value))
+            : offVal;
+          upsertEdit(def.key, newEnabled ? targetVal : offVal, originalVal, def.engine_section);
+          break;
+        }
+        case "BatchToggle": {
+          for (const entry of def.entries) {
+            const originalVal = isSavedActive ? entry.on_value : (entry.off_value ?? null);
+            upsertEdit(
+              entry.key,
+              newEnabled ? entry.on_value : (entry.off_value ?? null),
+              originalVal,
+              entry.engine_section
+            );
+          }
+          break;
+        }
+      }
+    }
+
+    setEdits(newEdits);
+    setAppliedPresetAt(preset.modified_at);
+  }
+
+  async function saveCurrentAsPreset() {
+    const trimmed = newPresetName.trim();
+    if (!trimmed) return;
+    try {
+      const profile = await invoke<TweakPreset>("save_tweak_profile", {
+        name: trimmed,
+        settings: buildCurrentSettings(),
+      });
+      setNewPresetName("");
+      setSavingAs(false);
+      setPresets((prev) => [...prev.filter((p) => p.name !== profile.name), profile]);
+      setSelectedPreset(profile.name);
+      setAppliedPresetAt(profile.modified_at);
+      emitTweakProfilesChanged();
+      showNotice(`Saved preset "${profile.name}"`, "ok");
+    } catch (e) {
+      showNotice(String(e), "err");
+    }
+  }
+
+  async function overwriteSelectedPreset() {
+    if (!selectedPreset) return;
+    try {
+      const profile = await invoke<TweakPreset>("overwrite_tweak_profile", {
+        name: selectedPreset,
+        settings: buildCurrentSettings(),
+      });
+      setPresets((prev) => prev.map((p) => (p.name === profile.name ? profile : p)));
+      setAppliedPresetAt(profile.modified_at);
+      emitTweakProfilesChanged();
+      showNotice(`Updated preset "${profile.name}"`, "ok");
+    } catch (e) {
+      showNotice(String(e), "err");
+    }
+  }
+
+  // Auto-reapply when the selected preset is modified on another tab.
+  useEffect(() => {
+    if (!selectedPreset || appliedPresetAt == null || !selectedPak) return;
+    const preset = presets.find((p) => p.name === selectedPreset);
+    if (!preset || preset.modified_at <= appliedPresetAt) return;
+    applyPresetToCurrentPak(preset);
+    showNotice(`Preset "${preset.name}" was updated, reapplied`, "info", 5000);
+  }, [presets, selectedPreset, appliedPresetAt, selectedPak]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function deleteSelectedPreset() {
+    if (!selectedPreset) return;
+    const name = selectedPreset;
+    try {
+      await invoke("delete_tweak_profile", { name });
+      setSelectedPreset("");
+      setAppliedPresetAt(null);
+      setPresets((prev) => prev.filter((p) => p.name !== name));
+      emitTweakProfilesChanged();
+      showNotice(`Deleted preset "${name}"`, "ok");
+    } catch (e) {
+      showNotice(String(e), "err");
+    }
+  }
+
+  async function renameSelectedPreset() {
+    if (!selectedPreset) return;
+    const oldName = selectedPreset;
+    const trimmed = newPresetName.trim();
+    if (!trimmed || trimmed === oldName) {
+      setRenamingAs(false);
+      setNewPresetName("");
+      return;
+    }
+    try {
+      const profile = await invoke<TweakPreset>("rename_tweak_profile", {
+        oldName,
+        newName: trimmed,
+      });
+      setRenamingAs(false);
+      setNewPresetName("");
+      setPresets((prev) => prev.map((p) => (p.name === oldName ? profile : p)));
+      setSelectedPreset(profile.name);
+      emitTweakProfilesChanged();
+      showNotice(`Renamed preset to "${profile.name}"`, "ok");
+    } catch (e) {
+      showNotice(String(e), "err");
     }
   }
 
@@ -640,7 +894,7 @@ export function PakTweaks({ gamePath, scalabilityContent, isActive }: Props) {
                   <li
                     key={pak.pak_path}
                     className={cn(
-                      "flex min-w-0 items-center transition-colors hover:bg-secondary/50",
+                      "flex h-9 min-w-0 items-center transition-colors hover:bg-secondary/50",
                       selectedPak?.pak_path === pak.pak_path && "bg-secondary"
                     )}
                   >
@@ -682,6 +936,130 @@ export function PakTweaks({ gamePath, scalabilityContent, isActive }: Props) {
             )}
           </div>
 
+          {/* Preset bar */}
+          {selectedPak && tweakStates.length > 0 && (
+            <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-card/40 px-3 py-2">
+              <div className="w-56 shrink-0">
+                {savingAs || renamingAs ? (
+                  <input
+                    autoFocus
+                    value={newPresetName}
+                    onChange={(e) => setNewPresetName(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        if (renamingAs) renameSelectedPreset();
+                        else saveCurrentAsPreset();
+                      }
+                      if (e.key === "Escape") {
+                        setSavingAs(false);
+                        setRenamingAs(false);
+                        setNewPresetName("");
+                      }
+                    }}
+                    placeholder={renamingAs ? "New preset name…" : "Preset name…"}
+                    className="h-7 w-full rounded-md border border-border bg-background px-3 text-[12px] outline-none placeholder:text-muted-foreground/50 focus:border-primary"
+                  />
+                ) : (
+                  <Select
+                    value={selectedPreset}
+                    onValueChange={(name) => {
+                      setSelectedPreset(name);
+                      const p = presets.find((x) => x.name === name);
+                      if (p) applyPresetToCurrentPak(p);
+                    }}
+                    disabled={presets.length === 0}
+                  >
+                    <SelectTrigger
+                      size="sm"
+                      className="w-full text-left text-[12px] [&>span]:text-left"
+                    >
+                      <SelectValue
+                        placeholder={presets.length === 0 ? "No saved presets" : "Choose preset…"}
+                      />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {presets.map((p) => (
+                        <SelectItem key={p.name} value={p.name}>
+                          {p.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                )}
+              </div>
+              {savingAs || renamingAs ? (
+                <>
+                  <Tip content="Save (Enter)">
+                    <Button
+                      variant="blue"
+                      size="icon-sm"
+                      onClick={renamingAs ? renameSelectedPreset : saveCurrentAsPreset}
+                      disabled={
+                        !newPresetName.trim() ||
+                        (renamingAs && newPresetName.trim() === selectedPreset)
+                      }
+                    >
+                      <Save size={13} />
+                    </Button>
+                  </Tip>
+                  <Tip content="Cancel (Esc)">
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      onClick={() => {
+                        setSavingAs(false);
+                        setRenamingAs(false);
+                        setNewPresetName("");
+                      }}
+                    >
+                      <X size={13} />
+                    </Button>
+                  </Tip>
+                </>
+              ) : (
+                <>
+                  {selectedPreset && (
+                    <>
+                      <Tip content="Save current tweaks into this preset">
+                        <Button variant="ghost" size="icon-sm" onClick={overwriteSelectedPreset}>
+                          <Save size={13} />
+                        </Button>
+                      </Tip>
+                      <Tip content="Rename this preset">
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          onClick={() => {
+                            setNewPresetName(selectedPreset);
+                            setRenamingAs(true);
+                          }}
+                        >
+                          <Pencil size={13} />
+                        </Button>
+                      </Tip>
+                      <Tip content="Delete this preset">
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          className="text-destructive hover:bg-destructive/15 hover:text-destructive"
+                          onClick={deleteSelectedPreset}
+                        >
+                          <Trash2 size={13} />
+                        </Button>
+                      </Tip>
+                      <span className="mx-1 h-4 w-px bg-border/60" />
+                    </>
+                  )}
+                  <Tip content="Save current tweaks as new preset">
+                    <Button variant="ghost" size="icon-sm" onClick={() => setSavingAs(true)}>
+                      <Plus size={13} />
+                    </Button>
+                  </Tip>
+                </>
+              )}
+            </div>
+          )}
+
           {/* Selected pak editor — tweak cards */}
           {selectedPak &&
             tweakStates.length > 0 &&
@@ -707,7 +1085,9 @@ export function PakTweaks({ gamePath, scalabilityContent, isActive }: Props) {
                             (tweak.kind === "Toggle" && !!tweak.engine_section) ||
                             (tweak.kind === "Slider" && !!tweak.engine_section) ||
                             (tweak.kind === "BatchToggle" &&
-                              tweak.entries.some((entry) => !!entry.engine_section));
+                              tweak.entries.some((entry) => !!entry.engine_section)) ||
+                            (tweak.kind === "RemoveLines" &&
+                              tweak.lines.some((line) => !!line.engine_section));
                           const isEnabled =
                             tweakStates.find((s) => s.id === tweak.id)?.active ?? false;
                           const removeOnly = tweak.kind === "RemoveLines" && tweak.remove_only;
@@ -775,7 +1155,12 @@ export function PakTweaks({ gamePath, scalabilityContent, isActive }: Props) {
             <Button
               variant="outline"
               size="sm"
-              onClick={() => selectedPak && forceReloadPak(selectedPak)}
+              onClick={() => {
+                if (!selectedPak) return;
+                setSelectedPreset("");
+                setAppliedPresetAt(null);
+                forceReloadPak(selectedPak);
+              }}
               disabled={loading}
             >
               <Undo2 size={14} />

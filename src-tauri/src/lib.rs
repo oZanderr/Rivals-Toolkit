@@ -84,6 +84,16 @@ pub fn run() {
             scalability::commands::detect_tweaks,
             scalability::commands::apply_tweaks,
             tweaks::shader_cache::clear_shader_cache,
+            // tweaks/profiles
+            tweaks::profiles::list_tweak_profiles,
+            tweaks::profiles::save_tweak_profile,
+            tweaks::profiles::overwrite_tweak_profile,
+            tweaks::profiles::delete_tweak_profile,
+            tweaks::profiles::rename_tweak_profile,
+            tweaks::profiles::export_tweak_profile,
+            tweaks::profiles::export_tweak_profile_to_file,
+            tweaks::profiles::import_tweak_profile,
+            tweaks::profiles::import_tweak_profile_from_file,
             // mods
             mods::commands::get_mods_status,
             mods::commands::check_mod_conflicts,

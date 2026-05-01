@@ -7,19 +7,31 @@ import {
   CheckCircle2,
   XCircle,
   FolderOpen,
+  Pencil,
+  Plus,
   RefreshCw,
   Search,
   Info,
+  Trash2,
   Undo2,
+  X,
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { Tip } from "@/components/ui/tooltip";
+import { emitTweakProfilesChanged, onTweakProfilesChanged } from "@/lib/tweakProfileEvents";
 import { cn } from "@/lib/utils";
 
 // ── Types matching Rust backend (serde tag="kind" + flatten) ─────────
@@ -74,6 +86,13 @@ interface TweakSetting {
   value: string | null;
 }
 
+interface TweakPreset {
+  name: string;
+  settings: TweakSetting[];
+  created_at: number;
+  modified_at: number;
+}
+
 type StatusType = "ok" | "err" | "info";
 
 interface Props {
@@ -113,6 +132,12 @@ export function ScalabilityTweaks({
   const [savedValues, setSavedValues] = useState<Record<string, string>>({});
   const [status, setStatus] = useState<{ msg: string; type: StatusType } | null>(null);
   const statusTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [presets, setPresets] = useState<TweakPreset[]>([]);
+  const [selectedPreset, setSelectedPreset] = useState<string>("");
+  const [appliedPresetAt, setAppliedPresetAt] = useState<number | null>(null);
+  const [savingAs, setSavingAs] = useState(false);
+  const [renamingAs, setRenamingAs] = useState(false);
+  const [newPresetName, setNewPresetName] = useState("");
 
   const showStatus = (msg: string, type: StatusType = "info") => {
     if (statusTimer.current) clearTimeout(statusTimer.current);
@@ -157,6 +182,150 @@ export function ScalabilityTweaks({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional: only fires on reload signal, not on every content change
   }, [reloadSignal]);
 
+  const refreshPresets = useCallback(async () => {
+    try {
+      const list = await invoke<TweakPreset[]>("list_tweak_profiles");
+      setPresets(list);
+      setSelectedPreset((prev) => (list.some((p) => p.name === prev) ? prev : ""));
+    } catch {
+      setPresets([]);
+      setSelectedPreset("");
+      setAppliedPresetAt(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshPresets();
+    return onTweakProfilesChanged(refreshPresets);
+  }, [refreshPresets]);
+
+  // Clear stale selection when current preset disappears from list
+  useEffect(() => {
+    if (selectedPreset && !presets.some((p) => p.name === selectedPreset)) {
+      setSelectedPreset("");
+      setAppliedPresetAt(null);
+    }
+  }, [presets, selectedPreset]);
+
+  function buildCurrentScalabilitySettings(): TweakSetting[] {
+    return definitions
+      .filter((d) => !d.pak_only)
+      .map((def) => ({
+        id: def.id,
+        enabled: enabled[def.id] ?? false,
+        value:
+          def.kind === "Slider"
+            ? String(values[def.id] != null ? values[def.id] : def.default_value)
+            : (values[def.id] ?? null),
+      }));
+  }
+
+  function applyPresetToDraft(preset: TweakPreset) {
+    const scalabilityIds = new Set(definitions.filter((d) => !d.pak_only).map((d) => d.id));
+    const newEnabled = { ...enabled };
+    const newValues = { ...values };
+    for (const s of preset.settings) {
+      if (!scalabilityIds.has(s.id)) continue;
+      newEnabled[s.id] = s.enabled;
+      if (s.value != null) newValues[s.id] = s.value;
+    }
+    setEnabled(newEnabled);
+    setValues(newValues);
+    setSelectedPreset(preset.name);
+    setAppliedPresetAt(preset.modified_at);
+  }
+
+  async function saveCurrentAsPreset() {
+    const trimmed = newPresetName.trim();
+    if (!trimmed) return;
+    try {
+      const profile = await invoke<TweakPreset>("save_tweak_profile", {
+        name: trimmed,
+        settings: buildCurrentScalabilitySettings(),
+      });
+      setNewPresetName("");
+      setSavingAs(false);
+      setPresets((prev) => [...prev.filter((p) => p.name !== profile.name), profile]);
+      setSelectedPreset(profile.name);
+      setAppliedPresetAt(profile.modified_at);
+      emitTweakProfilesChanged();
+      showStatus(`Saved preset "${profile.name}"`, "ok");
+    } catch (e) {
+      showStatus(String(e), "err");
+    }
+  }
+
+  async function overwriteSelectedPreset() {
+    if (!selectedPreset) return;
+    const existing = presets.find((p) => p.name === selectedPreset);
+    if (!existing) return;
+    // Preserve pak-only entries from the existing preset, replace scalability entries.
+    const scalabilityIds = new Set(definitions.filter((d) => !d.pak_only).map((d) => d.id));
+    const preserved = existing.settings.filter((s) => !scalabilityIds.has(s.id));
+    const merged = [...preserved, ...buildCurrentScalabilitySettings()];
+    try {
+      const profile = await invoke<TweakPreset>("overwrite_tweak_profile", {
+        name: selectedPreset,
+        settings: merged,
+      });
+      setPresets((prev) => prev.map((p) => (p.name === profile.name ? profile : p)));
+      setAppliedPresetAt(profile.modified_at);
+      emitTweakProfilesChanged();
+      showStatus(`Updated preset "${profile.name}"`, "ok");
+    } catch (e) {
+      showStatus(String(e), "err");
+    }
+  }
+
+  // Auto-reapply when the selected preset is modified on another tab.
+  useEffect(() => {
+    if (!selectedPreset || appliedPresetAt == null) return;
+    const preset = presets.find((p) => p.name === selectedPreset);
+    if (!preset || preset.modified_at <= appliedPresetAt) return;
+    applyPresetToDraft(preset);
+    showStatus(`Preset "${preset.name}" was updated, reapplied`, "info");
+  }, [presets, selectedPreset, appliedPresetAt]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function deleteSelectedPreset() {
+    if (!selectedPreset) return;
+    const name = selectedPreset;
+    try {
+      await invoke("delete_tweak_profile", { name });
+      setSelectedPreset("");
+      setAppliedPresetAt(null);
+      setPresets((prev) => prev.filter((p) => p.name !== name));
+      emitTweakProfilesChanged();
+      showStatus(`Deleted preset "${name}"`, "ok");
+    } catch (e) {
+      showStatus(String(e), "err");
+    }
+  }
+
+  async function renameSelectedPreset() {
+    if (!selectedPreset) return;
+    const oldName = selectedPreset;
+    const trimmed = newPresetName.trim();
+    if (!trimmed || trimmed === oldName) {
+      setRenamingAs(false);
+      setNewPresetName("");
+      return;
+    }
+    try {
+      const profile = await invoke<TweakPreset>("rename_tweak_profile", {
+        oldName,
+        newName: trimmed,
+      });
+      setRenamingAs(false);
+      setNewPresetName("");
+      setPresets((prev) => prev.map((p) => (p.name === oldName ? profile : p)));
+      setSelectedPreset(profile.name);
+      emitTweakProfilesChanged();
+      showStatus(`Renamed preset to "${profile.name}"`, "ok");
+    } catch (e) {
+      showStatus(String(e), "err");
+    }
+  }
+
   function toggleEnabled(id: string) {
     setEnabled((prev) => ({ ...prev, [id]: !prev[id] }));
   }
@@ -177,10 +346,13 @@ export function ScalabilityTweaks({
               ? String(values[def.id] != null ? values[def.id] : def.default_value)
               : (values[def.id] ?? null),
         }));
+      const changeCount = pendingChanges.length;
       const modified = await invoke<string>("apply_tweaks", { content, settings });
       setContent(modified);
       await invoke("write_scalability", { path: filePath, content: modified });
-      showStatus("Settings applied and saved.", "ok");
+      const fileName = filePath.split(/[\\/]/).pop() || "Scalability.ini";
+      const label = changeCount === 1 ? "change" : "changes";
+      showStatus(`Applied ${changeCount} ${label} to ${fileName}`, "ok");
       onSaved(modified);
     } catch (e: unknown) {
       showStatus(String(e), "err");
@@ -255,9 +427,9 @@ export function ScalabilityTweaks({
           {/* Config file location */}
           <div className="flex flex-col overflow-hidden rounded-md border border-border">
             <div className="flex items-center justify-between border-b border-border bg-card px-3 py-2">
-              <div className="flex items-center gap-2">
-                <span className="text-sm font-semibold">Config File</span>
-                {detectBadge && (
+              <div className="flex min-w-0 flex-1 items-center gap-2">
+                <span className="shrink-0 text-sm font-semibold">Config File</span>
+                {detectBadge && !status && (
                   <span
                     className={cn(
                       "flex items-center gap-1 text-[12px] font-medium",
@@ -267,6 +439,28 @@ export function ScalabilityTweaks({
                     <CheckCircle2 size={13} strokeWidth={2.5} />
                     {detectBadge}
                   </span>
+                )}
+                {status && (
+                  <Tip content={status.msg}>
+                    <span
+                      className={cn(
+                        "flex min-w-0 items-center gap-1 text-[12px] font-medium",
+                        status.type === "ok"
+                          ? "text-ok"
+                          : status.type === "err"
+                            ? "text-err"
+                            : "text-muted-foreground"
+                      )}
+                    >
+                      {status.type === "ok" && (
+                        <CheckCircle2 size={13} strokeWidth={2.5} className="shrink-0" />
+                      )}
+                      {status.type === "err" && (
+                        <XCircle size={13} strokeWidth={2.5} className="shrink-0" />
+                      )}
+                      <span className="truncate">{status.msg}</span>
+                    </span>
+                  </Tip>
                 )}
               </div>
               <Button
@@ -318,6 +512,127 @@ export function ScalabilityTweaks({
             </div>
           )}
 
+          {/* Preset bar */}
+          <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-card/40 px-3 py-2">
+            <div className="w-56 shrink-0">
+              {savingAs || renamingAs ? (
+                <input
+                  autoFocus
+                  value={newPresetName}
+                  onChange={(e) => setNewPresetName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      if (renamingAs) renameSelectedPreset();
+                      else saveCurrentAsPreset();
+                    }
+                    if (e.key === "Escape") {
+                      setSavingAs(false);
+                      setRenamingAs(false);
+                      setNewPresetName("");
+                    }
+                  }}
+                  placeholder={renamingAs ? "New preset name…" : "Preset name…"}
+                  className="h-7 w-full rounded-md border border-border bg-background px-3 text-[12px] outline-none placeholder:text-muted-foreground/50 focus:border-primary"
+                />
+              ) : (
+                <Select
+                  value={selectedPreset}
+                  onValueChange={(name) => {
+                    const p = presets.find((x) => x.name === name);
+                    if (p) applyPresetToDraft(p);
+                  }}
+                  disabled={presets.length === 0}
+                >
+                  <SelectTrigger
+                    size="sm"
+                    className="w-full text-left text-[12px] [&>span]:text-left"
+                  >
+                    <SelectValue
+                      placeholder={presets.length === 0 ? "No saved presets" : "Choose preset…"}
+                    />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {presets.map((p) => (
+                      <SelectItem key={p.name} value={p.name}>
+                        {p.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
+            </div>
+            {savingAs || renamingAs ? (
+              <>
+                <Tip content="Save (Enter)">
+                  <Button
+                    variant="blue"
+                    size="icon-sm"
+                    onClick={renamingAs ? renameSelectedPreset : saveCurrentAsPreset}
+                    disabled={
+                      !newPresetName.trim() ||
+                      (renamingAs && newPresetName.trim() === selectedPreset)
+                    }
+                  >
+                    <Save size={13} />
+                  </Button>
+                </Tip>
+                <Tip content="Cancel (Esc)">
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    onClick={() => {
+                      setSavingAs(false);
+                      setRenamingAs(false);
+                      setNewPresetName("");
+                    }}
+                  >
+                    <X size={13} />
+                  </Button>
+                </Tip>
+              </>
+            ) : (
+              <>
+                {selectedPreset && (
+                  <>
+                    <Tip content="Save current tweaks into this preset (preserves pak-only entries)">
+                      <Button variant="ghost" size="icon-sm" onClick={overwriteSelectedPreset}>
+                        <Save size={13} />
+                      </Button>
+                    </Tip>
+                    <Tip content="Rename this preset">
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        onClick={() => {
+                          setNewPresetName(selectedPreset);
+                          setRenamingAs(true);
+                        }}
+                      >
+                        <Pencil size={13} />
+                      </Button>
+                    </Tip>
+                    <Tip content="Delete this preset">
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        className="text-destructive hover:bg-destructive/15 hover:text-destructive"
+                        onClick={deleteSelectedPreset}
+                      >
+                        <Trash2 size={13} />
+                      </Button>
+                    </Tip>
+                    <span className="mx-1 h-4 w-px bg-border/60" />
+                  </>
+                )}
+                <Tip content="Save current tweaks as new preset">
+                  <Button variant="ghost" size="icon-sm" onClick={() => setSavingAs(true)}>
+                    <Plus size={13} />
+                  </Button>
+                </Tip>
+              </>
+            )}
+          </div>
+
           <div className="grid gap-5 xl:grid-cols-2 2xl:grid-cols-3">
             {Object.entries(categories).map(([category, tweaks]) => (
               <div key={category} className="overflow-hidden rounded-md border border-border">
@@ -351,49 +666,40 @@ export function ScalabilityTweaks({
       </div>
 
       {/* Save bar */}
-      {(dirty || status) && (
+      {dirty && (
         <div className="flex shrink-0 flex-col gap-2 border-t border-border pt-2">
-          {status && !dirty && (
-            <span
-              className={cn(
-                "flex items-center gap-1.5 text-[12px] font-medium",
-                status.type === "ok"
-                  ? "text-ok"
-                  : status.type === "err"
-                    ? "text-err"
-                    : "text-muted-foreground"
-              )}
-            >
-              {status.type === "ok" && <CheckCircle2 size={13} strokeWidth={2.5} />}
-              {status.type === "err" && <XCircle size={13} strokeWidth={2.5} />}
-              {status.msg}
+          <div className="flex flex-col gap-1.5">
+            <span className="text-[11px] font-semibold uppercase text-muted-foreground">
+              Pending Changes ({pendingChanges.length})
             </span>
-          )}
-          {dirty && (
-            <div className="flex flex-col gap-1.5">
-              <span className="text-[11px] font-semibold uppercase text-muted-foreground">
-                Pending Changes ({pendingChanges.length})
-              </span>
-              <div className="flex flex-wrap gap-1.5">
-                {pendingChanges.map((change) => (
-                  <Badge
-                    key={change.id}
-                    variant="outline"
-                    className={cn(
-                      "rounded-sm px-1.5 py-0 text-[11px] font-mono",
-                      change.kind === "remove"
-                        ? "border-destructive/40 bg-destructive/10 text-destructive"
-                        : "border-ok/40 bg-ok/10 text-ok"
-                    )}
-                  >
-                    {change.kind === "remove" ? `- ${change.display}` : change.display}
-                  </Badge>
-                ))}
-              </div>
+            <div className="flex flex-wrap gap-1.5">
+              {pendingChanges.map((change) => (
+                <Badge
+                  key={change.id}
+                  variant="outline"
+                  className={cn(
+                    "rounded-sm px-1.5 py-0 text-[11px] font-mono",
+                    change.kind === "remove"
+                      ? "border-destructive/40 bg-destructive/10 text-destructive"
+                      : "border-ok/40 bg-ok/10 text-ok"
+                  )}
+                >
+                  {change.kind === "remove" ? `- ${change.display}` : change.display}
+                </Badge>
+              ))}
             </div>
-          )}
+          </div>
           <div className="flex items-center justify-end gap-2">
-            <Button variant="outline" size="sm" onClick={onReload} disabled={!dirty}>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                setSelectedPreset("");
+                setAppliedPresetAt(null);
+                onReload();
+              }}
+              disabled={!dirty}
+            >
               <Undo2 size={14} />
               Discard
             </Button>
