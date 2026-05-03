@@ -1078,18 +1078,24 @@ export function PakTweaks({ gamePath, scalabilityContent, isActive }: Props) {
                 <div className="grid gap-5 xl:grid-cols-2 2xl:grid-cols-3">
                   {Object.entries(categories).map(([category, defs]) => (
                     <div key={category} className="overflow-hidden rounded-md border border-border">
-                      <div className="border-b border-border bg-card px-3 py-2">
+                      <div className="flex items-center justify-between gap-2 border-b border-border bg-card px-3 py-2">
                         <span className="text-sm font-semibold">{category}</span>
+                        {ADVANCED_CATEGORIES.has(category) && (
+                          <Tip
+                            content={
+                              <span className="block break-normal">
+                                Advanced tweaks. Defaults are tuned for most setups; only change
+                                these if you understand what they do.
+                              </span>
+                            }
+                          >
+                            <span className="flex shrink-0 items-center gap-1 rounded-full bg-warn/10 px-2 py-0.5 text-[10px] font-medium text-warn">
+                              <TriangleAlert size={11} strokeWidth={2.5} />
+                              Advanced
+                            </span>
+                          </Tip>
+                        )}
                       </div>
-                      {ADVANCED_CATEGORIES.has(category) && (
-                        <div className="flex items-start gap-2 border-b border-border/50 bg-warn/10 px-3 py-2 text-[11px] text-muted-foreground">
-                          <TriangleAlert size={13} className="mt-px shrink-0 text-warn" />
-                          <span>
-                            Advanced tweaks. Defaults are tuned for most setups; only change these
-                            if you understand what they do.
-                          </span>
-                        </div>
-                      )}
                       <div className="flex flex-col divide-y divide-border/50">
                         {defs.map((tweak) => {
                           const engineOnly =
