@@ -1,6 +1,6 @@
 {
   "source": "https://raw.githubusercontent.com/donutman07/MarvelRivalsCharacterIDs/main/MarvelRivalsCharacterIDs.md",
-  "generated_at": "2026-04-17T18:29:53.679Z",
+  "generated_at": "2026-05-03T08:02:56.945Z",
   "characters": {
     "1011": {
       "name": "Hulk",
@@ -56,7 +56,9 @@
         "1016501": "All-Butcher",
         "1016502": "LADY LOKI",
         "1016503": "LOW-KEY LOKI",
-        "1016800": "Loki Season 2"
+        "1016800": "Loki Season 2",
+        "1016801": "THE AVENGERS",
+        "1016802": "TWILIGHT AURORA"
       }
     },
     "1017": {
@@ -244,7 +246,8 @@
         "1029306": "BLUE BLITZ",
         "1029500": "Eldritch Armor",
         "1029501": "Retro X-Uniform",
-        "1029502": "Phoenix Demon"
+        "1029502": "Phoenix Demon",
+        "1029503": "NETHERWORLD NOBLE"
       }
     },
     "1030": {
@@ -258,6 +261,7 @@
         "1030302": "ECLIPSE KNIGHT",
         "1030500": "Mister Knight",
         "1030501": "Phoenix Knight",
+        "1030502": "SUAVE SPECTOR",
         "1030800": "Fist Of Vengeance",
         "1030801": "Moon Knight Mech"
       }
@@ -325,7 +329,8 @@
         "1034502": "Extrembiote Armor",
         "1034503": "Big Shot",
         "1034504": "Mark I",
-        "1034800": "Avengers: Endgame"
+        "1034800": "Avengers: Endgame",
+        "1034801": "THE AVENGERS"
       }
     },
     "1035": {
@@ -667,6 +672,7 @@
         "1053102": "Golden Diamond",
         "1053300": "Hellfire Protocol",
         "1053301": "QUEEN OF DIAMONDS",
+        "1053304": "GALA GLAM",
         "1053500": "X-Revolution",
         "1053501": "Phoenix Diamond",
         "1053502": "BLACK QUEEN OF THE MARAUDERS"
@@ -682,7 +688,8 @@
         "1054300": "Chaos Phoenix",
         "1054301": "ICE PHOENIX",
         "1054500": "Dark Phoenix",
-        "1054501": "SEAT OF SPRING"
+        "1054501": "SEAT OF SPRING",
+        "1054502": "VERDANT VOGUE"
       }
     },
     "1055": {
@@ -743,7 +750,8 @@
         "1058101": "SACRIFICIAL PAWN",
         "1058102": "WILL OF GALACTA",
         "1058300": "THIEVES GUILDMASTER",
-        "1058302": "MR. X"
+        "1058302": "MR. X",
+        "1058303": "ALLURING ACE"
       }
     },
     "1059": {
@@ -752,7 +760,10 @@
         "1059001": "Default",
         "1059100": "APEX HUNTRESS",
         "1059101": "ICY EDGE",
-        "1059300": "YOUNG BLOOD"
+        "1059300": "YOUNG BLOOD",
+        "1059500": "BLOODY BLOODSTONE",
+        "1059501": "MARINE MAID",
+        "1059502": "PASTEL POLISHER"
       }
     },
     "1060": {
