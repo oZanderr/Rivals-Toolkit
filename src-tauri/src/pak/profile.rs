@@ -1,5 +1,8 @@
 //! Marvel Rivals pak profile: AES key, compression, mount point, and version constants.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use aes::cipher::KeyInit;
 
 /// AES-256 key used by Marvel Rivals pak files.
@@ -87,4 +90,14 @@ fn rivals_encrypted_prefix_len(mount_point: &str, path: &str, total_len: usize) 
 
 pub(crate) fn strip_mount_prefix(path: &str) -> String {
     RIVALS_PROFILE.strip_mount_prefix(path)
+}
+
+/// Build a retoc `Config` with the Marvel AES key wired in. Shared by every
+/// IoStore read path so encrypted containers decrypt consistently.
+pub(super) fn make_config() -> Result<Arc<retoc::Config>, String> {
+    let aes_key: retoc::AesKey = MARVEL_AES_KEY_HEX.parse().map_err(|e| format!("{e}"))?;
+    Ok(Arc::new(retoc::Config {
+        aes_keys: HashMap::from([(retoc::FGuid::default(), aes_key)]),
+        ..Default::default()
+    }))
 }

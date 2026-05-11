@@ -2,6 +2,7 @@
 
 pub(crate) mod commands;
 pub(crate) mod crypto;
+mod game_rebuild;
 mod iostore;
 pub(crate) mod profile;
 mod reader;
@@ -20,6 +21,8 @@ static PAK_LIST_CACHE: LazyLock<ListCache> = LazyLock::new(|| Mutex::new(HashMap
 /// Utoc file-list cache keyed by (absolute path, file size); invalidated on size change.
 static UTOC_LIST_CACHE: LazyLock<ListCache> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
+pub(crate) use game_rebuild::extract::ExtractReport;
+pub(crate) use game_rebuild::rebuild::RebuildReport;
 pub(crate) use reader::PakFileInfo;
 
 pub(crate) fn list_pak_files(game_root: &str, recursive: bool) -> Result<Vec<String>, String> {
@@ -84,23 +87,28 @@ pub(crate) fn extract_utoc_files(
     iostore::extract_utoc_files(utoc_path, file_names, output_dir)
 }
 
-pub(crate) fn repack_pak(input_dir: &str, output_pak: &str) -> Result<(), String> {
-    writer::repack_pak(input_dir, output_pak)
+pub(crate) fn repack_pak(
+    input_dir: &str,
+    output_pak: &str,
+    oodle_level: Option<retoc::OodleCompressionLevel>,
+) -> Result<(), String> {
+    writer::repack_pak(input_dir, output_pak, oodle_level)
 }
 
 pub(crate) fn write_pak_bytes(
     output_pak: &str,
     files: Vec<(String, Vec<u8>)>,
 ) -> Result<(), String> {
-    writer::write_pak_bytes(output_pak, files)
+    writer::write_pak_bytes(output_pak, files, None)
 }
 
 pub(crate) fn repack_iostore(
     input_dir: &str,
     output_utoc: &str,
+    oodle_level: Option<retoc::OodleCompressionLevel>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
-    iostore::repack_iostore(input_dir, output_utoc, app)
+    iostore::repack_iostore(input_dir, output_utoc, oodle_level, app)
 }
 
 pub(crate) fn cancel_repack_iostore() {
@@ -158,4 +166,39 @@ pub(crate) fn extract_utoc_legacy(
 
 pub(crate) fn cancel_legacy_extraction() {
     iostore::cancel_legacy_extraction();
+}
+
+pub(crate) fn extract_vanilla_container(
+    game_root: &str,
+    source_utoc: &str,
+    output_dir: &str,
+    app: tauri::AppHandle,
+) -> Result<ExtractReport, String> {
+    game_rebuild::extract::extract_vanilla_container(game_root, source_utoc, output_dir, app)
+}
+
+pub(crate) fn cancel_vanilla_extract() {
+    game_rebuild::extract::cancel_vanilla_extract();
+}
+
+pub(crate) fn rebuild_vanilla_container(
+    game_root: &str,
+    source_utoc: &str,
+    legacy_dir: &str,
+    output_dir: &str,
+    oodle_level: retoc::OodleCompressionLevel,
+    app: tauri::AppHandle,
+) -> Result<RebuildReport, String> {
+    game_rebuild::rebuild::rebuild_vanilla_container(
+        game_root,
+        source_utoc,
+        legacy_dir,
+        output_dir,
+        oodle_level,
+        app,
+    )
+}
+
+pub(crate) fn cancel_vanilla_rebuild() {
+    game_rebuild::rebuild::cancel_vanilla_rebuild();
 }

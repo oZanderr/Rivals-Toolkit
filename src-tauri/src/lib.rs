@@ -20,6 +20,7 @@ mod update_check;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 #[allow(clippy::expect_used)]
 pub fn run() {
+    concurrency::init_global_pool();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -46,6 +47,10 @@ pub fn run() {
             settings::get_game_path,
             settings::get_saved_install_info,
             settings::set_game_path,
+            settings::get_mod_compression_level,
+            settings::set_mod_compression_level,
+            settings::get_vanilla_compression_level,
+            settings::set_vanilla_compression_level,
             // update_check
             update_check::check_for_update,
             update_check::get_auto_check_updates,
@@ -72,6 +77,10 @@ pub fn run() {
             pak::commands::count_utoc_legacy_packages,
             pak::commands::extract_utoc_legacy,
             pak::commands::cancel_legacy_extraction,
+            pak::commands::extract_vanilla_container,
+            pak::commands::cancel_vanilla_extract,
+            pak::commands::rebuild_vanilla_container,
+            pak::commands::cancel_vanilla_rebuild,
             // pak_tweaks
             pak_tweaks::commands::inspect_pak_path,
             pak_tweaks::commands::scan_mod_paks_for_ini,

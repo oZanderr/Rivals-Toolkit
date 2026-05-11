@@ -192,7 +192,9 @@ export function PakTweaks({ gamePath, scalabilityContent, isActive }: Props) {
     noticeTimer.current = setTimeout(() => setNotice(null), duration);
   };
 
-  scanRef.current = scan;
+  useEffect(() => {
+    scanRef.current = scan;
+  });
   useEffect(() => {
     if (gamePath) scanRef.current(true);
   }, [gamePath]);
@@ -215,7 +217,9 @@ export function PakTweaks({ gamePath, scalabilityContent, isActive }: Props) {
   // Drag-and-drop: accept .pak files (same as browse).
   const [isDragging, setIsDragging] = useState(false);
   const isActiveRef = useRef(isActive);
-  isActiveRef.current = isActive;
+  useEffect(() => {
+    isActiveRef.current = isActive;
+  }, [isActive]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;

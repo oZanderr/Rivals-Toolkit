@@ -3,8 +3,10 @@
 use tauri::{AppHandle, State};
 
 use crate::pak;
-use crate::pak::PakFileInfo;
-use crate::settings::{SettingsState, recursive_mod_scan};
+use crate::pak::{ExtractReport, PakFileInfo, RebuildReport};
+use crate::settings::{
+    SettingsState, mod_compression_level, recursive_mod_scan, vanilla_compression_level,
+};
 
 #[tauri::command]
 pub(crate) fn list_pak_files(
@@ -83,21 +85,30 @@ pub(crate) async fn extract_utoc_files(
 }
 
 #[tauri::command]
-pub(crate) async fn repack_pak(input_dir: String, output_pak: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || pak::repack_pak(&input_dir, &output_pak))
+pub(crate) async fn repack_pak(
+    state: State<'_, SettingsState>,
+    input_dir: String,
+    output_pak: String,
+) -> Result<(), String> {
+    let level = Some(mod_compression_level(&state).to_oodle());
+    tauri::async_runtime::spawn_blocking(move || pak::repack_pak(&input_dir, &output_pak, level))
         .await
         .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
 pub(crate) async fn repack_iostore(
+    state: State<'_, SettingsState>,
     input_dir: String,
     output_utoc: String,
     app: AppHandle,
 ) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || pak::repack_iostore(&input_dir, &output_utoc, app))
-        .await
-        .map_err(|e| e.to_string())?
+    let level = Some(mod_compression_level(&state).to_oodle());
+    tauri::async_runtime::spawn_blocking(move || {
+        pak::repack_iostore(&input_dir, &output_utoc, level, app)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -166,4 +177,52 @@ pub(crate) async fn extract_utoc_legacy(
 #[tauri::command]
 pub(crate) fn cancel_legacy_extraction() {
     pak::cancel_legacy_extraction();
+}
+
+#[tauri::command]
+pub(crate) async fn extract_vanilla_container(
+    game_root: String,
+    source_utoc: String,
+    output_dir: String,
+    app: AppHandle,
+) -> Result<ExtractReport, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        pak::extract_vanilla_container(&game_root, &source_utoc, &output_dir, app)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub(crate) fn cancel_vanilla_extract() {
+    pak::cancel_vanilla_extract();
+}
+
+#[tauri::command]
+pub(crate) async fn rebuild_vanilla_container(
+    state: State<'_, SettingsState>,
+    game_root: String,
+    source_utoc: String,
+    legacy_dir: String,
+    output_dir: String,
+    app: AppHandle,
+) -> Result<RebuildReport, String> {
+    let level = vanilla_compression_level(&state).to_oodle();
+    tauri::async_runtime::spawn_blocking(move || {
+        pak::rebuild_vanilla_container(
+            &game_root,
+            &source_utoc,
+            &legacy_dir,
+            &output_dir,
+            level,
+            app,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub(crate) fn cancel_vanilla_rebuild() {
+    pak::cancel_vanilla_rebuild();
 }

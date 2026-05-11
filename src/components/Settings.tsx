@@ -23,6 +23,13 @@ import {
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Tip } from "@/components/ui/tooltip";
 import type { UpdateInfo } from "@/hooks/useUpdateCheck";
@@ -49,6 +56,26 @@ interface InstallInfo {
   source: string;
   launch_url: string;
 }
+
+type CompressionLevel = "None" | "Fast" | "Normal" | "Optimal1" | "Optimal2" | "Optimal3";
+
+const COMPRESSION_LEVELS: CompressionLevel[] = [
+  "None",
+  "Fast",
+  "Normal",
+  "Optimal1",
+  "Optimal2",
+  "Optimal3",
+];
+
+const COMPRESSION_LEVEL_DESC: Record<CompressionLevel, string> = {
+  None: "No compression. Largest output, fastest write.",
+  Fast: "Fastest LZ, larger output",
+  Normal: "Default for mods. Greedy LZ.",
+  Optimal1: "Default for vanilla rebuild. Faster optimal encoder.",
+  Optimal2: "Optimal · level 2",
+  Optimal3: "Optimal · level 3 (slowest, smallest)",
+};
 
 interface CharacterDataInfo {
   character_count: number;
@@ -109,6 +136,10 @@ export function Settings({
   const [savedAutoSyncHeroes, setSavedAutoSyncHeroes] = useState<boolean | null>(null);
   const [draftShowHeroIcons, setDraftShowHeroIcons] = useState<boolean | null>(null);
   const [savedShowHeroIcons, setSavedShowHeroIcons] = useState<boolean | null>(null);
+  const [draftModLevel, setDraftModLevel] = useState<CompressionLevel | null>(null);
+  const [savedModLevel, setSavedModLevel] = useState<CompressionLevel | null>(null);
+  const [draftVanillaLevel, setDraftVanillaLevel] = useState<CompressionLevel | null>(null);
+  const [savedVanillaLevel, setSavedVanillaLevel] = useState<CompressionLevel | null>(null);
 
   const [saving, setSaving] = useState(false);
   const [pathError, setPathError] = useState<string | null>(null);
@@ -263,6 +294,32 @@ export function Settings({
         console.error(e);
         setDraftShowHeroIcons(false);
         setSavedShowHeroIcons(false);
+      });
+  }, []);
+
+  useEffect(() => {
+    invoke<CompressionLevel>("get_mod_compression_level")
+      .then((v) => {
+        setDraftModLevel(v);
+        setSavedModLevel(v);
+      })
+      .catch((e) => {
+        console.error(e);
+        setDraftModLevel("Normal");
+        setSavedModLevel("Normal");
+      });
+  }, []);
+
+  useEffect(() => {
+    invoke<CompressionLevel>("get_vanilla_compression_level")
+      .then((v) => {
+        setDraftVanillaLevel(v);
+        setSavedVanillaLevel(v);
+      })
+      .catch((e) => {
+        console.error(e);
+        setDraftVanillaLevel("Optimal1");
+        setSavedVanillaLevel("Optimal1");
       });
   }, []);
 
@@ -490,13 +547,21 @@ export function Settings({
     draftShowHeroIcons !== null &&
     savedShowHeroIcons !== null &&
     draftShowHeroIcons !== savedShowHeroIcons;
+  const modLevelDirty =
+    draftModLevel !== null && savedModLevel !== null && draftModLevel !== savedModLevel;
+  const vanillaLevelDirty =
+    draftVanillaLevel !== null &&
+    savedVanillaLevel !== null &&
+    draftVanillaLevel !== savedVanillaLevel;
   const dirty =
     pathDirty ||
     skipDirty ||
     autoCheckDirty ||
     recursiveDirty ||
     autoSyncHeroesDirty ||
-    showHeroIconsDirty;
+    showHeroIconsDirty ||
+    modLevelDirty ||
+    vanillaLevelDirty;
 
   async function save() {
     setSaving(true);
@@ -564,6 +629,22 @@ export function Settings({
           console.error(e);
         }
       }
+      if (modLevelDirty && draftModLevel !== null) {
+        try {
+          await invoke("set_mod_compression_level", { level: draftModLevel });
+          setSavedModLevel(draftModLevel);
+        } catch (e) {
+          console.error(e);
+        }
+      }
+      if (vanillaLevelDirty && draftVanillaLevel !== null) {
+        try {
+          await invoke("set_vanilla_compression_level", { level: draftVanillaLevel });
+          setSavedVanillaLevel(draftVanillaLevel);
+        } catch (e) {
+          console.error(e);
+        }
+      }
       if (savedBadgeTimer.current) clearTimeout(savedBadgeTimer.current);
       setSavedBadge(true);
       savedBadgeTimer.current = setTimeout(() => setSavedBadge(false), 2500);
@@ -579,6 +660,8 @@ export function Settings({
     setDraftRecursive(savedRecursive);
     setDraftAutoSyncHeroes(savedAutoSyncHeroes);
     setDraftShowHeroIcons(savedShowHeroIcons);
+    setDraftModLevel(savedModLevel);
+    setDraftVanillaLevel(savedVanillaLevel);
     setPathError(null);
   }
 
@@ -751,6 +834,68 @@ export function Settings({
                 onCheckedChange={setDraftAutoSyncHeroes}
                 disabled={draftAutoSyncHeroes === null}
               />
+            </div>
+          </div>
+
+          {/* ── Compression ── */}
+          <div className="flex flex-col overflow-hidden rounded-md border border-border">
+            <div className="border-b border-border bg-card px-3 py-2">
+              <h3 className="text-sm font-semibold">Compression</h3>
+            </div>
+            <div className="flex items-center gap-3 rounded-sm px-3 py-3 hover:bg-secondary/50">
+              <div className="flex flex-1 flex-col gap-0.5">
+                <span className="text-[13px] font-medium">Mod repack level</span>
+                <span className="text-[11px] text-muted-foreground">
+                  Oodle Kraken level for "Repack Folder" output. Higher = smaller mod paks but
+                  slower. Default: Normal.
+                </span>
+              </div>
+              <Select
+                value={draftModLevel ?? undefined}
+                onValueChange={(v) => setDraftModLevel(v as CompressionLevel)}
+                disabled={draftModLevel === null}
+              >
+                <SelectTrigger size="sm" className="h-8 w-36 text-sm">
+                  <SelectValue placeholder="Loading…" />
+                </SelectTrigger>
+                <SelectContent>
+                  {COMPRESSION_LEVELS.map((lvl) => (
+                    <SelectItem key={lvl} value={lvl}>
+                      {lvl}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="flex items-center gap-3 rounded-sm px-3 py-3 hover:bg-secondary/50">
+              <div className="flex flex-1 flex-col gap-0.5">
+                <span className="text-[13px] font-medium">Vanilla rebuild level</span>
+                <span className="text-[11px] text-muted-foreground">
+                  Oodle Kraken level for "Rebuild container" output. Default: Optimal1 (close to
+                  vanilla, reasonable speed).
+                </span>
+                {draftVanillaLevel && (
+                  <span className="text-[11px] text-muted-foreground/80">
+                    {COMPRESSION_LEVEL_DESC[draftVanillaLevel]}
+                  </span>
+                )}
+              </div>
+              <Select
+                value={draftVanillaLevel ?? undefined}
+                onValueChange={(v) => setDraftVanillaLevel(v as CompressionLevel)}
+                disabled={draftVanillaLevel === null}
+              >
+                <SelectTrigger size="sm" className="h-8 w-36 text-sm">
+                  <SelectValue placeholder="Loading…" />
+                </SelectTrigger>
+                <SelectContent>
+                  {COMPRESSION_LEVELS.map((lvl) => (
+                    <SelectItem key={lvl} value={lvl}>
+                      {lvl}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
           </div>
 

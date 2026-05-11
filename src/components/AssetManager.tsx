@@ -16,7 +16,9 @@ import {
   FileText,
   Folder,
   FolderOpen,
+  Hammer,
   Layers,
+  Loader2,
   MinusSquare,
   Package,
   PackageOpen,
@@ -80,6 +82,9 @@ interface PakFileInfo {
   path: string;
   has_utoc: boolean;
   has_ucas: boolean;
+  optional_pak: string | null;
+  optional_has_utoc: boolean;
+  optional_has_ucas: boolean;
 }
 
 type ContentSource = "pak" | "utoc";
@@ -131,6 +136,18 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
     phase: string;
     current: number;
     total: number;
+  } | null>(null);
+  const [vanillaProgress, setVanillaProgress] = useState<{
+    op: "extract" | "rebuild";
+    phase: string;
+    current: number;
+    total: number;
+  } | null>(null);
+  const [vanillaConfirm, setVanillaConfirm] = useState<{
+    kind: "rebuild";
+    sourceUtoc: string;
+    legacyDir: string;
+    outputDir: string;
   } | null>(null);
   const [selectedEntries, setSelectedEntries] = useState<Set<string>>(new Set());
   const [knownHeroes, setKnownHeroes] = useState<CharacterSummary[]>([]);
@@ -200,6 +217,33 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
     return () => {
       cancelled = true;
       unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const unlisteners: Array<() => void> = [];
+    listen<{ phase: string; current: number; total: number }>(
+      "vanilla-extract-progress",
+      (event) => {
+        setVanillaProgress({ op: "extract", ...event.payload });
+      }
+    ).then((fn) => {
+      if (cancelled) fn();
+      else unlisteners.push(fn);
+    });
+    listen<{ phase: string; current: number; total: number }>(
+      "vanilla-rebuild-progress",
+      (event) => {
+        setVanillaProgress({ op: "rebuild", ...event.payload });
+      }
+    ).then((fn) => {
+      if (cancelled) fn();
+      else unlisteners.push(fn);
+    });
+    return () => {
+      cancelled = true;
+      unlisteners.forEach((fn) => fn());
     };
   }, []);
 
@@ -325,6 +369,11 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
     return !!(info?.has_utoc && info?.has_ucas);
   }, [pakList, selectedPak]);
 
+  const selectedIsVanilla = useMemo(
+    () => !!selectedPak && !/[/\\]~mods[/\\]/i.test(selectedPak),
+    [selectedPak]
+  );
+
   // Virtualizer for the contents list
   const contentsVirtualizer = useVirtualizer({
     count: visible.length,
@@ -391,17 +440,38 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
         invoke<boolean>("path_exists", { path: pak.replace(/\.pak$/i, ".ucas") }),
       ]);
       if (gen !== loadGenRef.current) return;
-      info = { path: pak, has_utoc: hasUtoc, has_ucas: hasUcas };
+      info = {
+        path: pak,
+        has_utoc: hasUtoc,
+        has_ucas: hasUcas,
+        optional_pak: null,
+        optional_has_utoc: false,
+        optional_has_ucas: false,
+      };
     }
     const isIoStore = info.has_utoc && info.has_ucas;
+    const optionalPak = info.optional_pak;
+    const optionalIsIoStore = !!optionalPak && info.optional_has_utoc && info.optional_has_ucas;
 
     setBusy(true);
     try {
       const utocPath = isIoStore ? pak.replace(/\.pak$/i, ".utoc") : "";
-      const [pakFiles, utocResult] = await Promise.all([
+      const optionalUtocPath = optionalIsIoStore ? optionalPak.replace(/\.pak$/i, ".utoc") : "";
+      const [pakFiles, utocResult, optionalPakFiles, optionalUtocResult] = await Promise.all([
         invoke<string[]>("list_pak_contents", { pakPath: pak }),
         isIoStore
           ? invoke<string[]>("list_utoc_contents", { utocPath }).then(
+              (files) => ({ ok: true as const, files }),
+              (err) => ({ ok: false as const, err: String(err) })
+            )
+          : Promise.resolve({ ok: true as const, files: [] as string[] }),
+        optionalPak
+          ? invoke<string[]>("list_pak_contents", { pakPath: optionalPak }).catch(
+              () => [] as string[]
+            )
+          : Promise.resolve([] as string[]),
+        optionalIsIoStore
+          ? invoke<string[]>("list_utoc_contents", { utocPath: optionalUtocPath }).then(
               (files) => ({ ok: true as const, files }),
               (err) => ({ ok: false as const, err: String(err) })
             )
@@ -411,22 +481,39 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
       if (gen !== loadGenRef.current) return;
 
       const entries: ContentEntry[] = [];
+      const seen = new Set<string>();
+      const pushUnique = (path: string, source: ContentSource) => {
+        const key = `${source}:${path}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        entries.push({ path, source });
+      };
       for (const f of pakFiles) {
         if (isIoStore && f === "chunknames") continue;
-        entries.push({ path: f, source: "pak" });
+        pushUnique(f, "pak");
+      }
+      for (const f of optionalPakFiles) {
+        if (optionalIsIoStore && f === "chunknames") continue;
+        pushUnique(f, "pak");
       }
       if (utocResult.ok) {
-        for (const f of utocResult.files) {
-          entries.push({ path: f, source: "utoc" });
-        }
+        for (const f of utocResult.files) pushUnique(f, "utoc");
+      }
+      if (optionalUtocResult.ok) {
+        for (const f of optionalUtocResult.files) pushUnique(f, "utoc");
       }
 
       setPakContents(entries);
       const displayName = pak.split(/[/\\]/).pop();
-      if (!utocResult.ok) {
-        showNotice(`${entries.length} file(s) inside ${displayName} (utoc failed to load)`, "err");
+      const utocFailed = !utocResult.ok || !optionalUtocResult.ok;
+      const optionalSuffix = optionalPak ? " (incl. optional)" : "";
+      if (utocFailed) {
+        showNotice(
+          `${entries.length} file(s) inside ${displayName}${optionalSuffix} (utoc failed to load)`,
+          "err"
+        );
       } else {
-        showNotice(`${entries.length} file(s) inside ${displayName}`, "ok");
+        showNotice(`${entries.length} file(s) inside ${displayName}${optionalSuffix}`, "ok");
       }
     } catch (e: unknown) {
       if (gen !== loadGenRef.current) return;
@@ -446,12 +533,19 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
         invoke<boolean>("path_exists", { path: selected.replace(/\.pak$/i, ".utoc") }),
         invoke<boolean>("path_exists", { path: selected.replace(/\.pak$/i, ".ucas") }),
       ]);
+      const info: PakFileInfo = {
+        path: selected,
+        has_utoc: hasUtoc,
+        has_ucas: hasUcas,
+        optional_pak: null,
+        optional_has_utoc: false,
+        optional_has_ucas: false,
+      };
       setPakList((prev) => {
         if (prev.some((p) => p.path === selected)) return prev;
-        return [...prev, { path: selected, has_utoc: hasUtoc, has_ucas: hasUcas }];
+        return [...prev, info];
       });
       setManualPaks((prev) => new Set(prev).add(selected));
-      const info: PakFileInfo = { path: selected, has_utoc: hasUtoc, has_ucas: hasUcas };
       await inspectPak(selected, info);
     }
   }
@@ -985,6 +1079,122 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
     }
   }
 
+  async function extractVanilla() {
+    if (!selectedPak || !gamePath || !selectedIsVanilla || !selectedIsIoStore) return;
+    const outputDir = await open({
+      directory: true,
+      multiple: false,
+      title: "Choose extract output folder",
+    });
+    if (typeof outputDir !== "string") return;
+    const sourceUtoc = selectedPak.replace(/\.pak$/i, ".utoc");
+    setBusy(true);
+    setVanillaProgress({ op: "extract", phase: "starting", current: 0, total: 0 });
+    showNotice("Extracting vanilla container…", "info");
+    try {
+      const report = await invoke<{
+        container_name: string;
+        optional_container_name: string | null;
+        package_count: number;
+        shader_library_count: number;
+        pak_entry_count: number;
+        uasset_count: number;
+        umap_count: number;
+        uexp_count: number;
+        ubulk_count: number;
+        uptnl_count: number;
+        memory_mapped_count: number;
+        script_objects_count: number;
+        total_files: number;
+      }>("extract_vanilla_container", {
+        gameRoot: gamePath,
+        sourceUtoc,
+        outputDir,
+      });
+      const optTag = report.optional_container_name ? "+opt" : "";
+      showNotice(
+        `Extracted ${report.container_name}${optTag} → ${report.total_files} files`,
+        "ok",
+        { revealPath: outputDir }
+      );
+    } catch (e: unknown) {
+      showNotice(String(e), "err");
+    } finally {
+      setBusy(false);
+      setVanillaProgress(null);
+    }
+  }
+
+  async function rebuildVanillaPrompt() {
+    if (!selectedPak || !gamePath || !selectedIsVanilla || !selectedIsIoStore) return;
+    const legacyDir = await open({
+      directory: true,
+      multiple: false,
+      title: "Choose legacy folder to rebuild from",
+    });
+    if (typeof legacyDir !== "string") return;
+    const outputDir = await open({
+      directory: true,
+      multiple: false,
+      title: "Choose output folder for rebuilt container",
+    });
+    if (typeof outputDir !== "string") return;
+    const sourceUtoc = selectedPak.replace(/\.pak$/i, ".utoc");
+    setVanillaConfirm({ kind: "rebuild", sourceUtoc, legacyDir, outputDir });
+  }
+
+  async function runRebuildVanilla() {
+    if (!vanillaConfirm) return;
+    const { sourceUtoc, legacyDir, outputDir } = vanillaConfirm;
+    setVanillaConfirm(null);
+    setBusy(true);
+    setVanillaProgress({ op: "rebuild", phase: "starting", current: 0, total: 0 });
+    showNotice("Rebuilding vanilla container…", "info");
+    try {
+      const report = await invoke<{
+        container_name: string;
+        optional_container_name: string | null;
+        package_count: number;
+        uasset_count: number;
+        umap_count: number;
+        ubulk_routed: number;
+        uptnl_routed: number;
+        memory_mapped_routed: number;
+        shader_library_count: number;
+        pak_entry_count: number;
+      }>("rebuild_vanilla_container", {
+        gameRoot: gamePath,
+        sourceUtoc,
+        legacyDir,
+        outputDir,
+      });
+      const optTag = report.optional_container_name ? "+opt" : "";
+      showNotice(
+        `Rebuilt ${report.container_name}${optTag} → ${report.package_count} zen, ${report.pak_entry_count} pak`,
+        "ok",
+        { revealPath: outputDir }
+      );
+    } catch (e: unknown) {
+      showNotice(String(e), "err");
+    } finally {
+      setBusy(false);
+      setVanillaProgress(null);
+    }
+  }
+
+  async function cancelVanillaOp() {
+    if (!vanillaProgress) return;
+    try {
+      if (vanillaProgress.op === "extract") {
+        await invoke("cancel_vanilla_extract");
+      } else {
+        await invoke("cancel_vanilla_rebuild");
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
   const pakName = selectedPak ? selectedPak.split(/[/\\]/).pop() : null;
   const footerText = !selectedPak
     ? "\u00A0"
@@ -996,7 +1206,7 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
     <div ref={rootRef} className="flex flex-1 min-h-0 flex-col gap-4">
       <div className="flex min-h-8 shrink-0 items-center gap-3">
         <h2 className="shrink-0 text-xl font-bold">Asset Manager</h2>
-        {notice && (
+        {notice && !vanillaProgress && (
           <Tip content="Click to reveal in explorer" disabled={!notice.revealPath}>
             <span
               className={cn(
@@ -1052,6 +1262,34 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
               size="sm"
               className="h-6 px-2 text-[11px]"
               onClick={cancelRepackIostore}
+            >
+              Cancel
+            </Button>
+          </div>
+        )}
+        {vanillaProgress && (
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="shrink-0 text-[11px] text-muted-foreground">
+              {vanillaProgress.op} · {vanillaProgress.phase}
+            </span>
+            {vanillaProgress.total > 0 ? (
+              <>
+                <Progress
+                  value={(vanillaProgress.current / vanillaProgress.total) * 100}
+                  className="h-2 w-32"
+                />
+                <span className="shrink-0 text-[11px] text-muted-foreground">
+                  {vanillaProgress.current}/{vanillaProgress.total}
+                </span>
+              </>
+            ) : (
+              <Loader2 size={12} className="shrink-0 animate-spin text-muted-foreground" />
+            )}
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-6 px-2 text-[11px]"
+              onClick={cancelVanillaOp}
             >
               Cancel
             </Button>
@@ -1217,6 +1455,30 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
               </div>
 
               <div className="flex shrink-0 items-center gap-1 overflow-visible py-1 -my-1 pr-1 -mr-1">
+                {selectedIsVanilla && selectedIsIoStore && (
+                  <>
+                    <Tip content="Extract this container to an editable legacy folder">
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        onClick={extractVanilla}
+                        disabled={busy || !selectedPak || !gamePath}
+                      >
+                        <PackageOpen size={15} />
+                      </Button>
+                    </Tip>
+                    <Tip content="Rebuild this container from an edited legacy folder">
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        onClick={rebuildVanillaPrompt}
+                        disabled={busy || !selectedPak || !gamePath}
+                      >
+                        <Hammer size={15} />
+                      </Button>
+                    </Tip>
+                  </>
+                )}
                 {hasSelectedBnk && (
                   <Tip content="Extract sound WAVs from this mod's soundbank">
                     <Button
@@ -1231,9 +1493,10 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
                 )}
                 {selectedEntries.size > 0 &&
                   selectedIsIoStore &&
+                  !selectedIsVanilla &&
                   selectedUtocEntries.length > 0 && (
                     <Tip
-                      content={`Convert ${selectedUtocEntries.length} selected IoStore assets to legacy format`}
+                      content={`Convert ${selectedUtocEntries.length} selected mod assets to editable .uasset/.uexp legacy`}
                     >
                       <Button
                         variant="ghost"
@@ -1266,8 +1529,8 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
                   </Tip>
                 ) : (
                   <>
-                    {selectedIsIoStore && (
-                      <Tip content="Convert IoStore assets to legacy .uasset/.uexp for UAssetGUI">
+                    {selectedIsIoStore && !selectedIsVanilla && (
+                      <Tip content="Convert this mod's IoStore assets to editable .uasset/.uexp/.ubulk legacy">
                         <Button
                           variant="ghost"
                           size="icon-sm"
@@ -1548,20 +1811,22 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
                             </ContextMenuSubContent>
                           </ContextMenuSub>
                         )}
-                        {entry.source === "utoc" && !entry.path.endsWith(".ubulk") && (
-                          <ContextMenuItem
-                            onSelect={() =>
-                              selectedUtocEntries.length > 0
-                                ? exportLegacySelected()
-                                : exportLegacySingle(entry)
-                            }
-                          >
-                            <FileOutput />
-                            {selectedUtocEntries.length > 1
-                              ? `Export ${selectedUtocEntries.length} Legacy (.uasset/.uexp)…`
-                              : "Export Legacy (.uasset/.uexp)…"}
-                          </ContextMenuItem>
-                        )}
+                        {entry.source === "utoc" &&
+                          !entry.path.endsWith(".ubulk") &&
+                          !selectedIsVanilla && (
+                            <ContextMenuItem
+                              onSelect={() =>
+                                selectedUtocEntries.length > 0
+                                  ? exportLegacySelected()
+                                  : exportLegacySingle(entry)
+                              }
+                            >
+                              <FileOutput />
+                              {selectedUtocEntries.length > 1
+                                ? `Export ${selectedUtocEntries.length} Legacy (.uasset/.uexp)…`
+                                : "Export Legacy (.uasset/.uexp)…"}
+                            </ContextMenuItem>
+                          )}
                         <ContextMenuSeparator />
                         <ContextMenuItem onSelect={() => selectByExtension(ext)} disabled={!ext}>
                           <Layers />
@@ -1591,6 +1856,34 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
           )}
         </div>
       </div>
+
+      <AlertDialog
+        open={!!vanillaConfirm}
+        onOpenChange={(open) => {
+          if (!open) setVanillaConfirm(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Rebuild vanilla container?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Builds a new <span className="font-mono">.utoc/.ucas/.pak</span> set (plus optional
+              sibling if present) into the chosen output folder. Swap the files into Paks/ while the
+              game is closed, with the signature bypass installed.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              autoFocus
+              className={buttonVariants({ variant: "blue" })}
+              onClick={runRebuildVanilla}
+            >
+              Rebuild
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <AlertDialog
         open={!!legacyConfirm}

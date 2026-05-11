@@ -1,6 +1,6 @@
 //! Pak file listing, inspection, and content extraction.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::{fs, io::BufReader, path::Path};
 
 use serde::Serialize;
@@ -15,6 +15,24 @@ pub(crate) struct PakFileInfo {
     pub path: String,
     pub has_utoc: bool,
     pub has_ucas: bool,
+    pub optional_pak: Option<String>,
+    pub optional_has_utoc: bool,
+    pub optional_has_ucas: bool,
+}
+
+fn is_optional_pak_name(name: &str) -> bool {
+    name.to_ascii_lowercase().contains("optional")
+}
+
+/// Strip the `optional` token from a pak filename to derive the base sibling name.
+/// Matches the first case-insensitive occurrence; returns `None` if not present.
+fn strip_optional_token(name: &str) -> Option<String> {
+    let lower = name.to_ascii_lowercase();
+    let idx = lower.find("optional")?;
+    let mut out = String::with_capacity(name.len() - "optional".len());
+    out.push_str(&name[..idx]);
+    out.push_str(&name[idx + "optional".len()..]);
+    Some(out)
 }
 
 fn is_update_patch_pak_path(path: &str) -> bool {
@@ -37,11 +55,7 @@ pub(super) fn list_pak_files(game_root: &str, recursive: bool) -> Result<Vec<Str
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
         .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("pak"))
-        .filter(|e| {
-            // Skip "optional" paks – they are empty I/O Store placeholders.
-            let name = e.file_name().to_string_lossy().to_ascii_lowercase();
-            !name.contains("optional")
-        })
+        .filter(|e| !is_optional_pak_name(&e.file_name().to_string_lossy()))
         .filter(|e| {
             let Ok(rel) = e.path().strip_prefix(&dir) else {
                 return false;
@@ -158,12 +172,14 @@ pub(super) fn extract_pak_files(
     Ok(extracted)
 }
 
-/// List pak files with companion file info (utoc/ucas presence).
+/// List pak files with companion file info (utoc/ucas presence) and any
+/// paired optional IoStore container that lives alongside the base pak.
 pub(super) fn list_pak_files_info(
     game_root: &str,
     recursive: bool,
 ) -> Result<Vec<PakFileInfo>, String> {
     let paths = list_pak_files(game_root, recursive)?;
+    let optional_by_base = collect_optional_paks(game_root);
     Ok(paths
         .into_iter()
         .map(|p| {
@@ -172,11 +188,79 @@ pub(super) fn list_pak_files_info(
                 .strip_suffix(".pak")
                 .or_else(|| p.strip_suffix(".PAK"))
                 .unwrap_or(&p);
+
+            let optional_pak = optional_by_base.get(&p.to_ascii_lowercase()).cloned();
+            let (optional_has_utoc, optional_has_ucas) = match &optional_pak {
+                Some(opt) => {
+                    let opt_base = opt
+                        .strip_suffix(".pak")
+                        .or_else(|| opt.strip_suffix(".PAK"))
+                        .unwrap_or(opt);
+                    (
+                        Path::new(&format!("{opt_base}.utoc")).exists(),
+                        Path::new(&format!("{opt_base}.ucas")).exists(),
+                    )
+                }
+                None => (false, false),
+            };
+
             PakFileInfo {
                 has_utoc: Path::new(&format!("{base}.utoc")).exists(),
                 has_ucas: Path::new(&format!("{base}.ucas")).exists(),
+                optional_pak,
+                optional_has_utoc,
+                optional_has_ucas,
                 path: p,
             }
         })
         .collect())
+}
+
+/// Walk the game `Paks` dir (excluding `~mods` overlays) for optional paks,
+/// returning a map keyed by the lowercased base sibling pak path.
+fn collect_optional_paks(game_root: &str) -> HashMap<String, String> {
+    let dir = paks_dir(game_root);
+    if !dir.is_dir() {
+        return HashMap::new();
+    }
+    let mut map = HashMap::new();
+    for entry in WalkDir::new(&dir)
+        .max_depth(2)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        if entry.path().extension().and_then(|x| x.to_str()) != Some("pak") {
+            continue;
+        }
+        let Ok(rel) = entry.path().strip_prefix(&dir) else {
+            continue;
+        };
+        if rel
+            .parent()
+            .and_then(|p| p.iter().next())
+            .is_some_and(|segment| segment.to_string_lossy().starts_with('~'))
+        {
+            continue;
+        }
+        let file_name = entry.file_name().to_string_lossy().into_owned();
+        if !is_optional_pak_name(&file_name) {
+            continue;
+        }
+        let Some(base_name) = strip_optional_token(&file_name) else {
+            continue;
+        };
+        let Some(parent) = entry.path().parent() else {
+            continue;
+        };
+        let base_path = parent.join(&base_name);
+        let optional_path = entry.path().to_string_lossy().into_owned();
+        map.insert(
+            base_path.to_string_lossy().to_ascii_lowercase(),
+            optional_path,
+        );
+    }
+    map
 }

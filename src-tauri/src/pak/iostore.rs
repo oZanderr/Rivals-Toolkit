@@ -2,7 +2,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use rayon::prelude::*;
@@ -18,7 +17,7 @@ use retoc::legacy_asset::FSerializedAssetBundle;
 use retoc::version::EngineVersion;
 use retoc::zen_asset_conversion;
 use retoc::{
-    Config, EIoChunkType, EIoStoreTocVersion, FIoChunkId, FIoChunkIdRaw, FPackageId, FSFileReader,
+    EIoChunkType, EIoStoreTocVersion, FIoChunkId, FIoChunkIdRaw, FPackageId, FSFileReader,
     FSFileWriter, FSHAHash, FileReaderTrait, UEPath, UEPathBuf,
 };
 
@@ -54,6 +53,7 @@ pub(crate) fn cancel_repack_iostore() {
 pub(crate) fn repack_iostore(
     input_dir: &str,
     output_utoc: &str,
+    oodle_level: Option<retoc::OodleCompressionLevel>,
     app: AppHandle,
 ) -> Result<(), String> {
     REPACK_CANCEL.store(false, Ordering::Relaxed);
@@ -100,6 +100,9 @@ pub(crate) fn repack_iostore(
         Some(retoc::compression::CompressionMethod::Oodle),
     )
     .map_err(|e| e.to_string())?;
+    if let Some(level) = oodle_level {
+        writer = writer.with_compression_level(level);
+    }
 
     let mut guard = IoStoreCleanupGuard {
         path: output_utoc_path,
@@ -109,31 +112,8 @@ pub(crate) fn repack_iostore(
     let shader_maps: HashMap<String, Vec<FSHAHash>> = HashMap::new();
     let total = asset_paths.len();
     let mut packed_paths: Vec<String> = Vec::new();
-
-    for (i, path) in asset_paths.iter().enumerate() {
-        if REPACK_CANCEL.load(Ordering::Relaxed) {
-            return Err("Repack cancelled".to_string());
-        }
-
+    for path in &asset_paths {
         let ue_path: &UEPath = path.as_ref();
-
-        let bundle = FSerializedAssetBundle {
-            asset_file_buffer: reader.read(ue_path).map_err(|e| e.to_string())?,
-            exports_file_buffer: reader
-                .read(&ue_path.with_extension("uexp"))
-                .map_err(|e| e.to_string())?,
-            bulk_data_buffer: reader
-                .read_opt(&ue_path.with_extension("ubulk"))
-                .map_err(|e| e.to_string())?,
-            optional_bulk_data_buffer: reader
-                .read_opt(&ue_path.with_extension("uptnl"))
-                .map_err(|e| e.to_string())?,
-            memory_mapped_bulk_data_buffer: reader
-                .read_opt(&ue_path.with_extension("m.ubulk"))
-                .map_err(|e| e.to_string())?,
-        };
-
-        let mounted_path: UEPathBuf = format!("{MOUNT_POINT}{ue_path}").into();
         packed_paths.push(ue_path.to_string());
         packed_paths.push(ue_path.with_extension("uexp").to_string());
         for ext in ["ubulk", "uptnl", "m.ubulk"] {
@@ -142,35 +122,108 @@ pub(crate) fn repack_iostore(
                 packed_paths.push(sibling.to_string());
             }
         }
+    }
 
-        let mut converted = zen_asset_conversion::build_zen_asset(
-            bundle,
-            &shader_maps,
-            &mounted_path,
-            Some(engine_version.package_file_version()),
-            container_header_version,
-            false,
-            None,
-            None,
-            &retoc::logging::Log::no_log(),
-        )
-        .map_err(|e| format!("Failed to convert {ue_path}: {e}"))?;
+    let channel_cap = std::cmp::max(2, crate::concurrency::POOL.current_num_threads());
+    let (tx, rx) = std::sync::mpsc::sync_channel::<
+        Result<retoc::zen_asset_conversion::ConvertedZenAssetBundle, String>,
+    >(channel_cap);
 
-        converted
-            .write_package_data(&mut writer)
-            .map_err(|e| e.to_string())?;
-        converted
-            .write_and_release_bulk_data(&mut writer)
-            .map_err(|e| e.to_string())?;
+    rayon::in_place_scope(|scope| -> Result<(), String> {
+        let asset_paths_ref = &asset_paths;
+        let shader_maps_ref = &shader_maps;
 
-        let _ = app.emit(
-            "repack-iostore-progress",
-            RepackProgress {
-                phase: "repacking",
-                current: i + 1,
-                total,
-            },
-        );
+        scope.spawn(move |_| {
+            let pool = &*crate::concurrency::POOL;
+            let log = retoc::logging::Log::no_log();
+            let _ = pool.install(|| {
+                asset_paths_ref
+                    .par_iter()
+                    .try_for_each(|path| -> Result<(), ()> {
+                        if REPACK_CANCEL.load(Ordering::Relaxed) {
+                            let _ = tx.send(Err("Repack cancelled".to_string()));
+                            return Err(());
+                        }
+                        let ue_path: &UEPath = path.as_ref();
+                        let bundle_result = (|| -> Result<FSerializedAssetBundle, String> {
+                            Ok(FSerializedAssetBundle {
+                                asset_file_buffer: reader
+                                    .read(ue_path)
+                                    .map_err(|e| e.to_string())?,
+                                exports_file_buffer: reader
+                                    .read(&ue_path.with_extension("uexp"))
+                                    .map_err(|e| e.to_string())?,
+                                bulk_data_buffer: reader
+                                    .read_opt(&ue_path.with_extension("ubulk"))
+                                    .map_err(|e| e.to_string())?,
+                                optional_bulk_data_buffer: reader
+                                    .read_opt(&ue_path.with_extension("uptnl"))
+                                    .map_err(|e| e.to_string())?,
+                                memory_mapped_bulk_data_buffer: reader
+                                    .read_opt(&ue_path.with_extension("m.ubulk"))
+                                    .map_err(|e| e.to_string())?,
+                            })
+                        })();
+                        let bundle = match bundle_result {
+                            Ok(b) => b,
+                            Err(e) => {
+                                let _ = tx.send(Err(e));
+                                return Err(());
+                            }
+                        };
+                        let mounted_path: UEPathBuf = format!("{MOUNT_POINT}{ue_path}").into();
+                        let converted = match zen_asset_conversion::build_zen_asset(
+                            bundle,
+                            shader_maps_ref,
+                            &mounted_path,
+                            Some(engine_version.package_file_version()),
+                            container_header_version,
+                            false,
+                            None,
+                            None,
+                            &log,
+                        ) {
+                            Ok(c) => c,
+                            Err(e) => {
+                                let _ = tx.send(Err(format!("Failed to convert {ue_path}: {e}")));
+                                return Err(());
+                            }
+                        };
+                        if tx.send(Ok(converted)).is_err() {
+                            return Err(());
+                        }
+                        Ok(())
+                    })
+            });
+        });
+
+        let mut completed = 0usize;
+        while let Ok(item) = rx.recv() {
+            let mut converted = item?;
+            converted
+                .write_package_data(&mut writer)
+                .map_err(|e| e.to_string())?;
+            converted
+                .write_and_release_bulk_data(&mut writer)
+                .map_err(|e| e.to_string())?;
+            completed += 1;
+            if completed.is_multiple_of(10) || completed == total {
+                let _ = app.emit(
+                    "repack-iostore-progress",
+                    RepackProgress {
+                        phase: "repacking",
+                        current: completed,
+                        total,
+                    },
+                );
+            }
+        }
+
+        Ok(())
+    })?;
+
+    if REPACK_CANCEL.load(Ordering::Relaxed) {
+        return Err("Repack cancelled".to_string());
     }
 
     writer.finalize().map_err(|e| e.to_string())?;
@@ -211,18 +264,8 @@ impl Drop for IoStoreCleanupGuard<'_> {
     }
 }
 
-fn make_config() -> Result<Arc<Config>, String> {
-    let aes_key: retoc::AesKey = super::profile::MARVEL_AES_KEY_HEX
-        .parse()
-        .map_err(|e| format!("{e}"))?;
-    Ok(Arc::new(Config {
-        aes_keys: HashMap::from([(retoc::FGuid::default(), aes_key)]),
-        ..Default::default()
-    }))
-}
-
 fn open_utoc(utoc_path: &str) -> Result<Box<dyn IoStoreTrait>, String> {
-    retoc::iostore::open(utoc_path, make_config()?).map_err(|e| e.to_string())
+    retoc::iostore::open(utoc_path, super::profile::make_config()?).map_err(|e| e.to_string())
 }
 
 /// Open base game containers only (excludes mods and patches).
@@ -231,7 +274,7 @@ fn open_base_game_paks(
     target_container: &str,
 ) -> Result<Box<dyn IoStoreTrait>, String> {
     let target = target_container.to_string();
-    retoc::iostore::open_filtered(paks_dir, make_config()?, move |name| {
+    retoc::iostore::open_filtered(paks_dir, super::profile::make_config()?, move |name| {
         if name == target {
             return true;
         }
@@ -252,7 +295,7 @@ fn open_base_game_paks(
 pub(crate) fn list_utoc_contents(utoc_path: &str) -> Result<Vec<String>, String> {
     let file = std::fs::File::open(utoc_path).map_err(|e| e.to_string())?;
     let mut reader = std::io::BufReader::new(file);
-    let config = make_config()?;
+    let config = super::profile::make_config()?;
     let raw = retoc::read_toc_paths(&mut reader, config).map_err(|e| e.to_string())?;
     let mut paths: Vec<String> = raw
         .into_iter()
@@ -388,7 +431,7 @@ pub(crate) fn extract_utoc_file(
 fn collect_target_paths(utoc_path: &str) -> Result<HashSet<String>, String> {
     let file = std::fs::File::open(utoc_path).map_err(|e| e.to_string())?;
     let mut reader = std::io::BufReader::new(file);
-    let config = make_config()?;
+    let config = super::profile::make_config()?;
     let raw = retoc::read_toc_paths(&mut reader, config).map_err(|e| e.to_string())?;
     Ok(raw
         .into_iter()
@@ -438,8 +481,10 @@ fn open_target_only(
     target_container: &str,
 ) -> Result<Box<dyn IoStoreTrait>, String> {
     let target = target_container.to_string();
-    retoc::iostore::open_filtered(paks_dir, make_config()?, move |name| name == target)
-        .map_err(|e| e.to_string())
+    retoc::iostore::open_filtered(paks_dir, super::profile::make_config()?, move |name| {
+        name == target
+    })
+    .map_err(|e| e.to_string())
 }
 
 /// Count legacy-convertible packages in a .utoc container.

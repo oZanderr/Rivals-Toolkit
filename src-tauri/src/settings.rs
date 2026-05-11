@@ -32,6 +32,38 @@ pub(crate) struct ModProfile {
     pub modified_at: u64,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) enum CompressionLevelSetting {
+    None,
+    Fast,
+    Normal,
+    Optimal1,
+    Optimal2,
+    Optimal3,
+}
+
+impl CompressionLevelSetting {
+    pub(crate) fn to_oodle(self) -> retoc::OodleCompressionLevel {
+        use retoc::OodleCompressionLevel as L;
+        match self {
+            Self::None => L::None,
+            Self::Fast => L::Fast,
+            Self::Normal => L::Normal,
+            Self::Optimal1 => L::Optimal1,
+            Self::Optimal2 => L::Optimal2,
+            Self::Optimal3 => L::Optimal3,
+        }
+    }
+}
+
+fn default_mod_compression_level() -> CompressionLevelSetting {
+    CompressionLevelSetting::Normal
+}
+
+fn default_vanilla_compression_level() -> CompressionLevelSetting {
+    CompressionLevelSetting::Optimal1
+}
+
 fn settings_path() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("rivals-toolkit").join(FILE_NAME))
 }
@@ -54,6 +86,10 @@ pub(crate) struct Settings {
     pub(crate) mod_profiles: Vec<ModProfile>,
     #[serde(default)]
     pub(crate) tweak_profiles: Vec<TweakProfile>,
+    #[serde(default = "default_mod_compression_level")]
+    pub(crate) mod_compression_level: CompressionLevelSetting,
+    #[serde(default = "default_vanilla_compression_level")]
+    pub(crate) vanilla_compression_level: CompressionLevelSetting,
 }
 
 fn default_true() -> bool {
@@ -71,6 +107,8 @@ impl Default for Settings {
             install_info: None,
             mod_profiles: Vec::new(),
             tweak_profiles: Vec::new(),
+            mod_compression_level: default_mod_compression_level(),
+            vanilla_compression_level: default_vanilla_compression_level(),
         }
     }
 }
@@ -172,5 +210,55 @@ pub(crate) fn set_game_path(
     let mut guard = state.lock().map_err(|e| e.to_string())?;
     guard.game_path = path.filter(|p| !p.is_empty());
     guard.install_info = install_info;
+    guard.save()
+}
+
+pub(crate) fn mod_compression_level(state: &State<'_, SettingsState>) -> CompressionLevelSetting {
+    state
+        .lock()
+        .map(|s| s.mod_compression_level)
+        .unwrap_or(CompressionLevelSetting::Normal)
+}
+
+pub(crate) fn vanilla_compression_level(
+    state: &State<'_, SettingsState>,
+) -> CompressionLevelSetting {
+    state
+        .lock()
+        .map(|s| s.vanilla_compression_level)
+        .unwrap_or(CompressionLevelSetting::Optimal1)
+}
+
+#[tauri::command]
+pub(crate) fn get_mod_compression_level(
+    state: State<'_, SettingsState>,
+) -> CompressionLevelSetting {
+    mod_compression_level(&state)
+}
+
+#[tauri::command]
+pub(crate) fn set_mod_compression_level(
+    state: State<'_, SettingsState>,
+    level: CompressionLevelSetting,
+) -> Result<(), String> {
+    let mut guard = state.lock().map_err(|e| e.to_string())?;
+    guard.mod_compression_level = level;
+    guard.save()
+}
+
+#[tauri::command]
+pub(crate) fn get_vanilla_compression_level(
+    state: State<'_, SettingsState>,
+) -> CompressionLevelSetting {
+    vanilla_compression_level(&state)
+}
+
+#[tauri::command]
+pub(crate) fn set_vanilla_compression_level(
+    state: State<'_, SettingsState>,
+    level: CompressionLevelSetting,
+) -> Result<(), String> {
+    let mut guard = state.lock().map_err(|e| e.to_string())?;
+    guard.vanilla_compression_level = level;
     guard.save()
 }
