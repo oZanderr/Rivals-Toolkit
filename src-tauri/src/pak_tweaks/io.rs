@@ -10,7 +10,34 @@ use walkdir::WalkDir;
 use crate::pak::crypto::{make_aes_key, open_pak};
 use crate::pak::profile::{RIVALS_PROFILE, strip_mount_prefix};
 
-use super::PakIniInfo;
+use super::{PakIniInfo, PakIniListing};
+
+/// Inspect a pak and list every `.ini` entry inside it. Returns `None` if no
+/// INI files are present.
+pub(super) fn inspect_pak_for_any_ini(pak_path: &Path) -> Result<Option<PakIniListing>, String> {
+    let pak = open_pak(pak_path)?;
+    let mut entries: Vec<String> = pak
+        .files()
+        .into_iter()
+        .filter(|f| f.to_ascii_lowercase().ends_with(".ini"))
+        .collect();
+    if entries.is_empty() {
+        return Ok(None);
+    }
+    entries.sort();
+
+    let pak_name = pak_path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+
+    Ok(Some(PakIniListing {
+        pak_name,
+        pak_path: pak_path.to_string_lossy().into_owned(),
+        ini_entries: entries,
+    }))
+}
 
 /// Inspect a pak for tweakable INI entries.
 pub(super) fn inspect_pak_for_ini(pak_path: &Path) -> Result<Option<PakIniInfo>, String> {

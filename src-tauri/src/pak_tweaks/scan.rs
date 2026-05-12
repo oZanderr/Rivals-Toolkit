@@ -6,12 +6,17 @@ use crate::paths::mods_dir;
 use crate::tweaks::TweakState;
 
 use super::cvars::parse_console_vars;
-use super::io::{extract_file_to_string, inspect_pak_for_ini};
-use super::{PakIniInfo, PakTweakState};
+use super::io::{extract_file_to_string, inspect_pak_for_any_ini, inspect_pak_for_ini};
+use super::{PakIniInfo, PakIniListing, PakTweakState};
 
 /// Inspect one pak and return INI metadata when present.
 pub(crate) fn inspect_single_pak(pak_path: &str) -> Result<Option<PakIniInfo>, String> {
     inspect_pak_for_ini(Path::new(pak_path))
+}
+
+/// Inspect one pak and list every `.ini` entry inside (any-INI variant).
+pub(crate) fn inspect_single_pak_any_ini(pak_path: &str) -> Result<Option<PakIniListing>, String> {
+    inspect_pak_for_any_ini(Path::new(pak_path))
 }
 
 /// Scan `~mods` and return paks that contain tweakable INI files.
@@ -28,6 +33,34 @@ pub(crate) fn scan_mod_paks(game_root: &str, recursive: bool) -> Result<Vec<PakI
             continue;
         }
         match inspect_pak_for_ini(&path) {
+            Ok(Some(info)) => results.push(info),
+            Ok(None) => {}
+            Err(_) => {}
+        }
+    }
+    results.sort_by(|a, b| a.pak_name.cmp(&b.pak_name));
+    Ok(results)
+}
+
+/// Scan `~mods` and return paks that contain ANY `.ini` file (used by the Pak
+/// INI Editor tab). Unlike `scan_mod_paks`, this is not limited to the curated
+/// Engine/DeviceProfiles filenames.
+pub(crate) fn scan_mod_paks_any_ini(
+    game_root: &str,
+    recursive: bool,
+) -> Result<Vec<PakIniListing>, String> {
+    let mods_dir = mods_dir(game_root);
+    if !mods_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let mut results = Vec::new();
+    for rel_path in crate::mods::walk_mod_files(&mods_dir, recursive) {
+        let path = mods_dir.join(&rel_path);
+        if path.extension().and_then(|x| x.to_str()) != Some("pak") {
+            continue;
+        }
+        match inspect_pak_for_any_ini(&path) {
             Ok(Some(info)) => results.push(info),
             Ok(None) => {}
             Err(_) => {}

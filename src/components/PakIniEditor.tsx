@@ -49,13 +49,10 @@ import { cn } from "@/lib/utils";
 
 // ── Types matching Rust backend ─────────────────────────────────────
 
-interface PakIniInfo {
+interface PakIniListing {
   pak_name: string;
   pak_path: string;
-  has_device_profiles: boolean;
-  has_engine_ini: boolean;
-  device_profiles_entry: string | null;
-  engine_ini_entry: string | null;
+  ini_entries: string[];
 }
 
 interface PakIniFileContent {
@@ -63,7 +60,6 @@ interface PakIniFileContent {
   content: string;
 }
 
-type IniFile = "device_profiles" | "engine";
 type NoticeType = "ok" | "err" | "info";
 
 interface Props {
@@ -134,21 +130,30 @@ const searchHighlightPlugin = ViewPlugin.fromClass(
 
 const searchExtension = [searchConfigField, searchHighlightPlugin];
 
+// ── Helpers ─────────────────────────────────────────────────────────
+
+function entryBasename(entry: string): string {
+  const parts = entry.split(/[/\\]/);
+  return parts[parts.length - 1] || entry;
+}
+
+function normalizeLineEndings(s: string): string {
+  return s.replace(/\r\n/g, "\n");
+}
+
 // ── Component ───────────────────────────────────────────────────────
 
 export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
   // ── Pak selection ──
-  const [paks, setPaks] = useState<PakIniInfo[]>([]);
-  const [selectedPak, setSelectedPak] = useState<PakIniInfo | null>(null);
+  const [paks, setPaks] = useState<PakIniListing[]>([]);
+  const [selectedPak, setSelectedPak] = useState<PakIniListing | null>(null);
   const [scanning, setScanning] = useState(false);
   const [loading, setLoading] = useState(false);
 
-  // ── Editor content ──
-  const [activeFile, setActiveFile] = useState<IniFile>("device_profiles");
-  const [dpContent, setDpContent] = useState<string | null>(null);
-  const [engineContent, setEngineContent] = useState<string | null>(null);
-  const [savedDp, setSavedDp] = useState<string | null>(null);
-  const [savedEngine, setSavedEngine] = useState<string | null>(null);
+  // ── Editor content (per INI entry) ──
+  const [activeEntry, setActiveEntry] = useState<string | null>(null);
+  const [contents, setContents] = useState<Record<string, string>>({});
+  const [savedContents, setSavedContents] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
 
   // ── Search ──
@@ -168,7 +173,9 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
   // ── Drag-and-drop ──
   const [isDragging, setIsDragging] = useState(false);
   const isActiveRef = useRef(isActive);
-  isActiveRef.current = isActive;
+  useEffect(() => {
+    isActiveRef.current = isActive;
+  }, [isActive]);
 
   // ── Notices ──
   const [notice, setNotice] = useState<{ msg: string; type: NoticeType } | null>(null);
@@ -181,12 +188,24 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
   }
 
   // ── Dirty detection ──
-  const dpDirty = dpContent !== null && dpContent !== savedDp;
-  const engineDirty = engineContent !== null && engineContent !== savedEngine;
-  const isDirty = dpDirty || engineDirty;
+  const dirtyEntries = useMemo(() => {
+    const out: string[] = [];
+    for (const [entry, value] of Object.entries(contents)) {
+      if (savedContents[entry] !== value) out.push(entry);
+    }
+    return out;
+  }, [contents, savedContents]);
+  const isDirty = dirtyEntries.length > 0;
 
-  const currentContent = activeFile === "device_profiles" ? dpContent : engineContent;
-  const setCurrentContent = activeFile === "device_profiles" ? setDpContent : setEngineContent;
+  const currentContent = activeEntry !== null ? (contents[activeEntry] ?? null) : null;
+
+  const setCurrentContent = useCallback(
+    (value: string) => {
+      if (activeEntry === null) return;
+      setContents((prev) => ({ ...prev, [activeEntry]: value }));
+    },
+    [activeEntry]
+  );
 
   // ── Match positions ──
   const matchPositions = useMemo(() => {
@@ -208,7 +227,7 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
       if (!gamePath) return;
       setScanning(true);
       try {
-        const results = await invoke<PakIniInfo[]>("scan_mod_paks_for_ini", {
+        const results = await invoke<PakIniListing[]>("scan_mod_paks_any_ini", {
           gameRoot: gamePath,
         });
         // Re-inspect manually-browsed paks not in the folder scan; drop those that no longer have INI entries.
@@ -216,7 +235,7 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
         const inspectedManual = await Promise.all(
           manualOnly.map(async (pak) => {
             try {
-              return await invoke<PakIniInfo | null>("inspect_pak_path", {
+              return await invoke<PakIniListing | null>("inspect_pak_path_any_ini", {
                 pakPath: pak.pak_path,
               });
             } catch {
@@ -224,20 +243,19 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
             }
           })
         );
-        const retainedManual = inspectedManual.filter((p): p is PakIniInfo => p !== null);
+        const retainedManual = inspectedManual.filter((p): p is PakIniListing => p !== null);
         const merged = [...results, ...retainedManual];
         setPaks(merged);
         if (selectedPak && !merged.find((p) => p.pak_path === selectedPak.pak_path)) {
           setSelectedPak(null);
-          setDpContent(null);
-          setEngineContent(null);
-          setSavedDp(null);
-          setSavedEngine(null);
+          setActiveEntry(null);
+          setContents({});
+          setSavedContents({});
         }
         if (merged.length === 0) {
-          if (!silent) showNotice("No config mods found", "info");
+          if (!silent) showNotice("No paks with INI files found", "info");
         } else if (!silent) {
-          showNotice(`Found ${merged.length} config mod${merged.length !== 1 ? "s" : ""}`, "ok");
+          showNotice(`Found ${merged.length} pak${merged.length !== 1 ? "s" : ""} with INI`, "ok");
         }
       } catch (e) {
         console.error("Scan failed:", e);
@@ -256,7 +274,9 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
     });
     if (typeof selected !== "string") return;
     try {
-      const info = await invoke<PakIniInfo | null>("inspect_pak_path", { pakPath: selected });
+      const info = await invoke<PakIniListing | null>("inspect_pak_path_any_ini", {
+        pakPath: selected,
+      });
       if (!info) {
         showNotice("No INI files found in that pak", "err");
         return;
@@ -282,7 +302,7 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
           const pakPaths = event.payload.paths.filter((p) => p.toLowerCase().endsWith(".pak"));
           if (pakPaths.length === 0) return;
           try {
-            const info = await invoke<PakIniInfo | null>("inspect_pak_path", {
+            const info = await invoke<PakIniListing | null>("inspect_pak_path_any_ini", {
               pakPath: pakPaths[0],
             });
             if (!info) {
@@ -321,49 +341,36 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
     });
   }, [selectedPak, isDirty]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  async function loadPak(pak: PakIniInfo) {
+  async function loadPak(pak: PakIniListing) {
     const isPakSwitch = selectedPak?.pak_path !== pak.pak_path;
     setSelectedPak(pak);
-    setDpContent(null);
-    setEngineContent(null);
-    setSavedDp(null);
-    setSavedEngine(null);
+    setContents({});
+    setSavedContents({});
     setLoading(true);
 
     try {
-      let dp: string | null = null;
-      let eng: string | null = null;
-
-      if (pak.has_device_profiles && pak.device_profiles_entry) {
-        dp = await invoke<string>("extract_pak_ini", {
-          pakPath: pak.pak_path,
-          entry: pak.device_profiles_entry,
-        });
+      const loaded: Record<string, string> = {};
+      for (const entry of pak.ini_entries) {
+        try {
+          const raw = await invoke<string>("extract_pak_ini", {
+            pakPath: pak.pak_path,
+            entry,
+          });
+          loaded[entry] = normalizeLineEndings(raw);
+        } catch (e) {
+          console.error(`Failed to read ${entry}:`, e);
+        }
       }
-      if (pak.has_engine_ini && pak.engine_ini_entry) {
-        eng = await invoke<string>("extract_pak_ini", {
-          pakPath: pak.pak_path,
-          entry: pak.engine_ini_entry,
-        });
-      }
-
-      // Normalize to \n so dirty detection matches CM's internal line endings
-      const normDp = dp?.replace(/\r\n/g, "\n") ?? null;
-      const normEng = eng?.replace(/\r\n/g, "\n") ?? null;
-      setDpContent(normDp);
-      setSavedDp(normDp);
-      setEngineContent(normEng);
-      setSavedEngine(normEng);
+      setContents(loaded);
+      setSavedContents(loaded);
       setPakEpoch((n) => n + 1);
 
-      // Preserve user's active file across disk reloads; only auto-select when current choice is unavailable or switching paks.
+      // Preserve user's active entry across reloads when it still exists; otherwise pick the first.
+      const firstEntry = pak.ini_entries.find((e) => loaded[e] !== undefined) ?? null;
       if (isPakSwitch) {
-        if (dp !== null) setActiveFile("device_profiles");
-        else if (eng !== null) setActiveFile("engine");
-      } else if (activeFile === "device_profiles" && dp === null && eng !== null) {
-        setActiveFile("engine");
-      } else if (activeFile === "engine" && eng === null && dp !== null) {
-        setActiveFile("device_profiles");
+        setActiveEntry(firstEntry);
+      } else if (activeEntry === null || loaded[activeEntry] === undefined) {
+        setActiveEntry(firstEntry);
       }
     } catch (e) {
       showNotice(String(e), "err");
@@ -382,34 +389,23 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
   function discard() {
     if (!isDirty) return;
     const view = editorViewRef.current;
-    const target = activeFile === "device_profiles" ? savedDp : savedEngine;
+    const target = activeEntry !== null ? (savedContents[activeEntry] ?? "") : null;
     if (view && target !== null) {
       view.dispatch({
         changes: { from: 0, to: view.state.doc.length, insert: target },
       });
     }
-    setDpContent(savedDp);
-    setEngineContent(savedEngine);
+    setContents(savedContents);
   }
 
   async function save() {
     if (!selectedPak || !isDirty) return;
     setSaving(true);
     try {
-      const files: PakIniFileContent[] = [];
-
-      if (dpDirty && dpContent !== null && selectedPak.device_profiles_entry) {
-        files.push({
-          entry: selectedPak.device_profiles_entry,
-          content: dpContent.replace(/\r?\n/g, "\r\n"),
-        });
-      }
-      if (engineDirty && engineContent !== null && selectedPak.engine_ini_entry) {
-        files.push({
-          entry: selectedPak.engine_ini_entry,
-          content: engineContent.replace(/\r?\n/g, "\r\n"),
-        });
-      }
+      const files: PakIniFileContent[] = dirtyEntries.map((entry) => ({
+        entry,
+        content: contents[entry].replace(/\r?\n/g, "\r\n"),
+      }));
 
       const msg = await invoke<string>("save_pak_ini", {
         pakPath: selectedPak.pak_path,
@@ -418,9 +414,8 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
       showNotice(msg, "ok");
       emitPakChanged({ pakPath: selectedPak.pak_path, source: "PakIniEditor" });
 
-      // Sync saved snapshot to current buffer; skip disk round-trip to preserve cursor and active file.
-      if (dpContent !== null) setSavedDp(dpContent);
-      if (engineContent !== null) setSavedEngine(engineContent);
+      // Sync saved snapshot to current buffer; skip disk round-trip to preserve cursor and active entry.
+      setSavedContents(contents);
     } catch (e) {
       showNotice(String(e), "err", 8000);
       console.error(e);
@@ -431,7 +426,9 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
 
   // ── Search functions ──
   const saveRef = useRef(save);
-  saveRef.current = save;
+  useEffect(() => {
+    saveRef.current = save;
+  });
 
   function openSearch() {
     setSearchOpen(true);
@@ -439,7 +436,9 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
   }
 
   const openSearchRef = useRef(openSearch);
-  openSearchRef.current = openSearch;
+  useEffect(() => {
+    openSearchRef.current = openSearch;
+  });
 
   function scrollToPos(view: EditorView, pos: number) {
     requestAnimationFrame(() => {
@@ -496,7 +495,9 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
   // ── CodeMirror setup ──
   // Ref to access current search state in the editor creation effect
   const searchStateRef = useRef({ open: false, term: "", caseSensitive: false });
-  searchStateRef.current = { open: searchOpen, term: searchTerm, caseSensitive };
+  useEffect(() => {
+    searchStateRef.current = { open: searchOpen, term: searchTerm, caseSensitive };
+  });
 
   useEffect(() => {
     if (!editorContainerRef.current || currentContent === null) return;
@@ -599,9 +600,9 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
       view.destroy();
       editorViewRef.current = null;
     };
-    // Only recreate when switching files or loading new content from disk (pakEpoch bump)
+    // Only recreate when switching entries or loading new content from disk (pakEpoch bump)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeFile, pakEpoch]);
+  }, [activeEntry, pakEpoch]);
 
   // ── Sync search config + auto-jump (single atomic dispatch) ──
   useEffect(() => {
@@ -649,9 +650,11 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
     }
   }, [isActive, gamePath, scan]);
 
-  // Re-scan when ~mods composition changes elsewhere; prunes deleted paks and adds new config mods.
+  // Re-scan when ~mods composition changes elsewhere; prunes deleted paks and adds new INI-bearing paks.
   const scanRef = useRef(scan);
-  scanRef.current = scan;
+  useEffect(() => {
+    scanRef.current = scan;
+  });
   useEffect(() => {
     return onModsChanged((event) => {
       if (!gamePath) return;
@@ -661,7 +664,7 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
     });
   }, [gamePath]);
 
-  // Auto-select when exactly one config mod is found
+  // Auto-select when exactly one pak is found
   useEffect(() => {
     if (paks.length === 1 && !selectedPak && !loading) {
       loadPak(paks[0]);
@@ -674,13 +677,12 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
     hasScanned.current = false;
     setPaks([]);
     setSelectedPak(null);
-    setDpContent(null);
-    setEngineContent(null);
-    setSavedDp(null);
-    setSavedEngine(null);
+    setActiveEntry(null);
+    setContents({});
+    setSavedContents({});
   }, [gamePath]);
 
-  const hasBothFiles = selectedPak?.has_device_profiles && selectedPak?.has_engine_ini;
+  const showTabs = !!selectedPak && selectedPak.ini_entries.length > 1;
 
   return (
     <div className="relative flex flex-1 min-h-0 w-full flex-col gap-4">
@@ -725,7 +727,7 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
             <SelectValue
               className="block min-w-0 max-w-full truncate text-left"
               placeholder={
-                paks.length === 0 ? "No config mods — scan or browse" : "Select a config mod..."
+                paks.length === 0 ? "No paks with INI — scan or browse" : "Select a pak..."
               }
             />
           </SelectTrigger>
@@ -742,7 +744,7 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
             <FolderOpen size={14} />
           </Button>
         </Tip>
-        <Tip content="Scan for config mods">
+        <Tip content="Scan for paks with INI files">
           <Button
             variant="ghost"
             size="icon-sm"
@@ -759,56 +761,47 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
       </div>
 
       {/* ── Editor area ── */}
-      {selectedPak && !loading && currentContent !== null && (
+      {selectedPak && !loading && currentContent !== null && activeEntry !== null && (
         <div className="flex flex-1 min-h-0 flex-col rounded-md border border-border overflow-hidden">
           {/* File tabs + toolbar */}
           <div className="flex items-center justify-between border-b border-border px-3 py-1.5">
-            <div className="flex items-center gap-2">
-              {hasBothFiles ? (
+            <div className="flex min-w-0 flex-1 items-center gap-2 overflow-x-auto">
+              {showTabs ? (
                 <div className="flex gap-1 rounded-md bg-muted p-1">
-                  {selectedPak.has_device_profiles && (
-                    <button
-                      onClick={() => setActiveFile("device_profiles")}
-                      className={cn(
-                        "flex items-center gap-1.5 rounded-sm px-3 py-1 text-[12px] font-medium transition-colors",
-                        activeFile === "device_profiles"
-                          ? "bg-background text-foreground shadow-sm"
-                          : "text-muted-foreground hover:text-foreground"
-                      )}
-                    >
-                      <FileText size={12} />
-                      DefaultDeviceProfiles.ini
-                      {dpDirty && <span className="size-1.5 rounded-full bg-warn" />}
-                    </button>
-                  )}
-                  {selectedPak.has_engine_ini && (
-                    <button
-                      onClick={() => setActiveFile("engine")}
-                      className={cn(
-                        "flex items-center gap-1.5 rounded-sm px-3 py-1 text-[12px] font-medium transition-colors",
-                        activeFile === "engine"
-                          ? "bg-background text-foreground shadow-sm"
-                          : "text-muted-foreground hover:text-foreground"
-                      )}
-                    >
-                      <FileText size={12} />
-                      DefaultEngine.ini
-                      {engineDirty && <span className="size-1.5 rounded-full bg-warn" />}
-                    </button>
-                  )}
+                  {selectedPak.ini_entries.map((entry) => {
+                    const entryDirty = contents[entry] !== savedContents[entry];
+                    return (
+                      <button
+                        key={entry}
+                        onClick={() => setActiveEntry(entry)}
+                        title={entry}
+                        className={cn(
+                          "flex items-center gap-1.5 rounded-sm px-3 py-1 text-[12px] font-medium transition-colors",
+                          activeEntry === entry
+                            ? "bg-background text-foreground shadow-sm"
+                            : "text-muted-foreground hover:text-foreground"
+                        )}
+                      >
+                        <FileText size={12} />
+                        {entryBasename(entry)}
+                        {entryDirty && <span className="size-1.5 rounded-full bg-warn" />}
+                      </button>
+                    );
+                  })}
                 </div>
               ) : (
-                <span className="flex items-center gap-1.5 text-[12px] font-medium text-foreground">
+                <span
+                  className="flex items-center gap-1.5 text-[12px] font-medium text-foreground"
+                  title={activeEntry}
+                >
                   <FileText size={12} />
-                  {selectedPak.has_device_profiles
-                    ? "DefaultDeviceProfiles.ini"
-                    : "DefaultEngine.ini"}
+                  {entryBasename(activeEntry)}
                   {isDirty && <span className="size-1.5 rounded-full bg-warn" />}
                 </span>
               )}
             </div>
 
-            <div className="flex items-center gap-1">
+            <div className="flex shrink-0 items-center gap-1">
               <Tip content="Reload from disk">
                 <Button variant="ghost" size="sm" onClick={reload} disabled={loading || saving}>
                   <RefreshCw size={13} />
@@ -949,11 +942,9 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
                     <span className="relative inline-flex h-2 w-2 rounded-full bg-warn" />
                   </span>
                   Unsaved
-                  {dpDirty && engineDirty
-                    ? " (both files)"
-                    : dpDirty
-                      ? " (DeviceProfiles)"
-                      : " (Engine)"}
+                  {dirtyEntries.length === 1
+                    ? ` (${entryBasename(dirtyEntries[0])})`
+                    : ` (${dirtyEntries.length} files)`}
                 </span>
               )}
               <Button variant="ghost" size="sm" onClick={discard} disabled={saving}>
@@ -985,7 +976,7 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
       {!selectedPak && !loading && (
         <div className="flex flex-1 min-h-0 items-center justify-center rounded-md border border-border">
           <span className="text-[13px] text-muted-foreground">
-            Select a config mod pak to start editing
+            Select a pak with INI files to start editing
           </span>
         </div>
       )}

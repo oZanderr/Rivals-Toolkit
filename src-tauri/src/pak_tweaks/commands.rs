@@ -3,7 +3,7 @@
 use tauri::State;
 
 use crate::pak_tweaks;
-use crate::pak_tweaks::{PakIniFileContent, PakIniInfo, PakTweakEdit};
+use crate::pak_tweaks::{PakIniFileContent, PakIniInfo, PakIniListing, PakTweakEdit};
 use crate::settings::{SettingsState, recursive_mod_scan};
 use crate::tweaks::TweakState;
 
@@ -23,6 +23,28 @@ pub(crate) async fn scan_mod_paks_for_ini(
     tauri::async_runtime::spawn_blocking(move || pak_tweaks::scan_mod_paks(&game_root, recursive))
         .await
         .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub(crate) async fn inspect_pak_path_any_ini(
+    pak_path: String,
+) -> Result<Option<PakIniListing>, String> {
+    tauri::async_runtime::spawn_blocking(move || pak_tweaks::inspect_single_pak_any_ini(&pak_path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub(crate) async fn scan_mod_paks_any_ini(
+    state: State<'_, SettingsState>,
+    game_root: String,
+) -> Result<Vec<PakIniListing>, String> {
+    let recursive = recursive_mod_scan(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        pak_tweaks::scan_mod_paks_any_ini(&game_root, recursive)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

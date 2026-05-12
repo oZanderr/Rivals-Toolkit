@@ -9,9 +9,12 @@ mod scan;
 use serde::{Deserialize, Serialize};
 
 pub(crate) use apply::{apply_pak_tweaks, save_pak_ini};
-pub(crate) use scan::{detect_pak_tweaks, extract_pak_ini, inspect_single_pak, scan_mod_paks};
+pub(crate) use scan::{
+    detect_pak_tweaks, extract_pak_ini, inspect_single_pak, inspect_single_pak_any_ini,
+    scan_mod_paks, scan_mod_paks_any_ini,
+};
 
-/// INI entries discovered in a pak mod.
+/// INI entries discovered in a pak mod for the curated tweak workflow (Config Tweaks).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct PakIniInfo {
     pub pak_name: String,
@@ -20,6 +23,14 @@ pub(crate) struct PakIniInfo {
     pub has_engine_ini: bool,
     pub device_profiles_entry: Option<String>,
     pub engine_ini_entry: Option<String>,
+}
+
+/// Any-INI listing for paks shown in the Pak INI Editor tab.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct PakIniListing {
+    pub pak_name: String,
+    pub pak_path: String,
+    pub ini_entries: Vec<String>,
 }
 
 /// Parsed CVar state from pak INI files.
