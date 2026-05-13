@@ -3,7 +3,15 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
-import { CheckCircle2, FileText, Package, Trash2, UploadCloud, XCircle } from "lucide-react";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  FileText,
+  Package,
+  Trash2,
+  UploadCloud,
+  XCircle,
+} from "lucide-react";
 
 import { PakTweaks } from "./PakTweaks";
 import { ScalabilityTweaks } from "./ScalabilityTweaks";
@@ -215,6 +223,15 @@ export function ConfigTweaks({ gamePath, isActive }: Props) {
             </Tip>
           </div>
         )}
+      </div>
+
+      {/* Anti-cheat detection warning */}
+      <div className="flex items-center gap-2.5 rounded-md border border-warn/20 bg-warn/5 px-3 py-2">
+        <AlertTriangle size={15} className="shrink-0 text-warn" />
+        <span className="flex-1 text-[12px] text-warn">
+          The game now detects graphics-altering config tweaks. No punishments yet, but use at your
+          own risk.
+        </span>
       </div>
 
       {/* Sub-tab bar */}
