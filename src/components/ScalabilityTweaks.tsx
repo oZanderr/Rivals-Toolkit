@@ -10,7 +10,6 @@ import {
   Pencil,
   Plus,
   RefreshCw,
-  Search,
   Info,
   Trash2,
   Undo2,
@@ -19,7 +18,6 @@ import {
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
   Select,
@@ -99,14 +97,12 @@ type StatusType = "ok" | "err" | "info";
 
 interface Props {
   filePath: string;
-  setFilePath: (p: string) => void;
   fileExists: boolean | null;
   content: string;
   setContent: (c: string) => void;
   reloadSignal: number;
   detectBadge: string | null;
   detecting: boolean;
-  onDetect: () => void;
   onBrowse: () => void;
   onSaved: (content: string) => void;
   onReload: () => void;
@@ -114,14 +110,12 @@ interface Props {
 
 export function ScalabilityTweaks({
   filePath,
-  setFilePath,
   fileExists,
   content,
   setContent,
   reloadSignal,
   detectBadge,
   detecting,
-  onDetect,
   onBrowse,
   onSaved,
   onReload,
@@ -433,7 +427,7 @@ export function ScalabilityTweaks({
 
   return (
     <div className="flex flex-1 min-h-0 flex-col">
-      <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable]">
+      <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto scrollbar-gutter-stable">
         <div className="flex flex-col gap-5">
           {/* Config file location */}
           <div className="flex flex-col overflow-hidden rounded-md border border-border">
@@ -474,25 +468,7 @@ export function ScalabilityTweaks({
                   </Tip>
                 )}
               </div>
-              <Button
-                variant="ghost"
-                size="sm"
-                disabled={!filePath}
-                onClick={() => filePath && openPath(filePath.replace(/[/\\][^/\\]+$/, ""))}
-              >
-                Show in Explorer
-              </Button>
-            </div>
-            <div className="relative">
-              <Tip content={filePath} disabled={!filePath}>
-                <Input
-                  className="pr-16 rounded-none border-0 shadow-none font-mono text-[12px] focus-visible:ring-0 focus-visible:border-0"
-                  value={filePath}
-                  onChange={(e) => setFilePath(e.target.value)}
-                  placeholder="Path to Scalability.ini\u2026"
-                />
-              </Tip>
-              <div className="absolute right-1 top-1/2 flex -translate-y-1/2 items-center gap-0.5">
+              <div className="flex shrink-0 items-center gap-0.5">
                 <Tip content="Browse for config file">
                   <Button variant="ghost" size="icon-sm" onClick={onBrowse}>
                     <FolderOpen size={14} />
@@ -500,15 +476,25 @@ export function ScalabilityTweaks({
                 </Tip>
                 <Tip content="Reload from file">
                   <Button variant="ghost" size="icon-sm" onClick={onReload} disabled={!filePath}>
-                    <RefreshCw size={14} />
+                    <RefreshCw size={14} className={cn(detecting && "animate-spin")} />
                   </Button>
                 </Tip>
-                <Tip content="Auto-detect path">
-                  <Button variant="ghost" size="icon-sm" onClick={onDetect} disabled={detecting}>
-                    <Search size={14} className={cn(detecting && "animate-pulse")} />
-                  </Button>
-                </Tip>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={!filePath}
+                  onClick={() => filePath && openPath(filePath.replace(/[/\\][^/\\]+$/, ""))}
+                >
+                  Show in Explorer
+                </Button>
               </div>
+            </div>
+            <div className="px-3 py-2">
+              <Tip content={filePath} disabled={!filePath}>
+                <span className="block truncate font-mono text-[12px] text-muted-foreground">
+                  {filePath || "Path to Scalability.ini\u2026"}
+                </span>
+              </Tip>
             </div>
           </div>
 
@@ -680,7 +666,7 @@ export function ScalabilityTweaks({
       {!atBottom && (
         <div
           aria-hidden
-          className="pointer-events-none -mt-8 h-8 shrink-0 bg-gradient-to-t from-background to-transparent"
+          className="pointer-events-none -mt-8 h-8 shrink-0 bg-linear-to-t from-background to-transparent"
         />
       )}
 

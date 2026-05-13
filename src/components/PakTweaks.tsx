@@ -836,7 +836,7 @@ export function PakTweaks({ gamePath, scalabilityContent, isActive }: Props) {
         </div>
       )}
       {/* Scrollable content: pak list + tweak cards */}
-      <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable]">
+      <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto scrollbar-gutter-stable">
         <div className="flex flex-col gap-5">
           {/* Pak list */}
           <div className="flex flex-col overflow-hidden rounded-md border border-border">
@@ -889,7 +889,7 @@ export function PakTweaks({ gamePath, scalabilityContent, isActive }: Props) {
             </div>
 
             {!gamePath && (
-              <div className="px-3 py-2.5">
+              <div className="px-3 py-2">
                 <span className="flex items-center gap-1.5 text-[12px] text-warn">
                   <XCircle size={14} strokeWidth={2.5} />
                   Set game root in Settings first
@@ -898,7 +898,7 @@ export function PakTweaks({ gamePath, scalabilityContent, isActive }: Props) {
             )}
 
             {gamePath && paks.length === 0 && (
-              <div className="px-3 py-2.5">
+              <div className="px-3 py-2">
                 <span className="flex items-start gap-1.5 text-[12px] text-muted-foreground">
                   <Info size={14} className="mt-0.5 shrink-0" />
                   <span>
@@ -1168,7 +1168,7 @@ export function PakTweaks({ gamePath, scalabilityContent, isActive }: Props) {
       {!atBottom && (
         <div
           aria-hidden
-          className="pointer-events-none -mt-8 h-8 shrink-0 bg-gradient-to-t from-background to-transparent"
+          className="pointer-events-none -mt-8 h-8 shrink-0 bg-linear-to-t from-background to-transparent"
         />
       )}
 

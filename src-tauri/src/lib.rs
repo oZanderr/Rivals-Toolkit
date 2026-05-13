@@ -6,6 +6,7 @@ mod audio;
 mod concurrency;
 mod detect;
 mod game_status;
+mod game_user_settings;
 mod launch_record;
 mod mods;
 mod pak;
@@ -105,6 +106,12 @@ pub fn run() {
             scalability::commands::get_tweak_definitions,
             scalability::commands::detect_tweaks,
             scalability::commands::apply_tweaks,
+            game_user_settings::commands::get_game_user_settings_path,
+            game_user_settings::commands::read_game_user_settings,
+            game_user_settings::commands::write_game_user_settings,
+            game_user_settings::commands::get_game_user_settings_definitions,
+            game_user_settings::commands::detect_game_user_settings_tweaks,
+            game_user_settings::commands::apply_game_user_settings_tweaks,
             tweaks::shader_cache::clear_shader_cache,
             // tweaks/profiles
             tweaks::profiles::list_tweak_profiles,

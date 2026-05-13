@@ -7,12 +7,14 @@ import {
   AlertTriangle,
   CheckCircle2,
   FileText,
+  Gauge,
   Package,
   Trash2,
   UploadCloud,
   XCircle,
 } from "lucide-react";
 
+import { GameUserSettingsTweaks } from "./GameUserSettingsTweaks";
 import { PakTweaks } from "./PakTweaks";
 import { ScalabilityTweaks } from "./ScalabilityTweaks";
 
@@ -20,7 +22,7 @@ import { Button } from "@/components/ui/button";
 import { Tip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 
-type SubTab = "scalability" | "pak-config";
+type SubTab = "scalability" | "pak-config" | "game-settings";
 
 interface Props {
   gamePath: string;
@@ -39,7 +41,7 @@ export function ConfigTweaks({ gamePath, isActive }: Props) {
   const [detecting, setDetecting] = useState(false);
   const [detectBadge, setDetectBadge] = useState<string | null>(null);
   const detectBadgeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const detectPathRef = useRef(detectPath);
+  const detectPathRef = useRef<(() => Promise<void>) | null>(null);
 
   const [shaderNotice, setShaderNotice] = useState<{
     msg: string;
@@ -59,16 +61,8 @@ export function ConfigTweaks({ gamePath, isActive }: Props) {
   }, []);
 
   const isActiveRef = useRef(isActive);
-  isActiveRef.current = isActive;
   const subTabRef = useRef(subTab);
-  subTabRef.current = subTab;
   const fileExistsRef = useRef(fileExists);
-  fileExistsRef.current = fileExists;
-
-  detectPathRef.current = detectPath;
-  useEffect(() => {
-    detectPathRef.current();
-  }, []);
 
   // Drag-and-drop: accept .ini on scalability sub-tab, .pak on pak-config sub-tab.
   useEffect(() => {
@@ -116,6 +110,19 @@ export function ConfigTweaks({ gamePath, isActive }: Props) {
     return () => unlisten?.();
   }, []);
 
+  async function loadFile(path: string) {
+    try {
+      const text = await invoke<string>("read_scalability", { path });
+      setContent(text);
+      setScalabilityContent(text);
+      setFileExists(true);
+    } catch {
+      setContent("");
+      setScalabilityContent("");
+      setFileExists(false);
+    }
+  }
+
   /** Used on mount: detects path and loads file content. */
   async function detectPath() {
     setDetecting(true);
@@ -126,27 +133,6 @@ export function ConfigTweaks({ gamePath, isActive }: Props) {
       await loadFile(p);
     } catch {
       // no-op on mount
-    } finally {
-      setDetecting(false);
-    }
-  }
-
-  /** Button handler: detects path only, does not load file content. */
-  async function detectPathOnly() {
-    setDetecting(true);
-    setDetectBadge(null);
-    try {
-      const p = await invoke<string>("get_scalability_path");
-      const hadPath = filePath !== "";
-      const pathChanged = p !== filePath;
-      setFilePath(p);
-      if (pathChanged) {
-        if (hadPath) showDetectBadge("Path updated");
-      } else {
-        showDetectBadge("Path unchanged");
-      }
-    } catch {
-      showDetectBadge("Not found");
     } finally {
       setDetecting(false);
     }
@@ -175,22 +161,21 @@ export function ConfigTweaks({ gamePath, isActive }: Props) {
     }
   }
 
-  async function loadFile(path: string) {
-    try {
-      const text = await invoke<string>("read_scalability", { path });
-      setContent(text);
-      setScalabilityContent(text);
-      setFileExists(true);
-    } catch {
-      setContent("");
-      setScalabilityContent("");
-      setFileExists(false);
-    }
-  }
+  useEffect(() => {
+    isActiveRef.current = isActive;
+    subTabRef.current = subTab;
+    fileExistsRef.current = fileExists;
+    detectPathRef.current = detectPath;
+  });
+
+  useEffect(() => {
+    detectPathRef.current?.();
+  }, []);
 
   const SUB_TABS: { id: SubTab; label: string; Icon: React.ElementType }[] = [
     { id: "scalability", label: "Scalability", Icon: FileText },
     { id: "pak-config", label: "Pak Config", Icon: Package },
+    { id: "game-settings", label: "Game Settings", Icon: Gauge },
   ];
 
   return (
@@ -225,12 +210,13 @@ export function ConfigTweaks({ gamePath, isActive }: Props) {
         )}
       </div>
 
-      {/* Anti-cheat detection warning */}
+      {/* Warning banner: anti-cheat for tweaks, overwrite caveat for game-settings. */}
       <div className="flex items-center gap-2.5 rounded-md border border-warn/20 bg-warn/5 px-3 py-2">
         <AlertTriangle size={15} className="shrink-0 text-warn" />
         <span className="flex-1 text-[12px] text-warn">
-          The game now detects graphics-altering config tweaks. No punishments yet, but use at your
-          own risk.
+          {subTab === "game-settings"
+            ? "Marvel Rivals overwrites this file when it saves settings. Close the game before editing, and changes may reset when the game writes its own preferences."
+            : "The game now detects graphics-altering config tweaks. No punishments yet, but use at your own risk."}
         </span>
       </div>
 
@@ -270,14 +256,12 @@ export function ConfigTweaks({ gamePath, isActive }: Props) {
         )}
         <ScalabilityTweaks
           filePath={filePath}
-          setFilePath={setFilePath}
           fileExists={fileExists}
           content={content}
           setContent={setContent}
           reloadSignal={reloadSignal}
           detectBadge={detectBadge}
           detecting={detecting}
-          onDetect={detectPathOnly}
           onBrowse={browse}
           onSaved={(newContent) => {
             setFileExists(true);
@@ -294,6 +278,11 @@ export function ConfigTweaks({ gamePath, isActive }: Props) {
           scalabilityContent={scalabilityContent}
           isActive={isActive && subTab === "pak-config"}
         />
+      </div>
+
+      {/* ── Game Settings tab ── */}
+      <div className={cn("flex flex-1 min-h-0 flex-col", subTab !== "game-settings" && "hidden")}>
+        <GameUserSettingsTweaks />
       </div>
     </div>
   );

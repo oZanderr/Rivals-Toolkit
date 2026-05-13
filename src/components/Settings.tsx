@@ -733,7 +733,7 @@ export function Settings({
 
   return (
     <div className="flex flex-1 min-h-0 w-full flex-col">
-      <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable]">
+      <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto scrollbar-gutter-stable">
         <div className="flex flex-col gap-4">
           {/* ── Header ── */}
           <div className="flex min-h-8 items-center gap-3">
@@ -1261,7 +1261,7 @@ export function Settings({
       {!atBottom && (
         <div
           aria-hidden
-          className="pointer-events-none -mt-8 h-8 shrink-0 bg-gradient-to-t from-background to-transparent"
+          className="pointer-events-none -mt-8 h-8 shrink-0 bg-linear-to-t from-background to-transparent"
         />
       )}
 
