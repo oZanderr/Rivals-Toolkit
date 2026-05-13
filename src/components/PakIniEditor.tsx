@@ -212,11 +212,12 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
     if (!searchTerm || !currentContent || !searchOpen) return [];
     const hay = caseSensitive ? currentContent : currentContent.toLowerCase();
     const ndl = caseSensitive ? searchTerm : searchTerm.toLowerCase();
+    if (ndl.length === 0) return [];
     const positions: number[] = [];
     let idx = hay.indexOf(ndl);
     while (idx !== -1) {
       positions.push(idx);
-      idx = hay.indexOf(ndl, idx + 1);
+      idx = hay.indexOf(ndl, idx + ndl.length);
     }
     return positions;
   }, [searchTerm, currentContent, caseSensitive, searchOpen]);
