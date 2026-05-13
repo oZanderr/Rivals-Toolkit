@@ -7,6 +7,7 @@ const OPTIMISTIC_TIMEOUT_MS = 60_000;
 
 export function useGameRunning(active: boolean) {
   const [polled, setPolled] = useState<boolean | null>(null);
+  const [blocked, setBlocked] = useState<boolean | null>(null);
   const [optimistic, setOptimistic] = useState(false);
   const optimisticTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -32,9 +33,13 @@ export function useGameRunning(active: boolean) {
     let cancelled = false;
     async function poll() {
       try {
-        const running = await invoke<boolean>("get_game_running");
+        const [running, shouldBlock] = await Promise.all([
+          invoke<boolean>("get_game_running"),
+          invoke<boolean>("get_should_block_for_game"),
+        ]);
         if (cancelled) return;
         setPolled(running);
+        setBlocked(shouldBlock);
         if (running) clearOptimistic();
       } catch {
         // ignore — backend guards are source of truth
@@ -55,8 +60,13 @@ export function useGameRunning(active: boolean) {
     []
   );
 
-  // Suppress isRunning until the first poll has completed to avoid a flash of
+  // Suppress signals until the first poll has completed to avoid a flash of
   // "game is running" UI before the backend has actually been queried.
-  const ready = polled !== null;
-  return { isRunning: ready && (polled === true || optimistic), ready, markLaunched };
+  const ready = polled !== null && blocked !== null;
+  return {
+    isRunning: ready && (polled === true || optimistic),
+    shouldBlock: ready && (blocked === true || optimistic),
+    ready,
+    markLaunched,
+  };
 }

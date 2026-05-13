@@ -55,3 +55,8 @@ pub(crate) fn game_running_error() -> String {
 pub(crate) fn get_game_running() -> bool {
     is_game_running()
 }
+
+#[tauri::command]
+pub(crate) fn get_should_block_for_game() -> bool {
+    should_block_for_game()
+}

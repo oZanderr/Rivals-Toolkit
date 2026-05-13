@@ -34,6 +34,8 @@ import {
 import { Slider as SliderUI } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { Tip } from "@/components/ui/tooltip";
+import { useSaveHotkeys } from "@/hooks/useSaveHotkeys";
+import { useScrollAtBottom } from "@/hooks/useScrollAtBottom";
 import { normalizeFolderPath, onModsChanged } from "@/lib/modsEvents";
 import { emitPakChanged, onPakChanged } from "@/lib/pakEvents";
 import { emitTweakProfilesChanged, onTweakProfilesChanged } from "@/lib/tweakProfileEvents";
@@ -777,6 +779,20 @@ export function PakTweaks({ gamePath, scalabilityContent, isActive }: Props) {
 
   const dirty = edits.length > 0;
 
+  const { atBottom, scrollRef, sentinelRef } = useScrollAtBottom();
+  const discardEdits = () => {
+    if (!selectedPak) return;
+    setSelectedPreset("");
+    setAppliedPresetAt(null);
+    forceReloadPak(selectedPak);
+  };
+  useSaveHotkeys({
+    dirty,
+    saving: applying,
+    onSave: applyEdits,
+    onDiscard: discardEdits,
+  });
+
   function hasScalabilityConflict(tweak: TweakDefinition): boolean {
     if (tweak.pak_only || tweak.kind !== "RemoveLines") return false;
     const isActive = tweakStates.find((s) => s.id === tweak.id)?.active ?? false;
@@ -820,7 +836,7 @@ export function PakTweaks({ gamePath, scalabilityContent, isActive }: Props) {
         </div>
       )}
       {/* Scrollable content: pak list + tweak cards */}
-      <div className="flex-1 overflow-y-auto [scrollbar-gutter:stable]">
+      <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable]">
         <div className="flex flex-col gap-5">
           {/* Pak list */}
           <div className="flex flex-col overflow-hidden rounded-md border border-border">
@@ -1146,57 +1162,51 @@ export function PakTweaks({ gamePath, scalabilityContent, isActive }: Props) {
               );
             })()}
         </div>
+        <div ref={sentinelRef} aria-hidden className="h-px w-full shrink-0" />
       </div>
+
+      {!atBottom && (
+        <div
+          aria-hidden
+          className="pointer-events-none -mt-8 h-8 shrink-0 bg-gradient-to-t from-background to-transparent"
+        />
+      )}
 
       {/* Save bar */}
       {selectedPak && !loading && dirty && (
-        <div className="mt-3 flex shrink-0 flex-col gap-2 border-t border-border pt-3">
-          <div className="flex flex-col gap-1.5">
+        <div className="flex shrink-0 items-center gap-2 pt-2">
+          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
             <span className="text-[11px] font-semibold uppercase text-muted-foreground">
-              Pending Changes ({edits.length})
+              Pending ({edits.length})
             </span>
-            <div className="flex flex-wrap gap-1.5">
-              {edits.map((edit) => (
-                <Badge
-                  key={edit.key}
-                  variant="outline"
-                  className={cn(
-                    "rounded-sm px-1.5 py-0 text-[11px] font-mono",
-                    edit.value === null
-                      ? "border-destructive/40 bg-destructive/10 text-destructive"
-                      : "border-ok/40 bg-ok/10 text-ok"
-                  )}
-                >
-                  {edit.value === null ? `- ${edit.key}` : `${edit.key}=${edit.value}`}
-                </Badge>
-              ))}
-            </div>
+            {edits.map((edit) => (
+              <Badge
+                key={edit.key}
+                variant="outline"
+                className={cn(
+                  "rounded-sm px-1.5 py-0 text-[11px] font-mono",
+                  edit.value === null
+                    ? "border-destructive/40 bg-destructive/10 text-destructive"
+                    : "border-ok/40 bg-ok/10 text-ok"
+                )}
+              >
+                {edit.value === null ? `- ${edit.key}` : `${edit.key}=${edit.value}`}
+              </Badge>
+            ))}
           </div>
-          <div className="flex items-center justify-end gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => {
-                if (!selectedPak) return;
-                setSelectedPreset("");
-                setAppliedPresetAt(null);
-                forceReloadPak(selectedPak);
-              }}
-              disabled={loading}
-            >
-              <Undo2 size={14} />
-              Discard
-            </Button>
-            <Button
-              variant="blue"
-              size="sm"
-              onClick={applyEdits}
-              disabled={!dirty || applying || edits.length === 0}
-            >
-              {applying ? <RefreshCw size={14} className="animate-spin" /> : <Save size={14} />}
-              {applying ? "Repacking…" : "Save"}
-            </Button>
-          </div>
+          <Button variant="outline" size="sm" onClick={discardEdits} disabled={loading}>
+            <Undo2 size={14} />
+            Discard
+          </Button>
+          <Button
+            variant="blue"
+            size="sm"
+            onClick={applyEdits}
+            disabled={!dirty || applying || edits.length === 0}
+          >
+            {applying ? <RefreshCw size={14} className="animate-spin" /> : <Save size={14} />}
+            {applying ? "Repacking…" : "Save"}
+          </Button>
         </div>
       )}
     </div>

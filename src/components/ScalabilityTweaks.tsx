@@ -31,6 +31,8 @@ import {
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { Tip } from "@/components/ui/tooltip";
+import { useSaveHotkeys } from "@/hooks/useSaveHotkeys";
+import { useScrollAtBottom } from "@/hooks/useScrollAtBottom";
 import { emitTweakProfilesChanged, onTweakProfilesChanged } from "@/lib/tweakProfileEvents";
 import { cn } from "@/lib/utils";
 
@@ -418,11 +420,20 @@ export function ScalabilityTweaks({
     return acc;
   }, {});
 
+  const { atBottom, scrollRef, sentinelRef } = useScrollAtBottom();
+  const discardChanges = useCallback(() => {
+    setEnabled(savedEnabled);
+    setValues(savedValues);
+    setSelectedPreset("");
+    setAppliedPresetAt(null);
+  }, [savedEnabled, savedValues]);
+  useSaveHotkeys({ dirty, onSave: applyAndSave, onDiscard: discardChanges });
+
   if (!defsLoaded) return null;
 
   return (
-    <div className="flex flex-1 min-h-0 flex-col gap-5">
-      <div className="flex-1 overflow-y-auto [scrollbar-gutter:stable]">
+    <div className="flex flex-1 min-h-0 flex-col">
+      <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable]">
         <div className="flex flex-col gap-5">
           {/* Config file location */}
           <div className="flex flex-col overflow-hidden rounded-md border border-border">
@@ -663,51 +674,46 @@ export function ScalabilityTweaks({
             ))}
           </div>
         </div>
+        <div ref={sentinelRef} aria-hidden className="h-px w-full shrink-0" />
       </div>
+
+      {!atBottom && (
+        <div
+          aria-hidden
+          className="pointer-events-none -mt-8 h-8 shrink-0 bg-gradient-to-t from-background to-transparent"
+        />
+      )}
 
       {/* Save bar */}
       {dirty && (
-        <div className="flex shrink-0 flex-col gap-2 border-t border-border pt-2">
-          <div className="flex flex-col gap-1.5">
+        <div className="flex shrink-0 items-center gap-2 pt-2">
+          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
             <span className="text-[11px] font-semibold uppercase text-muted-foreground">
-              Pending Changes ({pendingChanges.length})
+              Pending ({pendingChanges.length})
             </span>
-            <div className="flex flex-wrap gap-1.5">
-              {pendingChanges.map((change) => (
-                <Badge
-                  key={change.id}
-                  variant="outline"
-                  className={cn(
-                    "rounded-sm px-1.5 py-0 text-[11px] font-mono",
-                    change.kind === "remove"
-                      ? "border-destructive/40 bg-destructive/10 text-destructive"
-                      : "border-ok/40 bg-ok/10 text-ok"
-                  )}
-                >
-                  {change.kind === "remove" ? `- ${change.display}` : change.display}
-                </Badge>
-              ))}
-            </div>
+            {pendingChanges.map((change) => (
+              <Badge
+                key={change.id}
+                variant="outline"
+                className={cn(
+                  "rounded-sm px-1.5 py-0 text-[11px] font-mono",
+                  change.kind === "remove"
+                    ? "border-destructive/40 bg-destructive/10 text-destructive"
+                    : "border-ok/40 bg-ok/10 text-ok"
+                )}
+              >
+                {change.kind === "remove" ? `- ${change.display}` : change.display}
+              </Badge>
+            ))}
           </div>
-          <div className="flex items-center justify-end gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => {
-                setSelectedPreset("");
-                setAppliedPresetAt(null);
-                onReload();
-              }}
-              disabled={!dirty}
-            >
-              <Undo2 size={14} />
-              Discard
-            </Button>
-            <Button variant="blue" size="sm" onClick={applyAndSave} disabled={!dirty}>
-              <Save size={14} />
-              Save
-            </Button>
-          </div>
+          <Button variant="outline" size="sm" onClick={discardChanges} disabled={!dirty}>
+            <Undo2 size={14} />
+            Discard
+          </Button>
+          <Button variant="blue" size="sm" onClick={applyAndSave} disabled={!dirty}>
+            <Save size={14} />
+            Save
+          </Button>
         </div>
       )}
     </div>

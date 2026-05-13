@@ -10,6 +10,7 @@ import {
   Crosshair,
   Crown,
   Flame,
+  FolderOpen,
   HandHelping,
   Heart,
   HeartHandshake,
@@ -126,6 +127,12 @@ interface Props {
 
 type ResultState = { msg: string; ok: boolean; revealPath?: string } | null;
 
+interface LoadedSoundMod {
+  mod_name: string;
+  slots: Record<string, string>;
+  missing_baseline: string | null;
+}
+
 export function Sounds({ gamePath, isActive }: Props) {
   const [slots, setSlots] = useState<Record<SlotKey, SlotState | null>>(() => ({
     ...EMPTY_SLOTS,
@@ -141,6 +148,8 @@ export function Sounds({ gamePath, isActive }: Props) {
     outputDir: string;
     pakPath: string;
   } | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [loadConfirm, setLoadConfirm] = useState<LoadedSoundMod | null>(null);
   const [expandedCategories, setExpandedCategories] = useState<Set<string>>(
     () => new Set(["Combat"])
   );
@@ -434,6 +443,52 @@ export function Sounds({ gamePath, isActive }: Props) {
     });
   }
 
+  async function applyLoadedMod(loaded: LoadedSoundMod) {
+    setSlots(() => ({ ...EMPTY_SLOTS }));
+    setModName(loaded.mod_name);
+    setBuildResult(null);
+    const entries = Object.entries(loaded.slots) as [SlotKey, string][];
+    for (const [key, path] of entries) {
+      if (!SLOT_KEYS.includes(key)) continue;
+      await validateAndSet(path, key);
+    }
+    const suffix = loaded.missing_baseline ? ` (baseline BNK missing; all slots loaded)` : "";
+    setBuildResult({
+      msg: `Loaded ${entries.length} slot${entries.length !== 1 ? "s" : ""} from ${loaded.mod_name}${suffix}`,
+      ok: true,
+    });
+  }
+
+  async function loadExistingMod() {
+    if (loading) return;
+    if (!gamePath) {
+      setBuildResult({ msg: "Set game root in Settings first.", ok: false });
+      return;
+    }
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: "Sound mod pak", extensions: ["pak"] }],
+    });
+    if (typeof selected !== "string") return;
+    setLoading(true);
+    try {
+      const loaded = await invoke<LoadedSoundMod>("load_sound_mod_for_edit", {
+        gameRoot: gamePath,
+        pakPath: selected,
+      });
+      const anyFilled = SLOT_KEYS.some((k) => slots[k] !== null);
+      if (anyFilled) {
+        setLoadConfirm(loaded);
+      } else {
+        await applyLoadedMod(loaded);
+      }
+    } catch (e) {
+      setBuildResult({ msg: String(e), ok: false });
+    } finally {
+      setLoading(false);
+    }
+  }
+
   return (
     <div className="flex min-h-0 w-full flex-1 flex-col gap-3">
       {/* Page header */}
@@ -565,8 +620,47 @@ export function Sounds({ gamePath, isActive }: Props) {
 
       {/* Build section (fixed at bottom) */}
       <div className="flex shrink-0 flex-col overflow-hidden rounded-md border border-border">
-        <div className="border-b border-border bg-card px-3 py-2">
-          <h3 className="text-sm font-semibold">Build</h3>
+        <div className="flex items-center gap-3 border-b border-border bg-card px-3 py-2">
+          <h3 className="shrink-0 text-sm font-semibold">Build</h3>
+          {buildResult && (
+            <Tip content="Click to reveal in explorer" disabled={!buildResult.revealPath}>
+              <div
+                className={cn(
+                  "flex min-w-0 flex-1 items-center gap-1.5 text-xs",
+                  buildResult.ok ? "text-green-accent-foreground" : "text-red-accent-foreground",
+                  buildResult.revealPath && "cursor-pointer hover:underline"
+                )}
+                onClick={
+                  buildResult.revealPath
+                    ? () => revealItemInDir(buildResult.revealPath!)
+                    : undefined
+                }
+              >
+                {buildResult.ok ? (
+                  <CheckCircle2 size={13} className="shrink-0" />
+                ) : (
+                  <XCircle size={13} className="shrink-0" />
+                )}
+                <span className="truncate">{buildResult.msg}</span>
+              </div>
+            </Tip>
+          )}
+          <div className="ml-auto">
+            <Tip content="Load slots from an existing hitsound mod">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={(e) => {
+                  e.currentTarget.blur();
+                  void loadExistingMod();
+                }}
+                disabled={loading || building || !gamePath}
+              >
+                <FolderOpen size={13} />
+                {loading ? "Loading…" : "Load mod"}
+              </Button>
+            </Tip>
+          </div>
         </div>
         <div className="flex flex-col gap-3 p-3">
           <div className="relative">
@@ -595,29 +689,6 @@ export function Sounds({ gamePath, isActive }: Props) {
               {building ? "Building..." : "Build Sound Mod"}
             </Button>
           </div>
-          {buildResult && (
-            <Tip content="Click to reveal in explorer" disabled={!buildResult.revealPath}>
-              <div
-                className={cn(
-                  "flex items-center gap-1.5 text-xs",
-                  buildResult.ok ? "text-green-accent-foreground" : "text-red-accent-foreground",
-                  buildResult.revealPath && "cursor-pointer hover:underline"
-                )}
-                onClick={
-                  buildResult.revealPath
-                    ? () => revealItemInDir(buildResult.revealPath!)
-                    : undefined
-                }
-              >
-                {buildResult.ok ? (
-                  <CheckCircle2 size={13} className="shrink-0" />
-                ) : (
-                  <XCircle size={13} className="shrink-0" />
-                )}
-                <span className="truncate">{buildResult.msg}</span>
-              </div>
-            </Tip>
-          )}
         </div>
       </div>
 
@@ -657,6 +728,37 @@ export function Sounds({ gamePath, isActive }: Props) {
                   );
                 }
                 setReplaceConfirm(null);
+              }}
+            >
+              Replace
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={!!loadConfirm}
+        onOpenChange={(isOpen) => {
+          if (!isOpen) setLoadConfirm(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Replace current slots?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Loading <span className="font-semibold text-foreground">{loadConfirm?.mod_name}</span>{" "}
+              will clear your current slots and replace them with{" "}
+              {Object.keys(loadConfirm?.slots ?? {}).length} sound(s) from that mod.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className={buttonVariants({ variant: "blue" })}
+              onClick={() => {
+                const pending = loadConfirm;
+                setLoadConfirm(null);
+                if (pending) void applyLoadedMod(pending);
               }}
             >
               Replace

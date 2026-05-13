@@ -39,6 +39,7 @@ pub fn run() {
             paths::path_exists,
             // game_status
             game_status::get_game_running,
+            game_status::get_should_block_for_game,
             launch_record::get_skip_launcher,
             launch_record::set_skip_launcher,
             // settings
@@ -66,6 +67,7 @@ pub fn run() {
             // sounds
             sounds::build_sound_mod,
             sounds::extract_sound_wavs,
+            sounds::load_sound_mod_for_edit,
             // pak
             pak::commands::list_pak_files,
             pak::commands::list_pak_files_info,

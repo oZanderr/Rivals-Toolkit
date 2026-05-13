@@ -33,6 +33,8 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Tip } from "@/components/ui/tooltip";
+import { useSaveHotkeys } from "@/hooks/useSaveHotkeys";
+import { useScrollAtBottom } from "@/hooks/useScrollAtBottom";
 import type { UpdateInfo } from "@/hooks/useUpdateCheck";
 import { emitModsChanged } from "@/lib/modsEvents";
 import { setShowHeroIcons } from "@/lib/showHeroIcons";
@@ -726,9 +728,12 @@ export function Settings({
     setPathError(null);
   }
 
+  const { atBottom, scrollRef, sentinelRef } = useScrollAtBottom();
+  useSaveHotkeys({ dirty, saving, onSave: save, onDiscard: discard });
+
   return (
     <div className="flex flex-1 min-h-0 w-full flex-col">
-      <div className="flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable]">
+      <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable]">
         <div className="flex flex-col gap-4">
           {/* ── Header ── */}
           <div className="flex min-h-8 items-center gap-3">
@@ -1249,38 +1254,51 @@ export function Settings({
             </div>
           </div>
         </div>
+        <div ref={sentinelRef} aria-hidden className="h-px w-full shrink-0" />
       </div>
 
-      {/* ── Save bar (always rendered to avoid layout shift) ── */}
+      {/* Soft fade above save bar so cut-off descriptions don't slice abruptly. */}
+      {!atBottom && (
+        <div
+          aria-hidden
+          className="pointer-events-none -mt-8 h-8 shrink-0 bg-gradient-to-t from-background to-transparent"
+        />
+      )}
+
+      {/* Save bar collapses to zero height when inactive so it doesn't reserve space. */}
       <div
         className={cn(
-          "flex shrink-0 items-center justify-end gap-2 border-t border-border pt-2 transition-opacity duration-150",
-          dirty || savedBadge ? "opacity-100" : "pointer-events-none opacity-0"
+          "grid shrink-0 transition-[grid-template-rows] duration-200",
+          dirty || savedBadge ? "grid-rows-[1fr]" : "grid-rows-[0fr]"
         )}
       >
-        {savedBadge && !dirty && (
-          <span className="mr-auto flex items-center gap-1.5 text-[12px] font-medium text-ok">
-            <CheckCircle2 size={13} strokeWidth={2.5} />
-            Saved
-          </span>
-        )}
-        {dirty && (
-          <span className="mr-auto flex items-center gap-1.5 text-[12px] font-medium text-warn">
-            <span className="relative flex h-2 w-2">
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-warn opacity-60" />
-              <span className="relative inline-flex h-2 w-2 rounded-full bg-warn" />
-            </span>
-            Unsaved changes
-          </span>
-        )}
-        <Button variant="outline" onClick={discard} disabled={!dirty || saving}>
-          <Undo2 size={14} />
-          Discard
-        </Button>
-        <Button variant="blue" onClick={save} disabled={!dirty || saving}>
-          <Save size={14} />
-          Save
-        </Button>
+        <div className="overflow-hidden">
+          <div className="flex items-center justify-end gap-2 pt-2">
+            {savedBadge && !dirty && (
+              <span className="mr-auto flex items-center gap-1.5 text-[12px] font-medium text-ok">
+                <CheckCircle2 size={13} strokeWidth={2.5} />
+                Saved
+              </span>
+            )}
+            {dirty && (
+              <span className="mr-auto flex items-center gap-1.5 text-[12px] font-medium text-warn">
+                <span className="relative flex h-2 w-2">
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-warn opacity-60" />
+                  <span className="relative inline-flex h-2 w-2 rounded-full bg-warn" />
+                </span>
+                Unsaved changes
+              </span>
+            )}
+            <Button variant="outline" onClick={discard} disabled={!dirty || saving}>
+              <Undo2 size={14} />
+              Discard
+            </Button>
+            <Button variant="blue" onClick={save} disabled={!dirty || saving}>
+              <Save size={14} />
+              Save
+            </Button>
+          </div>
+        </div>
       </div>
     </div>
   );

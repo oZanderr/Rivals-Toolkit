@@ -323,8 +323,29 @@ fn build_sound_pak(
     Ok(format!("Sound mod created with {summary} sound(s)"))
 }
 
-fn extract_sound_pak(game_root: &str, pak_path: &str, output_dir: &str) -> Result<String, String> {
-    let pak_path = Path::new(pak_path);
+struct ExtractedSoundMod {
+    out_dir: PathBuf,
+    slot_paths: HashMap<String, PathBuf>,
+    extracted_labels: Vec<String>,
+    baseline_warning: Option<String>,
+}
+
+fn derive_mod_name_from_pak(pak_path: &Path) -> String {
+    let stem = pak_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("sound_mod");
+    stem.strip_suffix("_P")
+        .and_then(|s| s.rsplit_once('_').map(|(base, _)| base))
+        .unwrap_or(stem)
+        .to_string()
+}
+
+fn extract_sound_pak_core(
+    game_root: &str,
+    pak_path: &Path,
+    output_dir: &Path,
+) -> Result<ExtractedSoundMod, String> {
     let pak = open_pak(pak_path)?;
 
     let entry = find_bnk_entry(&pak.files()).ok_or_else(|| {
@@ -354,20 +375,12 @@ fn extract_sound_pak(game_root: &str, pak_path: &str, output_dir: &str) -> Resul
         }
     };
 
-    // Derive subfolder name from pak filename, stripping version suffix
-    let pak_stem = pak_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("sound_mod");
-    let folder_name = pak_stem
-        .strip_suffix("_P")
-        .and_then(|s| s.rsplit_once('_').map(|(base, _)| base))
-        .unwrap_or(pak_stem);
-
-    let out_dir = Path::new(output_dir).join(folder_name);
+    let folder_name = derive_mod_name_from_pak(pak_path);
+    let out_dir = output_dir.join(&folder_name);
     fs::create_dir_all(&out_dir).map_err(|e| format!("Failed to create output directory: {e}"))?;
 
     let mut extracted: Vec<String> = Vec::new();
+    let mut slot_paths: HashMap<String, PathBuf> = HashMap::new();
 
     for slot in SOUND_SLOTS {
         let Some(wem) = bnk.wems.iter().find(|w| w.id == slot.wem_id) else {
@@ -388,21 +401,76 @@ fn extract_sound_pak(game_root: &str, pak_path: &str, output_dir: &str) -> Resul
         fs::write(&out_path, wav_bytes)
             .map_err(|e| format!("Failed to write {}: {e}", out_path.display()))?;
         extracted.push(slot.label.to_string());
+        slot_paths.insert(slot.key.to_string(), out_path);
     }
 
-    if extracted.is_empty() {
-        return Err(match baseline_warning {
+    Ok(ExtractedSoundMod {
+        out_dir,
+        slot_paths,
+        extracted_labels: extracted,
+        baseline_warning,
+    })
+}
+
+fn extract_sound_pak(game_root: &str, pak_path: &str, output_dir: &str) -> Result<String, String> {
+    let result = extract_sound_pak_core(game_root, Path::new(pak_path), Path::new(output_dir))?;
+    if result.extracted_labels.is_empty() {
+        return Err(match result.baseline_warning {
             Some(w) => format!("No sounds extracted ({w})"),
             None => "No modified sounds found in this mod".to_string(),
         });
     }
-
-    let summary = extracted.join(" + ");
-    let mut msg = format!("Extracted {summary} sound(s) to {}", out_dir.display());
-    if let Some(w) = baseline_warning {
+    let summary = result.extracted_labels.join(" + ");
+    let mut msg = format!(
+        "Extracted {summary} sound(s) to {}",
+        result.out_dir.display()
+    );
+    if let Some(w) = result.baseline_warning {
         msg.push_str(&format!(" (note: {w}; all slot sounds extracted)"));
     }
     Ok(msg)
+}
+
+fn hitsound_edit_cache_dir() -> Result<PathBuf, String> {
+    dirs::cache_dir()
+        .map(|d| d.join("rivals-toolkit").join("hitsound-edit"))
+        .ok_or_else(|| "Cache directory unavailable".to_string())
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct LoadedSoundMod {
+    mod_name: String,
+    slots: HashMap<String, String>,
+    missing_baseline: Option<String>,
+}
+
+fn load_sound_mod_for_edit_impl(game_root: &str, pak_path: &str) -> Result<LoadedSoundMod, String> {
+    let cache_root = hitsound_edit_cache_dir()?;
+    if cache_root.exists() {
+        fs::remove_dir_all(&cache_root).map_err(|e| format!("clear hitsound-edit cache: {e}"))?;
+    }
+    fs::create_dir_all(&cache_root).map_err(|e| format!("create hitsound-edit cache: {e}"))?;
+
+    let extracted = extract_sound_pak_core(game_root, Path::new(pak_path), &cache_root)?;
+    if extracted.slot_paths.is_empty() {
+        return Err(match extracted.baseline_warning {
+            Some(w) => format!("No modified sounds found in this mod ({w})"),
+            None => "No modified sounds found in this mod".to_string(),
+        });
+    }
+
+    let mod_name = derive_mod_name_from_pak(Path::new(pak_path));
+    let slots: HashMap<String, String> = extracted
+        .slot_paths
+        .into_iter()
+        .map(|(k, p)| (k, p.to_string_lossy().into_owned()))
+        .collect();
+
+    Ok(LoadedSoundMod {
+        mod_name,
+        slots,
+        missing_baseline: extracted.baseline_warning,
+    })
 }
 
 #[tauri::command]
@@ -430,6 +498,18 @@ pub(crate) async fn extract_sound_wavs(
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         extract_sound_pak(&game_root, &pak_path, &output_dir)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub(crate) async fn load_sound_mod_for_edit(
+    game_root: String,
+    pak_path: String,
+) -> Result<LoadedSoundMod, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        load_sound_mod_for_edit_impl(&game_root, &pak_path)
     })
     .await
     .map_err(|e| e.to_string())?

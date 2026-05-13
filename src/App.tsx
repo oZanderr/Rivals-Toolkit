@@ -54,7 +54,12 @@ function App() {
   const [mountedTabs, setMountedTabs] = useState<Set<Tab>>(() => new Set(["mod-tools"]));
   const [version, setVersion] = useState("");
   const autoUpdateInfo = useUpdateCheck();
-  const { isRunning: gameRunning, ready: gameStatusReady, markLaunched } = useGameRunning(true);
+  const {
+    isRunning: gameRunning,
+    shouldBlock: gameBlocking,
+    ready: gameStatusReady,
+    markLaunched,
+  } = useGameRunning(true);
   const [manualUpdateInfo, setManualUpdateInfo] = useState<UpdateInfo | null>(null);
   const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
   const activeUpdateInfo = useMemo(
@@ -248,7 +253,7 @@ function App() {
                 <Mods
                   gamePath={gamePath}
                   isActive={activeTab === "mod-tools"}
-                  gameRunning={gameRunning}
+                  gameRunning={gameBlocking}
                   pathLoading={installInfo === undefined}
                   onViewInAssetManager={navigateToAssetManager}
                 />
@@ -278,7 +283,7 @@ function App() {
                 <PakIniEditor
                   gamePath={gamePath}
                   isActive={activeTab === "ini-editor"}
-                  gameRunning={gameRunning}
+                  gameRunning={gameBlocking}
                 />
               </div>
             )}
