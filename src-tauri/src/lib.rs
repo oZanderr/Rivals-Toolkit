@@ -12,6 +12,7 @@ mod mods;
 mod pak;
 mod pak_tweaks;
 mod paths;
+mod platform;
 mod scalability;
 mod settings;
 mod sounds;

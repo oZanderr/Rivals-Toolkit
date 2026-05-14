@@ -29,7 +29,6 @@ retoc = { git = "https://github.com/oZanderr/retoc", branch = "master" }
 aes = "0.8.4"
 hex = "0.4"
 walkdir = "2"
-winreg = "0.52"
 dirs = "5"
 zip = { version = "8.2.0", default-features = false, features = ["deflate"] }
 sevenz-rust2 = { version = "0.20", default-features = false, features = ["compress", "util"] }
@@ -38,6 +37,9 @@ rayon = "1"
 ureq = { version = "3", features = ["json"] }
 lewton = "0.10"
 sysinfo = { version = "0.33", default-features = false, features = ["system"] }
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"
 
 [profile.release]
 opt-level = 3

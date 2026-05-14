@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 pub(crate) fn paks_dir(game_root: &str) -> PathBuf {
-    PathBuf::from(game_root).join("MarvelGame\\Marvel\\Content\\Paks")
+    PathBuf::from(game_root).join("MarvelGame/Marvel/Content/Paks")
 }
 
 pub(crate) fn mods_dir(game_root: &str) -> PathBuf {
@@ -11,7 +11,7 @@ pub(crate) fn mods_dir(game_root: &str) -> PathBuf {
 }
 
 pub(crate) fn binaries_dir(game_root: &str) -> PathBuf {
-    PathBuf::from(game_root).join("MarvelGame\\Marvel\\Binaries\\Win64")
+    PathBuf::from(game_root).join("MarvelGame/Marvel/Binaries/Win64")
 }
 
 pub(crate) fn launch_record_path(game_root: &str) -> PathBuf {

@@ -6,7 +6,7 @@ use std::{fs, path::Path};
 
 use crate::tweaks::{self, TweakDefinition, TweakSetting, TweakState, parser};
 
-const CONFIG_PATH: &str = "Marvel\\Saved\\Config\\Windows\\GameUserSettings.ini";
+const CONFIG_PATH: &str = "Marvel/Saved/Config/Windows/GameUserSettings.ini";
 
 pub(crate) fn get_game_user_settings_path() -> Result<String, String> {
     dirs::data_local_dir()

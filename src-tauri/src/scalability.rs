@@ -7,7 +7,7 @@ use std::{fs, path::Path};
 
 use crate::tweaks::{self, TweakDefinition, TweakSetting, TweakState};
 
-const CONFIG_PATH: &str = "Marvel\\Saved\\Config\\Windows\\Scalability.ini";
+const CONFIG_PATH: &str = "Marvel/Saved/Config/Windows/Scalability.ini";
 
 pub(crate) fn get_scalability_path() -> Result<String, String> {
     dirs::data_local_dir()

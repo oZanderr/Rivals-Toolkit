@@ -64,8 +64,8 @@ pub(crate) fn get_signature_bypass_kind(game_root: String) -> mods::BypassKind {
 }
 
 #[tauri::command]
-pub(crate) fn open_mods_folder(game_root: String) -> Result<(), String> {
-    mods::open_mods_folder(&game_root)
+pub(crate) fn open_mods_folder(app: tauri::AppHandle, game_root: String) -> Result<(), String> {
+    mods::open_mods_folder(&app, &game_root)
 }
 
 #[tauri::command]

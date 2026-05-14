@@ -93,8 +93,8 @@ pub(crate) fn signature_bypass_kind(game_root: &str) -> BypassKind {
     bypass::bypass_install_kind(game_root)
 }
 
-pub(crate) fn open_mods_folder(game_root: &str) -> Result<(), String> {
-    folder::open_mods_folder(game_root)
+pub(crate) fn open_mods_folder(app: &tauri::AppHandle, game_root: &str) -> Result<(), String> {
+    folder::open_mods_folder(app, game_root)
 }
 
 pub(crate) fn toggle_mod_enabled(

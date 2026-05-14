@@ -3,7 +3,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex};
 
-use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
+use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System, UpdateKind};
 
 static CHECK_ENABLED: AtomicBool = AtomicBool::new(true);
 
@@ -24,10 +24,17 @@ pub(crate) fn should_block_for_game() -> bool {
 /// runs. The launcher exe does not, so ignore it.
 const GAME_PROCESS: &str = "Marvel-Win64-Shipping.exe";
 
+/// Refresh kind shared by init and every poll: process list plus exe paths.
+/// The exe path is needed on Linux, where Proton processes show up under a
+/// `/proc/<pid>/comm` name truncated to 15 chars.
+fn process_refresh() -> ProcessRefreshKind {
+    ProcessRefreshKind::nothing().with_exe(UpdateKind::OnlyIfNotSet)
+}
+
 /// Reused across polls to keep the process-name cache warm and avoid reallocating.
 static SYSTEM: LazyLock<Mutex<System>> = LazyLock::new(|| {
     Mutex::new(System::new_with_specifics(
-        RefreshKind::nothing().with_processes(ProcessRefreshKind::nothing()),
+        RefreshKind::nothing().with_processes(process_refresh()),
     ))
 });
 
@@ -38,11 +45,14 @@ pub(crate) fn is_game_running() -> bool {
     let Ok(mut sys) = SYSTEM.lock() else {
         return false;
     };
-    sys.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
+    sys.refresh_processes_specifics(ProcessesToUpdate::All, true, process_refresh());
     sys.processes().values().any(|p| {
-        p.name()
-            .to_string_lossy()
-            .eq_ignore_ascii_case(GAME_PROCESS)
+        let name = p.name().to_string_lossy();
+        let exe_base = p
+            .exe()
+            .and_then(|e| e.file_name())
+            .map(|n| n.to_string_lossy().into_owned());
+        crate::platform::process_matches(&name, exe_base.as_deref(), GAME_PROCESS)
     })
 }
 

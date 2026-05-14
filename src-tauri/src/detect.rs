@@ -1,7 +1,10 @@
 //! Marvel Rivals install detection across Steam, Epic Games, and Loading Bay launchers.
 
+#[cfg(windows)]
 mod epic;
+#[cfg(windows)]
 mod loading_bay;
+#[cfg(windows)]
 mod registry;
 mod steam;
 
@@ -9,7 +12,9 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(windows)]
 use epic::find_epic_install;
+#[cfg(windows)]
 use loading_bay::find_loading_bay_install;
 use steam::find_steam_install;
 
@@ -37,8 +42,19 @@ impl InstallInfo {
     }
 
     pub(crate) fn launch_game(&self) -> Result<(), String> {
-        std::process::Command::new("cmd")
-            .args(["/c", "start", "", &self.launch_url])
+        #[cfg(windows)]
+        let mut command = {
+            let mut c = std::process::Command::new("cmd");
+            c.args(["/c", "start", "", &self.launch_url]);
+            c
+        };
+        #[cfg(not(windows))]
+        let mut command = {
+            let mut c = std::process::Command::new("xdg-open");
+            c.arg(&self.launch_url);
+            c
+        };
+        command
             .spawn()
             .map_err(|e| format!("Failed to launch game: {e}"))?;
         Ok(())
@@ -46,20 +62,29 @@ impl InstallInfo {
 }
 
 pub(crate) fn detect_game_install() -> Option<InstallInfo> {
-    find_steam_install()
-        .map(|p| InstallInfo::new(p, InstallSource::Steam, "steam://rungameid/2767030"))
-        .or_else(|| {
-            find_epic_install().map(|(p, url)| InstallInfo::new(p, InstallSource::Epic, url))
-        })
-        .or_else(|| {
-            find_loading_bay_install().map(|p| {
-                InstallInfo::new(
-                    p,
-                    InstallSource::LoadingBay,
-                    "loadingbay://mygame/?gameId=31",
-                )
+    let steam = find_steam_install()
+        .map(|p| InstallInfo::new(p, InstallSource::Steam, "steam://rungameid/2767030"));
+
+    #[cfg(windows)]
+    {
+        steam
+            .or_else(|| {
+                find_epic_install().map(|(p, url)| InstallInfo::new(p, InstallSource::Epic, url))
             })
-        })
+            .or_else(|| {
+                find_loading_bay_install().map(|p| {
+                    InstallInfo::new(
+                        p,
+                        InstallSource::LoadingBay,
+                        "loadingbay://mygame/?gameId=31",
+                    )
+                })
+            })
+    }
+    #[cfg(not(windows))]
+    {
+        steam
+    }
 }
 
 #[tauri::command]
