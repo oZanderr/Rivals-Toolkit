@@ -1,6 +1,6 @@
 {
   "source": "https://raw.githubusercontent.com/donutman07/MarvelRivalsCharacterIDs/main/MarvelRivalsCharacterIDs.md",
-  "generated_at": "2026-05-14T08:45:34.917Z",
+  "generated_at": "2026-05-15T08:56:09.133Z",
   "characters": {
     "1011": {
       "name": "Hulk",
@@ -251,7 +251,9 @@
         "1029500": "Eldritch Armor",
         "1029501": "Retro X-Uniform",
         "1029502": "Phoenix Demon",
-        "1029503": "NETHERWORLD NOBLE"
+        "1029503": "NETHERWORLD NOBLE",
+        "1029505": "BLUE BLITZ",
+        "1029506": "LAVENDER LIMBO"
       }
     },
     "1030": {
