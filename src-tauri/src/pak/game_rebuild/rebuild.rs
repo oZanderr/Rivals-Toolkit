@@ -333,6 +333,10 @@ pub(crate) fn rebuild_vanilla_container(
         file_set.contains(&uptnl) || file_set.contains(&m_ubulk)
     });
 
+    let block_size = store
+        .compression_block_size()
+        .unwrap_or(crate::pak::profile::RIVALS_BLOCK_SIZE);
+
     let base_utoc = output_path.join(format!("{base_name}.utoc"));
     let mut base_writer = IoStoreWriter::new(
         &base_utoc,
@@ -342,7 +346,8 @@ pub(crate) fn rebuild_vanilla_container(
         Some(retoc::compression::CompressionMethod::Oodle),
     )
     .map_err(|e| format!("open base writer: {e}"))?
-    .with_compression_level(vanilla_oodle_level);
+    .with_compression_level(vanilla_oodle_level)
+    .with_compression_block_size(block_size);
     let mut base_guard = WriterCleanupGuard {
         path: base_utoc.as_path(),
         disarmed: false,
@@ -362,7 +367,8 @@ pub(crate) fn rebuild_vanilla_container(
                 Some(retoc::compression::CompressionMethod::Oodle),
             )
             .map_err(|e| format!("open optional writer: {e}"))?
-            .with_compression_level(vanilla_oodle_level),
+            .with_compression_level(vanilla_oodle_level)
+            .with_compression_block_size(block_size),
         ),
         None => None,
     };

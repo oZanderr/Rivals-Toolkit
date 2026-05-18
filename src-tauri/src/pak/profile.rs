@@ -9,6 +9,9 @@ use aes::cipher::KeyInit;
 pub(crate) const MARVEL_AES_KEY_HEX: &str =
     "0C263D8C22DCB085894899C3A3796383E9BF9DE0CBFB08C9BF2DEF2E84F29D74";
 
+/// IoStore compression block size Marvel Rivals expects.
+pub(crate) const RIVALS_BLOCK_SIZE: u32 = 0x10000;
+
 pub(crate) const RIVALS_MOUNT_POINT: &str = "../../../";
 const RIVALS_ENCRYPTION_SEED_BYTES: [u8; 4] = [0x11, 0x22, 0x33, 0x44];
 const RIVALS_INDEX_TRAILER: &[u8] = &[

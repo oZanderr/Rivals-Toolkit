@@ -99,7 +99,8 @@ pub(crate) fn repack_iostore(
         MOUNT_POINT.into(),
         Some(retoc::compression::CompressionMethod::Oodle),
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| e.to_string())?
+    .with_compression_block_size(crate::pak::profile::RIVALS_BLOCK_SIZE);
     if let Some(level) = oodle_level {
         writer = writer.with_compression_level(level);
     }
@@ -549,6 +550,9 @@ impl IoStoreTrait for ModScopedStore {
     }
     fn container_header_version(&self) -> Option<EIoContainerHeaderVersion> {
         self.full.container_header_version()
+    }
+    fn compression_block_size(&self) -> Option<u32> {
+        self.full.compression_block_size()
     }
     fn print_info(&self, depth: usize) {
         self.full.print_info(depth);
