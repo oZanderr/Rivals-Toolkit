@@ -2145,7 +2145,7 @@ dependencies = [
 [[package]]
 name = "jmap"
 version = "0.1.1"
-source = "git+https://github.com/trumank/jmap.git#62d4caf37559accbf771ddf7476497f649dc8fd4"
+source = "git+https://github.com/trumank/jmap.git#07b0c13e7e3950fc9012b3858a2469b8974300ab"
 dependencies = [
  "base64 0.22.1",
  "bitflags 2.11.1",
@@ -3392,7 +3392,7 @@ dependencies = [
 [[package]]
 name = "retoc"
 version = "0.1.5"
-source = "git+https://github.com/oZanderr/retoc?branch=master#a309ebcd5ba0e851978ad0d552280605e5b362d4"
+source = "git+https://github.com/oZanderr/retoc?branch=master#3eafa3d764c39d75f27373219eed688da50de396"
 dependencies = [
  "aes",
  "anyhow",

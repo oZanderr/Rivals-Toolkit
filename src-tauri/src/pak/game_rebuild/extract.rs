@@ -1,8 +1,9 @@
 //! Per-container vanilla extract: dumps a single base container's `.pak` archive contents, zen-package legacy assets, shader libraries, and the global `scriptobjects.bin` into one interleaved tree ready for round-trip rebuild.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::Cursor;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use rayon::prelude::*;
@@ -74,8 +75,7 @@ fn has_entries(path: &Path) -> Result<bool, String> {
         .is_some())
 }
 
-/// Guard that removes a directory the toolkit created during this run if the                               
-/// operation does not complete. Keeps pre-existing user data intact.
+/// Removes a directory created during this run if the operation aborts; pre-existing data untouched.
 struct OwnedOutputGuard<'a> {
     path: &'a Path,
     we_created_it: bool,
@@ -292,6 +292,8 @@ pub(crate) fn extract_vanilla_container(
         .map_err(|e| format!("serialize script objects: {e}"))?;
     write_with_dirs(&output_path.join(SCRIPT_OBJECTS_FILENAME), &script_buf)?;
 
+    write_rebuild_manifest(output_path, &base_name)?;
+
     output_guard.disarmed = true;
 
     let counts = count_emitted_files(output_path);
@@ -358,4 +360,48 @@ fn write_with_dirs(path: &Path, data: &[u8]) -> Result<(), String> {
         fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
     }
     fs::write(path, data).map_err(|e| format!("write {}: {e}", path.display()))
+}
+
+/// Hash every zen-package file so rebuild can tell which packages are unedited.
+fn write_rebuild_manifest(root: &Path, source_container: &str) -> Result<(), String> {
+    let files: Vec<PathBuf> = WalkDir::new(root)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().to_ascii_lowercase();
+            let is_zen = name.ends_with(".uasset")
+                || name.ends_with(".umap")
+                || name.ends_with(".uexp")
+                || name.ends_with(".ubulk")
+                || name.ends_with(".uptnl");
+            is_zen.then(|| e.path().to_path_buf())
+        })
+        .collect();
+
+    let entries: HashMap<String, String> = files
+        .par_iter()
+        .filter_map(|p| {
+            let rel = p
+                .strip_prefix(root)
+                .ok()?
+                .to_string_lossy()
+                .replace('\\', "/");
+            let data = fs::read(p).ok()?;
+            Some((rel, blake3::hash(&data).to_hex().to_string()))
+        })
+        .collect();
+
+    let manifest = super::RebuildManifest {
+        version: super::REBUILD_MANIFEST_VERSION,
+        source_container: source_container.to_string(),
+        entries,
+    };
+    let json = serde_json::to_vec(&manifest).map_err(|e| format!("serialize manifest: {e}"))?;
+
+    // Write to a sibling .tmp then rename so a process crash mid-write cannot leave a torn manifest.
+    let final_path = root.join(super::REBUILD_MANIFEST_FILENAME);
+    let tmp_path = final_path.with_extension("json.tmp");
+    fs::write(&tmp_path, json).map_err(|e| format!("write manifest tmp: {e}"))?;
+    fs::rename(&tmp_path, &final_path).map_err(|e| format!("rename manifest: {e}"))
 }

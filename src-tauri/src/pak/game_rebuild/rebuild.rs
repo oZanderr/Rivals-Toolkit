@@ -12,14 +12,15 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 use walkdir::WalkDir;
 
-use retoc::container_header::EIoContainerHeaderVersion;
+use retoc::container_header::{EIoContainerHeaderVersion, StoreEntry};
+use retoc::iostore::IoStoreTrait;
 use retoc::iostore_writer::IoStoreWriter;
 use retoc::legacy_asset::FSerializedAssetBundle;
 use retoc::script_objects::ZenScriptObjects;
 use retoc::shader_library;
 use retoc::version::EngineVersion;
 use retoc::zen_asset_conversion::{self, ConvertedZenAssetBundle};
-use retoc::{EIoChunkType, FIoChunkId, FSHAHash, UEPathBuf};
+use retoc::{EIoChunkType, FIoChunkId, FPackageId, FSHAHash, UEPathBuf};
 
 use crate::game_status::{game_running_error, should_block_for_game};
 use crate::paths::paks_dir;
@@ -69,8 +70,6 @@ fn base_name_from_optional(name: &str) -> Option<String> {
     Some(out)
 }
 
-/// Returns the package stem (no zen extension) for a path whose filename ends
-/// in any known zen sibling extension. `None` for unrelated files.
 fn zen_package_stem(path: &Path) -> Option<PathBuf> {
     let file = path.file_name()?.to_str()?;
     let dir = path.parent()?;
@@ -116,10 +115,123 @@ fn rel_string(legacy_dir: &Path, file: &Path) -> Result<String, String> {
     Ok(rel)
 }
 
-struct ZenJob {
-    converted: ConvertedZenAssetBundle,
-    rel: String,
-    primary_ext: &'static str,
+enum ZenJob {
+    /// Edited package: re-converted legacy -> zen.
+    Convert {
+        converted: ConvertedZenAssetBundle,
+        rel: String,
+        primary_ext: &'static str,
+    },
+    /// Unedited: chunks + store entry copied verbatim from the source, preserving header linkage.
+    Copy {
+        id: FPackageId,
+        mounted: UEPathBuf,
+        rel: String,
+        primary_ext: &'static str,
+        export_bundle: Vec<u8>,
+        store_entry: StoreEntry,
+        bulk: Vec<(EIoChunkType, Vec<u8>)>,
+    },
+}
+
+/// Any failure (missing, malformed, version or source mismatch) yields an empty map -> full-convert.
+fn load_manifest(legacy_path: &Path, expected_source: &str) -> HashMap<String, String> {
+    let Ok(bytes) = fs::read(legacy_path.join(super::REBUILD_MANIFEST_FILENAME)) else {
+        return HashMap::new();
+    };
+    let Ok(m) = serde_json::from_slice::<super::RebuildManifest>(&bytes) else {
+        return HashMap::new();
+    };
+    if m.version != super::REBUILD_MANIFEST_VERSION {
+        eprintln!(
+            "vanilla rebuild: manifest version {} != expected {}; full-convert",
+            m.version,
+            super::REBUILD_MANIFEST_VERSION
+        );
+        return HashMap::new();
+    }
+    if m.source_container != expected_source {
+        eprintln!(
+            "vanilla rebuild: manifest source_container {:?} != selected {:?}; full-convert",
+            m.source_container, expected_source
+        );
+        return HashMap::new();
+    }
+    m.entries
+}
+
+/// True if every on-disk file for this package matches the extraction manifest (i.e. unedited).
+fn package_unchanged(stem: &Path, legacy_path: &Path, manifest: &HashMap<String, String>) -> bool {
+    let mut any = false;
+    for ext in ["uasset", "umap", "uexp", "ubulk", "uptnl", "m.ubulk"] {
+        let path = stem.with_extension(ext);
+        if !path.is_file() {
+            continue;
+        }
+        any = true;
+        let Ok(rel) = rel_string(legacy_path, &path) else {
+            return false;
+        };
+        let Ok(data) = fs::read(&path) else {
+            return false;
+        };
+        let hash = blake3::hash(&data).to_hex().to_string();
+        match manifest.get(&rel) {
+            Some(h) if *h == hash => {}
+            _ => return false,
+        }
+    }
+    any
+}
+
+/// Build a verbatim-copy job: read the package's chunks straight from the source container.
+fn build_copy_job(
+    id: FPackageId,
+    stem: &Path,
+    legacy_path: &Path,
+    store: &dyn IoStoreTrait,
+) -> Result<ZenJob, String> {
+    let uasset_path = stem.with_extension("uasset");
+    let (primary_path, primary_ext): (PathBuf, &'static str) = if uasset_path.is_file() {
+        (uasset_path, "uasset")
+    } else {
+        (stem.with_extension("umap"), "umap")
+    };
+    let rel = rel_string(legacy_path, &primary_path)?;
+    let mounted: UEPathBuf = format!("{MOUNT_POINT}{rel}").into();
+
+    let eb_id = FIoChunkId::from_package_id(id, 0, EIoChunkType::ExportBundleData);
+    let export_bundle = store
+        .read(eb_id)
+        .map_err(|e| format!("read source package {rel}: {e}"))?;
+    let store_entry = store
+        .package_store_entry(id)
+        .ok_or_else(|| format!("no source store entry for {rel}"))?;
+
+    let mut bulk = Vec::new();
+    for ty in [
+        EIoChunkType::BulkData,
+        EIoChunkType::OptionalBulkData,
+        EIoChunkType::MemoryMappedBulkData,
+    ] {
+        let cid = FIoChunkId::from_package_id(id, 0, ty);
+        if store.has_chunk_id(cid) {
+            let data = store
+                .read(cid)
+                .map_err(|e| format!("read source bulk {rel}: {e}"))?;
+            bulk.push((ty, data));
+        }
+    }
+
+    Ok(ZenJob::Copy {
+        id,
+        mounted,
+        rel,
+        primary_ext,
+        export_bundle,
+        store_entry,
+        bulk,
+    })
 }
 
 fn build_zen_job(
@@ -173,7 +285,7 @@ fn build_zen_job(
     )
     .map_err(|e| format!("build_zen_asset {rel}: {e}"))?;
 
-    Ok(ZenJob {
+    Ok(ZenJob::Convert {
         converted,
         rel,
         primary_ext,
@@ -245,6 +357,33 @@ pub(crate) fn rebuild_vanilla_container(
                 && base_name_from_optional(n).as_deref() == Some(base_name.as_str())
         });
 
+    let mut source_id_map: HashMap<String, FPackageId> = HashMap::new();
+    let mut source_shader_hashes: HashMap<u64, Vec<FSHAHash>> = HashMap::new();
+    for chunk in store.chunks() {
+        if chunk.id().get_chunk_type() != EIoChunkType::ExportBundleData
+            || chunk.container().container_name() != base_name
+        {
+            continue;
+        }
+        let id = chunk.id().get_package_id();
+        if let Some(path) = store.chunk_path(chunk.id())
+            && let Some(rel) = path.strip_prefix(MOUNT_POINT)
+        {
+            let stem = rel
+                .trim_end_matches(".uasset")
+                .trim_end_matches(".umap")
+                .to_string();
+            source_id_map.insert(stem, id);
+        }
+        if let Some(entry) = store.package_store_entry(id)
+            && !entry.shader_map_hashes.is_empty()
+        {
+            source_shader_hashes.insert(id.0, entry.shader_map_hashes);
+        }
+    }
+
+    let manifest = load_manifest(legacy_path, &base_name);
+
     let mut all_files: Vec<PathBuf> = Vec::new();
     for entry in WalkDir::new(legacy_path).into_iter().filter_map(|e| e.ok()) {
         if entry.file_type().is_file() {
@@ -288,6 +427,9 @@ pub(crate) fn rebuild_vanilla_container(
             continue;
         }
         if has_script_objects && path == &script_objects_path {
+            continue;
+        }
+        if path.file_name().and_then(|s| s.to_str()) == Some(super::REBUILD_MANIFEST_FILENAME) {
             continue;
         }
         if let Some(stem) = zen_package_stem(path)
@@ -383,6 +525,22 @@ pub(crate) fn rebuild_vanilla_container(
     zen_paths.sort();
     let zen_total = zen_paths.len();
 
+    let unchanged_ids: HashMap<PathBuf, FPackageId> = zen_paths
+        .par_iter()
+        .filter_map(|stem| {
+            let rel_stem = stem
+                .strip_prefix(legacy_path)
+                .ok()?
+                .to_string_lossy()
+                .replace('\\', "/");
+            let id = *source_id_map.get(&rel_stem)?;
+            if !package_unchanged(stem, legacy_path, &manifest) {
+                return None;
+            }
+            Some((stem.clone(), id))
+        })
+        .collect();
+
     let _ = app.emit(
         "vanilla-rebuild-progress",
         VanillaRebuildProgress {
@@ -399,8 +557,7 @@ pub(crate) fn rebuild_vanilla_container(
     let mut memory_mapped_routed = 0usize;
     let mut completed = 0usize;
 
-    // Half-size cap so a slow chunk write back-pressures the build phase instead
-    // of letting it queue ahead and balloon memory.
+    // Bounded so slow chunk writes back-pressure the build phase instead of queuing into memory growth.
     let channel_cap = std::cmp::max(2, crate::concurrency::POOL.current_num_threads() / 2);
     let (tx, rx) = std::sync::mpsc::sync_channel::<Result<ZenJob, String>>(channel_cap);
 
@@ -409,6 +566,8 @@ pub(crate) fn rebuild_vanilla_container(
         let script_objects_ref = &script_objects;
         let legacy_path_ref = legacy_path;
         let zen_paths_ref = &zen_paths;
+        let unchanged_ids_ref = &unchanged_ids;
+        let store_ref: &dyn IoStoreTrait = &*store;
 
         scope.spawn(move |_| {
             let pool = &*crate::concurrency::POOL;
@@ -421,14 +580,17 @@ pub(crate) fn rebuild_vanilla_container(
                             let _ = tx.send(Err("Rebuild cancelled".into()));
                             return Err(());
                         }
-                        let result = build_zen_job(
-                            stem,
-                            legacy_path_ref,
-                            shader_maps_ref,
-                            script_objects_ref.clone(),
-                            header_version,
-                            &log,
-                        );
+                        let result = match unchanged_ids_ref.get(stem) {
+                            Some(&id) => build_copy_job(id, stem, legacy_path_ref, store_ref),
+                            None => build_zen_job(
+                                stem,
+                                legacy_path_ref,
+                                shader_maps_ref,
+                                script_objects_ref.clone(),
+                                header_version,
+                                &log,
+                            ),
+                        };
                         let send_result = match result {
                             Ok(job) => tx.send(Ok(job)),
                             Err(e) => tx.send(Err(e)),
@@ -442,46 +604,113 @@ pub(crate) fn rebuild_vanilla_container(
         });
 
         while let Ok(item) = rx.recv() {
-            let mut job = item?;
-            match job.primary_ext {
-                "uasset" => uasset_count += 1,
-                "umap" => umap_count += 1,
-                _ => {}
-            }
-            job.converted
-                .write_package_data(&mut base_writer)
-                .map_err(|e| format!("write_package_data {}: {e}", job.rel))?;
-            let pkg_id = job.converted.package_id;
+            match item? {
+                ZenJob::Convert {
+                    mut converted,
+                    rel,
+                    primary_ext,
+                } => {
+                    match primary_ext {
+                        "uasset" => uasset_count += 1,
+                        "umap" => umap_count += 1,
+                        _ => {}
+                    }
+                    if converted.store_entry().shader_map_hashes.is_empty()
+                        && let Some(hashes) = source_shader_hashes.get(&converted.package_id.0)
+                    {
+                        converted.set_shader_map_hashes(hashes.clone());
+                    }
+                    converted
+                        .write_package_data(&mut base_writer)
+                        .map_err(|e| format!("write_package_data {rel}: {e}"))?;
+                    let pkg_id = converted.package_id;
 
-            if let Some(bytes) = job.converted.take_bulk_data() {
-                let id = FIoChunkId::from_package_id(pkg_id, 0, EIoChunkType::BulkData);
-                let path = job.converted.mounted_path().with_extension("ubulk");
-                base_writer
-                    .write_chunk(id, Some(&path), &bytes)
-                    .map_err(|e| format!("write ubulk {}: {e}", job.rel))?;
-                ubulk_routed += 1;
-            }
-            if let Some(bytes) = job.converted.take_optional_bulk_data() {
-                let id = FIoChunkId::from_package_id(pkg_id, 0, EIoChunkType::OptionalBulkData);
-                let path = job.converted.mounted_path().with_extension("uptnl");
-                match &mut optional_writer {
-                    Some(w) => w.write_chunk(id, Some(&path), &bytes),
-                    None => base_writer.write_chunk(id, Some(&path), &bytes),
+                    if let Some(bytes) = converted.take_bulk_data() {
+                        let id = FIoChunkId::from_package_id(pkg_id, 0, EIoChunkType::BulkData);
+                        let path = converted.mounted_path().with_extension("ubulk");
+                        base_writer
+                            .write_chunk(id, Some(&path), &bytes)
+                            .map_err(|e| format!("write ubulk {rel}: {e}"))?;
+                        ubulk_routed += 1;
+                    }
+                    if let Some(bytes) = converted.take_optional_bulk_data() {
+                        let id =
+                            FIoChunkId::from_package_id(pkg_id, 0, EIoChunkType::OptionalBulkData);
+                        let path = converted.mounted_path().with_extension("uptnl");
+                        match &mut optional_writer {
+                            Some(w) => w.write_chunk(id, Some(&path), &bytes),
+                            None => base_writer.write_chunk(id, Some(&path), &bytes),
+                        }
+                        .map_err(|e| format!("write uptnl {rel}: {e}"))?;
+                        uptnl_routed += 1;
+                    }
+                    if let Some(bytes) = converted.take_memory_mapped_bulk_data() {
+                        let id = FIoChunkId::from_package_id(
+                            pkg_id,
+                            0,
+                            EIoChunkType::MemoryMappedBulkData,
+                        );
+                        let path = converted.mounted_path().with_extension("m.ubulk");
+                        match &mut optional_writer {
+                            Some(w) => w.write_chunk(id, Some(&path), &bytes),
+                            None => base_writer.write_chunk(id, Some(&path), &bytes),
+                        }
+                        .map_err(|e| format!("write m.ubulk {rel}: {e}"))?;
+                        memory_mapped_routed += 1;
+                    }
+                    drop(converted);
                 }
-                .map_err(|e| format!("write uptnl {}: {e}", job.rel))?;
-                uptnl_routed += 1;
-            }
-            if let Some(bytes) = job.converted.take_memory_mapped_bulk_data() {
-                let id = FIoChunkId::from_package_id(pkg_id, 0, EIoChunkType::MemoryMappedBulkData);
-                let path = job.converted.mounted_path().with_extension("m.ubulk");
-                match &mut optional_writer {
-                    Some(w) => w.write_chunk(id, Some(&path), &bytes),
-                    None => base_writer.write_chunk(id, Some(&path), &bytes),
+                ZenJob::Copy {
+                    id,
+                    mounted,
+                    rel,
+                    primary_ext,
+                    export_bundle,
+                    store_entry,
+                    bulk,
+                } => {
+                    match primary_ext {
+                        "uasset" => uasset_count += 1,
+                        "umap" => umap_count += 1,
+                        _ => {}
+                    }
+                    let eb_id = FIoChunkId::from_package_id(id, 0, EIoChunkType::ExportBundleData);
+                    base_writer
+                        .write_package_chunk(eb_id, Some(&mounted), &export_bundle, &store_entry)
+                        .map_err(|e| format!("copy package {rel}: {e}"))?;
+                    for (ty, bytes) in bulk {
+                        let cid = FIoChunkId::from_package_id(id, 0, ty);
+                        match ty {
+                            EIoChunkType::BulkData => {
+                                let path = mounted.with_extension("ubulk");
+                                base_writer
+                                    .write_chunk(cid, Some(&path), &bytes)
+                                    .map_err(|e| format!("copy ubulk {rel}: {e}"))?;
+                                ubulk_routed += 1;
+                            }
+                            EIoChunkType::OptionalBulkData => {
+                                let path = mounted.with_extension("uptnl");
+                                match &mut optional_writer {
+                                    Some(w) => w.write_chunk(cid, Some(&path), &bytes),
+                                    None => base_writer.write_chunk(cid, Some(&path), &bytes),
+                                }
+                                .map_err(|e| format!("copy uptnl {rel}: {e}"))?;
+                                uptnl_routed += 1;
+                            }
+                            EIoChunkType::MemoryMappedBulkData => {
+                                let path = mounted.with_extension("m.ubulk");
+                                match &mut optional_writer {
+                                    Some(w) => w.write_chunk(cid, Some(&path), &bytes),
+                                    None => base_writer.write_chunk(cid, Some(&path), &bytes),
+                                }
+                                .map_err(|e| format!("copy m.ubulk {rel}: {e}"))?;
+                                memory_mapped_routed += 1;
+                            }
+                            _ => {}
+                        }
+                    }
                 }
-                .map_err(|e| format!("write m.ubulk {}: {e}", job.rel))?;
-                memory_mapped_routed += 1;
             }
-            drop(job.converted);
 
             completed += 1;
             if completed.is_multiple_of(10) || completed == zen_total {
