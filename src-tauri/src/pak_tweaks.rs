@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) use apply::{apply_pak_tweaks, save_pak_ini};
 pub(crate) use scan::{
-    detect_pak_tweaks, extract_pak_ini, inspect_single_pak, inspect_single_pak_any_ini,
-    scan_mod_paks, scan_mod_paks_any_ini,
+    create_new_mod_pak, detect_pak_tweaks, extract_game_default_ini, extract_pak_ini,
+    inspect_single_pak, inspect_single_pak_any_ini, scan_mod_paks, scan_mod_paks_any_ini,
 };
 
 /// INI entries discovered in a pak mod for the curated tweak workflow (Config Tweaks).
@@ -57,12 +57,10 @@ pub(crate) struct PakTweakEdit {
     pub engine_section: Option<String>,
 }
 
-/// Which embedded INI file the Config Tweaks page reads from and writes to.
-///
-/// `Engine` is DefaultEngine.ini (the legacy default). `BaseEngine` and `WindowsEngine`
-/// are added later; the variant name `Engine` is kept for wire-protocol compatibility.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// Which embedded INI file a new CVar edit is written to. Resolved internally to the
+/// highest-priority file present in the pak (DeviceProfiles > WindowsEngine > Engine >
+/// BaseEngine); `Engine` is DefaultEngine.ini.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PakIniTarget {
     BaseEngine,
     Engine,

@@ -56,7 +56,7 @@ interface PakIniInfo {
   windows_engine_entry: string | null;
 }
 
-// Matches pak_tweaks::PakIniTarget (serde rename_all = "snake_case").
+// One of the four tweakable INI files, used to render presence badges on each pak.
 // Runtime priority for shared keys: device_profiles > windows_engine > engine > base_engine.
 type PakIniTarget = "base_engine" | "engine" | "windows_engine" | "device_profiles";
 
@@ -148,7 +148,6 @@ interface PakCacheEntry {
   tweakStates: TweakState[];
   savedTweakStates: TweakState[];
   edits: PakTweakEdit[];
-  iniTarget: PakIniTarget;
 }
 
 interface Props {
@@ -159,34 +158,9 @@ interface Props {
 
 const ADVANCED_CATEGORIES = new Set(["Latency"]);
 
-// Default target = highest-priority file present, so a brand-new edit takes effect
-// at runtime without being shadowed.
-function defaultIniTarget(pak: PakIniInfo): PakIniTarget {
-  if (pak.has_device_profiles) return "device_profiles";
-  if (pak.has_windows_engine) return "windows_engine";
-  if (pak.has_engine_ini) return "engine";
-  return "base_engine";
-}
-
 function hasAnyEngine(pak: PakIniInfo): boolean {
   return pak.has_engine_ini || pak.has_base_engine || pak.has_windows_engine;
 }
-
-function presentTargetCount(pak: PakIniInfo): number {
-  return (
-    Number(pak.has_base_engine) +
-    Number(pak.has_engine_ini) +
-    Number(pak.has_windows_engine) +
-    Number(pak.has_device_profiles)
-  );
-}
-
-const TARGET_LABEL: Record<PakIniTarget, string> = {
-  base_engine: "BaseEngine.ini",
-  engine: "DefaultEngine.ini",
-  windows_engine: "WindowsEngine.ini",
-  device_profiles: "DefaultDeviceProfiles.ini",
-};
 
 const TARGET_BADGE: Record<PakIniTarget, string> = {
   base_engine: "BaseEngine",
@@ -198,8 +172,6 @@ const TARGET_BADGE: Record<PakIniTarget, string> = {
 export function PakTweaks({ gamePath, scalabilityContent, isActive }: Props) {
   const [paks, setPaks] = useState<PakIniInfo[]>([]);
   const [selectedPak, setSelectedPak] = useState<PakIniInfo | null>(null);
-  const [iniTarget, setIniTarget] = useState<PakIniTarget>("device_profiles");
-  const iniTargetRef = useRef(iniTarget);
   const [tweakStates, setTweakStates] = useState<TweakState[]>([]);
   const [savedTweakStates, setSavedTweakStates] = useState<TweakState[]>([]);
   const [edits, setEdits] = useState<PakTweakEdit[]>([]);
@@ -243,7 +215,6 @@ export function PakTweaks({ gamePath, scalabilityContent, isActive }: Props) {
 
   useEffect(() => {
     scanRef.current = scan;
-    iniTargetRef.current = iniTarget;
   });
   useEffect(() => {
     if (gamePath) scanRef.current(true);
@@ -313,6 +284,9 @@ export function PakTweaks({ gamePath, scalabilityContent, isActive }: Props) {
     return onPakChanged((e) => {
       if (e.source === "PakTweaks") return;
       pakCache.current.delete(e.pakPath);
+      // Adding or deleting an INI in the editor can change which paks qualify for
+      // the tweak list, so refresh the list itself (preserves current selection).
+      scanRef.current(true);
       if (selectedPak?.pak_path !== e.pakPath) return;
       if (edits.length > 0) {
         showNotice("Pak changed elsewhere; reload manually to discard changes", "info", 6000);
@@ -713,14 +687,12 @@ export function PakTweaks({ gamePath, scalabilityContent, isActive }: Props) {
         tweakStates,
         savedTweakStates,
         edits,
-        iniTarget,
       });
     }
 
     const cached = pakCache.current.get(pak.pak_path);
     if (cached) {
       setSelectedPak(pak);
-      setIniTarget(cached.iniTarget);
       setTweakStates(cached.tweakStates);
       setSavedTweakStates(cached.savedTweakStates);
       setEdits(cached.edits);
@@ -728,9 +700,7 @@ export function PakTweaks({ gamePath, scalabilityContent, isActive }: Props) {
     }
 
     // Cache miss — fetch from backend, keep showing previous state during load
-    const target = defaultIniTarget(pak);
     setSelectedPak(pak);
-    setIniTarget(target);
     setLoading(true);
     try {
       const states = await invoke<TweakState[]>("detect_pak_tweaks", { pakPath: pak.pak_path });
@@ -741,7 +711,6 @@ export function PakTweaks({ gamePath, scalabilityContent, isActive }: Props) {
         tweakStates: states,
         savedTweakStates: states,
         edits: [],
-        iniTarget: target,
       });
     } catch (e: unknown) {
       // Clear on failure so stale state doesn't linger
@@ -772,7 +741,6 @@ export function PakTweaks({ gamePath, scalabilityContent, isActive }: Props) {
         tweakStates: states,
         savedTweakStates: states,
         edits: [],
-        iniTarget: iniTargetRef.current,
       });
     } catch (e: unknown) {
       if (isPakMissingError(e)) {
@@ -783,18 +751,6 @@ export function PakTweaks({ gamePath, scalabilityContent, isActive }: Props) {
       }
       console.error("Reload failed:", e);
     }
-  }
-
-  /** Switch which embedded INI file new edits are written to. Detection is merged,
-   *  so only the write destination (and which tweaks are editable) changes. */
-  function changeTarget(target: PakIniTarget) {
-    if (!selectedPak || target === iniTarget) return;
-    if (edits.length > 0) {
-      showNotice("Apply or discard pending changes before switching target", "info");
-      return;
-    }
-    setIniTarget(target);
-    iniTargetRef.current = target;
   }
 
   function queueEdit(
@@ -830,7 +786,6 @@ export function PakTweaks({ gamePath, scalabilityContent, isActive }: Props) {
       const msg = await invoke<string>("apply_pak_tweak_edits", {
         pakPath: selectedPak.pak_path,
         edits,
-        target: iniTarget,
       });
       showNotice(msg, "ok");
       emitPakChanged({ pakPath: selectedPak.pak_path, source: "PakTweaks" });
@@ -1044,59 +999,9 @@ export function PakTweaks({ gamePath, scalabilityContent, isActive }: Props) {
             )}
           </div>
 
-          {/* Toolbar: edit target (when 2+ INIs exist) + presets */}
+          {/* Toolbar: presets */}
           {selectedPak && tweakStates.length > 0 && (
             <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-card/40 px-3 py-2">
-              {presentTargetCount(selectedPak) >= 2 && (
-                <div className="flex items-center gap-2">
-                  <Label className="shrink-0 text-[12px] font-medium text-muted-foreground">
-                    Edit target
-                  </Label>
-                  <Select
-                    value={iniTarget}
-                    onValueChange={(v) => changeTarget(v as PakIniTarget)}
-                    disabled={loading || applying}
-                  >
-                    <SelectTrigger
-                      size="sm"
-                      className="w-56 text-left text-[12px] [&>span]:text-left"
-                    >
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {selectedPak.has_device_profiles && (
-                        <SelectItem value="device_profiles">
-                          {TARGET_LABEL.device_profiles}
-                        </SelectItem>
-                      )}
-                      {selectedPak.has_windows_engine && (
-                        <SelectItem value="windows_engine">
-                          {TARGET_LABEL.windows_engine}
-                        </SelectItem>
-                      )}
-                      {selectedPak.has_engine_ini && (
-                        <SelectItem value="engine">{TARGET_LABEL.engine}</SelectItem>
-                      )}
-                      {selectedPak.has_base_engine && (
-                        <SelectItem value="base_engine">{TARGET_LABEL.base_engine}</SelectItem>
-                      )}
-                    </SelectContent>
-                  </Select>
-                  <Tip
-                    content={
-                      <span className="block break-normal">
-                        Toggles write to this file. Runtime priority: DeviceProfiles over
-                        WindowsEngine over DefaultEngine over BaseEngine. An edited key already
-                        present in any other file is kept in sync.
-                      </span>
-                    }
-                  >
-                    <Info size={14} className="shrink-0 text-muted-foreground/70" />
-                  </Tip>
-                  <span className="mx-1 h-4 w-px bg-border/60" />
-                </div>
-              )}
-
               <div className="flex flex-wrap items-center gap-2">
                 <Label className="shrink-0 text-[12px] font-medium text-muted-foreground">
                   Preset
@@ -1272,14 +1177,10 @@ export function PakTweaks({ gamePath, scalabilityContent, isActive }: Props) {
                           const isSavedEnabled =
                             savedTweakStates.find((s) => s.id === tweak.id)?.active ?? false;
                           if (removeOnly && isSavedEnabled) return null;
-                          const needsEngine = engineOnly && !hasAnyEngine(selectedPak);
                           // Engine-section settings can't live in DefaultDeviceProfiles.ini;
-                          // they need an engine file as the write target.
-                          const blockedByTarget =
-                            engineOnly &&
-                            iniTarget === "device_profiles" &&
-                            hasAnyEngine(selectedPak);
-                          const disabled = needsEngine || blockedByTarget;
+                          // they need an engine file present in the pak.
+                          const needsEngine = engineOnly && !hasAnyEngine(selectedPak);
+                          const disabled = needsEngine;
                           const conflict = hasScalabilityConflict(tweak);
                           return (
                             <QuickTweakRow
@@ -1287,11 +1188,7 @@ export function PakTweaks({ gamePath, scalabilityContent, isActive }: Props) {
                               tweak={tweak}
                               isEnabled={isEnabled}
                               disabledReason={
-                                needsEngine
-                                  ? "Requires an Engine.ini in this pak mod"
-                                  : blockedByTarget
-                                    ? "Needs an Engine.ini section — switch Edit target to an Engine file"
-                                    : undefined
+                                needsEngine ? "Requires an Engine.ini in this pak mod" : undefined
                               }
                               scalabilityConflict={conflict}
                               currentValue={

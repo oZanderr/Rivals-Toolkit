@@ -99,6 +99,37 @@ pub(super) fn extract_file_to_string(pak_path: &Path, entry: &str) -> Result<Str
     String::from_utf8(buf).map_err(|e| format!("INI file is not valid UTF-8: {}", e))
 }
 
+/// Open a pak once and find an entry whose path matches `in_pak_path` once the
+/// mount prefix is normalized away on both sides. Different paks in the
+/// ecosystem store the same logical path with or without the `../../../` mount
+/// prefix; comparing after stripping handles either form.
+pub(super) fn extract_optional_entry(
+    pak_path: &Path,
+    in_pak_path: &str,
+) -> Result<Option<String>, String> {
+    if !pak_path.exists() {
+        return Ok(None);
+    }
+    let needle = strip_mount_prefix(in_pak_path);
+    let pak = open_pak(pak_path)?;
+    let files = pak.files();
+    let target = files
+        .iter()
+        .find(|f| strip_mount_prefix(f) == needle)
+        .cloned();
+    let Some(target) = target else {
+        return Ok(None);
+    };
+
+    let mut reader = BufReader::new(fs::File::open(pak_path).map_err(|e| e.to_string())?);
+    let mut buf = Vec::new();
+    pak.read_file(&target, &mut reader, &mut buf)
+        .map_err(|e| e.to_string())?;
+    let content =
+        String::from_utf8(buf).map_err(|e| format!("INI file is not valid UTF-8: {}", e))?;
+    Ok(Some(content))
+}
+
 /// Extract all pak entries to a directory.
 pub(super) fn unpack_to_dir(pak_path: &Path, output_dir: &Path) -> Result<(), String> {
     fs::create_dir_all(output_dir).map_err(|e| e.to_string())?;
@@ -117,6 +148,30 @@ pub(super) fn unpack_to_dir(pak_path: &Path, output_dir: &Path) -> Result<(), St
         pak.read_file(name, &mut reader, &mut out)
             .map_err(|e| e.to_string())?;
     }
+    Ok(())
+}
+
+/// Write a brand-new empty pak (no entries) at `output_pak`. Used by the
+/// "New pak" flow so users can populate INI files via the editor instead of
+/// staging a folder layout by hand first.
+pub(super) fn create_empty_pak(output_pak: &Path) -> Result<(), String> {
+    use std::io::BufWriter;
+
+    if let Some(parent) = output_pak.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let out_file = fs::File::create(output_pak).map_err(|e| e.to_string())?;
+    let pak_writer = repak::PakBuilder::new()
+        .profile(RIVALS_PROFILE.repak_profile())
+        .key(make_aes_key()?)
+        .compression(RIVALS_PROFILE.compression())
+        .writer(
+            BufWriter::new(out_file),
+            RIVALS_PROFILE.pak_version(),
+            RIVALS_PROFILE.mount_point().to_string(),
+            None,
+        );
+    pak_writer.write_index().map_err(|e| e.to_string())?;
     Ok(())
 }
 

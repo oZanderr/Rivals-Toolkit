@@ -2,11 +2,14 @@
 
 use std::path::Path;
 
-use crate::paths::mods_dir;
+use crate::paths::{mods_dir, paks_dir};
 use crate::tweaks::TweakState;
 
 use super::cvars::parse_console_vars;
-use super::io::{extract_file_to_string, inspect_pak_for_any_ini, inspect_pak_for_ini};
+use super::io::{
+    create_empty_pak, extract_file_to_string, extract_optional_entry, inspect_pak_for_any_ini,
+    inspect_pak_for_ini,
+};
 use super::{PakIniInfo, PakIniListing, PakTweakState};
 
 /// Inspect one pak and return INI metadata when present.
@@ -114,4 +117,61 @@ pub(crate) fn detect_pak_tweaks(pak_path: &str) -> Result<Vec<TweakState>, Strin
 /// Extract a single file from a pak as a UTF-8 string.
 pub(crate) fn extract_pak_ini(pak_path: &str, entry: &str) -> Result<String, String> {
     extract_file_to_string(Path::new(pak_path), entry)
+}
+
+/// Pull the game's stock copy of an INI from pakchunk0 so new mod entries can
+/// start with the real defaults instead of an empty section header.
+pub(crate) fn extract_game_default_ini(
+    game_root: &str,
+    in_pak_path: &str,
+) -> Result<Option<String>, String> {
+    let pakchunk0 = paks_dir(game_root).join("pakchunk0-Windows.pak");
+    extract_optional_entry(&pakchunk0, in_pak_path)
+}
+
+/// Sanitize a user-typed pak name into the toolkit's mod convention
+/// `<name>_9999999_P.pak`. Strips invalid Windows filename chars, idempotently
+/// strips an existing `_9999999_P` suffix or `.pak` extension before re-applying.
+fn normalize_pak_filename(raw: &str) -> Result<String, String> {
+    const PRIORITY_SUFFIX: &str = "_9999999_P";
+
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("Pak name can't be empty".to_string());
+    }
+    // Strip extension first so suffix detection works on the bare stem.
+    let no_ext = trimmed.strip_suffix(".pak").unwrap_or(trimmed);
+    let no_ext = no_ext.strip_suffix(".PAK").unwrap_or(no_ext);
+    let stem = no_ext.strip_suffix(PRIORITY_SUFFIX).unwrap_or(no_ext);
+    let cleaned: String = stem
+        .chars()
+        .filter(|c| !matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'))
+        .collect();
+    let cleaned = cleaned.trim();
+    if cleaned.is_empty() {
+        return Err("Pak name contains only invalid characters".to_string());
+    }
+    Ok(format!("{cleaned}{PRIORITY_SUFFIX}.pak"))
+}
+
+/// Create an empty mod pak in `~mods/` ready to be populated via the INI editor.
+pub(crate) fn create_new_mod_pak(game_root: &str, name: &str) -> Result<PakIniListing, String> {
+    let filename = normalize_pak_filename(name)?;
+    let mods = mods_dir(game_root);
+    if !mods.is_dir() {
+        return Err(format!(
+            "Mods folder doesn't exist at {} -- check your game path",
+            mods.display()
+        ));
+    }
+    let pak_path = mods.join(&filename);
+    if pak_path.exists() {
+        return Err(format!("{} already exists", filename));
+    }
+    create_empty_pak(&pak_path)?;
+    Ok(PakIniListing {
+        pak_name: filename,
+        pak_path: pak_path.to_string_lossy().into_owned(),
+        ini_entries: Vec::new(),
+    })
 }

@@ -20,21 +20,35 @@ import {
   RefreshCw,
   Save,
   Search,
+  FilePlus2,
   FolderOpen,
   FileText,
   ListRestart,
   CaseSensitive,
   ChevronUp,
   ChevronDown,
+  Plus,
   Replace,
   ReplaceAll,
+  Trash2,
   Undo2,
   UploadCloud,
   X,
 } from "lucide-react";
 
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
   Select,
   SelectContent,
@@ -43,7 +57,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Tip } from "@/components/ui/tooltip";
-import { normalizeFolderPath, onModsChanged } from "@/lib/modsEvents";
+import { emitModsChanged, normalizeFolderPath, onModsChanged } from "@/lib/modsEvents";
 import { emitPakChanged, onPakChanged } from "@/lib/pakEvents";
 import { cn } from "@/lib/utils";
 
@@ -137,8 +151,45 @@ function entryBasename(entry: string): string {
   return parts[parts.length - 1] || entry;
 }
 
+function entryParentDir(entry: string): string {
+  const normalized = entry.replace(/\\/g, "/");
+  const idx = normalized.lastIndexOf("/");
+  return idx >= 0 ? normalized.slice(0, idx) : "";
+}
+
 function normalizeLineEndings(s: string): string {
   return s.replace(/\r\n/g, "\n");
+}
+
+// In-pak path convention: every entry stored in `contents` is the full path
+// repak returns, which always has the UE mount prefix prepended.
+const MOUNT_PREFIX = "../../../";
+
+function ensureMountPrefix(p: string): string {
+  const trimmed = p.trim().replace(/\\/g, "/");
+  return trimmed.startsWith(MOUNT_PREFIX) ? trimmed : MOUNT_PREFIX + trimmed.replace(/^\/+/, "");
+}
+
+// Canonical in-pak destination paths for each preset, mirroring where the
+// matching files live in pakchunk0. WindowsEngine and BaseEngine live under
+// `Engine/Config/`; DefaultEngine and DefaultDeviceProfiles under `Marvel/Config/`.
+const PRESET_INI_PATHS: Record<string, string> = {
+  "DefaultEngine.ini": "../../../Marvel/Config/DefaultEngine.ini",
+  "BaseEngine.ini": "../../../Engine/Config/BaseEngine.ini",
+  "WindowsEngine.ini": "../../../Engine/Config/Windows/WindowsEngine.ini",
+  "DefaultDeviceProfiles.ini": "../../../Marvel/Config/DefaultDeviceProfiles.ini",
+};
+
+const PRESET_INI_FILES = Object.keys(PRESET_INI_PATHS) as readonly string[];
+
+// Parent dir for the inline custom-path placeholder, derived from existing
+// entries so the suggestion stays consistent with how the pak is organized.
+function inferCustomParentDir(existingEntries: string[]): string {
+  for (const entry of existingEntries) {
+    const parent = entryParentDir(entry);
+    if (parent) return parent;
+  }
+  return "../../../Marvel/Config";
 }
 
 // ── Component ───────────────────────────────────────────────────────
@@ -154,6 +205,16 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
   const [activeEntry, setActiveEntry] = useState<string | null>(null);
   const [contents, setContents] = useState<Record<string, string>>({});
   const [savedContents, setSavedContents] = useState<Record<string, string>>({});
+  // Entries queued for deletion on next save. Hidden from tabs but kept in
+  // `contents` so discard cleanly restores them.
+  const [pendingDeletes, setPendingDeletes] = useState<Set<string>>(new Set());
+  const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
+  const [addOpen, setAddOpen] = useState(false);
+  const [addCustomPath, setAddCustomPath] = useState("");
+  const [adding, setAdding] = useState(false);
+  const [newPakOpen, setNewPakOpen] = useState(false);
+  const [newPakName, setNewPakName] = useState("");
+  const [creatingPak, setCreatingPak] = useState(false);
   const [saving, setSaving] = useState(false);
 
   // ── Search ──
@@ -169,6 +230,10 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
   const editorViewRef = useRef<EditorView | null>(null);
   // Bumped on disk reload / pak switch to force editor recreation.
   const [pakEpoch, setPakEpoch] = useState(0);
+  // Top-of-viewport document position, keyed by `${pak_path}::${entry}`. Stored
+  // as a CM document offset (not pixels) so restore goes through CM's measurement
+  // cycle and renders the lines instead of leaving a blank viewport.
+  const entryScrollRef = useRef<Record<string, number>>({});
 
   // ── Drag-and-drop ──
   const [isDragging, setIsDragging] = useState(false);
@@ -188,14 +253,29 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
   }
 
   // ── Dirty detection ──
+  // An entry is "edit-dirty" if its in-memory content differs from disk; this
+  // naturally covers both modifications (saved value differs) and brand-new
+  // entries (saved value is undefined). Pending deletes are tracked separately.
   const dirtyEntries = useMemo(() => {
     const out: string[] = [];
     for (const [entry, value] of Object.entries(contents)) {
+      if (pendingDeletes.has(entry)) continue;
       if (savedContents[entry] !== value) out.push(entry);
     }
     return out;
-  }, [contents, savedContents]);
-  const isDirty = dirtyEntries.length > 0;
+  }, [contents, savedContents, pendingDeletes]);
+  // Tabs ignore pending-delete entries; new entries naturally appear via
+  // Object.keys order (insertion-order).
+  const displayedEntries = useMemo(
+    () => Object.keys(contents).filter((e) => !pendingDeletes.has(e)),
+    [contents, pendingDeletes]
+  );
+  // Save fires if there are edits OR pending deletes of entries that were on disk.
+  const hasRealDeletes = useMemo(
+    () => [...pendingDeletes].some((e) => savedContents[e] !== undefined),
+    [pendingDeletes, savedContents]
+  );
+  const isDirty = dirtyEntries.length > 0 || hasRealDeletes;
 
   const currentContent = activeEntry !== null ? (contents[activeEntry] ?? null) : null;
 
@@ -252,6 +332,7 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
           setActiveEntry(null);
           setContents({});
           setSavedContents({});
+          setPendingDeletes(new Set());
         }
         if (merged.length === 0) {
           if (!silent) showNotice("No paks with INI files found", "info");
@@ -267,6 +348,33 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
     },
     [gamePath, paks, selectedPak]
   );
+
+  async function createNewPak() {
+    if (!gamePath || !newPakName.trim()) return;
+    setCreatingPak(true);
+    try {
+      const info = await invoke<PakIniListing>("create_new_mod_pak", {
+        gameRoot: gamePath,
+        name: newPakName.trim(),
+      });
+      setPaks((prev) => (prev.find((p) => p.pak_path === info.pak_path) ? prev : [...prev, info]));
+      await loadPak(info);
+      setNewPakOpen(false);
+      setNewPakName("");
+      // A new pak file landed in ~mods; refresh other tabs' mod lists. The editor
+      // ignores its own source so this freshly-created (INI-less) pak isn't pruned.
+      emitModsChanged({
+        modsFolder: `${gamePath}\\MarvelGame\\Marvel\\Content\\Paks\\~mods`,
+        source: "PakIniEditor",
+      });
+      showNotice(`Created ${info.pak_name}`, "ok");
+    } catch (e) {
+      showNotice(String(e), "err", 6000);
+      console.error(e);
+    } finally {
+      setCreatingPak(false);
+    }
+  }
 
   async function browse() {
     const selected = await open({
@@ -347,6 +455,7 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
     setSelectedPak(pak);
     setContents({});
     setSavedContents({});
+    setPendingDeletes(new Set());
     setLoading(true);
 
     try {
@@ -397,6 +506,77 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
       });
     }
     setContents(savedContents);
+    setPendingDeletes(new Set());
+    // Active entry may have been a brand-new add or a pending-delete; snap to a
+    // valid remaining entry.
+    if (activeEntry === null || savedContents[activeEntry] === undefined) {
+      const firstSaved = Object.keys(savedContents)[0] ?? null;
+      setActiveEntry(firstSaved);
+    }
+  }
+
+  // Queue an entry for deletion on next save. Brand-new entries (not in
+  // savedContents) drop entirely from contents so the popover treats the name
+  // as available again.
+  function queueDelete(entry: string) {
+    const wasOnDisk = savedContents[entry] !== undefined;
+    if (wasOnDisk) {
+      setPendingDeletes((prev) => {
+        const next = new Set(prev);
+        next.add(entry);
+        return next;
+      });
+    } else {
+      setContents((prev) => {
+        const next = { ...prev };
+        delete next[entry];
+        return next;
+      });
+    }
+    if (activeEntry === entry) {
+      const remaining = displayedEntries.find((e) => e !== entry);
+      setActiveEntry(remaining ?? null);
+    }
+  }
+
+  // Add a new INI entry to the working buffer. `entry` is the full in-pak path;
+  // a previously-queued delete for the same path is un-queued instead so the
+  // round-trip is a no-op. Seeds new content from pakchunk0's matching default
+  // when available so the user starts with the real UE defaults rather than a
+  // blank section header.
+  async function addEntry(rawEntry: string) {
+    const entry = ensureMountPrefix(rawEntry);
+    if (pendingDeletes.has(entry)) {
+      setPendingDeletes((prev) => {
+        const next = new Set(prev);
+        next.delete(entry);
+        return next;
+      });
+      setActiveEntry(entry);
+      return;
+    }
+    if (contents[entry] !== undefined) {
+      showNotice(`${entryBasename(entry)} already exists in this pak`, "err");
+      return;
+    }
+
+    let seeded = "";
+    if (gamePath) {
+      try {
+        const fromGame = await invoke<string | null>("extract_game_default_ini", {
+          gameRoot: gamePath,
+          inPakPath: entry,
+        });
+        if (fromGame !== null) {
+          seeded = normalizeLineEndings(fromGame);
+        }
+      } catch (e) {
+        console.warn("Failed to seed from game default:", e);
+        // Fall through with an empty buffer; the user can fill it in.
+      }
+    }
+    setContents((prev) => ({ ...prev, [entry]: seeded }));
+    setActiveEntry(entry);
   }
 
   async function save() {
@@ -407,16 +587,43 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
         entry,
         content: contents[entry].replace(/\r?\n/g, "\r\n"),
       }));
+      const deletes = [...pendingDeletes].filter((entry) => savedContents[entry] !== undefined);
 
       const msg = await invoke<string>("save_pak_ini", {
         pakPath: selectedPak.pak_path,
         files,
+        deletes,
       });
       showNotice(msg, "ok");
       emitPakChanged({ pakPath: selectedPak.pak_path, source: "PakIniEditor" });
 
-      // Sync saved snapshot to current buffer; skip disk round-trip to preserve cursor and active entry.
-      setSavedContents(contents);
+      // Rebuild saved snapshot from in-memory contents minus deletes; skip the
+      // disk round-trip to preserve cursor and active entry.
+      const newSaved: Record<string, string> = {};
+      for (const [entry, value] of Object.entries(contents)) {
+        if (pendingDeletes.has(entry)) continue;
+        newSaved[entry] = value;
+      }
+      setSavedContents(newSaved);
+      // Drop deleted (and discarded-add) entries from contents.
+      if (pendingDeletes.size > 0) {
+        setContents((prev) => {
+          const next: Record<string, string> = {};
+          for (const [entry, value] of Object.entries(prev)) {
+            if (pendingDeletes.has(entry)) continue;
+            next[entry] = value;
+          }
+          return next;
+        });
+      }
+      setPendingDeletes(new Set());
+      // If the active entry was deleted, switch to first remaining.
+      if (activeEntry !== null && pendingDeletes.has(activeEntry)) {
+        const remaining = Object.keys(contents).find(
+          (e) => e !== activeEntry && !pendingDeletes.has(e)
+        );
+        setActiveEntry(remaining ?? null);
+      }
     } catch (e) {
       showNotice(String(e), "err", 8000);
       console.error(e);
@@ -503,6 +710,10 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
   useEffect(() => {
     if (!editorContainerRef.current || currentContent === null) return;
 
+    // Capture identity of the file shown at mount so cleanup saves scroll under
+    // the right key even if activeEntry/selectedPak have already changed by then.
+    const scrollKey = selectedPak && activeEntry ? `${selectedPak.pak_path}::${activeEntry}` : null;
+
     // Destroy previous editor if switching files
     if (editorViewRef.current) {
       editorViewRef.current.destroy();
@@ -519,7 +730,10 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
         fontFamily: "ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace",
         caretColor: "var(--color-foreground)",
         color: "var(--color-foreground)",
-        lineHeight: "1.625",
+        // Pinned to an integer pixel value so every row renders at the same height;
+        // a unitless multiplier (e.g. 1.625) yields 21.125px which the browser
+        // rounds inconsistently between rows.
+        lineHeight: "21px",
         padding: "16px 0",
       },
       ".cm-line": {
@@ -597,7 +811,24 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
       });
     }
 
+    // Restore scroll position from prior visit of this entry. scrollIntoView
+    // tells CM to render around that document position so the viewport isn't
+    // left blank, and works even with search open (which is what we want when
+    // iterating matches and tab-hopping).
+    if (scrollKey !== null) {
+      const savedPos = entryScrollRef.current[scrollKey];
+      if (savedPos !== undefined && savedPos > 0) {
+        view.dispatch({
+          effects: EditorView.scrollIntoView(savedPos, { y: "start" }),
+        });
+      }
+    }
+
     return () => {
+      if (scrollKey !== null) {
+        const block = view.lineBlockAtHeight(view.scrollDOM.scrollTop);
+        entryScrollRef.current[scrollKey] = block.from;
+      }
       view.destroy();
       editorViewRef.current = null;
     };
@@ -659,6 +890,8 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
   useEffect(() => {
     return onModsChanged((event) => {
       if (!gamePath) return;
+      // Skip our own create-pak emission; re-scanning would prune the new INI-less pak.
+      if (event.source === "PakIniEditor") return;
       const modsFolder = `${gamePath}\\MarvelGame\\Marvel\\Content\\Paks\\~mods`;
       if (normalizeFolderPath(event.modsFolder) !== normalizeFolderPath(modsFolder)) return;
       scanRef.current(true);
@@ -681,9 +914,8 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
     setActiveEntry(null);
     setContents({});
     setSavedContents({});
+    setPendingDeletes(new Set());
   }, [gamePath]);
-
-  const showTabs = !!selectedPak && selectedPak.ini_entries.length > 1;
 
   return (
     <div className="relative flex flex-1 min-h-0 w-full flex-col gap-4">
@@ -745,6 +977,30 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
             <FolderOpen size={14} />
           </Button>
         </Tip>
+        <Popover
+          open={newPakOpen}
+          onOpenChange={(open) => {
+            if (creatingPak) return;
+            setNewPakOpen(open);
+            if (!open) setNewPakName("");
+          }}
+        >
+          <Tip content="Create a new empty pak">
+            <PopoverTrigger asChild>
+              <Button variant="ghost" size="icon-sm" disabled={!gamePath}>
+                <FilePlus2 size={14} />
+              </Button>
+            </PopoverTrigger>
+          </Tip>
+          <PopoverContent align="end" className="w-72 p-3">
+            <NewPakPopover
+              name={newPakName}
+              setName={setNewPakName}
+              creating={creatingPak}
+              onCreate={createNewPak}
+            />
+          </PopoverContent>
+        </Popover>
         <Tip content="Scan for paks with INI files">
           <Button
             variant="ghost"
@@ -762,24 +1018,31 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
       </div>
 
       {/* ── Editor area ── */}
-      {selectedPak && !loading && currentContent !== null && activeEntry !== null && (
+      {selectedPak && !loading && (
         <div className="flex flex-1 min-h-0 flex-col rounded-md border border-border overflow-hidden">
           {/* File tabs + toolbar */}
           <div className="flex items-center justify-between border-b border-border px-3 py-1.5">
             <div className="flex min-w-0 flex-1 items-center gap-2 overflow-x-auto">
-              {showTabs ? (
-                <div className="flex gap-1 rounded-md bg-muted p-1">
-                  {selectedPak.ini_entries.map((entry) => {
-                    const entryDirty = contents[entry] !== savedContents[entry];
-                    return (
+              <div className="flex items-center gap-1 rounded-md bg-muted p-1">
+                {displayedEntries.map((entry) => {
+                  const entryDirty = contents[entry] !== savedContents[entry];
+                  const isActive = activeEntry === entry;
+                  return (
+                    <div
+                      key={entry}
+                      className={cn(
+                        "group flex items-center rounded-sm transition-colors",
+                        isActive ? "bg-background shadow-sm" : "hover:bg-background/40"
+                      )}
+                    >
                       <button
-                        key={entry}
                         onClick={() => setActiveEntry(entry)}
                         title={entry}
                         className={cn(
-                          "flex items-center gap-1.5 rounded-sm px-3 py-1 text-[12px] font-medium transition-colors",
-                          activeEntry === entry
-                            ? "bg-background text-foreground shadow-sm"
+                          "flex items-center gap-1.5 pl-3 py-1 text-[12px] font-medium transition-colors",
+                          displayedEntries.length === 1 ? "pr-3" : "pr-2",
+                          isActive
+                            ? "text-foreground"
                             : "text-muted-foreground hover:text-foreground"
                         )}
                       >
@@ -787,19 +1050,55 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
                         {entryBasename(entry)}
                         {entryDirty && <span className="size-1.5 rounded-full bg-warn" />}
                       </button>
-                    );
-                  })}
-                </div>
-              ) : (
-                <span
-                  className="flex items-center gap-1.5 text-[12px] font-medium text-foreground"
-                  title={activeEntry}
+                      {displayedEntries.length > 1 && (
+                        <button
+                          onClick={() => setDeleteConfirm(entry)}
+                          title={`Delete ${entryBasename(entry)}`}
+                          className={cn(
+                            "mr-1 rounded-sm p-0.5 transition-opacity hover:bg-destructive/15 hover:text-destructive",
+                            isActive ? "opacity-60" : "opacity-0 group-hover:opacity-60"
+                          )}
+                        >
+                          <X size={11} />
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+                <Popover
+                  open={addOpen}
+                  onOpenChange={(open) => {
+                    if (!adding) setAddOpen(open);
+                  }}
                 >
-                  <FileText size={12} />
-                  {entryBasename(activeEntry)}
-                  {isDirty && <span className="size-1.5 rounded-full bg-warn" />}
-                </span>
-              )}
+                  <PopoverTrigger asChild>
+                    <button
+                      title="Add INI file"
+                      className="ml-0.5 rounded-sm p-1 text-muted-foreground transition-colors hover:bg-background/40 hover:text-foreground"
+                    >
+                      <Plus size={13} />
+                    </button>
+                  </PopoverTrigger>
+                  <PopoverContent align="start" className="w-80 p-3">
+                    <AddIniPopover
+                      existingEntries={Object.keys(contents).filter((e) => !pendingDeletes.has(e))}
+                      adding={adding}
+                      onAdd={async (entry) => {
+                        setAdding(true);
+                        try {
+                          await addEntry(entry);
+                          setAddOpen(false);
+                          setAddCustomPath("");
+                        } finally {
+                          setAdding(false);
+                        }
+                      }}
+                      customPath={addCustomPath}
+                      setCustomPath={setAddCustomPath}
+                    />
+                  </PopoverContent>
+                </Popover>
+              </div>
             </div>
 
             <div className="flex shrink-0 items-center gap-1">
@@ -925,8 +1224,17 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
             </div>
           )}
 
-          {/* CodeMirror editor */}
-          <div ref={editorContainerRef} className="flex-1 min-h-0 w-full overflow-hidden" />
+          {/* CodeMirror editor (mounted only when an entry is active) */}
+          {currentContent !== null && activeEntry !== null ? (
+            <div ref={editorContainerRef} className="flex-1 min-h-0 w-full overflow-hidden" />
+          ) : (
+            <div className="flex flex-1 min-h-0 flex-col items-center justify-center gap-2 px-4 text-center">
+              <FileText size={22} className="text-muted-foreground/50" />
+              <span className="text-[12px] text-muted-foreground">
+                No INI file open. Use the + tab to add one.
+              </span>
+            </div>
+          )}
 
           {/* Save bar — only visible when there are pending edits */}
           {isDirty && (
@@ -981,6 +1289,198 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
           </span>
         </div>
       )}
+
+      {/* Delete-tab confirmation */}
+      <AlertDialog
+        open={deleteConfirm !== null}
+        onOpenChange={(open) => !open && setDeleteConfirm(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete INI file?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {deleteConfirm !== null && (
+                <>
+                  <span className="font-mono text-foreground">{entryBasename(deleteConfirm)}</span>{" "}
+                  will be removed from this pak on save. Discard the change to undo before saving.
+                </>
+              )}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (deleteConfirm !== null) queueDelete(deleteConfirm);
+                setDeleteConfirm(null);
+              }}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              <Trash2 size={13} />
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
+}
+
+// ── Add INI popover ─────────────────────────────────────────────────
+
+function AddIniPopover({
+  existingEntries,
+  adding,
+  onAdd,
+  customPath,
+  setCustomPath,
+}: {
+  existingEntries: string[];
+  adding: boolean;
+  onAdd: (entry: string) => void;
+  customPath: string;
+  setCustomPath: (s: string) => void;
+}) {
+  const customParentDir = inferCustomParentDir(existingEntries);
+  // Compare presets by basename: mod paks routinely put e.g. BaseEngine.ini at
+  // a non-canonical path (Marvel/Config/ instead of Engine/Config/), and adding
+  // another copy at the canonical path would create a duplicate at runtime.
+  const existingBasenames = new Set(existingEntries.map((e) => entryBasename(e).toLowerCase()));
+  const customError = validateCustomPath(customPath, existingEntries);
+  const trimmed = customPath.trim();
+  return (
+    <div className="flex flex-col gap-3">
+      <div>
+        <div className="mb-1.5 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+          <span>Presets</span>
+          {adding && <RefreshCw size={11} className="animate-spin" />}
+        </div>
+        <div className="flex flex-wrap gap-1">
+          {PRESET_INI_FILES.map((name) => {
+            const targetPath = PRESET_INI_PATHS[name];
+            const already = existingBasenames.has(name.toLowerCase());
+            const disabled = already || adding;
+            return (
+              <button
+                key={name}
+                disabled={disabled}
+                onClick={() => onAdd(targetPath)}
+                title={already ? `${name} is already in this pak` : `Add ${targetPath}`}
+                className={cn(
+                  "rounded border border-border px-2 py-1 text-[11px] font-medium transition-colors",
+                  disabled
+                    ? "cursor-not-allowed text-muted-foreground/40"
+                    : "hover:border-foreground/40 hover:bg-muted"
+                )}
+              >
+                {name}
+              </button>
+            );
+          })}
+        </div>
+        <div className="mt-1.5 text-[10px] text-muted-foreground">
+          Seeds new content from the game's pakchunk0 default when available.
+        </div>
+      </div>
+
+      <div>
+        <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+          Custom path
+        </div>
+        <Input
+          value={customPath}
+          onChange={(e) => setCustomPath(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !customError && trimmed && !adding) onAdd(trimmed);
+          }}
+          placeholder={`${customParentDir}/MyOverride.ini`}
+          disabled={adding}
+          className="h-7 text-[11px] font-mono"
+        />
+        {customError && trimmed && (
+          <div className="mt-1 text-[10px] text-destructive">{customError}</div>
+        )}
+        <div className="mt-2 flex justify-end">
+          <Button
+            variant="blue"
+            size="sm"
+            onClick={() => onAdd(trimmed)}
+            disabled={!trimmed || customError !== null || adding}
+          >
+            {adding ? <RefreshCw size={12} className="animate-spin" /> : <Plus size={12} />}
+            Add
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function previewPakFilename(raw: string): string {
+  const trimmed = raw
+    .trim()
+    .replace(/[<>:"/\\|?*]/g, "")
+    .replace(/\.pak$/i, "")
+    .replace(/_9999999_P$/i, "");
+  if (!trimmed) return "";
+  return `${trimmed}_9999999_P.pak`;
+}
+
+function NewPakPopover({
+  name,
+  setName,
+  creating,
+  onCreate,
+}: {
+  name: string;
+  setName: (s: string) => void;
+  creating: boolean;
+  onCreate: () => void;
+}) {
+  const preview = previewPakFilename(name);
+  const canCreate = preview.length > 0 && !creating;
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+        New pak name
+      </div>
+      <Input
+        autoFocus
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && canCreate) onCreate();
+        }}
+        placeholder="MyConfigMod"
+        disabled={creating}
+        className="h-7 font-mono text-[11px]"
+      />
+      {preview && (
+        <div className="truncate text-[10px] text-muted-foreground">
+          Saves as <span className="font-mono text-foreground/80">{preview}</span> in{" "}
+          <span className="font-mono">~mods</span>
+        </div>
+      )}
+      <div className="mt-1 flex justify-end">
+        <Button variant="blue" size="sm" onClick={onCreate} disabled={!canCreate}>
+          {creating ? <RefreshCw size={12} className="animate-spin" /> : <FilePlus2 size={12} />}
+          Create
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function validateCustomPath(raw: string, existingEntries: string[]): string | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  if (!/\.ini$/i.test(trimmed)) return "Path must end with .ini";
+  if (trimmed.split(/[/\\]/).some((seg) => seg === ".." || seg === ".")) {
+    return "Path must not contain .. or .";
+  }
+  const lower = trimmed.toLowerCase();
+  if (existingEntries.some((e) => e.toLowerCase() === lower)) {
+    return "An entry with this path already exists";
+  }
+  return null;
 }

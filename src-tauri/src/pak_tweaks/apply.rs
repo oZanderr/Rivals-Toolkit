@@ -17,26 +17,22 @@ const ENGINE_TARGETS: [PakIniTarget; 3] = [
     PakIniTarget::WindowsEngine,
 ];
 
-/// Apply catalogue-driven edits to a pak's chosen INI file and repack in place.
+/// Apply catalogue-driven edits to a pak's INI files and repack in place.
 ///
-/// Plain CVar edits are written to `target` (defaulting to the highest-priority file
-/// present in the pak). Engine-section settings are not console variables and only
-/// belong in an engine file: they go to `target` when it is an engine file, else to
-/// the highest-priority engine file present. Every other file that already contains
-/// an edited key is kept in sync so no higher-priority file shadows the user's edit;
-/// keys absent from a file are never injected into it.
-pub(crate) fn apply_pak_tweaks(
-    pak_path: &str,
-    edits: &[PakTweakEdit],
-    target: Option<PakIniTarget>,
-) -> Result<String, String> {
+/// Plain CVar edits are written to the highest-priority file present in the pak so a
+/// new key takes effect without being shadowed. Engine-section settings are not console
+/// variables and only belong in an engine file: they go to the highest-priority engine
+/// file present. Every other file that already contains an edited key is kept in sync
+/// so no higher-priority file shadows the user's edit; keys absent from a file are
+/// never injected into it.
+pub(crate) fn apply_pak_tweaks(pak_path: &str, edits: &[PakTweakEdit]) -> Result<String, String> {
     let pak = Path::new(pak_path);
     let info = inspect_pak_for_ini(pak)?
         .ok_or_else(|| "No INI config files found in this pak.".to_string())?;
     let pak_name = info.pak_name.clone();
     let edit_count = edits.len();
 
-    let resolved = resolve_target(&info, target)?;
+    let resolved = resolve_target(&info)?;
     // Engine-section edits need an engine file. Prefer the user's target if it's an
     // engine file; otherwise the highest-priority engine file present.
     let engine_section_target = if is_engine(resolved) {
@@ -101,16 +97,9 @@ pub(crate) fn apply_pak_tweaks(
     Ok(format!("Applied {edit_count} {label} to {pak_name}"))
 }
 
-/// Resolve the requested target to one the pak actually contains, falling back to
-/// the highest-priority file present (DeviceProfiles > WindowsEngine > DefaultEngine
-/// > BaseEngine) so a new edit takes effect without being shadowed.
-fn resolve_target(info: &PakIniInfo, target: Option<PakIniTarget>) -> Result<PakIniTarget, String> {
-    if let Some(t) = target
-        && entry_for(info, t).is_some()
-    {
-        return Ok(t);
-    }
-    // Highest-priority first.
+/// Pick the highest-priority file present in the pak (DeviceProfiles > WindowsEngine >
+/// DefaultEngine > BaseEngine) so a new edit takes effect without being shadowed.
+fn resolve_target(info: &PakIniInfo) -> Result<PakIniTarget, String> {
     for candidate in [
         PakIniTarget::DeviceProfiles,
         PakIniTarget::WindowsEngine,
@@ -177,20 +166,36 @@ fn source_label(target: PakIniTarget) -> &'static str {
     }
 }
 
-/// Replace raw INI file contents in a pak and repack in place.
+/// Replace raw INI file contents in a pak and repack in place. `files` writes are
+/// applied first (creating parent dirs for brand-new entries), then `deletes` are
+/// removed from the temp tree; repack picks up whatever remains.
 pub(crate) fn save_pak_ini(
     pak_path: &str,
     files: Vec<PakIniFileContent>,
+    deletes: Vec<String>,
 ) -> Result<String, String> {
     let pak = Path::new(pak_path);
-    let file_count = files.len();
+    let change_count = files.len() + deletes.len();
 
     with_unpacked_pak(pak, |temp_dir| {
         for file in &files {
             let rel = strip_mount_prefix(&file.entry);
             let dest = temp_dir.join(rel);
+            if let Some(parent) = dest.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|e| format!("Failed to create {}: {}", parent.display(), e))?;
+            }
             fs::write(&dest, &file.content)
                 .map_err(|e| format!("Failed to write {}: {}", dest.display(), e))?;
+        }
+        for entry in &deletes {
+            let rel = strip_mount_prefix(entry);
+            let dest = temp_dir.join(rel);
+            match fs::remove_file(&dest) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(format!("Failed to delete {}: {}", dest.display(), e)),
+            }
         }
         Ok(())
     })?;
@@ -200,7 +205,7 @@ pub(crate) fn save_pak_ini(
         .unwrap_or_default()
         .to_string_lossy()
         .into_owned();
-    Ok(format!("Saved {} file(s) to {}", file_count, pak_name))
+    Ok(format!("Saved {} change(s) to {}", change_count, pak_name))
 }
 
 /// Read an extracted pak INI, apply `edits`, and write it back.

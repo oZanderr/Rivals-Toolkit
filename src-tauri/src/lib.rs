@@ -96,6 +96,8 @@ pub fn run() {
             pak_tweaks::commands::detect_pak_tweaks,
             pak_tweaks::commands::apply_pak_tweak_edits,
             pak_tweaks::commands::extract_pak_ini,
+            pak_tweaks::commands::extract_game_default_ini,
+            pak_tweaks::commands::create_new_mod_pak,
             pak_tweaks::commands::save_pak_ini,
             pak_tweaks::commands::inspect_pak_path_any_ini,
             pak_tweaks::commands::scan_mod_paks_any_ini,
