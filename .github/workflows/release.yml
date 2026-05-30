@@ -52,6 +52,9 @@ jobs:
             $changeLines = git --no-pager log --reverse --no-merges --pretty=format:"- %s" "$tag"
           }
 
+          # Drop the automated character_ids.json sync commits; they're noise in release notes.
+          $changeLines = $changeLines | Where-Object { $_ -notmatch '^- chore: refresh character_ids\.json$' }
+
           if (-not $changeLines) {
             $changeLines = "- No changes detected in git log for this release range."
           }
