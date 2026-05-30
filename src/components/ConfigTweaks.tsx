@@ -110,16 +110,18 @@ export function ConfigTweaks({ gamePath, isActive }: Props) {
     return () => unlisten?.();
   }, []);
 
-  async function loadFile(path: string) {
+  async function loadFile(path: string): Promise<boolean> {
     try {
       const text = await invoke<string>("read_scalability", { path });
       setContent(text);
       setScalabilityContent(text);
       setFileExists(true);
+      return true;
     } catch {
       setContent("");
       setScalabilityContent("");
       setFileExists(false);
+      return false;
     }
   }
 
@@ -145,9 +147,10 @@ export function ConfigTweaks({ gamePath, isActive }: Props) {
   }
 
   async function reloadContent() {
-    await loadFile(filePath);
+    const found = await loadFile(filePath);
     setReloadSignal((s) => s + 1);
-    showDetectBadge("Reloaded");
+    // No success badge when the file is missing; the persistent "Not found" badge stands.
+    if (found) showDetectBadge("Reloaded");
   }
 
   async function browse() {

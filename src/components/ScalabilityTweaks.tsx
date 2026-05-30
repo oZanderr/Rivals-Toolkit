@@ -182,11 +182,13 @@ export function ScalabilityTweaks({
   }, []);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- detectTweaks awaits a backend call before it sets state
     detectTweaks(content);
   }, [content, detectTweaks]);
 
   // Re-detect when an explicit reload is triggered, even if content is unchanged
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- async backend detection, state is set after the await
     if (reloadSignal > 0) detectTweaks(content);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional: only fires on reload signal, not on every content change
   }, [reloadSignal]);
@@ -204,6 +206,7 @@ export function ScalabilityTweaks({
   }, []);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- async load + event subscription, state is set after the await
     refreshPresets();
     return onTweakProfilesChanged(refreshPresets);
   }, [refreshPresets]);
@@ -211,6 +214,7 @@ export function ScalabilityTweaks({
   // Clear stale selection when current preset disappears from list
   useEffect(() => {
     if (selectedPreset && !presets.some((p) => p.name === selectedPreset)) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- reacts to the external preset list shrinking elsewhere
       setSelectedPreset("");
       setAppliedPresetAt(null);
     }
@@ -291,6 +295,7 @@ export function ScalabilityTweaks({
     if (!selectedPreset || appliedPresetAt == null) return;
     const preset = presets.find((p) => p.name === selectedPreset);
     if (!preset || preset.modified_at <= appliedPresetAt) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- reapplies a preset edited on another tab (cross-tab event)
     applyPresetToDraft(preset);
     showStatus(`Preset "${preset.name}" was updated, reapplied`, "info");
   }, [presets, selectedPreset, appliedPresetAt]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -459,12 +464,7 @@ export function ScalabilityTweaks({
               <div className="flex min-w-0 flex-1 items-center gap-2">
                 <span className="shrink-0 text-sm font-semibold">Config File</span>
                 {detectBadge && !status && (
-                  <span
-                    className={cn(
-                      "flex items-center gap-1 text-[12px] font-medium",
-                      detectBadge === "Not found" ? "text-warn" : "text-ok"
-                    )}
-                  >
+                  <span className="flex items-center gap-1 text-[12px] font-medium text-ok">
                     <CheckCircle2 size={13} strokeWidth={2.5} />
                     {detectBadge}
                   </span>
@@ -491,6 +491,14 @@ export function ScalabilityTweaks({
                     </span>
                   </Tip>
                 )}
+                {fileExists === false && !status && !detectBadge && (
+                  <Tip content="Tweaks you save will create the file automatically.">
+                    <span className="flex shrink-0 items-center gap-1 text-[12px] font-medium text-muted-foreground">
+                      <Info size={13} strokeWidth={2.5} className="shrink-0" />
+                      Not found
+                    </span>
+                  </Tip>
+                )}
               </div>
               <div className="flex shrink-0 items-center gap-0.5">
                 <Tip content="Browse for config file">
@@ -507,7 +515,7 @@ export function ScalabilityTweaks({
                   <Button
                     variant="ghost"
                     size="icon-sm"
-                    className="text-muted-foreground hover:bg-destructive/15 hover:text-destructive"
+                    className="hover:bg-destructive/15 hover:text-destructive"
                     onClick={() => setConfirmDelete(true)}
                     disabled={fileExists !== true}
                   >
@@ -524,21 +532,12 @@ export function ScalabilityTweaks({
                 </Button>
               </div>
             </div>
-            <div className="flex flex-col gap-1.5 px-3 py-2">
+            <div className="px-3 py-2">
               <Tip content={filePath} disabled={!filePath}>
                 <span className="block truncate font-mono text-[12px] text-muted-foreground">
                   {filePath || "Path to Scalability.ini\u2026"}
                 </span>
               </Tip>
-              {fileExists === false && (
-                <span className="flex items-start gap-1.5 text-[11px] text-muted-foreground">
-                  <Info size={13} className="mt-px shrink-0" />
-                  <span>
-                    <strong className="font-medium text-foreground">Not found.</strong> Tweaks you
-                    save will create the file automatically.
-                  </span>
-                </span>
-              )}
             </div>
           </div>
 
@@ -742,8 +741,7 @@ export function ScalabilityTweaks({
             <AlertDialogTitle>Delete Scalability.ini?</AlertDialogTitle>
             <AlertDialogDescription>
               This permanently removes the file at{" "}
-              <span className="font-mono text-foreground">{filePath}</span>. The tweaks here reset
-              to off; saving again recreates the file.
+              <span className="font-mono break-all text-foreground">{filePath}</span>
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
