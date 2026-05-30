@@ -284,8 +284,7 @@ export function PakTweaks({ gamePath, scalabilityContent, isActive }: Props) {
     return onPakChanged((e) => {
       if (e.source === "PakTweaks") return;
       pakCache.current.delete(e.pakPath);
-      // Adding or deleting an INI in the editor can change which paks qualify for
-      // the tweak list, so refresh the list itself (preserves current selection).
+      // An added/removed INI can change which paks qualify, so refresh the list.
       scanRef.current(true);
       if (selectedPak?.pak_path !== e.pakPath) return;
       if (edits.length > 0) {

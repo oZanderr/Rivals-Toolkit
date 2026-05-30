@@ -170,6 +170,12 @@ function ensureMountPrefix(p: string): string {
   return trimmed.startsWith(MOUNT_PREFIX) ? trimmed : MOUNT_PREFIX + trimmed.replace(/^\/+/, "");
 }
 
+// The mount prefix is internal; strip it for anything user-facing.
+function stripMountPrefixForDisplay(p: string): string {
+  const normalized = p.replace(/\\/g, "/");
+  return normalized.startsWith(MOUNT_PREFIX) ? normalized.slice(MOUNT_PREFIX.length) : normalized;
+}
+
 // Canonical in-pak destination paths for each preset, mirroring where the
 // matching files live in pakchunk0. WindowsEngine and BaseEngine live under
 // `Engine/Config/`; DefaultEngine and DefaultDeviceProfiles under `Marvel/Config/`.
@@ -187,9 +193,9 @@ const PRESET_INI_FILES = Object.keys(PRESET_INI_PATHS) as readonly string[];
 function inferCustomParentDir(existingEntries: string[]): string {
   for (const entry of existingEntries) {
     const parent = entryParentDir(entry);
-    if (parent) return parent;
+    if (parent) return stripMountPrefixForDisplay(parent);
   }
-  return "../../../Marvel/Config";
+  return "Marvel/Config";
 }
 
 // ── Component ───────────────────────────────────────────────────────
@@ -234,6 +240,9 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
   // as a CM document offset (not pixels) so restore goes through CM's measurement
   // cycle and renders the lines instead of leaving a blank viewport.
   const entryScrollRef = useRef<Record<string, number>>({});
+  // Cached per-entry CodeMirror state (undo history + selection) so tab switches
+  // preserve history. Keyed by `${pak_path}::${entry}`; restored only on doc match.
+  const editorStatesRef = useRef<Record<string, EditorState>>({});
 
   // ── Drag-and-drop ──
   const [isDragging, setIsDragging] = useState(false);
@@ -361,8 +370,8 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
       await loadPak(info);
       setNewPakOpen(false);
       setNewPakName("");
-      // A new pak file landed in ~mods; refresh other tabs' mod lists. The editor
-      // ignores its own source so this freshly-created (INI-less) pak isn't pruned.
+      // Refresh other tabs' mod lists. The editor skips its own source so this
+      // empty (INI-less) pak isn't pruned from its own list.
       emitModsChanged({
         modsFolder: `${gamePath}\\MarvelGame\\Marvel\\Content\\Paks\\~mods`,
         source: "PakIniEditor",
@@ -785,19 +794,26 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
       }
     });
 
+    // Reuse the cached state (and its history) when its doc still matches; else fresh.
+    const cached = scrollKey !== null ? editorStatesRef.current[scrollKey] : undefined;
+    const state =
+      cached && cached.doc.toString() === currentContent
+        ? cached
+        : EditorState.create({
+            doc: currentContent,
+            extensions: [
+              cmTheme,
+              cmKeymap,
+              keymap.of([...defaultKeymap, ...historyKeymap]),
+              history(),
+              searchExtension,
+              updateListener,
+              EditorView.lineWrapping,
+            ],
+          });
+
     const view = new EditorView({
-      state: EditorState.create({
-        doc: currentContent,
-        extensions: [
-          cmTheme,
-          cmKeymap,
-          keymap.of([...defaultKeymap, ...historyKeymap]),
-          history(),
-          searchExtension,
-          updateListener,
-          EditorView.lineWrapping,
-        ],
-      }),
+      state,
       parent: editorContainerRef.current,
     });
 
@@ -828,6 +844,7 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
       if (scrollKey !== null) {
         const block = view.lineBlockAtHeight(view.scrollDOM.scrollTop);
         entryScrollRef.current[scrollKey] = block.from;
+        editorStatesRef.current[scrollKey] = view.state;
       }
       view.destroy();
       editorViewRef.current = null;
@@ -860,18 +877,21 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchOpen, searchTerm, caseSensitive]);
 
-  // ── Ctrl+F when this tab is active ──
+  // ── Ctrl+F / Esc when this tab is active ──
   useEffect(() => {
     if (!isActive) return;
     function onKeyDown(e: KeyboardEvent) {
       if (e.key === "f" && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
         openSearch();
+      } else if (e.key === "Escape" && searchOpen) {
+        // Close from anywhere (e.g. the editor), not just the search inputs.
+        setSearchOpen(false);
       }
     }
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [isActive]);
+  }, [isActive, searchOpen]);
 
   // Auto-scan on first activation with a game path
   const hasScanned = useRef(false);
@@ -890,7 +910,7 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
   useEffect(() => {
     return onModsChanged((event) => {
       if (!gamePath) return;
-      // Skip our own create-pak emission; re-scanning would prune the new INI-less pak.
+      // Skip our own emission; a re-scan would prune the new INI-less pak.
       if (event.source === "PakIniEditor") return;
       const modsFolder = `${gamePath}\\MarvelGame\\Marvel\\Content\\Paks\\~mods`;
       if (normalizeFolderPath(event.modsFolder) !== normalizeFolderPath(modsFolder)) return;
@@ -1475,11 +1495,15 @@ function validateCustomPath(raw: string, existingEntries: string[]): string | nu
   const trimmed = raw.trim();
   if (!trimmed) return null;
   if (!/\.ini$/i.test(trimmed)) return "Path must end with .ini";
-  if (trimmed.split(/[/\\]/).some((seg) => seg === ".." || seg === ".")) {
+  // Accept a clean or mount-prefixed path; the leading `../../../` is the canonical
+  // prefix, so check for traversal segments on the remainder only.
+  const full = ensureMountPrefix(trimmed);
+  const relative = stripMountPrefixForDisplay(full);
+  if (relative.split("/").some((seg) => seg === ".." || seg === ".")) {
     return "Path must not contain .. or .";
   }
-  const lower = trimmed.toLowerCase();
-  if (existingEntries.some((e) => e.toLowerCase() === lower)) {
+  const lower = full.toLowerCase();
+  if (existingEntries.some((e) => ensureMountPrefix(e).toLowerCase() === lower)) {
     return "An entry with this path already exists";
   }
   return null;
