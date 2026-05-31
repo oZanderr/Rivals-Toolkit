@@ -3480,6 +3480,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sevenz-rust2",
+ "sha2",
  "sysinfo",
  "tauri",
  "tauri-build",

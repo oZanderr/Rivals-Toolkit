@@ -10,8 +10,8 @@ use tauri::State;
 
 use crate::settings::SettingsState;
 
-const GITHUB_OWNER: &str = "oZanderr";
-const GITHUB_REPO: &str = "Rivals-Toolkit";
+pub(crate) const GITHUB_OWNER: &str = "oZanderr";
+pub(crate) const GITHUB_REPO: &str = "Rivals-Toolkit";
 const CACHE_MAX_AGE: Duration = Duration::from_secs(30 * 60); // 30 minutes
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// Hard cap so a hostile/broken host can't OOM the app. Real GitHub release JSON is well under.

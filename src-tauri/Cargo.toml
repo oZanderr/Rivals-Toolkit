@@ -34,6 +34,7 @@ dirs = "5"
 zip = { version = "8.2.0", default-features = false, features = ["deflate"] }
 sevenz-rust2 = { version = "0.20", default-features = false, features = ["compress", "util"] }
 blake3 = "1"
+sha2 = "0.10"
 rayon = "1"
 ureq = { version = "3", features = ["json"] }
 lewton = "0.10"
