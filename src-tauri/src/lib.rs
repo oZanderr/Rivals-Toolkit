@@ -17,11 +17,13 @@ mod settings;
 mod sounds;
 mod tweaks;
 mod update_check;
+mod updater;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 #[allow(clippy::expect_used)]
 pub fn run() {
     concurrency::init_global_pool();
+    updater::cleanup_stale_update_files();
     let loaded_settings = settings::Settings::load();
     game_status::set_check_enabled(loaded_settings.game_running_check_enabled);
     tauri::Builder::default()
@@ -63,6 +65,9 @@ pub fn run() {
             update_check::check_for_update,
             update_check::get_auto_check_updates,
             update_check::set_auto_check_updates,
+            updater::download_update,
+            updater::cancel_update_download,
+            updater::apply_update_and_restart,
             // audio
             audio::validate_wav,
             // sounds
