@@ -1,4 +1,4 @@
-//! Per-container vanilla extract: dumps a single base container's `.pak` archive contents, zen-package legacy assets, shader libraries, and the global `scriptobjects.bin` into one interleaved tree ready for round-trip rebuild.
+//! Dumps a single vanilla container's contents to a legacy tree ready for round-trip rebuild.
 
 use std::collections::HashMap;
 use std::fs;
@@ -13,9 +13,8 @@ use walkdir::WalkDir;
 
 use retoc::asset_conversion::{self, FZenPackageContext};
 use retoc::iostore::IoStoreTrait;
-use retoc::shader_library;
 use retoc::version::EngineVersion;
-use retoc::{EIoChunkType, FIoChunkId, FPackageId, FSFileWriter, UEPath};
+use retoc::{EIoChunkType, FPackageId, FSFileWriter, UEPath};
 
 use crate::concurrency;
 use crate::paths::paks_dir;
@@ -160,24 +159,26 @@ pub(crate) fn extract_vanilla_container(
     );
 
     let mut pak_entry_count = 0usize;
+    let mut uncompressed_pak_entries: Vec<String> = Vec::new();
     if source_pak.is_file() {
-        let unpacked = super::super::reader::unpack_pak(
-            source_pak.to_string_lossy().as_ref(),
-            output_dir,
-            &["chunknames"],
-        )?;
+        let source_pak_str = source_pak.to_string_lossy();
+        let unpacked =
+            super::super::reader::unpack_pak(source_pak_str.as_ref(), output_dir, &["chunknames"])?;
         pak_entry_count = unpacked.len();
+        uncompressed_pak_entries =
+            super::super::reader::pak_uncompressed_entries(source_pak_str.as_ref())?;
     }
 
     if EXTRACT_CANCEL.load(Ordering::Relaxed) {
         return Err("Extraction cancelled".into());
     }
 
-    // Enumerate by physically-present ExportBundleData chunks, not header package_ids:
-    // a Patch_ container's header declares a store entry for the whole cumulative game,
-    // so iterating store.packages() would pull in every base-game package it merely references.
+    // Enumerate by physically-present ExportBundleData chunks, not header package_ids: a patch's
+    // header declares the whole cumulative game, so store.packages() would pull in everything it
+    // references. chunks_all() not chunks(): the deduped view sorts shared chunks away and would
+    // skip ~10% of a base pakchunk's own packages.
     let mut packages_to_extract: Vec<(FPackageId, String)> = Vec::new();
-    for chunk in store.chunks() {
+    for chunk in store.chunks_all() {
         if chunk.container().container_name() != base_name {
             continue;
         }
@@ -241,49 +242,14 @@ pub(crate) fn extract_vanilla_container(
         return Err("Extraction cancelled".into());
     }
 
-    let shader_chunks: Vec<(FIoChunkId, String)> = store
-        .chunks()
+    // Shader libraries are not materialized here: the cumulative ShaderCodeLibrary header would pull
+    // the whole multi-GB library out of the merged store. Rebuild copies the physical shader chunks
+    // verbatim instead, so extract only needs the count for reporting.
+    let shader_total = store
+        .chunks_all()
         .filter(|c| c.id().get_chunk_type() == EIoChunkType::ShaderCodeLibrary)
         .filter(|c| c.container().container_name() == base_name)
-        .filter_map(|c| {
-            let path = c.path()?;
-            let stripped = path.strip_prefix(MOUNT_POINT).unwrap_or(&path).to_string();
-            Some((c.id(), stripped))
-        })
-        .collect();
-    let shader_total = shader_chunks.len();
-    if shader_total > 0 {
-        let _ = app.emit(
-            "vanilla-extract-progress",
-            VanillaExtractProgress {
-                phase: "shaders",
-                current: 0,
-                total: shader_total,
-            },
-        );
-    }
-
-    for (i, (chunk_id, lib_path)) in shader_chunks.iter().enumerate() {
-        if EXTRACT_CANCEL.load(Ordering::Relaxed) {
-            return Err("Extraction cancelled".into());
-        }
-        let (lib_bytes, info_bytes) =
-            shader_library::rebuild_shader_library_from_io_store(&*store, *chunk_id, &log, true)
-                .map_err(|e| format!("shader {lib_path}: {e}"))?;
-        let info_path =
-            shader_library::get_shader_asset_info_filename_from_library_filename(lib_path)
-                .map_err(|e| format!("shader asset info path: {e}"))?;
-        write_with_dirs(&output_path.join(lib_path), &lib_bytes)?;
-        write_with_dirs(&output_path.join(&info_path), &info_bytes)?;
-        let _ = app.emit(
-            "vanilla-extract-progress",
-            VanillaExtractProgress {
-                phase: "shaders",
-                current: i + 1,
-                total: shader_total,
-            },
-        );
-    }
+        .count();
 
     let script_objects = store
         .load_script_objects()
@@ -294,7 +260,7 @@ pub(crate) fn extract_vanilla_container(
         .map_err(|e| format!("serialize script objects: {e}"))?;
     write_with_dirs(&output_path.join(SCRIPT_OBJECTS_FILENAME), &script_buf)?;
 
-    write_rebuild_manifest(output_path, &base_name)?;
+    write_rebuild_manifest(output_path, &base_name, uncompressed_pak_entries)?;
 
     output_guard.disarmed = true;
 
@@ -365,7 +331,11 @@ fn write_with_dirs(path: &Path, data: &[u8]) -> Result<(), String> {
 }
 
 /// Hash every zen-package file so rebuild can tell which packages are unedited.
-fn write_rebuild_manifest(root: &Path, source_container: &str) -> Result<(), String> {
+fn write_rebuild_manifest(
+    root: &Path,
+    source_container: &str,
+    uncompressed_pak_entries: Vec<String>,
+) -> Result<(), String> {
     let files: Vec<PathBuf> = WalkDir::new(root)
         .into_iter()
         .filter_map(|e| e.ok())
@@ -398,6 +368,7 @@ fn write_rebuild_manifest(root: &Path, source_container: &str) -> Result<(), Str
         version: super::REBUILD_MANIFEST_VERSION,
         source_container: source_container.to_string(),
         entries,
+        uncompressed_pak_entries,
     };
     let json = serde_json::to_vec(&manifest).map_err(|e| format!("serialize manifest: {e}"))?;
 

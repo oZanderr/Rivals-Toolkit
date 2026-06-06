@@ -1,4 +1,4 @@
-//! Per-container vanilla rebuild: partition an edited legacy tree into zen packages + raw pak entries, re-zen with full fidelity, route bulk chunks between base and optional writers, emit a swap-ready container set.
+//! Rebuilds an edited legacy tree back into a swap-ready vanilla container set, copying unedited packages verbatim and re-converting edited ones.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -17,10 +17,9 @@ use retoc::iostore::IoStoreTrait;
 use retoc::iostore_writer::IoStoreWriter;
 use retoc::legacy_asset::FSerializedAssetBundle;
 use retoc::script_objects::ZenScriptObjects;
-use retoc::shader_library;
 use retoc::version::EngineVersion;
 use retoc::zen_asset_conversion::{self, ConvertedZenAssetBundle};
-use retoc::{EIoChunkType, FIoChunkId, FPackageId, FSHAHash, UEPathBuf};
+use retoc::{EIoChunkType, EIoStoreTocVersion, FIoChunkId, FPackageId, FSHAHash, UEPathBuf};
 
 use crate::game_status::{game_running_error, should_block_for_game};
 use crate::paths::paks_dir;
@@ -135,12 +134,21 @@ enum ZenJob {
 }
 
 /// Any failure (missing, malformed, version or source mismatch) yields an empty map -> full-convert.
-fn load_manifest(legacy_path: &Path, expected_source: &str) -> HashMap<String, String> {
+fn empty_manifest() -> super::RebuildManifest {
+    super::RebuildManifest {
+        version: super::REBUILD_MANIFEST_VERSION,
+        source_container: String::new(),
+        entries: HashMap::new(),
+        uncompressed_pak_entries: Vec::new(),
+    }
+}
+
+fn load_manifest(legacy_path: &Path, expected_source: &str) -> super::RebuildManifest {
     let Ok(bytes) = fs::read(legacy_path.join(super::REBUILD_MANIFEST_FILENAME)) else {
-        return HashMap::new();
+        return empty_manifest();
     };
     let Ok(m) = serde_json::from_slice::<super::RebuildManifest>(&bytes) else {
-        return HashMap::new();
+        return empty_manifest();
     };
     if m.version != super::REBUILD_MANIFEST_VERSION {
         eprintln!(
@@ -148,16 +156,16 @@ fn load_manifest(legacy_path: &Path, expected_source: &str) -> HashMap<String, S
             m.version,
             super::REBUILD_MANIFEST_VERSION
         );
-        return HashMap::new();
+        return empty_manifest();
     }
     if m.source_container != expected_source {
         eprintln!(
             "vanilla rebuild: manifest source_container {:?} != selected {:?}; full-convert",
             m.source_container, expected_source
         );
-        return HashMap::new();
+        return empty_manifest();
     }
-    m.entries
+    m
 }
 
 /// True if every on-disk file for this package matches the extraction manifest (i.e. unedited).
@@ -190,6 +198,9 @@ fn build_copy_job(
     stem: &Path,
     legacy_path: &Path,
     store: &dyn IoStoreTrait,
+    own_store: &dyn IoStoreTrait,
+    base_chunks: &HashSet<FIoChunkId>,
+    toc_version: EIoStoreTocVersion,
 ) -> Result<ZenJob, String> {
     let uasset_path = stem.with_extension("uasset");
     let (primary_path, primary_ext): (PathBuf, &'static str) = if uasset_path.is_file() {
@@ -204,7 +215,7 @@ fn build_copy_job(
     let export_bundle = store
         .read(eb_id)
         .map_err(|e| format!("read source package {rel}: {e}"))?;
-    let store_entry = store
+    let store_entry = own_store
         .package_store_entry(id)
         .ok_or_else(|| format!("no source store entry for {rel}"))?;
 
@@ -215,7 +226,10 @@ fn build_copy_job(
         EIoChunkType::MemoryMappedBulkData,
     ] {
         let cid = FIoChunkId::from_package_id(id, 0, ty);
-        if store.has_chunk_id(cid) {
+        // Only copy bulk that physically belongs to this container. Bulk a package merely
+        // references from another container (a base pakchunk or earlier patch) is left out so it
+        // resolves from its home container at runtime, reproducing the original's chunk set.
+        if base_chunks.contains(&cid.with_version(toc_version)) {
             let data = store
                 .read(cid)
                 .map_err(|e| format!("read source bulk {rel}: {e}"))?;
@@ -357,25 +371,57 @@ pub(crate) fn rebuild_vanilla_container(
                 && base_name_from_optional(n).as_deref() == Some(base_name.as_str())
         });
 
+    // Store entries (shader_map_hashes especially) come from the container's own header, not the
+    // merged store: a patch's merged shader resolution diverges from its own entries.
+    let own_store = {
+        let base = base_name.clone();
+        let optional = optional_name.clone();
+        retoc::iostore::open_filtered(
+            &paks_root,
+            super::super::profile::make_config()?,
+            move |name: &str| name == base || optional.as_deref() == Some(name),
+        )
+        .map_err(|e| format!("open source container {}: {e}", paks_root.display()))?
+    };
+
     let mut source_id_map: HashMap<String, FPackageId> = HashMap::new();
     let mut source_shader_hashes: HashMap<u64, Vec<FSHAHash>> = HashMap::new();
-    for chunk in store.chunks() {
-        if chunk.id().get_chunk_type() != EIoChunkType::ExportBundleData
-            || chunk.container().container_name() != base_name
-        {
+    // Chunks physically resident here (and which ship uncompressed) so the rebuild reproduces the
+    // original layout. Ids built via `from_package_id` need `.with_version(toc_version)` before any
+    // set lookup (FIoChunkId hashing panics on unversioned ids).
+    let mut base_chunks: HashSet<FIoChunkId> = HashSet::new();
+    let mut raw_chunks: HashSet<FIoChunkId> = HashSet::new();
+    // chunks_all() not the deduped chunks(): a base pakchunk's own chunks also live in global/patches
+    // and sort first, so chunks() would drop ~10% of them. The optional sibling counts as owned too.
+    for chunk in store.chunks_all() {
+        let cname = chunk.container().container_name();
+        let in_base = cname == base_name;
+        let in_optional = optional_name.as_deref() == Some(cname);
+        if !in_base && !in_optional {
+            continue;
+        }
+        base_chunks.insert(chunk.id());
+        if !chunk.is_compressed() {
+            raw_chunks.insert(chunk.id());
+        }
+        // source_id_map / shader hashes are keyed off base-container packages only.
+        if !in_base || chunk.id().get_chunk_type() != EIoChunkType::ExportBundleData {
             continue;
         }
         let id = chunk.id().get_package_id();
         if let Some(path) = store.chunk_path(chunk.id())
             && let Some(rel) = path.strip_prefix(MOUNT_POINT)
         {
+            // Lowercase the key: a few packages are cooked with a case differing from their sibling
+            // dir (e.g. UI/ability vs UI/Ability), which Windows folds together on disk; a
+            // case-sensitive lookup would miss and demote Copy to Convert.
             let stem = rel
                 .trim_end_matches(".uasset")
                 .trim_end_matches(".umap")
-                .to_string();
+                .to_ascii_lowercase();
             source_id_map.insert(stem, id);
         }
-        if let Some(entry) = store.package_store_entry(id)
+        if let Some(entry) = own_store.package_store_entry(id)
             && !entry.shader_map_hashes.is_empty()
         {
             source_shader_hashes.insert(id.0, entry.shader_map_hashes);
@@ -393,7 +439,6 @@ pub(crate) fn rebuild_vanilla_container(
     let file_set: HashSet<PathBuf> = all_files.iter().cloned().collect();
 
     let mut zen_stems: HashSet<PathBuf> = HashSet::new();
-    let mut shader_libs: Vec<PathBuf> = Vec::new();
     let script_objects_path = legacy_path.join(SCRIPT_OBJECTS_FILENAME);
     let has_script_objects = script_objects_path.is_file();
 
@@ -404,28 +449,19 @@ pub(crate) fn rebuild_vanilla_container(
             if file_set.contains(&uexp) {
                 zen_stems.insert(path.with_extension(""));
             }
-        } else if ext.eq_ignore_ascii_case("ushaderbytecode") {
-            shader_libs.push(path.clone());
         }
     }
 
-    let mut shader_extras: HashSet<PathBuf> = HashSet::new();
-    for lib in &shader_libs {
-        shader_extras.insert(lib.clone());
-        if let Some(rel) = lib.strip_prefix(legacy_path).ok().and_then(|p| p.to_str())
-            && let Ok(info_rel) =
-                shader_library::get_shader_asset_info_filename_from_library_filename(rel)
-        {
-            shader_extras
-                .insert(legacy_path.join(info_rel.replace('/', std::path::MAIN_SEPARATOR_STR)));
-        }
-    }
+    // Entries the source stored uncompressed are rebuilt verbatim (Oodle skipped) so they
+    // reproduce byte-for-byte; everything else is compressed at the configured level.
+    let uncompressed_set: HashSet<&str> = manifest
+        .uncompressed_pak_entries
+        .iter()
+        .map(String::as_str)
+        .collect();
 
-    let mut pak_entries: Vec<(String, PathBuf)> = Vec::new();
+    let mut pak_entries: Vec<(String, PathBuf, bool)> = Vec::new();
     for path in &all_files {
-        if shader_extras.contains(path) {
-            continue;
-        }
         if has_script_objects && path == &script_objects_path {
             continue;
         }
@@ -438,25 +474,13 @@ pub(crate) fn rebuild_vanilla_container(
             continue;
         }
         let rel = rel_string(legacy_path, path)?;
-        pak_entries.push((rel, path.clone()));
+        let compress = !uncompressed_set.contains(rel.as_str());
+        pak_entries.push((rel, path.clone(), compress));
     }
 
-    let mut shader_maps: HashMap<String, Vec<FSHAHash>> = HashMap::new();
-    for lib in &shader_libs {
-        if let Some(rel) = lib.strip_prefix(legacy_path).ok().and_then(|p| p.to_str()) {
-            let info_rel =
-                shader_library::get_shader_asset_info_filename_from_library_filename(rel)
-                    .map_err(|e| format!("shader info path: {e}"))?;
-            let info_path = legacy_path.join(info_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
-            if !info_path.exists() {
-                continue;
-            }
-            let info_bytes =
-                fs::read(&info_path).map_err(|e| format!("read {}: {e}", info_path.display()))?;
-            shader_library::read_shader_asset_info(&info_bytes, &mut shader_maps)
-                .map_err(|e| format!("parse shader info: {e}"))?;
-        }
-    }
+    // Edited packages recover their shader-map hashes from `source_shader_hashes` below, so the
+    // converter does not need a package->shader-map table sourced from a legacy shader library.
+    let shader_maps: HashMap<String, Vec<FSHAHash>> = HashMap::new();
 
     let script_objects: Option<Arc<ZenScriptObjects>> = if has_script_objects {
         let bytes =
@@ -520,7 +544,6 @@ pub(crate) fn rebuild_vanilla_container(
             disarmed: false,
         });
 
-    let log = retoc::logging::Log::no_log();
     let mut zen_paths: Vec<PathBuf> = zen_stems.iter().cloned().collect();
     zen_paths.sort();
     let zen_total = zen_paths.len();
@@ -532,9 +555,10 @@ pub(crate) fn rebuild_vanilla_container(
                 .strip_prefix(legacy_path)
                 .ok()?
                 .to_string_lossy()
-                .replace('\\', "/");
+                .replace('\\', "/")
+                .to_ascii_lowercase();
             let id = *source_id_map.get(&rel_stem)?;
-            if !package_unchanged(stem, legacy_path, &manifest) {
+            if !package_unchanged(stem, legacy_path, &manifest.entries) {
                 return None;
             }
             Some((stem.clone(), id))
@@ -568,6 +592,8 @@ pub(crate) fn rebuild_vanilla_container(
         let zen_paths_ref = &zen_paths;
         let unchanged_ids_ref = &unchanged_ids;
         let store_ref: &dyn IoStoreTrait = &*store;
+        let own_store_ref: &dyn IoStoreTrait = &*own_store;
+        let base_chunks_ref = &base_chunks;
 
         scope.spawn(move |_| {
             let pool = &*crate::concurrency::POOL;
@@ -581,7 +607,15 @@ pub(crate) fn rebuild_vanilla_container(
                             return Err(());
                         }
                         let result = match unchanged_ids_ref.get(stem) {
-                            Some(&id) => build_copy_job(id, stem, legacy_path_ref, store_ref),
+                            Some(&id) => build_copy_job(
+                                id,
+                                stem,
+                                legacy_path_ref,
+                                store_ref,
+                                own_store_ref,
+                                base_chunks_ref,
+                                toc_version,
+                            ),
                             None => build_zen_job(
                                 stem,
                                 legacy_path_ref,
@@ -675,23 +709,50 @@ pub(crate) fn rebuild_vanilla_container(
                         _ => {}
                     }
                     let eb_id = FIoChunkId::from_package_id(id, 0, EIoChunkType::ExportBundleData);
-                    base_writer
-                        .write_package_chunk(eb_id, Some(&mounted), &export_bundle, &store_entry)
-                        .map_err(|e| format!("copy package {rel}: {e}"))?;
+                    // Preserve the source's per-chunk compression decision. `with_version` is
+                    // required before the set lookup (FIoChunkId hashing panics on unversioned ids).
+                    if raw_chunks.contains(&eb_id.with_version(toc_version)) {
+                        base_writer.write_package_chunk_uncompressed(
+                            eb_id,
+                            Some(&mounted),
+                            &export_bundle,
+                            &store_entry,
+                        )
+                    } else {
+                        base_writer.write_package_chunk(
+                            eb_id,
+                            Some(&mounted),
+                            &export_bundle,
+                            &store_entry,
+                        )
+                    }
+                    .map_err(|e| format!("copy package {rel}: {e}"))?;
                     for (ty, bytes) in bulk {
                         let cid = FIoChunkId::from_package_id(id, 0, ty);
+                        let raw = raw_chunks.contains(&cid.with_version(toc_version));
                         match ty {
                             EIoChunkType::BulkData => {
                                 let path = mounted.with_extension("ubulk");
-                                base_writer
-                                    .write_chunk(cid, Some(&path), &bytes)
-                                    .map_err(|e| format!("copy ubulk {rel}: {e}"))?;
+                                if raw {
+                                    base_writer.write_chunk_uncompressed(cid, Some(&path), &bytes)
+                                } else {
+                                    base_writer.write_chunk(cid, Some(&path), &bytes)
+                                }
+                                .map_err(|e| format!("copy ubulk {rel}: {e}"))?;
                                 ubulk_routed += 1;
                             }
                             EIoChunkType::OptionalBulkData => {
                                 let path = mounted.with_extension("uptnl");
                                 match &mut optional_writer {
+                                    Some(w) if raw => {
+                                        w.write_chunk_uncompressed(cid, Some(&path), &bytes)
+                                    }
                                     Some(w) => w.write_chunk(cid, Some(&path), &bytes),
+                                    None if raw => base_writer.write_chunk_uncompressed(
+                                        cid,
+                                        Some(&path),
+                                        &bytes,
+                                    ),
                                     None => base_writer.write_chunk(cid, Some(&path), &bytes),
                                 }
                                 .map_err(|e| format!("copy uptnl {rel}: {e}"))?;
@@ -700,7 +761,15 @@ pub(crate) fn rebuild_vanilla_container(
                             EIoChunkType::MemoryMappedBulkData => {
                                 let path = mounted.with_extension("m.ubulk");
                                 match &mut optional_writer {
+                                    Some(w) if raw => {
+                                        w.write_chunk_uncompressed(cid, Some(&path), &bytes)
+                                    }
                                     Some(w) => w.write_chunk(cid, Some(&path), &bytes),
+                                    None if raw => base_writer.write_chunk_uncompressed(
+                                        cid,
+                                        Some(&path),
+                                        &bytes,
+                                    ),
                                     None => base_writer.write_chunk(cid, Some(&path), &bytes),
                                 }
                                 .map_err(|e| format!("copy m.ubulk {rel}: {e}"))?;
@@ -732,7 +801,23 @@ pub(crate) fn rebuild_vanilla_container(
         return Err("Rebuild cancelled".into());
     }
 
-    let shader_total = shader_libs.len();
+    // Copy this container's physically-present shader chunks verbatim rather than rebuilding the
+    // ShaderCodeLibrary: its header is cumulative (the whole game's groups), so a rebuild would pull
+    // every base group out of the merged store (multi-GB). Copying base_name's own chunks keeps the
+    // original layout; header references to base groups still resolve against the untouched containers.
+    let shader_chunk_ids: Vec<FIoChunkId> = store
+        .chunks_all()
+        .filter(|c| c.container().container_name() == base_name)
+        .map(|c| c.id())
+        .filter(|id| {
+            matches!(
+                id.get_chunk_type(),
+                EIoChunkType::ShaderCodeLibrary | EIoChunkType::ShaderCode
+            )
+        })
+        .collect();
+    let shader_total = shader_chunk_ids.len();
+    let mut shader_library_count = 0usize;
     if shader_total > 0 {
         let _ = app.emit(
             "vanilla-rebuild-progress",
@@ -743,15 +828,24 @@ pub(crate) fn rebuild_vanilla_container(
             },
         );
     }
-    for (i, lib) in shader_libs.iter().enumerate() {
+    for (i, chunk_id) in shader_chunk_ids.iter().enumerate() {
         if REBUILD_CANCEL.load(Ordering::Relaxed) {
             return Err("Rebuild cancelled".into());
         }
-        let rel = rel_string(legacy_path, lib)?;
-        let mounted: UEPathBuf = format!("{MOUNT_POINT}{rel}").into();
-        let bytes = fs::read(lib).map_err(|e| format!("read {}: {e}", lib.display()))?;
-        shader_library::write_io_store_library(&mut base_writer, &bytes, &mounted, &log)
-            .map_err(|e| format!("write shader lib {rel}: {e}"))?;
+        let bytes = store
+            .read(*chunk_id)
+            .map_err(|e| format!("read shader chunk {chunk_id:?}: {e}"))?;
+        let mounted: Option<UEPathBuf> = store.chunk_path(*chunk_id).map(Into::into);
+        // Shader ids come straight from `chunks()` so they are already version-tagged.
+        if raw_chunks.contains(chunk_id) {
+            base_writer.write_chunk_uncompressed(*chunk_id, mounted.as_deref(), &bytes)
+        } else {
+            base_writer.write_chunk(*chunk_id, mounted.as_deref(), &bytes)
+        }
+        .map_err(|e| format!("write shader chunk {chunk_id:?}: {e}"))?;
+        if chunk_id.get_chunk_type() == EIoChunkType::ShaderCodeLibrary {
+            shader_library_count += 1;
+        }
         let _ = app.emit(
             "vanilla-rebuild-progress",
             VanillaRebuildProgress {
@@ -853,7 +947,7 @@ pub(crate) fn rebuild_vanilla_container(
         ubulk_routed,
         uptnl_routed,
         memory_mapped_routed,
-        shader_library_count: shader_total,
+        shader_library_count,
         pak_entry_count,
         output_dir: output_dir.to_string(),
         outputs,

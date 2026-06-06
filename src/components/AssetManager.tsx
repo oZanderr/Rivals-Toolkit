@@ -676,6 +676,29 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
     return idx > 0 ? p.slice(0, idx) : "";
   }
 
+  async function revealPak(pak: string) {
+    try {
+      await revealItemInDir(pak);
+    } catch (e: unknown) {
+      showNotice(String(e), "err");
+    }
+  }
+
+  function removeManualPak(pak: string) {
+    setPakList((prev) => prev.filter((info) => info.path !== pak));
+    setManualPaks((prev) => {
+      const next = new Set(prev);
+      next.delete(pak);
+      return next;
+    });
+    pakContentsCacheRef.current.delete(pak);
+    if (selectedPak === pak) {
+      setSelectedPak("");
+      setPakContents([]);
+      setSelectedEntries(new Set());
+    }
+  }
+
   function selectByExtension(ext: string) {
     const lowered = `.${ext.toLowerCase()}`;
     const next = new Set<string>();
@@ -1446,34 +1469,70 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
                     const displayName =
                       isMod && modsIdx !== -1 ? p.slice(modsIdx + 1).replace(/\\/g, "/") : fileName;
                     return (
-                      <Tip key={p} content={fileName} side="top" align="end">
-                        <li
-                          className={cn(
-                            "flex items-center gap-2 border-b border-border/50 px-3 py-2 last:border-none",
-                            "cursor-pointer",
-                            isSelected ? "bg-secondary text-foreground" : "hover:bg-secondary/50"
-                          )}
-                          onClick={() => inspectPak(p)}
-                        >
-                          {isManual ? (
-                            <PackagePlus size={14} className="shrink-0 text-sky-400" />
-                          ) : (
-                            <Package
-                              size={14}
+                      <ContextMenu key={p}>
+                        <Tip content={fileName} side="top" align="end">
+                          <ContextMenuTrigger asChild>
+                            <li
                               className={cn(
-                                "shrink-0",
-                                isMod ? "text-amber-400" : "text-muted-foreground"
+                                "flex items-center gap-2 border-b border-border/50 px-3 py-2 last:border-none",
+                                "cursor-pointer",
+                                isSelected
+                                  ? "bg-secondary text-foreground"
+                                  : "hover:bg-secondary/50"
                               )}
-                            />
+                              onClick={() => inspectPak(p)}
+                            >
+                              {isManual ? (
+                                <PackagePlus size={14} className="shrink-0 text-sky-400" />
+                              ) : (
+                                <Package
+                                  size={14}
+                                  className={cn(
+                                    "shrink-0",
+                                    isMod ? "text-amber-400" : "text-muted-foreground"
+                                  )}
+                                />
+                              )}
+                              <span className="flex-1 truncate text-[12px]">{displayName}</span>
+                              {isIoStore && (
+                                <span className="shrink-0 rounded bg-ok/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase leading-none text-ok">
+                                  IoStore
+                                </span>
+                              )}
+                            </li>
+                          </ContextMenuTrigger>
+                        </Tip>
+                        <ContextMenuContent>
+                          <ContextMenuItem onSelect={() => inspectPak(p)}>
+                            <PackageOpen size={14} />
+                            Open contents
+                          </ContextMenuItem>
+                          <ContextMenuItem onSelect={() => revealPak(p)}>
+                            <FolderOpen size={14} />
+                            Reveal in File Explorer
+                          </ContextMenuItem>
+                          <ContextMenuSeparator />
+                          <ContextMenuItem onSelect={() => copyToClipboard(p, "path")}>
+                            <Copy size={14} />
+                            Copy path
+                          </ContextMenuItem>
+                          <ContextMenuItem
+                            onSelect={() => copyToClipboard(fileName ?? p, "file name")}
+                          >
+                            <FileText size={14} />
+                            Copy file name
+                          </ContextMenuItem>
+                          {isManual && (
+                            <>
+                              <ContextMenuSeparator />
+                              <ContextMenuItem destructive onSelect={() => removeManualPak(p)}>
+                                <XCircle size={14} />
+                                Remove from list
+                              </ContextMenuItem>
+                            </>
                           )}
-                          <span className="flex-1 truncate text-[12px]">{displayName}</span>
-                          {isIoStore && (
-                            <span className="shrink-0 rounded bg-ok/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase leading-none text-ok">
-                              IoStore
-                            </span>
-                          )}
-                        </li>
-                      </Tip>
+                        </ContextMenuContent>
+                      </ContextMenu>
                     );
                   })}
                 </ul>
