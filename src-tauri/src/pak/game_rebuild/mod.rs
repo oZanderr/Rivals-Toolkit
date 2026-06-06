@@ -1,4 +1,4 @@
-//! Per-container vanilla extract and rebuild: dump a single game container's pak + utoc/ucas content to a legacy tree, then rebuild a modified tree back into a swap-ready container set.
+//! Vanilla container extract and rebuild: shared types for the round-trip between a game container and an editable legacy tree.
 
 pub(crate) mod extract;
 pub(crate) mod rebuild;
@@ -16,4 +16,8 @@ pub(crate) struct RebuildManifest {
     /// Source utoc file stem (e.g. `pakchunk0-Windows`); rebuild rejects mismatches.
     pub(crate) source_container: String,
     pub(crate) entries: HashMap<String, String>,
+    /// Mount-stripped pak-entry paths the source stored uncompressed; rebuilt verbatim (no Oodle)
+    /// so raw-shipped entries (e.g. `Marvel/AssetRegistry.bin`, `.locres`) reproduce exactly.
+    #[serde(default)]
+    pub(crate) uncompressed_pak_entries: Vec<String>,
 }

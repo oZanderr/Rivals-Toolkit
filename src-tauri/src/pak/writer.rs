@@ -71,9 +71,11 @@ pub(super) fn write_pak_bytes(
     Ok(())
 }
 
+/// Each entry is `(pak_path, source_file, compress)`. `compress = false` stores the entry
+/// uncompressed, reproducing entries the source pak shipped raw.
 pub(super) fn write_pak_streaming(
     output_pak: &str,
-    mut entries: Vec<(String, std::path::PathBuf)>,
+    mut entries: Vec<(String, std::path::PathBuf, bool)>,
     oodle_level: Option<OodleCompressionLevel>,
 ) -> Result<(), String> {
     if entries.is_empty() {
@@ -91,10 +93,10 @@ pub(super) fn write_pak_streaming(
         None,
     );
 
-    for (path, source) in entries.drain(..) {
+    for (path, source, compress) in entries.drain(..) {
         let bytes = fs::read(&source).map_err(|e| format!("read {}: {e}", source.display()))?;
         pak_writer
-            .write_file(&path, true, bytes)
+            .write_file(&path, compress, bytes)
             .map_err(|e| e.to_string())?;
     }
 

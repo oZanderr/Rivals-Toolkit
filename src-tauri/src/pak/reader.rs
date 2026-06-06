@@ -92,6 +92,20 @@ pub(super) fn list_pak_contents(pak_path: &str) -> Result<Vec<String>, String> {
     Ok(open_pak(Path::new(pak_path))?.files())
 }
 
+/// Mount-stripped relative paths of entries the source pak stored uncompressed
+/// (`compression_slot == None`). Used to reproduce the original compression layout on rebuild.
+pub(super) fn pak_uncompressed_entries(pak_path: &str) -> Result<Vec<String>, String> {
+    let pak = open_pak(Path::new(pak_path))?;
+    let mut out = Vec::new();
+    for name in pak.files() {
+        let entry = pak.get_file_entry(&name).map_err(|e| e.to_string())?;
+        if entry.compression_slot.is_none() {
+            out.push(strip_mount_prefix(&name));
+        }
+    }
+    Ok(out)
+}
+
 pub(super) fn unpack_pak(
     pak_path: &str,
     output_dir: &str,
