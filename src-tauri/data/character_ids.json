@@ -1,6 +1,6 @@
 {
   "source": "https://raw.githubusercontent.com/donutman07/MarvelRivalsCharacterIDs/main/MarvelRivalsCharacterIDs.md",
-  "generated_at": "2026-06-04T10:04:52.670Z",
+  "generated_at": "2026-06-11T10:48:08.707Z",
   "characters": {
     "1011": {
       "name": "Hulk",
@@ -35,6 +35,7 @@
       "skins": {
         "1015001": "Default",
         "1015100": "Ivory Breeze",
+        "1015101": "WILL OF GALACTA",
         "1015300": "QUEEN OF ORPHANS",
         "1015500": "Mohawk Rock",
         "1015501": "Ultimate Wind-Rider",
@@ -218,6 +219,7 @@
         "1027301": "YGGROOT",
         "1027302": "Holiday Happiness",
         "1027303": "MECHA-FLORA",
+        "1027304": "IRONWOOD SERPENT",
         "1027500": "Carved Traveler",
         "1027501": "Symbiote Flora",
         "1027502": "BIG BUDDY",
@@ -249,8 +251,9 @@
         "1029302": "Rosy Resilience",
         "1029303": "NEW MILENNIA MIGHT",
         "1029304": "INFERNAL IDOL",
-        "1029305": "LAVENDER LIMBO",
-        "1029306": "BLUE BLITZ",
+        "1029305": "SOULLESS SWORD",
+        "1029306": "GREEN GLOW",
+        "1029307": "NEON NEMESIS",
         "1029500": "Eldritch Armor",
         "1029501": "Retro X-Uniform",
         "1029502": "Phoenix Demon",
@@ -717,7 +720,8 @@
         "1054301": "ICE PHOENIX",
         "1054500": "Dark Phoenix",
         "1054501": "SEAT OF SPRING",
-        "1054502": "VERDANT VOGUE"
+        "1054502": "VERDANT VOGUE",
+        "1054503": "WHITE CROWN PHOENIX"
       }
     },
     "1055": {
@@ -831,7 +835,9 @@
       "name": "Cyclops",
       "skins": {
         "1063001": "Default",
-        "1063500": "ALCHEMAX"
+        "1063100": "SHADOWED NEMESIS",
+        "1063101": "FUTURISTIC FOCUS",
+        "1063500": "WEAPON M"
       }
     },
     "1065": {
