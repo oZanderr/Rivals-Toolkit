@@ -1,6 +1,6 @@
 {
   "source": "https://raw.githubusercontent.com/donutman07/MarvelRivalsCharacterIDs/main/MarvelRivalsCharacterIDs.md",
-  "generated_at": "2026-06-19T10:46:51.659Z",
+  "generated_at": "2026-06-26T09:38:19.147Z",
   "characters": {
     "1011": {
       "name": "Hulk",
@@ -335,6 +335,9 @@
         "1033501": "Mrs. Barnes",
         "1033502": "Phoenix Widow",
         "1033503": "MIDNIGHT SUSPENSE",
+        "1033504": "AQUATIC ASSASSIN",
+        "1033505": "GOLDEN GOSSAMER",
+        "1033506": "TOXIC TRACE",
         "1033800": "White Suit"
       }
     },
@@ -628,6 +631,7 @@
       "skins": {
         "1049001": "Default",
         "1049100": "Lone Wolf",
+        "1049101": "WILL OF GALACTA",
         "1049300": "Blood Berserker",
         "1049301": "DOG BROTHER X",
         "1049302": "X-2099",
@@ -744,6 +748,7 @@
         "1055101": "Shenloong's Creed",
         "1055102": "Aurora Twilight",
         "1055103": "WILL OF GALACTA",
+        "1055300": "SONAR SAVIOR",
         "1055500": "Devil 2099",
         "1055501": "NOT DAREDEVIL",
         "1055502": "SHADOWED START",
