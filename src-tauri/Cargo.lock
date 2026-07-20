@@ -3255,7 +3255,7 @@ dependencies = [
 [[package]]
 name = "rebnk"
 version = "0.1.0"
-source = "git+https://github.com/oZanderr/rebnk?branch=master#b9c23ca98f8de86335bfa51d8c9b70505068f024"
+source = "git+https://github.com/oZanderr/rebnk?branch=master#c2033ba5b42a4eb06c2ec57b88ed2dcb3fcdd2d2"
 
 [[package]]
 name = "redox_syscall"

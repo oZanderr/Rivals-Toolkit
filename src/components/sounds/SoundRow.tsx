@@ -1,4 +1,4 @@
-import { AlertTriangle, FileAudio, RotateCcw, Trash2, UploadCloud } from "lucide-react";
+import { AlertTriangle, FileAudio, RotateCcw, Sparkles, Trash2, UploadCloud } from "lucide-react";
 
 import {
   formatDuration,
@@ -25,6 +25,7 @@ export function SoundRow({
   onPick,
   onClear,
   onGainChange,
+  onToggleFilter,
   disabled,
   showDropOverlay,
   onDragOverRow,
@@ -36,6 +37,7 @@ export function SoundRow({
   onPick: () => void;
   onClear: () => void;
   onGainChange: (db: number) => void;
+  onToggleFilter: (remove: boolean) => void;
   disabled: boolean;
   showDropOverlay: boolean;
   onDragOverRow: () => void;
@@ -157,6 +159,30 @@ export function SoundRow({
       )}
 
       <div className="flex shrink-0 items-center gap-2">
+        {slot && !slot.error && (
+          <Tip
+            content={
+              slot.removeFiltering
+                ? "Filtering removed: your audio plays clean. Click to keep the game's built-in processing."
+                : "Remove the game's built-in filtering/processing so your audio plays clean."
+            }
+          >
+            <Button
+              size="icon-xs"
+              variant="ghost"
+              onClick={() => onToggleFilter(!slot.removeFiltering)}
+              disabled={disabled}
+              aria-pressed={slot.removeFiltering}
+              className={cn(
+                slot.removeFiltering
+                  ? "bg-blue-accent text-blue-accent-foreground hover:bg-blue-accent-hover"
+                  : "text-muted-foreground/60 hover:text-foreground"
+              )}
+            >
+              <Sparkles size={13} />
+            </Button>
+          </Tip>
+        )}
         {slot && (
           <Badge
             variant="outline"

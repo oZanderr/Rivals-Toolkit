@@ -94,6 +94,10 @@ pub(crate) struct Settings {
     pub(crate) game_running_check_enabled: bool,
     #[serde(default = "default_true")]
     pub(crate) mod_conflict_check_enabled: bool,
+    /// User-supplied path to vgmstream-cli for decoding compressed Wwise WEMs. `None` falls back
+    /// to the in-process PCM-only decoder.
+    #[serde(default)]
+    pub(crate) vgmstream_path: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -115,6 +119,7 @@ impl Default for Settings {
             vanilla_compression_level: default_vanilla_compression_level(),
             game_running_check_enabled: true,
             mod_conflict_check_enabled: true,
+            vgmstream_path: None,
         }
     }
 }
@@ -306,5 +311,20 @@ pub(crate) fn set_mod_conflict_check_enabled(
 ) -> Result<(), String> {
     let mut guard = state.lock().map_err(|e| e.to_string())?;
     guard.mod_conflict_check_enabled = enabled;
+    guard.save()
+}
+
+#[tauri::command]
+pub(crate) fn get_vgmstream_path(state: State<'_, SettingsState>) -> Option<String> {
+    state.lock().ok().and_then(|s| s.vgmstream_path.clone())
+}
+
+#[tauri::command]
+pub(crate) fn set_vgmstream_path(
+    state: State<'_, SettingsState>,
+    path: Option<String>,
+) -> Result<(), String> {
+    let mut guard = state.lock().map_err(|e| e.to_string())?;
+    guard.vgmstream_path = path.filter(|p| !p.is_empty());
     guard.save()
 }

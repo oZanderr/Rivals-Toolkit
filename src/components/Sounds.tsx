@@ -55,27 +55,18 @@ const SLOT_CONFIGS = [
   { key: "headshot_hit", label: "Headshot", category: "Combat", icon: <Crosshair size={15} /> },
   { key: "bodyshot_kill", label: "Bodyshot Kill", category: "Combat", icon: <Skull size={15} /> },
   { key: "headshot_kill", label: "Headshot Kill", category: "Combat", icon: <Target size={15} /> },
+  { key: "ko_double", label: "Double KO", category: "Announcer", icon: <Flame size={15} /> },
+  { key: "ko_triple", label: "Triple KO", category: "Announcer", icon: <Zap size={15} /> },
+  { key: "ko_quad", label: "Quad KO", category: "Announcer", icon: <Sparkles size={15} /> },
+  { key: "ko_penta", label: "Penta KO", category: "Announcer", icon: <Star size={15} /> },
+  { key: "ko_hexa", label: "Hexa KO", category: "Announcer", icon: <Trophy size={15} /> },
+  { key: "ko_septa", label: "Septa KO", category: "Announcer", icon: <Crown size={15} /> },
   {
-    key: "killstreak_2k",
-    label: "Double Kill",
-    category: "Killstreaks",
-    icon: <Flame size={15} />,
+    key: "ko_ace",
+    label: "Ace",
+    category: "Announcer",
+    icon: <Skull size={15} />,
   },
-  {
-    key: "killstreak_3k",
-    label: "Triple Kill",
-    category: "Killstreaks",
-    icon: <Zap size={15} />,
-  },
-  {
-    key: "killstreak_4k",
-    label: "Quad Kill",
-    category: "Killstreaks",
-    icon: <Sparkles size={15} />,
-  },
-  { key: "killstreak_5k", label: "Penta Kill", category: "Killstreaks", icon: <Star size={15} /> },
-  { key: "killstreak_6k", label: "Hexa Kill", category: "Killstreaks", icon: <Trophy size={15} /> },
-  { key: "killstreak_7k", label: "Septa Kill", category: "Killstreaks", icon: <Crown size={15} /> },
   { key: "heal_direct", label: "Heal Tick", category: "Healing", icon: <Heart size={15} /> },
   {
     key: "heal_pack_pickup",
@@ -227,6 +218,7 @@ export function Sounds({ gamePath, isActive }: Props) {
             ? null
             : `Incompatible format (${validation.bits_per_sample}-bit, ${validation.channels}ch)`,
           gainDb: prev[key]?.gainDb ?? GAIN_DEFAULT_DB,
+          removeFiltering: prev[key]?.removeFiltering ?? false,
         },
       }));
     } catch (e) {
@@ -238,6 +230,7 @@ export function Sounds({ gamePath, isActive }: Props) {
           validation: null,
           error: String(e),
           gainDb: prev[key]?.gainDb ?? GAIN_DEFAULT_DB,
+          removeFiltering: prev[key]?.removeFiltering ?? false,
         },
       }));
     }
@@ -289,6 +282,14 @@ export function Sounds({ gamePath, isActive }: Props) {
       const slot = prev[key];
       if (!slot) return prev;
       return { ...prev, [key]: { ...slot, gainDb } };
+    });
+  }
+
+  function setSlotRemoveFiltering(key: SlotKey, removeFiltering: boolean) {
+    setSlots((prev) => {
+      const slot = prev[key];
+      if (!slot) return prev;
+      return { ...prev, [key]: { ...slot, removeFiltering } };
     });
   }
 
@@ -379,11 +380,15 @@ export function Sounds({ gamePath, isActive }: Props) {
   }
 
   async function runBuild(normalizedModName: string, outputDir: string, outputPakPath: string) {
-    const wavs: Record<string, { path: string; gain_db: number }> = {};
+    const wavs: Record<string, { path: string; gain_db: number; remove_filtering: boolean }> = {};
     for (const key of SLOT_KEYS) {
       const slot = slots[key];
       if (slot && !slot.error) {
-        wavs[key] = { path: slot.path, gain_db: slot.gainDb };
+        wavs[key] = {
+          path: slot.path,
+          gain_db: slot.gainDb,
+          remove_filtering: slot.removeFiltering,
+        };
       }
     }
 
@@ -522,7 +527,7 @@ export function Sounds({ gamePath, isActive }: Props) {
           const filled = configs.filter((c) => slots[c.key] !== null).length;
           const total = configs.length;
           const isExpanded = expandedCategories.has(cat);
-          const isKillstreaks = cat === "Killstreaks";
+          const useTwoColumns = cat === "Announcer";
           const showCategoryDrop = isDragging && hoveredDropCategory === cat && !hoveredDropSlot;
           const emptyInCat = configs.filter((c) => !slots[c.key]).length;
           return (
@@ -598,7 +603,7 @@ export function Sounds({ gamePath, isActive }: Props) {
               {isExpanded && (
                 <div
                   className={cn(
-                    isKillstreaks
+                    useTwoColumns
                       ? "grid grid-cols-1 xl:grid-cols-2 xl:divide-x xl:divide-border/50"
                       : "flex flex-col"
                   )}
@@ -613,6 +618,7 @@ export function Sounds({ gamePath, isActive }: Props) {
                       onPick={() => pickWav(config.key)}
                       onClear={() => setSlot(config.key, null)}
                       onGainChange={(db) => setSlotGain(config.key, db)}
+                      onToggleFilter={(remove) => setSlotRemoveFiltering(config.key, remove)}
                       disabled={building}
                       showDropOverlay={isDragging && hoveredDropSlot === config.key}
                       onDragOverRow={() => setHoveredTarget(config.key, null)}

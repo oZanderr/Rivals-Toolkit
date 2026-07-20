@@ -7,6 +7,8 @@ pub(crate) enum ConvertError {
     InvalidWav(String),
     /// Audio format that cannot be converted (e.g. 24-bit, surround).
     UnsupportedFormat(String),
+    /// External decoder (vgmstream-cli) unavailable or failed.
+    Vgmstream(String),
 }
 
 impl std::fmt::Display for ConvertError {
@@ -15,6 +17,7 @@ impl std::fmt::Display for ConvertError {
             ConvertError::Io(e) => write!(f, "IO error: {e}"),
             ConvertError::InvalidWav(msg) => write!(f, "Invalid WAV: {msg}"),
             ConvertError::UnsupportedFormat(msg) => write!(f, "Unsupported format: {msg}"),
+            ConvertError::Vgmstream(msg) => write!(f, "{msg}"),
         }
     }
 }
@@ -54,7 +57,9 @@ pub(crate) fn peak_dbfs_i16_le(pcm: &[u8]) -> f32 {
     if peak == 0 {
         return f32::NEG_INFINITY;
     }
-    20.0 * (peak as f32 / i16::MAX as f32).log10()
+    // 0 dBFS reference is the full-scale magnitude 32768, not i16::MAX; a -32768 sample is 0 dBFS,
+    // and dividing by 32767 would report it as fractionally above 0 and trip a false clip warning.
+    20.0 * (peak as f32 / 32768.0).log10()
 }
 
 /// Convert a gain in decibels to a linear sample multiplier.
@@ -82,5 +87,47 @@ pub(crate) fn apply_gain_in_place(pcm: &mut [u8], gain_linear: f32) {
         let bytes = scaled.to_le_bytes();
         chunk[0] = bytes[0];
         chunk[1] = bytes[1];
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pcm_from(samples: &[i16]) -> Vec<u8> {
+        samples.iter().flat_map(|s| s.to_le_bytes()).collect()
+    }
+
+    #[test]
+    fn full_scale_negative_is_zero_dbfs_not_above() {
+        // A -32768 sample is full scale; it must read as exactly 0 dBFS, never positive, so the
+        // UI does not warn about clipping a normalized file at unity gain.
+        let peak = peak_dbfs_i16_le(&pcm_from(&[0, i16::MIN, 100]));
+        assert!(peak.abs() < 1e-4, "expected ~0 dBFS, got {peak}");
+        assert!(
+            peak <= 0.0,
+            "full-scale peak must not exceed 0 dBFS, got {peak}"
+        );
+    }
+
+    #[test]
+    fn positive_max_sample_is_just_below_zero() {
+        let peak = peak_dbfs_i16_le(&pcm_from(&[i16::MAX]));
+        assert!(
+            peak < 0.0 && peak > -0.01,
+            "expected just below 0 dBFS, got {peak}"
+        );
+    }
+
+    #[test]
+    fn half_scale_is_about_minus_six_db() {
+        let peak = peak_dbfs_i16_le(&pcm_from(&[16384]));
+        assert!((peak - -6.02).abs() < 0.05, "expected ~-6 dBFS, got {peak}");
+    }
+
+    #[test]
+    fn silence_is_negative_infinity() {
+        let peak = peak_dbfs_i16_le(&pcm_from(&[0, 0, 0]));
+        assert!(peak.is_infinite() && peak.is_sign_negative());
     }
 }

@@ -60,6 +60,8 @@ pub fn run() {
             settings::set_game_running_check_enabled,
             settings::get_mod_conflict_check_enabled,
             settings::set_mod_conflict_check_enabled,
+            settings::get_vgmstream_path,
+            settings::set_vgmstream_path,
             // update_check
             update_check::check_for_update,
             update_check::get_auto_check_updates,
@@ -69,10 +71,14 @@ pub fn run() {
             updater::apply_update_and_restart,
             // audio
             audio::validate_wav,
+            audio::validate_vgmstream,
+            audio::vgmstream_available,
+            audio::extract_wem_entry_as_wav,
             // sounds
             sounds::build_sound_mod,
             sounds::extract_sound_wavs,
             sounds::load_sound_mod_for_edit,
+            sounds::extract_bnk_wems_as_wav,
             // pak
             pak::commands::list_pak_files,
             pak::commands::list_pak_files_info,

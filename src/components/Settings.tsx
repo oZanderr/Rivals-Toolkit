@@ -37,6 +37,7 @@ import { useSaveHotkeys } from "@/hooks/useSaveHotkeys";
 import { useScrollAtBottom } from "@/hooks/useScrollAtBottom";
 import type { UpdateInfo } from "@/hooks/useUpdateCheck";
 import { emitModsChanged } from "@/lib/modsEvents";
+import { emitSettingsChanged } from "@/lib/settingsEvents";
 import { setShowHeroIcons } from "@/lib/showHeroIcons";
 import { emitTweakProfilesChanged, onTweakProfilesChanged } from "@/lib/tweakProfileEvents";
 import { cn } from "@/lib/utils";
@@ -149,6 +150,10 @@ export function Settings({
   const [savedGameRunningCheck, setSavedGameRunningCheck] = useState<boolean | null>(null);
   const [draftConflictCheck, setDraftConflictCheck] = useState<boolean | null>(null);
   const [savedConflictCheck, setSavedConflictCheck] = useState<boolean | null>(null);
+  const [draftVgmstreamPath, setDraftVgmstreamPath] = useState<string | null>(null);
+  const [savedVgmstreamPath, setSavedVgmstreamPath] = useState<string | null>(null);
+  const [vgmstreamTest, setVgmstreamTest] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [vgmstreamTesting, setVgmstreamTesting] = useState(false);
 
   const [saving, setSaving] = useState(false);
   const [pathError, setPathError] = useState<string | null>(null);
@@ -303,6 +308,19 @@ export function Settings({
         console.error(e);
         setDraftShowHeroIcons(false);
         setSavedShowHeroIcons(false);
+      });
+  }, []);
+
+  useEffect(() => {
+    invoke<string | null>("get_vgmstream_path")
+      .then((v) => {
+        setDraftVgmstreamPath(v ?? "");
+        setSavedVgmstreamPath(v ?? "");
+      })
+      .catch((e) => {
+        console.error(e);
+        setDraftVgmstreamPath("");
+        setSavedVgmstreamPath("");
       });
   }, []);
 
@@ -596,6 +614,10 @@ export function Settings({
     draftConflictCheck !== null &&
     savedConflictCheck !== null &&
     draftConflictCheck !== savedConflictCheck;
+  const vgmstreamDirty =
+    draftVgmstreamPath !== null &&
+    savedVgmstreamPath !== null &&
+    draftVgmstreamPath !== savedVgmstreamPath;
   const dirty =
     pathDirty ||
     skipDirty ||
@@ -606,7 +628,8 @@ export function Settings({
     modLevelDirty ||
     vanillaLevelDirty ||
     gameRunningCheckDirty ||
-    conflictCheckDirty;
+    conflictCheckDirty ||
+    vgmstreamDirty;
 
   async function save() {
     setSaving(true);
@@ -706,6 +729,15 @@ export function Settings({
           console.error(e);
         }
       }
+      if (vgmstreamDirty && draftVgmstreamPath !== null) {
+        try {
+          await invoke("set_vgmstream_path", { path: draftVgmstreamPath || null });
+          setSavedVgmstreamPath(draftVgmstreamPath);
+          emitSettingsChanged();
+        } catch (e) {
+          console.error(e);
+        }
+      }
       if (savedBadgeTimer.current) clearTimeout(savedBadgeTimer.current);
       setSavedBadge(true);
       savedBadgeTimer.current = setTimeout(() => setSavedBadge(false), 2500);
@@ -725,7 +757,35 @@ export function Settings({
     setDraftVanillaLevel(savedVanillaLevel);
     setDraftGameRunningCheck(savedGameRunningCheck);
     setDraftConflictCheck(savedConflictCheck);
+    setDraftVgmstreamPath(savedVgmstreamPath);
+    setVgmstreamTest(null);
     setPathError(null);
+  }
+
+  async function browseVgmstream() {
+    const picked = await open({ multiple: false, directory: false });
+    if (typeof picked === "string") {
+      setDraftVgmstreamPath(picked);
+      setVgmstreamTest(null);
+    }
+  }
+
+  async function testVgmstream() {
+    const p = draftVgmstreamPath?.trim();
+    if (!p) {
+      setVgmstreamTest({ ok: false, msg: "Enter a path first." });
+      return;
+    }
+    setVgmstreamTesting(true);
+    setVgmstreamTest(null);
+    try {
+      const version = await invoke<string>("validate_vgmstream", { path: p });
+      setVgmstreamTest({ ok: true, msg: version });
+    } catch (e) {
+      setVgmstreamTest({ ok: false, msg: String(e) });
+    } finally {
+      setVgmstreamTesting(false);
+    }
   }
 
   const { atBottom, scrollRef, sentinelRef } = useScrollAtBottom();
@@ -938,6 +998,69 @@ export function Settings({
                 disabled={draftConflictCheck === null}
               />
             </label>
+          </div>
+
+          {/* ── Audio ── */}
+          <div className="flex flex-col overflow-hidden rounded-md border border-border">
+            <div className="border-b border-border bg-card px-3 py-2">
+              <h3 className="text-sm font-semibold">Audio</h3>
+            </div>
+            <div className="flex flex-col gap-2 px-3 py-3">
+              <div className="flex flex-col gap-0.5">
+                <span className="text-[13px] font-medium">vgmstream-cli path</span>
+                <span className="text-[11px] text-muted-foreground">
+                  Optional. Point to a vgmstream-cli executable to extract compressed Wwise audio
+                  (.wem) to WAV in Sounds and the Asset Manager. Without it, only uncompressed
+                  sounds can be extracted.
+                </span>
+              </div>
+              <div className="relative">
+                <Tip content={draftVgmstreamPath ?? ""} disabled={!draftVgmstreamPath}>
+                  <Input
+                    value={draftVgmstreamPath ?? ""}
+                    onChange={(e) => {
+                      setDraftVgmstreamPath(e.target.value);
+                      setVgmstreamTest(null);
+                    }}
+                    placeholder={`e.g. C:\\tools\\vgmstream\\vgmstream-cli.exe`}
+                    className="h-8 pr-10 font-mono text-[12px]"
+                  />
+                </Tip>
+                <div className="absolute right-1 top-1/2 -translate-y-1/2">
+                  <Tip content="Browse for vgmstream-cli">
+                    <Button variant="ghost" size="icon-sm" onClick={browseVgmstream}>
+                      <FolderOpen size={14} />
+                    </Button>
+                  </Tip>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={testVgmstream}
+                  disabled={vgmstreamTesting || !draftVgmstreamPath}
+                >
+                  <Search size={13} className={cn(vgmstreamTesting && "animate-pulse")} />
+                  Test
+                </Button>
+                {vgmstreamTest && (
+                  <span
+                    className={cn(
+                      "flex min-w-0 items-center gap-1.5 text-[11px] font-medium",
+                      vgmstreamTest.ok ? "text-ok" : "text-err"
+                    )}
+                  >
+                    {vgmstreamTest.ok ? (
+                      <CheckCircle2 size={13} strokeWidth={2.5} className="shrink-0" />
+                    ) : (
+                      <XCircle size={13} strokeWidth={2.5} className="shrink-0" />
+                    )}
+                    <span className="truncate">{vgmstreamTest.msg}</span>
+                  </span>
+                )}
+              </div>
+            </div>
           </div>
 
           {/* ── Compression ── */}

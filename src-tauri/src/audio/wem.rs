@@ -73,12 +73,30 @@ pub(super) fn pcm_to_wem(pcm: &[u8], channels: u16, sample_rate: u32) -> Result<
     }
 }
 
-/// Convert raw WEM bytes (Wwise RIFF/PCM) to a standard WAV file in memory.
+/// Convert raw WEM bytes to a standard WAV file in memory.
 ///
-/// The WEM format uses the same RIFF chunk structure as WAV, so the shared
-/// [`parse_riff`] handles finding the `fmt ` and `data` chunks. We then emit
-/// a canonical 44-byte WAV header followed by the raw PCM data.
-pub(crate) fn wem_to_wav(wem: &[u8]) -> Result<Vec<u8>> {
+/// Uncompressed PCM WEMs (everything this app builds) decode in-process via the shared
+/// RIFF parser. Wwise-compressed WEMs (Vorbis/Opus/ADPCM) make `parse_riff` return
+/// `UnsupportedFormat`; those fall back to the user-supplied vgmstream-cli when `vgmstream`
+/// is `Some`, and otherwise return a clear "configure vgmstream" error.
+pub(crate) fn wem_to_wav(wem: &[u8], vgmstream: Option<&std::path::Path>) -> Result<Vec<u8>> {
+    match try_pcm_wem_to_wav(wem) {
+        Ok(wav) => Ok(wav),
+        Err(ConvertError::UnsupportedFormat(_)) => match vgmstream {
+            Some(bin) => super::vgmstream::decode_bytes_to_wav(bin, wem),
+            None => Err(ConvertError::Vgmstream(
+                "this WEM uses a compressed codec. Set a vgmstream-cli path in Settings to extract it."
+                    .into(),
+            )),
+        },
+        Err(e) => Err(e),
+    }
+}
+
+/// In-process decode for uncompressed PCM WEMs. The WEM format uses the same RIFF chunk
+/// structure as WAV, so the shared [`parse_riff`] finds the `fmt ` and `data` chunks; we then
+/// emit a canonical 44-byte WAV header followed by the raw PCM data.
+fn try_pcm_wem_to_wav(wem: &[u8]) -> Result<Vec<u8>> {
     let info = parse_riff(wem)?;
 
     if info.channels == 0 || info.channels > 2 {
@@ -108,4 +126,48 @@ pub(crate) fn wem_to_wav(wem: &[u8]) -> Result<Vec<u8>> {
         info.sample_rate,
         info.bits_per_sample,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Minimal RIFF/WAVE whose `fmt ` declares a non-PCM codec tag, so `parse_riff`
+    /// returns `UnsupportedFormat` (the compressed-WEM path).
+    fn non_pcm_riff() -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(b"RIFF");
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.extend_from_slice(b"WAVE");
+        v.extend_from_slice(b"fmt ");
+        v.extend_from_slice(&16u32.to_le_bytes());
+        v.extend_from_slice(&0x0166u16.to_le_bytes()); // non-PCM codec tag
+        v.extend_from_slice(&2u16.to_le_bytes());
+        v.extend_from_slice(&48_000u32.to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.extend_from_slice(&4u16.to_le_bytes());
+        v.extend_from_slice(&16u16.to_le_bytes());
+        v.extend_from_slice(b"data");
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v
+    }
+
+    #[test]
+    fn pcm_wem_decodes_without_vgmstream() {
+        let mut wem = build_wem_header(16, 48_000);
+        wem.extend_from_slice(&[0u8; 16]);
+        let result = wem_to_wav(&wem, None);
+        assert!(
+            result.is_ok(),
+            "uncompressed PCM WEM should decode in-process"
+        );
+    }
+
+    #[test]
+    fn compressed_wem_without_vgmstream_returns_configure_error() {
+        match wem_to_wav(&non_pcm_riff(), None) {
+            Err(ConvertError::Vgmstream(_)) => {}
+            other => panic!("expected a Vgmstream error, got {other:?}"),
+        }
+    }
 }

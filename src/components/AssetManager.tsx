@@ -12,6 +12,7 @@ import {
   Copy,
   Download,
   FileAudio,
+  Music,
   FileOutput,
   FileText,
   Folder,
@@ -72,6 +73,7 @@ import {
 } from "@/lib/assetCategory";
 import { detectHeroIdsInPath } from "@/lib/heroIcons";
 import { emitModsChanged, normalizeFolderPath, onModsChanged } from "@/lib/modsEvents";
+import { onSettingsChanged } from "@/lib/settingsEvents";
 import { useShowHeroIcons } from "@/lib/showHeroIcons";
 import { cn } from "@/lib/utils";
 
@@ -123,6 +125,7 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
     revealPath?: string;
   } | null>(null);
   const [busy, setBusy] = useState(false);
+  const [vgmstreamAvailable, setVgmstreamAvailable] = useState(false);
   const [manualPaks, setManualPaks] = useState<Set<string>>(new Set());
   const [debouncedFilter, setDebouncedFilter] = useState("");
   const [repackFormat, setRepackFormat] = useState<RepackFormat>("pak");
@@ -181,6 +184,17 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
     invoke<CharacterSummary[]>("list_known_heroes")
       .then(setKnownHeroes)
       .catch(() => setKnownHeroes([]));
+  }, []);
+
+  // Gate the "Extract as WAV" action on a configured vgmstream; refresh when settings change.
+  useEffect(() => {
+    const refresh = () => {
+      invoke<boolean>("vgmstream_available")
+        .then(setVgmstreamAvailable)
+        .catch(() => setVgmstreamAvailable(false));
+    };
+    refresh();
+    return onSettingsChanged(refresh);
   }, []);
 
   // Re-list paks when ~mods composition changes elsewhere (mod install/delete, repack, recursive toggle).
@@ -785,6 +799,95 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
     }
   }
 
+  async function extractEntryAsWav(entry: ContentEntry) {
+    const dir = await open({ directory: true, multiple: false });
+    if (!dir || typeof dir !== "string") return;
+    setBusy(true);
+    showNotice("Decoding…", "info");
+    try {
+      const isUtoc = entry.source === "utoc";
+      const sourcePath = isUtoc ? selectedPak.replace(/\.pak$/i, ".utoc") : selectedPak;
+      const outPath = await invoke<string>("extract_wem_entry_as_wav", {
+        sourcePath,
+        entry: entry.path,
+        isUtoc,
+        outputDir: dir,
+      });
+      showNotice(`Extracted WAV: ${outPath}`, "ok", { revealPath: outPath });
+    } catch (e: unknown) {
+      showNotice(String(e), "err");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function extractBnkWems(entry: ContentEntry) {
+    const dir = await open({ directory: true, multiple: false });
+    if (!dir || typeof dir !== "string") return;
+    setBusy(true);
+    showNotice("Decoding bank…", "info");
+    try {
+      const isUtoc = entry.source === "utoc";
+      const sourcePath = isUtoc ? selectedPak.replace(/\.pak$/i, ".utoc") : selectedPak;
+      const msg = await invoke<string>("extract_bnk_wems_as_wav", {
+        sourcePath,
+        entry: entry.path,
+        isUtoc,
+        outputDir: dir,
+      });
+      showNotice(msg, "ok", { revealPath: dir });
+    } catch (e: unknown) {
+      showNotice(String(e), "err");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function extractSelectedAudio() {
+    if (selectedAudioEntries.length === 0 || !selectedPak) return;
+    const dir = await open({ directory: true, multiple: false });
+    if (!dir || typeof dir !== "string") return;
+    setBusy(true);
+    showNotice("Decoding audio…", "info");
+    try {
+      let banks = 0;
+      let wems = 0;
+      let failed = 0;
+      for (const entry of selectedAudioEntries) {
+        const isUtoc = entry.source === "utoc";
+        const sourcePath = isUtoc ? selectedPak.replace(/\.pak$/i, ".utoc") : selectedPak;
+        const isBnk = entry.path.toLowerCase().endsWith(".bnk");
+        try {
+          await invoke<string>(isBnk ? "extract_bnk_wems_as_wav" : "extract_wem_entry_as_wav", {
+            sourcePath,
+            entry: entry.path,
+            isUtoc,
+            outputDir: dir,
+          });
+          if (isBnk) banks += 1;
+          else wems += 1;
+        } catch {
+          failed += 1;
+        }
+      }
+      const parts: string[] = [];
+      if (banks) parts.push(`${banks} bank${banks === 1 ? "" : "s"}`);
+      if (wems) parts.push(`${wems} wem${wems === 1 ? "" : "s"}`);
+      if (parts.length === 0) {
+        showNotice(`Could not decode the selected audio (${failed} failed)`, "err");
+      } else {
+        const summary = `Decoded ${parts.join(" + ")} to ${dir}`;
+        showNotice(failed ? `${summary} (${failed} failed)` : summary, failed ? "info" : "ok", {
+          revealPath: dir,
+        });
+      }
+    } catch (e: unknown) {
+      showNotice(String(e), "err");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function exportLegacy() {
     if (!selectedPak) return;
     const dir = await open({ directory: true, multiple: false });
@@ -956,6 +1059,16 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
     }
     return false;
   }, [selectedEntries]);
+
+  const selectedAudioEntries = useMemo(
+    () =>
+      pakContents.filter(
+        (e) =>
+          selectedEntries.has(e.path) &&
+          (e.path.toLowerCase().endsWith(".bnk") || e.path.toLowerCase().endsWith(".wem"))
+      ),
+    [pakContents, selectedEntries]
+  );
 
   async function extractSelected() {
     if (selectedEntries.size === 0 || !selectedPak) return;
@@ -1616,6 +1729,22 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
                     </Button>
                   </Tip>
                 )}
+                {vgmstreamAvailable && selectedAudioEntries.length > 0 && (
+                  <Tip content={`Decode ${selectedAudioEntries.length} selected .wem/.bnk to WAV`}>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      className="relative"
+                      onClick={extractSelectedAudio}
+                      disabled={busy || !selectedPak}
+                    >
+                      <Music size={15} />
+                      <span className="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-foreground px-1 text-[8px] font-bold leading-none text-background">
+                        {selectedAudioEntries.length}
+                      </span>
+                    </Button>
+                  </Tip>
+                )}
                 {selectedEntries.size > 0 &&
                   selectedIsIoStore &&
                   !selectedIsVanilla &&
@@ -1932,6 +2061,18 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
                                 <Folder />
                                 With folder structure…
                               </ContextMenuItem>
+                              {ext === "wem" && vgmstreamAvailable && (
+                                <ContextMenuItem onSelect={() => extractEntryAsWav(entry)}>
+                                  <FileAudio />
+                                  Extract as WAV…
+                                </ContextMenuItem>
+                              )}
+                              {ext === "bnk" && vgmstreamAvailable && (
+                                <ContextMenuItem onSelect={() => extractBnkWems(entry)}>
+                                  <FileAudio />
+                                  Extract all WEMs as WAV…
+                                </ContextMenuItem>
+                              )}
                               {fileName.toLowerCase() === "bnk_ui_battle.bnk" && (
                                 <ContextMenuItem onSelect={() => extractSoundWavs()}>
                                   <FileAudio />

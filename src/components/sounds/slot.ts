@@ -12,6 +12,7 @@ export interface SlotState {
   validation: WavValidation | null;
   error: string | null;
   gainDb: number;
+  removeFiltering: boolean;
 }
 
 export const GAIN_MIN_DB = -18;

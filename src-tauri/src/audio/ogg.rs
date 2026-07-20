@@ -81,7 +81,9 @@ pub(super) fn validate_ogg(data: &[u8]) -> Result<WavValidation, String> {
     let peak_dbfs = if peak == 0 {
         f32::NEG_INFINITY
     } else {
-        20.0 * (peak as f32 / i16::MAX as f32).log10()
+        // 0 dBFS reference is the full-scale magnitude 32768, not i16::MAX; a -32768 sample is
+        // 0 dBFS, and dividing by 32767 would report it as fractionally above 0 (false clip).
+        20.0 * (peak as f32 / 32768.0).log10()
     };
 
     Ok(WavValidation {

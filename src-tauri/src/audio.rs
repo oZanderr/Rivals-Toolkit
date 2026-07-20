@@ -2,11 +2,17 @@
 
 mod ogg;
 mod pcm;
+pub(crate) mod vgmstream;
 mod wav;
 mod wem;
 
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use tauri::State;
+
+use crate::settings::SettingsState;
 
 pub(crate) use pcm::{ConvertError, WavValidation};
 pub(crate) use wem::{build_wem_header, wem_to_wav};
@@ -113,4 +119,78 @@ pub(crate) fn validate_audio(input: &Path) -> Result<WavValidation> {
 #[tauri::command]
 pub(crate) fn validate_wav(path: String) -> std::result::Result<WavValidation, String> {
     validate_audio(Path::new(&path)).map_err(|e| e.to_string())
+}
+
+/// Confirm a user-supplied path is a working vgmstream-cli, returning its version banner.
+#[tauri::command]
+pub(crate) async fn validate_vgmstream(path: String) -> std::result::Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        vgmstream::probe_version(Path::new(&path)).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Whether a usable vgmstream-cli is configured (gates the Asset Manager extract action).
+#[tauri::command]
+pub(crate) fn vgmstream_available(state: State<'_, SettingsState>) -> bool {
+    let configured = state.lock().ok().and_then(|s| s.vgmstream_path.clone());
+    vgmstream::resolve(configured.as_deref()).is_some()
+}
+
+/// Extract a `.wem` entry from a pak/utoc and decode it to a `.wav` in `output_dir`.
+#[tauri::command]
+pub(crate) async fn extract_wem_entry_as_wav(
+    state: State<'_, SettingsState>,
+    source_path: String,
+    entry: String,
+    is_utoc: bool,
+    output_dir: String,
+) -> std::result::Result<String, String> {
+    let configured = state.lock().ok().and_then(|s| s.vgmstream_path.clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        let bin = vgmstream::resolve(configured.as_deref())
+            .ok_or_else(|| "vgmstream is not configured. Set its path in Settings.".to_string())?;
+        extract_wem_as_wav(&source_path, &entry, is_utoc, &output_dir, &bin)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+static EXTRACT_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Read the raw `.wem` to a temp file via the existing pak/utoc extractor, decode it, and write
+/// `<stem>.wav` into `output_dir`. Returns the written WAV path.
+fn extract_wem_as_wav(
+    source: &str,
+    entry: &str,
+    is_utoc: bool,
+    output_dir: &str,
+    bin: &Path,
+) -> std::result::Result<String, String> {
+    let stem = Path::new(entry)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("audio");
+
+    let tmp = std::env::temp_dir().join(format!(
+        "rivals_wem_{}_{}.wem",
+        std::process::id(),
+        EXTRACT_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let tmp_str = tmp.to_string_lossy().into_owned();
+
+    if is_utoc {
+        crate::pak::extract_utoc_file(source, entry, &tmp_str)?;
+    } else {
+        crate::pak::extract_single_file(source, entry, &tmp_str)?;
+    }
+
+    let wav = vgmstream::decode_file_to_wav(bin, &tmp, None).map_err(|e| e.to_string());
+    let _ = fs::remove_file(&tmp);
+    let wav = wav?;
+
+    let out_path = Path::new(output_dir).join(format!("{stem}.wav"));
+    fs::write(&out_path, wav).map_err(|e| e.to_string())?;
+    Ok(out_path.to_string_lossy().into_owned())
 }
