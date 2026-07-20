@@ -6,7 +6,7 @@ It combines a React frontend with a Tauri/Rust backend to provide:
 - game install detection across launchers
 - pak browsing, extraction, and repacking
 - mod management (status, toggle, export, delete)
-- scalability and pak-based INI tweak tooling
+- pak-based INI and game settings tweak tooling
 - shader cache cleanup and game launch helpers
 
 Current platform support: Windows only.

@@ -1,28 +1,16 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useCallback, useRef } from "react";
 
 import { invoke } from "@tauri-apps/api/core";
-import { getCurrentWindow } from "@tauri-apps/api/window";
-import { open } from "@tauri-apps/plugin-dialog";
-import {
-  AlertTriangle,
-  CheckCircle2,
-  FileText,
-  Gauge,
-  Package,
-  Trash2,
-  UploadCloud,
-  XCircle,
-} from "lucide-react";
+import { AlertTriangle, CheckCircle2, Gauge, Package, Trash2, XCircle } from "lucide-react";
 
 import { GameUserSettingsTweaks } from "./GameUserSettingsTweaks";
 import { PakTweaks } from "./PakTweaks";
-import { ScalabilityTweaks } from "./ScalabilityTweaks";
 
 import { Button } from "@/components/ui/button";
 import { Tip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 
-type SubTab = "scalability" | "pak-config" | "game-settings";
+type SubTab = "pak-config" | "game-settings";
 
 interface Props {
   gamePath: string;
@@ -30,18 +18,7 @@ interface Props {
 }
 
 export function ConfigTweaks({ gamePath, isActive }: Props) {
-  const [subTab, setSubTab] = useState<SubTab>("scalability");
-  const [isDragging, setIsDragging] = useState(false);
-
-  const [filePath, setFilePath] = useState("");
-  const [content, setContent] = useState("");
-  const [scalabilityContent, setScalabilityContent] = useState("");
-  const [fileExists, setFileExists] = useState<boolean | null>(null);
-  const [reloadSignal, setReloadSignal] = useState(0);
-  const [detecting, setDetecting] = useState(false);
-  const [detectBadge, setDetectBadge] = useState<string | null>(null);
-  const detectBadgeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const detectPathRef = useRef<(() => Promise<void>) | null>(null);
+  const [subTab, setSubTab] = useState<SubTab>("pak-config");
 
   const [shaderNotice, setShaderNotice] = useState<{
     msg: string;
@@ -60,123 +37,7 @@ export function ConfigTweaks({ gamePath, isActive }: Props) {
     shaderTimer.current = setTimeout(() => setShaderNotice(null), 6000);
   }, []);
 
-  const isActiveRef = useRef(isActive);
-  const subTabRef = useRef(subTab);
-  const fileExistsRef = useRef(fileExists);
-
-  // Drag-and-drop: accept .ini on scalability sub-tab, .pak on pak-config sub-tab.
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    getCurrentWindow()
-      .onDragDropEvent(async (event) => {
-        if (event.payload.type === "enter") {
-          if (isActiveRef.current) setIsDragging(true);
-        } else if (event.payload.type === "drop") {
-          setIsDragging(false);
-          if (!isActiveRef.current) return;
-          if (subTabRef.current === "scalability") {
-            const iniPaths = event.payload.paths.filter((p) => p.toLowerCase().endsWith(".ini"));
-            if (iniPaths.length === 0) return;
-            const droppedPath = iniPaths[0];
-            try {
-              const text = await invoke<string>("read_scalability", { path: droppedPath });
-              // If no scalability.ini exists yet, install to default path
-              if (!fileExistsRef.current) {
-                const defaultPath = await invoke<string>("get_scalability_path");
-                await invoke("write_scalability", { path: defaultPath, content: text });
-                setFilePath(defaultPath);
-                setContent(text);
-                setScalabilityContent(text);
-                setFileExists(true);
-                setReloadSignal((s) => s + 1);
-              } else {
-                setFilePath(droppedPath);
-                setContent(text);
-                setScalabilityContent(text);
-                setFileExists(true);
-                setReloadSignal((s) => s + 1);
-              }
-            } catch {
-              // Silently ignore unreadable files
-            }
-          }
-        } else if (event.payload.type === "leave") {
-          setIsDragging(false);
-        }
-      })
-      .then((fn) => {
-        unlisten = fn;
-      });
-    return () => unlisten?.();
-  }, []);
-
-  async function loadFile(path: string): Promise<boolean> {
-    try {
-      const text = await invoke<string>("read_scalability", { path });
-      setContent(text);
-      setScalabilityContent(text);
-      setFileExists(true);
-      return true;
-    } catch {
-      setContent("");
-      setScalabilityContent("");
-      setFileExists(false);
-      return false;
-    }
-  }
-
-  /** Used on mount: detects path and loads file content. */
-  async function detectPath() {
-    setDetecting(true);
-    setDetectBadge(null);
-    try {
-      const p = await invoke<string>("get_scalability_path");
-      setFilePath(p);
-      await loadFile(p);
-    } catch {
-      // no-op on mount
-    } finally {
-      setDetecting(false);
-    }
-  }
-
-  function showDetectBadge(msg: string) {
-    if (detectBadgeTimer.current) clearTimeout(detectBadgeTimer.current);
-    setDetectBadge(msg);
-    detectBadgeTimer.current = setTimeout(() => setDetectBadge(null), 4000);
-  }
-
-  async function reloadContent() {
-    const found = await loadFile(filePath);
-    setReloadSignal((s) => s + 1);
-    // No success badge when the file is missing; the persistent "Not found" badge stands.
-    if (found) showDetectBadge("Reloaded");
-  }
-
-  async function browse() {
-    const selected = await open({
-      multiple: false,
-      filters: [{ name: "INI files", extensions: ["ini"] }],
-    });
-    if (typeof selected === "string") {
-      setFilePath(selected);
-      await loadFile(selected);
-    }
-  }
-
-  useEffect(() => {
-    isActiveRef.current = isActive;
-    subTabRef.current = subTab;
-    fileExistsRef.current = fileExists;
-    detectPathRef.current = detectPath;
-  });
-
-  useEffect(() => {
-    detectPathRef.current?.();
-  }, []);
-
   const SUB_TABS: { id: SubTab; label: string; Icon: React.ElementType }[] = [
-    { id: "scalability", label: "Scalability", Icon: FileText },
     { id: "pak-config", label: "Pak Config", Icon: Package },
     { id: "game-settings", label: "Game Settings", Icon: Gauge },
   ];
@@ -242,51 +103,9 @@ export function ConfigTweaks({ gamePath, isActive }: Props) {
         ))}
       </div>
 
-      {/* ── Scalability tab ── */}
-      <div
-        className={cn(
-          "relative flex flex-1 min-h-0 flex-col",
-          subTab !== "scalability" && "hidden"
-        )}
-      >
-        {isDragging && subTab === "scalability" && (
-          <div className="pointer-events-none absolute inset-0 z-50 flex flex-col items-center justify-center gap-3 rounded-lg border-2 border-dashed border-ok bg-background/80 backdrop-blur-sm">
-            <UploadCloud size={36} className="text-ok" />
-            <span className="text-sm font-semibold text-ok">
-              Drop .ini to load scalability config
-            </span>
-          </div>
-        )}
-        <ScalabilityTweaks
-          filePath={filePath}
-          fileExists={fileExists}
-          content={content}
-          setContent={setContent}
-          reloadSignal={reloadSignal}
-          detectBadge={detectBadge}
-          detecting={detecting}
-          onBrowse={browse}
-          onSaved={(newContent) => {
-            setFileExists(true);
-            setScalabilityContent(newContent);
-          }}
-          onReload={reloadContent}
-          onDeleted={() => {
-            setContent("");
-            setScalabilityContent("");
-            setFileExists(false);
-            setReloadSignal((s) => s + 1);
-          }}
-        />
-      </div>
-
       {/* ── Pak Config tab ── */}
       <div className={cn("flex flex-1 min-h-0 flex-col", subTab !== "pak-config" && "hidden")}>
-        <PakTweaks
-          gamePath={gamePath}
-          scalabilityContent={scalabilityContent}
-          isActive={isActive && subTab === "pak-config"}
-        />
+        <PakTweaks gamePath={gamePath} isActive={isActive && subTab === "pak-config"} />
       </div>
 
       {/* ── Game Settings tab ── */}

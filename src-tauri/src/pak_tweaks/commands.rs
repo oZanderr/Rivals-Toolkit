@@ -5,7 +5,12 @@ use tauri::State;
 use crate::pak_tweaks;
 use crate::pak_tweaks::{PakIniFileContent, PakIniInfo, PakIniListing, PakTweakEdit};
 use crate::settings::{SettingsState, recursive_mod_scan};
-use crate::tweaks::TweakState;
+use crate::tweaks::{TweakDefinition, TweakState};
+
+#[tauri::command]
+pub(crate) fn get_tweak_definitions() -> Vec<TweakDefinition> {
+    crate::tweaks::catalogue::tweak_catalogue()
+}
 
 #[tauri::command]
 pub(crate) async fn inspect_pak_path(pak_path: String) -> Result<Option<PakIniInfo>, String> {

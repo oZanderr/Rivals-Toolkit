@@ -12,7 +12,6 @@ mod mods;
 mod pak;
 mod pak_tweaks;
 mod paths;
-mod scalability;
 mod settings;
 mod sounds;
 mod tweaks;
@@ -106,14 +105,8 @@ pub fn run() {
             pak_tweaks::commands::save_pak_ini,
             pak_tweaks::commands::inspect_pak_path_any_ini,
             pak_tweaks::commands::scan_mod_paks_any_ini,
-            // scalability
-            scalability::commands::get_scalability_path,
-            scalability::commands::read_scalability,
-            scalability::commands::write_scalability,
-            scalability::commands::delete_scalability,
-            scalability::commands::get_tweak_definitions,
-            scalability::commands::detect_tweaks,
-            scalability::commands::apply_tweaks,
+            pak_tweaks::commands::get_tweak_definitions,
+            // game_user_settings
             game_user_settings::commands::get_game_user_settings_path,
             game_user_settings::commands::read_game_user_settings,
             game_user_settings::commands::write_game_user_settings,
