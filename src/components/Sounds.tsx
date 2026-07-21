@@ -544,10 +544,17 @@ export function Sounds({ gamePath, isActive }: Props) {
                   </span>
                 </div>
               )}
-              <button
-                type="button"
+              <div
+                role="button"
+                tabIndex={0}
                 onClick={() => toggleCategory(cat)}
-                className="flex items-center justify-between gap-2 border-b border-border bg-card px-3 py-2 text-left transition-colors hover:bg-secondary/50"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    toggleCategory(cat);
+                  }
+                }}
+                className="flex cursor-pointer items-center justify-between gap-2 border-b border-border bg-card px-3 py-2 text-left transition-colors hover:bg-secondary/50"
               >
                 <div className="flex items-center gap-2">
                   <ChevronDown
@@ -587,7 +594,7 @@ export function Sounds({ gamePath, isActive }: Props) {
                     <Trash2 size={13} />
                   </Button>
                 </Tip>
-              </button>
+              </div>
               {isExpanded && (
                 <div
                   className={cn(
