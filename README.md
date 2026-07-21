@@ -105,7 +105,7 @@ pnpm tauri build
 
 ## Signature Bypass
 
-The toolkit installs a signature bypass so the game will load modified pak containers. The bundled `version.dll` is built from [oZanderr/rivals-sigbypass (proxy branch)](https://github.com/oZanderr/rivals-sigbypass/tree/proxy). Users with the older `dsound.dll` + `.asi` loader can keep using it; the toolkit detects either variant and offers Remove.
+The toolkit installs a signature bypass so the game will load modified pak containers. It drops [Ultimate ASI Loader](https://github.com/ThirteenAG/Ultimate-ASI-Loader) into the game's `Binaries/Win64` as `version.dll`, which loads the bypass payload `plugins/RivalsSigBypass.asi` (built from [oZanderr/rivals-sigbypass](https://github.com/oZanderr/rivals-sigbypass)). Users with the older `dsound.dll` + `.asi` loader can keep using it; the toolkit detects either variant and offers Remove, and installing over a leftover self-contained `version.dll` migrates it to the loader.
 
 ## License
 
@@ -113,3 +113,7 @@ This project is dual-licensed under either of the following, at your option:
 
 - Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
 - MIT License ([LICENSE-MIT](LICENSE-MIT))
+
+### Bundled third-party components
+
+The installed signature bypass includes [Ultimate ASI Loader](https://github.com/ThirteenAG/Ultimate-ASI-Loader) (shipped as `version.dll`), licensed under the MIT License, Copyright (c) 2023 ThirteenAG. Its license text is bundled at [src-tauri/resources/bypass/Ultimate-ASI-Loader-LICENSE.txt](src-tauri/resources/bypass/Ultimate-ASI-Loader-LICENSE.txt).

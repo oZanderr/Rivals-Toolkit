@@ -1166,22 +1166,34 @@ export function Settings({
                   {bypassKind === "modern" ? (
                     "Removes the bypass from the game directory."
                   ) : bypassKind === "legacy" ? (
-                    "Older dsound.dll + .asi loader detected. Remove it to switch to the newer single-file bypass."
+                    "Older dsound.dll + .asi loader detected. Remove it to switch to the newer ASI-loader bypass."
                   ) : (
                     <>
-                      Installs version.dll (
+                      Installs{" "}
                       <button
                         type="button"
                         onClick={() =>
-                          openUrl("https://github.com/oZanderr/rivals-sigbypass/tree/proxy").catch(
+                          openUrl("https://github.com/ThirteenAG/Ultimate-ASI-Loader").catch(
                             console.error
                           )
                         }
                         className="text-foreground underline underline-offset-2 hover:text-primary"
                       >
-                        oZanderr/rivals-sigbypass
+                        Ultimate ASI Loader
                       </button>{" "}
-                      proxy) into the game directory. Required to load modified containers.
+                      plus the{" "}
+                      <button
+                        type="button"
+                        onClick={() =>
+                          openUrl("https://github.com/oZanderr/rivals-sigbypass").catch(
+                            console.error
+                          )
+                        }
+                        className="text-foreground underline underline-offset-2 hover:text-primary"
+                      >
+                        rivals-sigbypass
+                      </button>{" "}
+                      payload into the game directory. Required to load modified containers.
                     </>
                   )}
                 </span>
