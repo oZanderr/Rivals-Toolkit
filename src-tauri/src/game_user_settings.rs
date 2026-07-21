@@ -51,10 +51,10 @@ pub(crate) fn detect_tweaks(content: &str) -> Vec<TweakState> {
                 key,
                 on_value,
                 default_enabled,
-                scalability_section,
+                section,
                 ..
             } => {
-                let current = scalability_section
+                let current = section
                     .as_deref()
                     .and_then(|s| parser::find_key_value_in_section(content, s, key));
                 let active = match current.as_deref() {
@@ -67,12 +67,8 @@ pub(crate) fn detect_tweaks(content: &str) -> Vec<TweakState> {
                     current_value: current,
                 }
             }
-            tweaks::TweakKind::Slider {
-                key,
-                scalability_section,
-                ..
-            } => {
-                let current = scalability_section
+            tweaks::TweakKind::Slider { key, section, .. } => {
+                let current = section
                     .as_deref()
                     .and_then(|s| parser::find_key_value_in_section(content, s, key));
                 TweakState {
@@ -91,9 +87,8 @@ pub(crate) fn detect_tweaks(content: &str) -> Vec<TweakState> {
 }
 
 /// Apply tweak settings to GameUserSettings.ini content and return modified text.
-/// GameUserSettings always has section headers, so we share the section-aware
-/// parser helpers but inline the apply loop to avoid Scalability's default
-/// `[ScalabilitySettings]` header injection.
+/// GameUserSettings always has section headers, so each key is upserted into its
+/// declared `section`, sharing the section-aware parser helpers.
 pub(crate) fn apply_tweaks(content: &str, settings: &[TweakSetting]) -> String {
     let catalogue = tweaks::catalogue::game_user_settings_catalogue();
     let mut text = content.to_string();
@@ -106,10 +101,10 @@ pub(crate) fn apply_tweaks(content: &str, settings: &[TweakSetting]) -> String {
                 key,
                 on_value,
                 off_value,
-                scalability_section,
+                section,
                 ..
             } => {
-                let Some(section) = scalability_section.as_deref() else {
+                let Some(section) = section.as_deref() else {
                     continue;
                 };
                 let target_value = if setting.enabled {
@@ -126,10 +121,10 @@ pub(crate) fn apply_tweaks(content: &str, settings: &[TweakSetting]) -> String {
                 key,
                 default_value,
                 write_default_on_disable,
-                scalability_section,
+                section,
                 ..
             } => {
-                let Some(section) = scalability_section.as_deref() else {
+                let Some(section) = section.as_deref() else {
                     continue;
                 };
                 if setting.enabled {

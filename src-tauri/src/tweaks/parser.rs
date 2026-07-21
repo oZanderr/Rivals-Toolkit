@@ -10,17 +10,6 @@ pub(crate) fn values_equal(file_value: &str, default: f64) -> bool {
     }
 }
 
-/// Extract the lowercased key from a tweak pattern like `r.X=0` or `+CVars=r.X=0`.
-pub(crate) fn pattern_key_lower(pattern: &str) -> String {
-    let inner = if pattern.to_ascii_lowercase().starts_with("+cvars=") {
-        &pattern["+CVars=".len()..]
-    } else {
-        pattern
-    };
-    let key = inner.split_once('=').map(|(k, _)| k).unwrap_or(inner);
-    key.trim().to_ascii_lowercase()
-}
-
 /// Check whether a non-comment line is an assignment to `key_lower`, including `+CVars=` form.
 pub(crate) fn matches_key(trimmed_line: &str, key_lower: &str) -> bool {
     let line_lower = trimmed_line.to_ascii_lowercase();
@@ -121,36 +110,9 @@ pub(crate) fn pattern_present_anywhere(content: &str, pattern: &str) -> bool {
     false
 }
 
-/// Whether any non-comment assignment to `key_lower` exists within `[section]`.
-pub(crate) fn key_present_in_section(content: &str, section: &str, key_lower: &str) -> bool {
-    let target_lower = format!("[{}]", section).to_ascii_lowercase();
-    let mut in_section = false;
-    for line in content.lines() {
-        let t = line.trim();
-        if t.starts_with('[') && t.ends_with(']') {
-            in_section = t.to_ascii_lowercase() == target_lower;
-            continue;
-        }
-        if !in_section || t.starts_with(';') {
-            continue;
-        }
-        if matches_key(t, key_lower) {
-            return true;
-        }
-    }
-    false
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn pattern_key_lower_strips_cvars_prefix_and_value() {
-        assert_eq!(pattern_key_lower("r.X=15"), "r.x");
-        assert_eq!(pattern_key_lower("+CVars=r.X=15"), "r.x");
-        assert_eq!(pattern_key_lower("+cvars=r.Y=0"), "r.y");
-    }
 
     #[test]
     fn matches_key_handles_both_forms_case_insensitive() {
@@ -173,18 +135,5 @@ mod tests {
     fn find_key_value_in_section_ignores_other_sections() {
         let content = "[Target]\n\n[Other]\nr.X=99\n";
         assert!(find_key_value_in_section(content, "Target", "r.X").is_none());
-    }
-
-    #[test]
-    fn key_present_in_section_ignores_comments_and_other_sections() {
-        let content = "[Target]\n;r.X=1\n[Other]\nr.X=2\n";
-        assert!(!key_present_in_section(content, "Target", "r.x"));
-        assert!(key_present_in_section(content, "Other", "r.x"));
-    }
-
-    #[test]
-    fn key_present_in_section_matches_cvars_form() {
-        let content = "[Target]\n+CVars=r.X=1\n";
-        assert!(key_present_in_section(content, "Target", "r.x"));
     }
 }
