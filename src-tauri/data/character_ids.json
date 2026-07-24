@@ -1,6 +1,6 @@
 {
   "source": "https://raw.githubusercontent.com/donutman07/MarvelRivalsCharacterIDs/main/MarvelRivalsCharacterIDs.md",
-  "generated_at": "2026-07-17T08:19:03.564Z",
+  "generated_at": "2026-07-24T08:34:22.693Z",
   "characters": {
     "1011": {
       "name": "Hulk",
@@ -189,9 +189,12 @@
         "1024305": "DISCO OF THE DEAD",
         "1024306": "HELEN ANGERBODA: THE REBEL",
         "1024307": "SAVAGE MONARCH",
+        "1024308": "CONSORT OF KHONSHU",
         "1024309": "RUBY REVOLT",
         "1024310": "VIOLET VIOLENCE",
         "1024500": "Goddess of Death",
+        "1024501": "MIDNIGHT MOON",
+        "1024502": "SAPPHIRE SHADOW",
         "1024800": "MERCIFUL QUEEN"
       }
     },
@@ -641,7 +644,8 @@
         "1048502": "Breezy Butterfly",
         "1048503": "Phantom Purple",
         "1048504": "Violet Veil",
-        "1048505": "Moonlit Mirage"
+        "1048505": "Moonlit Mirage",
+        "1048506": "PINNED BUTTERFLY"
       }
     },
     "1049": {
@@ -770,6 +774,7 @@
         "1055101": "Shenloong's Creed",
         "1055102": "Aurora Twilight",
         "1055103": "WILL OF GALACTA",
+        "1055104": "IGNITE DAREDEVIL",
         "1055300": "SONAR SAVIOR",
         "1055500": "Devil 2099",
         "1055501": "NOT DAREDEVIL",
