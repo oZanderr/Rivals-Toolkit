@@ -1,12 +1,14 @@
 //! IoStore (utoc/ucas) read, extract, and repack operations.
 
 use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use rayon::prelude::*;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
+use walkdir::WalkDir;
 
 use retoc::asset_conversion::{self, FZenPackageContext};
 use retoc::container_header::{EIoContainerHeaderVersion, StoreEntry};
@@ -269,13 +271,52 @@ fn open_utoc(utoc_path: &str) -> Result<Box<dyn IoStoreTrait>, String> {
     retoc::iostore::open(utoc_path, super::profile::make_config()?).map_err(|e| e.to_string())
 }
 
-/// Open base game containers only (excludes mods and patches).
+/// The app holds exactly one AES key, registered under the default (all-zero) GUID in
+/// [`super::profile::make_config`]. A container encrypted under any other key GUID cannot be
+/// decrypted; probing the TOC header for it lets callers skip such a container instead of
+/// aborting a whole merged open with "missing encryption key" (game patches ship containers
+/// like `pakchunkPatch07-Windows` keyed to a named GUID we do not have).
+pub(crate) fn utoc_is_decryptable(utoc_path: &Path) -> bool {
+    const MAGIC: &[u8; 16] = b"-==--==--==--==-";
+    const ENCRYPTED_FLAG: u8 = 0b0010;
+    let Ok(mut file) = std::fs::File::open(utoc_path) else {
+        return false;
+    };
+    // TOC header is 0x90 bytes; the encryption-key GUID (offset 64) and container flags
+    // (offset 80) are all we need to decide decryptability.
+    let mut header = [0u8; 81];
+    if file.read_exact(&mut header).is_err() || &header[0..16] != MAGIC {
+        return false;
+    }
+    let encrypted = header[80] & ENCRYPTED_FLAG != 0;
+    !encrypted || header[64..80].iter().all(|&b| b == 0)
+}
+
+/// Container stems under `paks_dir` encrypted with a key GUID the app does not hold. These
+/// poison a merged `open_filtered` with "missing encryption key", so callers exclude them
+/// from the container filter.
+pub(crate) fn undecryptable_container_stems(paks_dir: &Path) -> HashSet<String> {
+    WalkDir::new(paks_dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .map(walkdir::DirEntry::into_path)
+        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("utoc"))
+        .filter(|p| !utoc_is_decryptable(p))
+        .filter_map(|p| p.file_stem().and_then(|s| s.to_str()).map(str::to_string))
+        .collect()
+}
+
+/// Open base game containers only (excludes mods, patches, and any container we cannot decrypt).
 fn open_base_game_paks(
     paks_dir: &Path,
     target_container: &str,
 ) -> Result<Box<dyn IoStoreTrait>, String> {
     let target = target_container.to_string();
+    let undecryptable = undecryptable_container_stems(paks_dir);
     retoc::iostore::open_filtered(paks_dir, super::profile::make_config()?, move |name| {
+        if undecryptable.contains(name) {
+            return false;
+        }
         if name == target {
             return true;
         }
@@ -481,6 +522,11 @@ fn open_target_only(
     paks_dir: &Path,
     target_container: &str,
 ) -> Result<Box<dyn IoStoreTrait>, String> {
+    if !utoc_is_decryptable(&paks_dir.join(format!("{target_container}.utoc"))) {
+        return Err(format!(
+            "{target_container} is encrypted with a key this app does not have and cannot be extracted."
+        ));
+    }
     let target = target_container.to_string();
     retoc::iostore::open_filtered(paks_dir, super::profile::make_config()?, move |name| {
         name == target

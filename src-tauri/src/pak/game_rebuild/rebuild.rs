@@ -349,10 +349,17 @@ pub(crate) fn rebuild_vanilla_container(
         .ok_or_else(|| "Invalid source utoc path".to_string())?
         .to_string();
 
+    if !super::super::iostore::utoc_is_decryptable(Path::new(source_utoc)) {
+        return Err(format!(
+            "{base_name} is encrypted with a key this app does not have and cannot be rebuilt."
+        ));
+    }
+
+    let undecryptable = super::super::iostore::undecryptable_container_stems(&paks_root);
     let store = retoc::iostore::open_filtered(
         &paks_root,
         super::super::profile::make_config()?,
-        |name: &str| is_vanilla_container(name),
+        move |name: &str| is_vanilla_container(name) && !undecryptable.contains(name),
     )
     .map_err(|e| format!("open {}: {e}", paks_root.display()))?;
 
