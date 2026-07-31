@@ -9,12 +9,14 @@ pub(crate) fn make_aes_key() -> Result<aes::Aes256, String> {
 }
 
 pub(crate) fn open_pak(pak_path: &Path) -> Result<repak::PakReader, String> {
-    let key = make_aes_key()?;
+    // Patch containers (e.g. pakchunkPatch07) encrypt their index under a named key; repak picks
+    // the key matching the pak footer's GUID from the chain, falling back to the default key.
     let file = fs::File::open(pak_path).map_err(|e| e.to_string())?;
     let mut reader = BufReader::new(file);
     repak::PakBuilder::new()
         .profile(RIVALS_PROFILE.repak_profile())
-        .key(key)
+        .key(make_aes_key()?)
+        .keys(RIVALS_PROFILE.repak_key_chain()?)
         .reader(&mut reader)
         .map_err(|e| e.to_string())
 }

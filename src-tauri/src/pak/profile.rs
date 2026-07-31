@@ -5,9 +5,20 @@ use std::sync::Arc;
 
 use aes::cipher::KeyInit;
 
-/// AES-256 key used by Marvel Rivals pak files.
+/// AES-256 key for containers using the default (all-zero) encryption-key GUID.
 pub(crate) const MARVEL_AES_KEY_HEX: &str =
     "0C263D8C22DCB085894899C3A3796383E9BF9DE0CBFB08C9BF2DEF2E84F29D74";
+
+/// Named encryption keys for containers whose TOC header carries a non-zero key GUID.
+/// `pakchunkPatch07-Windows` ships under this named key; the GUID bytes are the raw
+/// 16 bytes at offset 64 of its .utoc header.
+pub(crate) const NAMED_AES_KEYS: &[([u8; 16], &str)] = &[(
+    [
+        0xb5, 0x3e, 0x53, 0x5f, 0x8f, 0xee, 0xea, 0x44, 0xaa, 0xcc, 0x46, 0xc9, 0xd5, 0xa1, 0xe7,
+        0x07,
+    ],
+    "C1149B1DBECF933C290C328A764427C1CA2AEC6D9EFEBD6A7750EE3FAB0A059E",
+)];
 
 /// IoStore compression block size Marvel Rivals expects.
 pub(crate) const RIVALS_BLOCK_SIZE: u32 = 0x10000;
@@ -39,12 +50,22 @@ impl RivalsPakProfile {
     }
 
     pub(crate) fn make_aes_key(self) -> Result<aes::Aes256, String> {
-        let mut bytes = hex::decode(MARVEL_AES_KEY_HEX).map_err(|e| e.to_string())?;
+        repak_key_from_hex(MARVEL_AES_KEY_HEX)
+    }
 
-        // Match repak-rivals key parsing by reversing each 4-byte word.
-        bytes.chunks_mut(4).for_each(|chunk| chunk.reverse());
-
-        aes::Aes256::new_from_slice(&bytes).map_err(|e| e.to_string())
+    /// GUID-keyed AES chain for repak: the default key under the zero GUID plus every named key
+    /// under its GUID. GUIDs are the little-endian `u128` of the raw header bytes, matching the
+    /// pak footer's `EncryptionKeyGuid`, so repak selects the right key per container.
+    pub(crate) fn repak_key_chain(self) -> Result<repak::KeyChain, String> {
+        let mut chain = repak::KeyChain::default();
+        chain.insert(0, repak_key_from_hex(MARVEL_AES_KEY_HEX)?);
+        for (guid_bytes, key_hex) in NAMED_AES_KEYS {
+            chain.insert(
+                u128::from_le_bytes(*guid_bytes),
+                repak_key_from_hex(key_hex)?,
+            );
+        }
+        Ok(chain)
     }
 
     pub(crate) fn repak_profile(self) -> repak::PakProfile {
@@ -95,12 +116,32 @@ pub(crate) fn strip_mount_prefix(path: &str) -> String {
     RIVALS_PROFILE.strip_mount_prefix(path)
 }
 
-/// Build a retoc `Config` with the Marvel AES key wired in. Shared by every
-/// IoStore read path so encrypted containers decrypt consistently.
+/// Build an AES-256 key for repak from hex, reversing each 4-byte word to match repak-rivals.
+fn repak_key_from_hex(hex: &str) -> Result<aes::Aes256, String> {
+    let mut bytes = hex::decode(hex).map_err(|e| e.to_string())?;
+    bytes.chunks_mut(4).for_each(|chunk| chunk.reverse());
+    aes::Aes256::new_from_slice(&bytes).map_err(|e| e.to_string())
+}
+
+/// Deserialize an `FGuid` from its raw 16 little-endian header bytes.
+pub(crate) fn guid_from_bytes(bytes: &[u8; 16]) -> Result<retoc::FGuid, String> {
+    use retoc::ser::Readable;
+    retoc::FGuid::de(&mut std::io::Cursor::new(&bytes[..])).map_err(|e| e.to_string())
+}
+
+/// Build a retoc `Config` with every known AES key wired in (the default-GUID key plus
+/// any named keys). Shared by every IoStore read path so encrypted containers decrypt
+/// consistently.
 pub(super) fn make_config() -> Result<Arc<retoc::Config>, String> {
-    let aes_key: retoc::AesKey = MARVEL_AES_KEY_HEX.parse().map_err(|e| format!("{e}"))?;
+    let principal: retoc::AesKey = MARVEL_AES_KEY_HEX.parse().map_err(|e| format!("{e}"))?;
+    let mut aes_keys = HashMap::from([(retoc::FGuid::default(), principal)]);
+    for (guid_bytes, key_hex) in NAMED_AES_KEYS {
+        let guid = guid_from_bytes(guid_bytes)?;
+        let key: retoc::AesKey = key_hex.parse().map_err(|e| format!("{e}"))?;
+        aes_keys.insert(guid, key);
+    }
     Ok(Arc::new(retoc::Config {
-        aes_keys: HashMap::from([(retoc::FGuid::default(), aes_key)]),
+        aes_keys,
         ..Default::default()
     }))
 }

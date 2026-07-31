@@ -271,11 +271,11 @@ fn open_utoc(utoc_path: &str) -> Result<Box<dyn IoStoreTrait>, String> {
     retoc::iostore::open(utoc_path, super::profile::make_config()?).map_err(|e| e.to_string())
 }
 
-/// The app holds exactly one AES key, registered under the default (all-zero) GUID in
-/// [`super::profile::make_config`]. A container encrypted under any other key GUID cannot be
+/// The app holds the default (all-zero) GUID key plus the named keys in
+/// [`super::profile::NAMED_AES_KEYS`]. A container encrypted under any other key GUID cannot be
 /// decrypted; probing the TOC header for it lets callers skip such a container instead of
-/// aborting a whole merged open with "missing encryption key" (game patches ship containers
-/// like `pakchunkPatch07-Windows` keyed to a named GUID we do not have).
+/// aborting a whole merged open with "missing encryption key" (a future game patch could ship a
+/// container keyed to a GUID we do not have).
 pub(crate) fn utoc_is_decryptable(utoc_path: &Path) -> bool {
     const MAGIC: &[u8; 16] = b"-==--==--==--==-";
     const ENCRYPTED_FLAG: u8 = 0b0010;
@@ -288,8 +288,14 @@ pub(crate) fn utoc_is_decryptable(utoc_path: &Path) -> bool {
     if file.read_exact(&mut header).is_err() || &header[0..16] != MAGIC {
         return false;
     }
-    let encrypted = header[80] & ENCRYPTED_FLAG != 0;
-    !encrypted || header[64..80].iter().all(|&b| b == 0)
+    if header[80] & ENCRYPTED_FLAG == 0 {
+        return true;
+    }
+    let guid = &header[64..80];
+    guid.iter().all(|&b| b == 0)
+        || super::profile::NAMED_AES_KEYS
+            .iter()
+            .any(|(known, _)| known == guid)
 }
 
 /// Container stems under `paks_dir` encrypted with a key GUID the app does not hold. These
