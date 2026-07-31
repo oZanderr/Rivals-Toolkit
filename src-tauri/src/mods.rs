@@ -15,7 +15,7 @@ pub(crate) use conflicts::ConflictReport;
 pub(crate) use folder::{BulkOpResult, InstallResult};
 pub(crate) use status::ModsStatus;
 
-// Ultimate ASI Loader (ThirteenAG), renamed to version.dll; loads the payload below.
+// Oxide ASI Loader (oZanderr/oxiloader) proxy DLL named version.dll; loads the payload below.
 static BYPASS_ASI_LOADER: &[u8] = include_bytes!("../resources/bypass/version.dll");
 // Bypass payload built from oZanderr/rivals-sigbypass `main` branch (plain-DllMain cdylib).
 static BYPASS_PAYLOAD_ASI: &[u8] = include_bytes!("../resources/bypass/RivalsSigBypass.asi");

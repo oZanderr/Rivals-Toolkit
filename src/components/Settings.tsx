@@ -1173,13 +1173,11 @@ export function Settings({
                       <button
                         type="button"
                         onClick={() =>
-                          openUrl("https://github.com/ThirteenAG/Ultimate-ASI-Loader").catch(
-                            console.error
-                          )
+                          openUrl("https://github.com/oZanderr/oxiloader").catch(console.error)
                         }
                         className="text-foreground underline underline-offset-2 hover:text-primary"
                       >
-                        Ultimate ASI Loader
+                        oxiloader
                       </button>{" "}
                       plus the{" "}
                       <button

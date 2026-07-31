@@ -1,4 +1,4 @@
-//! Installs and removes the signature bypass that allows unsigned pak mods to load. Installs Ultimate ASI Loader as version.dll plus the bypass payload as a plugins/*.asi, and still detects and removes the legacy dsound.dll loader.
+//! Installs and removes the signature bypass that allows unsigned pak mods to load. Installs oxiloader as version.dll plus the bypass payload as a plugins/*.asi, and still detects and removes the legacy dsound.dll loader.
 
 use std::fs;
 use std::path::PathBuf;
@@ -39,7 +39,7 @@ fn bypass_paths(game_root: &str) -> BypassPaths {
     }
 }
 
-/// Modern = Ultimate ASI Loader `version.dll` plus our payload `.asi` in `plugins`.
+/// Modern = oxiloader `version.dll` plus our payload `.asi` in `plugins`.
 /// Legacy pairs a generic `dsound.dll` with the specifically-named ASI loader so a stray
 /// third-party `dsound.dll` isn't mistaken for ours. A leftover `version.dll` with no payload
 /// (the old self-contained proxy) reports `None` so Install migrates it to the loader scheme.
@@ -61,9 +61,9 @@ pub(crate) fn is_signature_bypass_installed(game_root: &str) -> bool {
 pub(crate) fn install_signature_bypass(game_root: &str) -> Result<String, String> {
     if !BYPASS_ASI_LOADER.starts_with(b"MZ") || !BYPASS_PAYLOAD_ASI.starts_with(b"MZ") {
         return Err(
-            "Bundled bypass binaries are placeholders. Put Ultimate ASI Loader's \
-             version.dll (from version-x64.zip) and a RivalsSigBypass.asi built from \
-             oZanderr/rivals-sigbypass (main branch) into src-tauri/resources/bypass/, \
+            "Bundled bypass binaries are placeholders. Put oxiloader's version.dll \
+             (from the oZanderr/oxiloader release) and a RivalsSigBypass.asi (from the \
+             oZanderr/rivals-sigbypass release) into src-tauri/resources/bypass/, \
              then rebuild the app."
                 .to_string(),
         );

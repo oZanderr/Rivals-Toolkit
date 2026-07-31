@@ -2,20 +2,21 @@
 
 ## version.dll
 
-Ultimate ASI Loader by ThirteenAG, redistributed unmodified.
-Source: https://github.com/ThirteenAG/Ultimate-ASI-Loader
-Build: x64-latest release asset `version-x64.zip`.
-SHA-512: 8a9df89d57115ca00e6aa97d5d7071adf64494282c21a7a59dc6f09baa097758968bf77d217dd181b94f21c9ce0f4881258c35509cb63e1a2bc729deb1ac8dab
+Oxide ASI Loader (`oxiloader`) by oZanderr, redistributed unmodified.
+Source: https://github.com/oZanderr/oxiloader
+Build: v0.2.1 release asset `version.dll`.
+SHA-512: 655b6a09b5865fd289c9a7cdc1c15b3bad3191931866a0957bac1bd6a64484a9bd75423cba129058b88f0a07a64db2197fc7eb87180fc11313e7bce35b20a334
 
-Licensed under the MIT License, Copyright (c) 2023 ThirteenAG. The full license
-text and copyright notice are in `Ultimate-ASI-Loader-LICENSE.txt` alongside
-this file, as MIT requires when redistributing the binary.
+Licensed under the MIT License, Copyright (c) 2026 oZanderr. The full license
+text is in `oxiloader-LICENSE.txt` alongside this file.
 
 Installed next to the game executable as `version.dll`; it loads `.asi`
 plugins from the `plugins` subfolder.
 
 ## RivalsSigBypass.asi
 
-The pak signature bypass payload, built from oZanderr/rivals-sigbypass
-(`main` branch): a plain-DllMain cdylib renamed from `rivals_sigbypass.dll`.
+The pak signature bypass payload, built from oZanderr/rivals-sigbypass: a
+plain-DllMain cdylib renamed from `rivals_sigbypass.dll`.
 Source: https://github.com/oZanderr/rivals-sigbypass
+Build: v0.1.1 release asset `RivalsSigBypass.asi`.
+SHA-512: 1216a53bddc82f476cc27049fe477b804c903c58ad35132242074287888f644b172e80abe06e603e513cd84eda49c8ad9fb13d6c031fdea2a94d55113776617f
