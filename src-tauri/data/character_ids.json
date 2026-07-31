@@ -1,6 +1,6 @@
 {
   "source": "https://raw.githubusercontent.com/donutman07/MarvelRivalsCharacterIDs/main/MarvelRivalsCharacterIDs.md",
-  "generated_at": "2026-07-25T08:14:46.820Z",
+  "generated_at": "2026-07-31T08:57:04.100Z",
   "characters": {
     "1011": {
       "name": "Hulk",
@@ -11,7 +11,8 @@
         "1011500": "Punk Rage",
         "1011501": "Green Scar",
         "1011502": "Joe Fixit",
-        "1011800": "INFINITY HULK"
+        "1011800": "INFINITY HULK",
+        "1011801": "SPIDER-MAN: BRAND NEW DAY"
       }
     },
     "1014": {
@@ -258,6 +259,7 @@
         "1028500": "X-Tron",
         "1028502": "ODINFORCE ULTRON",
         "1028503": "ULTRON-15",
+        "1028504": "AVENGERS: AGE OF ULTRON",
         "1028800": "INFINITY ULTRON"
       }
     },
@@ -416,7 +418,8 @@
         "1036508": "IRON SPIDER",
         "1036509": "GROOVY SWING",
         "1036800": "Spider-Man: No Way Home",
-        "1036801": "MARVEL COSMIC INVASION"
+        "1036801": "MARVEL COSMIC INVASION",
+        "1036802": "SPIDER-MAN: BRAND NEW DAY"
       }
     },
     "1037": {
@@ -454,7 +457,8 @@
         "1038501": "Emporium Matron",
         "1038502": "WITCH OF THE EVIL EYE",
         "1038800": "Doctor Strange in the Multiverse of Madness",
-        "1038801": "The Queen Of The Dead"
+        "1038801": "The Queen Of The Dead",
+        "1038803": "AVENGERS: AGE OF ULTRON"
       }
     },
     "1039": {
@@ -510,7 +514,8 @@
         "1041501": "Winter's Veil",
         "1041502": "WINTER BUCKAROO",
         "1041503": "Bucky",
-        "1041800": "Thunderbolts*"
+        "1041800": "Thunderbolts*",
+        "1041802": "CAPTAIN AMERICA: THE WINTER SOLDIER"
       }
     },
     "1042": {
