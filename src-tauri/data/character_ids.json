@@ -1,6 +1,6 @@
 {
   "source": "https://raw.githubusercontent.com/donutman07/MarvelRivalsCharacterIDs/main/MarvelRivalsCharacterIDs.md",
-  "generated_at": "2026-07-31T08:57:04.100Z",
+  "generated_at": "2026-08-06T08:45:36.336Z",
   "characters": {
     "1011": {
       "name": "Hulk",
@@ -22,6 +22,7 @@
         "1014100": "Camo",
         "1014300": "Dangan Ronin",
         "1014301": "MARAUDER MARKSMAN",
+        "1014302": "SANDSTORM SOLDIER",
         "1014500": "Thunderbolts",
         "1014501": "Punisher 2099",
         "1014502": "AQUA ARSENAL",
@@ -297,6 +298,7 @@
         "1030500": "Mister Knight",
         "1030501": "Phoenix Knight",
         "1030502": "SUAVE SPECTOR",
+        "1030503": "FIST OF KHONSHU",
         "1030800": "Fist Of Vengeance",
         "1030801": "Moon Knight Mech"
       }
@@ -623,6 +625,7 @@
         "1047500": "Incognito Dolphin",
         "1047501": "Devouring Duo",
         "1047502": "Business Shark",
+        "1047505": "JEFF-POOL",
         "1047800": "8-BIT BASH"
       }
     },
@@ -733,6 +736,9 @@
         "1052303": "LIN SHAO: THE KNOCKOUT",
         "1052304": "SAVAGE SPIRIT",
         "1052305": "LIVELY LION",
+        "1052306": "FURIOUS FLOW",
+        "1052308": "COBALT CRUISER",
+        "1052309": "BLACKENED RAGE",
         "1052310": "SHOU-LAO'S CHAMPION",
         "1052500": "Sword Master",
         "1052501": "Immortal Weapon of Agamotto",
@@ -847,6 +853,7 @@
         "1059001": "Default",
         "1059100": "APEX HUNTRESS",
         "1059101": "ICY EDGE",
+        "1059102": "WILL OF GALACTA",
         "1059300": "YOUNG BLOOD",
         "1059301": "SILVER STALKER",
         "1059302": "JADE JAGUAR",
@@ -923,6 +930,15 @@
         "1065501": "RAIDER PRIME",
         "1065502": "MIDNIGHT MIRAGE",
         "1065503": "HIGH NOON"
+      }
+    },
+    "1066": {
+      "name": "The Hood",
+      "skins": {
+        "1066001": "Default",
+        "1066100": "OBLIVION'S WHISPER",
+        "1066101": "SAPPHIRE SANDS",
+        "1066500": "SINFUL BLACKOUT"
       }
     }
   }
