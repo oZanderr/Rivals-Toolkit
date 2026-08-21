@@ -1,6 +1,6 @@
 {
   "source": "https://raw.githubusercontent.com/donutman07/MarvelRivalsCharacterIDs/main/MarvelRivalsCharacterIDs.md",
-  "generated_at": "2026-08-14T07:39:21.804Z",
+  "generated_at": "2026-08-21T06:55:08.953Z",
   "characters": {
     "1011": {
       "name": "Hulk",
@@ -787,7 +787,8 @@
         "1054500": "Dark Phoenix",
         "1054501": "SEAT OF SPRING",
         "1054502": "VERDANT VOGUE",
-        "1054503": "WHITE CROWN PHOENIX"
+        "1054503": "WHITE CROWN PHOENIX",
+        "1054504": "VIRIDIAN VOGUE"
       }
     },
     "1055": {
@@ -803,6 +804,7 @@
         "1055500": "Devil 2099",
         "1055501": "NOT DAREDEVIL",
         "1055502": "SHADOWED START",
+        "1055503": "ATTORNEY AT LAW",
         "1055800": "DAREDEVIL: BORN AGAIN SEASON 2"
       }
     },
@@ -920,6 +922,7 @@
         "1063001": "Default",
         "1063100": "SHADOWED NEMESIS",
         "1063101": "FUTURISTIC FOCUS",
+        "1063300": "ELEGANT EYE",
         "1063500": "WEAPON M"
       }
     },
