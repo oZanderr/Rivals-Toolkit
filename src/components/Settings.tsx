@@ -80,7 +80,7 @@ const COMPRESSION_LEVEL_DESC: Record<CompressionLevel, string> = {
   Optimal3: "Optimal · level 3 (slowest, smallest)",
 };
 
-type BypassKind = "none" | "legacy" | "modern";
+type BypassKind = "none" | "outdated" | "installed";
 
 interface CharacterDataInfo {
   character_count: number;
@@ -1156,17 +1156,17 @@ export function Settings({
             <div className="flex items-center gap-3 rounded-sm px-3 py-3 hover:bg-secondary/50">
               <div className="flex flex-1 flex-col gap-0.5">
                 <span className="text-[13px] font-medium">
-                  {bypassKind === "modern"
+                  {bypassKind === "installed"
                     ? "Bypass installed"
-                    : bypassKind === "legacy"
-                      ? "Legacy bypass installed"
+                    : bypassKind === "outdated"
+                      ? "Bypass out of date"
                       : "Install bypass"}
                 </span>
                 <span className="text-[11px] text-muted-foreground">
-                  {bypassKind === "modern" ? (
+                  {bypassKind === "installed" ? (
                     "Removes the bypass from the game directory."
-                  ) : bypassKind === "legacy" ? (
-                    "Older dsound.dll + .asi loader detected. Remove it to switch to the newer ASI-loader bypass."
+                  ) : bypassKind === "outdated" ? (
+                    "An older bypass is installed. Update to swap in the current loader and payload."
                   ) : (
                     <>
                       Installs{" "}
@@ -1179,38 +1179,41 @@ export function Settings({
                       >
                         oxiloader
                       </button>{" "}
-                      plus the{" "}
-                      <button
-                        type="button"
-                        onClick={() =>
-                          openUrl("https://github.com/oZanderr/rivals-sigbypass").catch(
-                            console.error
-                          )
-                        }
-                        className="text-foreground underline underline-offset-2 hover:text-primary"
-                      >
-                        rivals-sigbypass
-                      </button>{" "}
+                      as <span className="text-foreground">dsound.dll</span> plus the{" "}
+                      <span className="text-foreground">MarvelRivalsUTOCSignatureBypass.asi</span>{" "}
                       payload into the game directory. Required to load modified containers.
                     </>
                   )}
                 </span>
               </div>
-              {bypassKind === "modern" || bypassKind === "legacy" ? (
+              {bypassKind === "installed" ? (
                 <Button variant="red" size="sm" onClick={removeBypass} disabled={!draftGamePath}>
                   <ShieldOff size={13} />
                   Remove
                 </Button>
               ) : (
-                <Button
-                  variant="green"
-                  size="sm"
-                  onClick={installBypass}
-                  disabled={!draftGamePath || bypassKind === null}
-                >
-                  <Shield size={13} />
-                  Install
-                </Button>
+                <>
+                  {bypassKind === "outdated" && (
+                    <Button
+                      variant="red"
+                      size="sm"
+                      onClick={removeBypass}
+                      disabled={!draftGamePath}
+                    >
+                      <ShieldOff size={13} />
+                      Remove
+                    </Button>
+                  )}
+                  <Button
+                    variant="green"
+                    size="sm"
+                    onClick={installBypass}
+                    disabled={!draftGamePath || bypassKind === null}
+                  >
+                    <Shield size={13} />
+                    {bypassKind === "outdated" ? "Update" : "Install"}
+                  </Button>
+                </>
               )}
             </div>
           </div>

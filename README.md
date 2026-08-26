@@ -105,7 +105,7 @@ pnpm tauri build
 
 ## Signature Bypass
 
-The toolkit installs a signature bypass so the game will load modified pak containers. It drops [oxiloader](https://github.com/oZanderr/oxiloader) into the game's `Binaries/Win64` as `version.dll`, which loads the bypass payload `plugins/RivalsSigBypass.asi` (built from [oZanderr/rivals-sigbypass](https://github.com/oZanderr/rivals-sigbypass)). Users with the older `dsound.dll` + `.asi` loader can keep using it; the toolkit detects either variant and offers Remove, and installing over a leftover self-contained `version.dll` migrates it to the loader.
+The toolkit installs a signature bypass so the game will load modified pak containers. It drops [oxiloader](https://github.com/oZanderr/oxiloader) into the game's `Binaries/Win64` as `dsound.dll`, which loads the bypass payload `plugins/MarvelRivalsUTOCSignatureBypass.asi` (the original community build, redistributed unmodified). A third-party `dsound.dll` counts as installed too, since it loads the same payload. Anything left from the older `version.dll` scheme, the proxy itself or the superseded `RivalsSigBypass.asi` payload, reports as out of date, and Install clears it before writing the current pair.
 
 ## License
 
@@ -116,4 +116,4 @@ This project is dual-licensed under either of the following, at your option:
 
 ### Bundled third-party components
 
-The installed signature bypass includes [oxiloader](https://github.com/oZanderr/oxiloader) (shipped as `version.dll`), licensed under the MIT License, Copyright (c) 2026 oZanderr. Its license text is bundled at [src-tauri/resources/bypass/oxiloader-LICENSE.txt](src-tauri/resources/bypass/oxiloader-LICENSE.txt).
+The installed signature bypass includes [oxiloader](https://github.com/oZanderr/oxiloader) (shipped as `dsound.dll`), licensed under the MIT License, Copyright (c) 2026 oZanderr. Its license text is bundled at [src-tauri/resources/bypass/oxiloader-LICENSE.txt](src-tauri/resources/bypass/oxiloader-LICENSE.txt). The bypass payload `MarvelRivalsUTOCSignatureBypass.asi` is a community binary redistributed unmodified, with no license text accompanying it. Provenance and hashes for both files are recorded in [src-tauri/resources/bypass/NOTICE.md](src-tauri/resources/bypass/NOTICE.md).

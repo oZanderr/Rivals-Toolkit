@@ -15,10 +15,11 @@ pub(crate) use conflicts::ConflictReport;
 pub(crate) use folder::{BulkOpResult, InstallResult};
 pub(crate) use status::ModsStatus;
 
-// Oxide ASI Loader (oZanderr/oxiloader) proxy DLL named version.dll; loads the payload below.
-static BYPASS_ASI_LOADER: &[u8] = include_bytes!("../resources/bypass/version.dll");
-// Bypass payload built from oZanderr/rivals-sigbypass `main` branch (plain-DllMain cdylib).
-static BYPASS_PAYLOAD_ASI: &[u8] = include_bytes!("../resources/bypass/RivalsSigBypass.asi");
+// Oxide ASI Loader (oZanderr/oxiloader) proxy DLL named dsound.dll; loads the payload below.
+static BYPASS_ASI_LOADER: &[u8] = include_bytes!("../resources/bypass/dsound.dll");
+// The original community UTOC bypass payload, redistributed unmodified (resources/bypass/NOTICE.md).
+static BYPASS_PAYLOAD_ASI: &[u8] =
+    include_bytes!("../resources/bypass/MarvelRivalsUTOCSignatureBypass.asi");
 
 /// Collect relative paths of mod-related files (.pak, .ucas, .utoc, and their
 /// `.disabled` variants) under the given root directory. When `recursive` is

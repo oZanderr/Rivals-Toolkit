@@ -135,10 +135,12 @@ function formatBytes(bytes: number): string {
   return `${gb.toFixed(gb < 10 ? 2 : 1)} GB`;
 }
 
+type BypassKind = "none" | "outdated" | "installed";
+
 interface ModsStatus {
   mods_folder_exists: boolean;
   mods_folder_path: string;
-  sig_bypass_installed: boolean;
+  sig_bypass_kind: BypassKind;
   mod_entries: ModEntry[];
   conflicts_resolved: number;
 }
@@ -1006,7 +1008,7 @@ export function Mods({
         </div>
       )}
 
-      {modsStatus && !modsStatus.sig_bypass_installed && (
+      {modsStatus?.sig_bypass_kind === "none" && (
         <div className="flex items-center gap-2.5 rounded-md border border-warn/20 bg-warn/5 px-3 py-2">
           <Shield size={15} className="shrink-0 text-warn" />
           <span className="flex-1 text-[12px] text-warn">
@@ -1014,6 +1016,18 @@ export function Mods({
           </span>
           <Button variant="green" size="xs" onClick={installBypass} disabled={!gamePath}>
             Install Bypass
+          </Button>
+        </div>
+      )}
+
+      {modsStatus?.sig_bypass_kind === "outdated" && (
+        <div className="flex items-center gap-2.5 rounded-md border border-warn/20 bg-warn/5 px-3 py-2">
+          <Shield size={15} className="shrink-0 text-warn" />
+          <span className="flex-1 text-[12px] text-warn">
+            Outdated signature bypass, update it so mods keep loading
+          </span>
+          <Button variant="green" size="xs" onClick={installBypass} disabled={!gamePath}>
+            Update Bypass
           </Button>
         </div>
       )}

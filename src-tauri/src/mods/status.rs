@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::paths::mods_dir;
 
-use super::bypass::is_signature_bypass_installed;
+use super::BypassKind;
+use super::bypass::bypass_install_kind;
 use super::heroes::HeroMatch;
 use super::mod_size_on_disk;
 use super::walk_mod_files;
@@ -37,7 +38,7 @@ pub(crate) struct ModEntry {
 pub(crate) struct ModsStatus {
     pub mods_folder_exists: bool,
     pub mods_folder_path: String,
-    pub sig_bypass_installed: bool,
+    pub sig_bypass_kind: BypassKind,
     pub mod_entries: Vec<ModEntry>,
     /// Number of disabled duplicates auto-removed because an enabled version of the same mod existed.
     pub conflicts_resolved: u32,
@@ -47,7 +48,7 @@ pub(crate) fn get_mods_status(game_root: &str, recursive: bool) -> ModsStatus {
     let mods = mods_dir(game_root);
     let exists = mods.exists();
 
-    let sig_bypass_installed = is_signature_bypass_installed(game_root);
+    let sig_bypass_kind = bypass_install_kind(game_root);
 
     let mut mod_entries: Vec<ModEntry> = if exists {
         walk_mod_files(&mods, recursive)
@@ -134,7 +135,7 @@ pub(crate) fn get_mods_status(game_root: &str, recursive: bool) -> ModsStatus {
     ModsStatus {
         mods_folder_exists: exists,
         mods_folder_path: mods.to_string_lossy().into_owned(),
-        sig_bypass_installed,
+        sig_bypass_kind,
         mod_entries,
         conflicts_resolved,
     }
