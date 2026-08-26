@@ -523,12 +523,16 @@ fn resolve_target_packages(
     Ok((store, packages))
 }
 
-/// Open the target container in isolation (no base game, no other mods).
+/// Open the target container in isolation (no base game, no other mods). `utoc_path` is where
+/// the container actually lives, which is rarely `paks_dir` itself since mods sit under `~mods`.
 fn open_target_only(
     paks_dir: &Path,
+    utoc_path: &Path,
     target_container: &str,
 ) -> Result<Box<dyn IoStoreTrait>, String> {
-    if !utoc_is_decryptable(&paks_dir.join(format!("{target_container}.utoc"))) {
+    // Only a readable container under an unknown key GUID is an encryption failure. A missing or
+    // unreadable file fails the same check, so let it reach the honest error further down.
+    if utoc_path.is_file() && !utoc_is_decryptable(utoc_path) {
         return Err(format!(
             "{target_container} is encrypted with a key this app does not have and cannot be extracted."
         ));
@@ -553,7 +557,7 @@ pub(crate) fn count_utoc_legacy_packages(
         .to_string();
 
     let paks_dir = crate::paths::paks_dir(game_root);
-    let store = open_target_only(&paks_dir, &target_container)?;
+    let store = open_target_only(&paks_dir, Path::new(utoc_path), &target_container)?;
 
     let target = store
         .child_containers()
@@ -679,7 +683,7 @@ pub(crate) fn extract_utoc_legacy(
         resolve_target_packages(&target_paths, game_root, &target_container, filter)?;
 
     let paks_dir = crate::paths::paks_dir(game_root);
-    let target_store = open_target_only(&paks_dir, &target_container)?;
+    let target_store = open_target_only(&paks_dir, Path::new(utoc_path), &target_container)?;
     let store = ModScopedStore {
         full: full_store,
         target: target_store,
@@ -776,4 +780,40 @@ pub(crate) fn extract_utoc_legacy(
     }
 
     Ok(extracted)
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    /// Minimal TOC header: valid magic, encryption flag clear, so the decryptability probe
+    /// passes and only the container's location is under test.
+    fn write_stub_utoc(path: &Path) {
+        let mut header = vec![0u8; 0x90];
+        header[0..16].copy_from_slice(b"-==--==--==--==-");
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("create dir");
+        std::fs::write(path, &header).expect("write stub utoc");
+    }
+
+    /// Mods live under `~mods`, so a guard that rebuilt the path from `paks_dir` and the
+    /// container name found nothing and reported every mod as encrypted.
+    #[test]
+    fn container_in_a_subfolder_is_not_reported_as_encrypted() {
+        let paks_dir =
+            std::env::temp_dir().join(format!("rivals-iostore-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&paks_dir);
+        let utoc_path = paks_dir.join("~mods").join("SomeMod_9999999_P.utoc");
+        write_stub_utoc(&utoc_path);
+
+        let err = open_target_only(&paks_dir, &utoc_path, "SomeMod_9999999_P")
+            .err()
+            .unwrap_or_default();
+
+        assert!(
+            !err.contains("encrypted with a key"),
+            "guard rejected a container it should have found: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&paks_dir);
+    }
 }
