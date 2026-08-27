@@ -306,6 +306,7 @@ fn archive_format(path: &str) -> Result<ArchiveFormat, String> {
     {
         Some("zip") => Ok(ArchiveFormat::Zip),
         Some("7z") => Ok(ArchiveFormat::SevenZ),
+        Some("rar") => Ok(ArchiveFormat::Rar),
         _ => Err(format!("Unsupported archive format: {path}")),
     }
 }
@@ -313,6 +314,7 @@ fn archive_format(path: &str) -> Result<ArchiveFormat, String> {
 enum ArchiveFormat {
     Zip,
     SevenZ,
+    Rar,
 }
 
 pub(crate) fn install_from_archive(
@@ -330,6 +332,7 @@ pub(crate) fn install_from_archive(
     let extract_result = match format {
         ArchiveFormat::Zip => extract_zip(archive_path, &temp_dir),
         ArchiveFormat::SevenZ => extract_7z(archive_path, &temp_dir),
+        ArchiveFormat::Rar => extract_rar(archive_path, &temp_dir),
     };
     if let Err(e) = extract_result {
         let _ = std::fs::remove_dir_all(&temp_dir);
@@ -374,6 +377,42 @@ fn extract_zip(archive_path: &str, temp_dir: &Path) -> Result<(), String> {
         let mut out =
             std::fs::File::create(&dest).map_err(|e| format!("Failed to create {name}: {e}"))?;
         io::copy(&mut entry, &mut out).map_err(|e| format!("Failed to extract {name}: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Like the other two, entries are flattened to their file name and filtered to mod files, so a
+/// crafted path cannot escape the temp dir.
+///
+/// UnRAR source code may be used in any software to handle RAR archives without limitations free of
+/// charge, but cannot be used to develop RAR (WinRAR) compatible archiver and to re-create RAR
+/// compression algorithm, which is proprietary. Distribution of modified UnRAR source code in
+/// separate form or as a part of other software is permitted, provided that full text of this
+/// paragraph, starting from "UnRAR source code" words, is included in license, or in documentation
+/// if license is not available, and in source code comments of resulting package.
+fn extract_rar(archive_path: &str, temp_dir: &Path) -> Result<(), String> {
+    let mut archive = unrar::Archive::new(archive_path)
+        .open_for_processing()
+        .map_err(|e| format!("Invalid rar file: {e}"))?;
+
+    while let Some(header) = archive
+        .read_header()
+        .map_err(|e| format!("Failed to read rar entry: {e}"))?
+    {
+        let entry = header.entry();
+        let name = entry
+            .filename
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(str::to_string);
+        archive = match name {
+            Some(name) if entry.is_file() && is_mod_ext(&name) => header
+                .extract_to(temp_dir.join(&name))
+                .map_err(|e| format!("Failed to extract {name}: {e}"))?,
+            _ => header
+                .skip()
+                .map_err(|e| format!("Failed to skip rar entry: {e}"))?,
+        };
     }
     Ok(())
 }
@@ -442,6 +481,10 @@ pub(crate) fn export_mods_archive(
     match format {
         ArchiveFormat::Zip => export_zip(dest_path, &files)?,
         ArchiveFormat::SevenZ => export_7z(dest_path, &files)?,
+        // unrar extracts only, and its licence forbids building a RAR-compatible archiver.
+        ArchiveFormat::Rar => {
+            return Err("Exporting to .rar is not supported. Use .zip or .7z.".to_string());
+        }
     }
 
     Ok(format!(

@@ -117,3 +117,14 @@ This project is dual-licensed under either of the following, at your option:
 ### Bundled third-party components
 
 The installed signature bypass includes [oxiloader](https://github.com/oZanderr/oxiloader) (shipped as `dsound.dll`), licensed under the MIT License, Copyright (c) 2026 oZanderr. Its license text is bundled at [src-tauri/resources/bypass/oxiloader-LICENSE.txt](src-tauri/resources/bypass/oxiloader-LICENSE.txt). The bypass payload `MarvelRivalsUTOCSignatureBypass.asi` is a community binary redistributed unmodified, with no license text accompanying it. Provenance and hashes for both files are recorded in [src-tauri/resources/bypass/NOTICE.md](src-tauri/resources/bypass/NOTICE.md).
+
+Installing mods from `.rar` archives uses the [unrar](https://crates.io/crates/unrar) crate, which
+vendors Alexander Roshal's UnRAR source. That source is used only to extract archives, never to
+create them, and its license requires the following paragraph to be reproduced:
+
+> UnRAR source code may be used in any software to handle RAR archives without limitations free of
+> charge, but cannot be used to develop RAR (WinRAR) compatible archiver and to re-create RAR
+> compression algorithm, which is proprietary. Distribution of modified UnRAR source code in
+> separate form or as a part of other software is permitted, provided that full text of this
+> paragraph, starting from "UnRAR source code" words, is included in license, or in documentation if
+> license is not available, and in source code comments of resulting package.

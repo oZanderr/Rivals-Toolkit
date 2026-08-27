@@ -331,7 +331,7 @@ export function Mods({
     });
   }, [modsStatus]);
 
-  // Drag-and-drop: accept .pak and .zip files dropped anywhere on the window.
+  // Drag-and-drop: accept .pak and archive files dropped anywhere on the window.
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     getCurrentWindow()
@@ -355,7 +355,7 @@ export function Mods({
           const pakPaths = event.payload.paths.filter((p) => p.endsWith(".pak"));
           const archivePaths = event.payload.paths.filter((p) => {
             const lower = p.toLowerCase();
-            return lower.endsWith(".zip") || lower.endsWith(".7z");
+            return lower.endsWith(".zip") || lower.endsWith(".7z") || lower.endsWith(".rar");
           });
           if (pakPaths.length === 0 && archivePaths.length === 0) return;
           dropProcessingRef.current = true;
@@ -381,7 +381,7 @@ export function Mods({
               }
             }
 
-            // Install mods from .zip / .7z archives
+            // Install mods from .zip / .7z / .rar archives
             for (const z of archivePaths) {
               try {
                 const results = await invoke<
@@ -961,7 +961,9 @@ export function Mods({
       {isDragging && (
         <div className="pointer-events-none absolute inset-0 z-50 flex flex-col items-center justify-center gap-3 rounded-lg border-2 border-dashed border-ok bg-background/80 backdrop-blur-sm">
           <UploadCloud size={36} className="text-ok" />
-          <span className="text-sm font-semibold text-ok">Drop .pak, .zip or .7z to install</span>
+          <span className="text-sm font-semibold text-ok">
+            Drop .pak, .zip, .7z or .rar to install
+          </span>
         </div>
       )}
       {/* Header */}

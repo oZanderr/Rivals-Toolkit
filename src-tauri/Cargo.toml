@@ -33,6 +33,9 @@ winreg = "0.52"
 dirs = "5"
 zip = { version = "8.2.0", default-features = false, features = ["deflate"] }
 sevenz-rust2 = { version = "0.20", default-features = false, features = ["compress", "util"] }
+# UnRAR licence: redistribution is allowed, but the source may not be used to build a
+# RAR-compatible archiver. Extraction only.
+unrar = "0.5"
 blake3 = "1"
 sha2 = "0.10"
 rayon = "1"
