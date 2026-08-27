@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use aes::cipher::KeyInit;
+use serde::{Deserialize, Serialize};
 
 /// AES-256 key for containers using the default (all-zero) encryption-key GUID.
 pub(crate) const MARVEL_AES_KEY_HEX: &str =
@@ -19,6 +20,34 @@ pub(crate) const NAMED_AES_KEYS: &[([u8; 16], &str)] = &[(
     ],
     "C1149B1DBECF933C290C328A764427C1CA2AEC6D9EFEBD6A7750EE3FAB0A059E",
 )];
+
+/// Compression the game is known to decode. Oodle is what Rivals ships, and Zlib is UE's
+/// always-present fallback. retoc and repak both also support Zstd and LZ4, deliberately left out
+/// until someone confirms this game's runtime decodes them: a container it cannot read produces a
+/// mod that silently fails to load.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum PackCompression {
+    #[default]
+    Oodle,
+    Zlib,
+}
+
+impl PackCompression {
+    pub(crate) fn repak(self) -> [repak::Compression; 1] {
+        match self {
+            Self::Oodle => [repak::Compression::Oodle],
+            Self::Zlib => [repak::Compression::Zlib],
+        }
+    }
+
+    pub(crate) fn retoc(self) -> retoc::compression::CompressionMethod {
+        match self {
+            Self::Oodle => retoc::compression::CompressionMethod::Oodle,
+            Self::Zlib => retoc::compression::CompressionMethod::Zlib,
+        }
+    }
+}
 
 /// IoStore compression block size Marvel Rivals expects.
 pub(crate) const RIVALS_BLOCK_SIZE: u32 = 0x10000;
@@ -42,7 +71,7 @@ impl RivalsPakProfile {
     }
 
     pub(crate) fn compression(self) -> [repak::Compression; 1] {
-        [repak::Compression::Oodle]
+        PackCompression::default().repak()
     }
 
     pub(crate) fn mount_point(self) -> &'static str {

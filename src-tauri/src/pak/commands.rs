@@ -3,6 +3,7 @@
 use tauri::{AppHandle, State};
 
 use crate::pak;
+use crate::pak::profile::PackCompression;
 use crate::pak::{ExtractReport, InPlaceReport, PakFileInfo, RebuildReport};
 use crate::settings::{
     SettingsState, mod_compression_level, recursive_mod_scan, vanilla_compression_level,
@@ -89,14 +90,17 @@ pub(crate) async fn repack_pak(
     state: State<'_, SettingsState>,
     input_dir: String,
     output_pak: String,
+    compression: PackCompression,
 ) -> Result<(), String> {
     if crate::game_status::should_block_for_game() {
         return Err(crate::game_status::game_running_error());
     }
     let level = Some(mod_compression_level(&state).to_oodle());
-    tauri::async_runtime::spawn_blocking(move || pak::repack_pak(&input_dir, &output_pak, level))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        pak::repack_pak(&input_dir, &output_pak, level, compression)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -105,6 +109,7 @@ pub(crate) async fn repack_iostore(
     input_dir: String,
     output_utoc: String,
     obfuscate: bool,
+    compression: PackCompression,
     app: AppHandle,
 ) -> Result<(), String> {
     if crate::game_status::should_block_for_game() {
@@ -112,7 +117,7 @@ pub(crate) async fn repack_iostore(
     }
     let level = Some(mod_compression_level(&state).to_oodle());
     tauri::async_runtime::spawn_blocking(move || {
-        pak::repack_iostore(&input_dir, &output_utoc, level, obfuscate, app)
+        pak::repack_iostore(&input_dir, &output_utoc, level, obfuscate, compression, app)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -125,6 +130,7 @@ pub(crate) async fn repack_mod_in_place(
     mod_pak: String,
     to_iostore: bool,
     obfuscate: bool,
+    compression: PackCompression,
     app: AppHandle,
 ) -> Result<InPlaceReport, String> {
     if crate::game_status::should_block_for_game() {
@@ -132,7 +138,15 @@ pub(crate) async fn repack_mod_in_place(
     }
     let level = Some(mod_compression_level(&state).to_oodle());
     tauri::async_runtime::spawn_blocking(move || {
-        pak::repack_mod_in_place(&game_root, &mod_pak, to_iostore, obfuscate, level, app)
+        pak::repack_mod_in_place(
+            &game_root,
+            &mod_pak,
+            to_iostore,
+            obfuscate,
+            level,
+            compression,
+            app,
+        )
     })
     .await
     .map_err(|e| e.to_string())?

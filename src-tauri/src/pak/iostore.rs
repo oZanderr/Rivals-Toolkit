@@ -59,6 +59,7 @@ pub(crate) fn repack_iostore(
     output_utoc: &str,
     oodle_level: Option<retoc::OodleCompressionLevel>,
     obfuscate: bool,
+    compression: super::profile::PackCompression,
     app: AppHandle,
 ) -> Result<(), String> {
     REPACK_CANCEL.store(false, Ordering::Relaxed);
@@ -102,7 +103,7 @@ pub(crate) fn repack_iostore(
         toc_version,
         Some(container_header_version),
         MOUNT_POINT.into(),
-        Some(retoc::compression::CompressionMethod::Oodle),
+        Some(compression.retoc()),
     )
     .map_err(|e| e.to_string())?
     .with_compression_block_size(crate::pak::profile::RIVALS_BLOCK_SIZE);

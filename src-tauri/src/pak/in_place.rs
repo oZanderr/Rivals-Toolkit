@@ -172,6 +172,7 @@ pub(crate) fn repack_mod_in_place(
     to_iostore: bool,
     obfuscate: bool,
     oodle_level: Option<retoc::OodleCompressionLevel>,
+    compression: super::profile::PackCompression,
     app: AppHandle,
 ) -> Result<InPlaceReport, String> {
     let live_pak = PathBuf::from(mod_pak);
@@ -256,6 +257,7 @@ pub(crate) fn repack_mod_in_place(
             &staged_utoc.to_string_lossy(),
             oodle_level,
             obfuscate,
+            compression,
             app,
         )?;
         if carried_pak_entries > 0 {
@@ -271,6 +273,7 @@ pub(crate) fn repack_mod_in_place(
                 &sidecar.to_string_lossy(),
                 &staged_pak.to_string_lossy(),
                 oodle_level,
+                compression,
             )?;
         }
     } else {
@@ -278,6 +281,7 @@ pub(crate) fn repack_mod_in_place(
             &assets_dir.to_string_lossy(),
             &staged_pak.to_string_lossy(),
             oodle_level,
+            compression,
         )?;
     }
 

@@ -93,15 +93,16 @@ pub(crate) fn repack_pak(
     input_dir: &str,
     output_pak: &str,
     oodle_level: Option<retoc::OodleCompressionLevel>,
+    compression: profile::PackCompression,
 ) -> Result<(), String> {
-    writer::repack_pak(input_dir, output_pak, oodle_level)
+    writer::repack_pak(input_dir, output_pak, oodle_level, compression)
 }
 
 pub(crate) fn write_pak_bytes(
     output_pak: &str,
     files: Vec<(String, Vec<u8>)>,
 ) -> Result<(), String> {
-    writer::write_pak_bytes(output_pak, files, None)
+    writer::write_pak_bytes(output_pak, files, None, profile::PackCompression::default())
 }
 
 pub(crate) fn repack_iostore(
@@ -109,9 +110,17 @@ pub(crate) fn repack_iostore(
     output_utoc: &str,
     oodle_level: Option<retoc::OodleCompressionLevel>,
     obfuscate: bool,
+    compression: profile::PackCompression,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
-    iostore::repack_iostore(input_dir, output_utoc, oodle_level, obfuscate, app)
+    iostore::repack_iostore(
+        input_dir,
+        output_utoc,
+        oodle_level,
+        obfuscate,
+        compression,
+        app,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -121,9 +130,18 @@ pub(crate) fn repack_mod_in_place(
     to_iostore: bool,
     obfuscate: bool,
     oodle_level: Option<retoc::OodleCompressionLevel>,
+    compression: profile::PackCompression,
     app: tauri::AppHandle,
 ) -> Result<InPlaceReport, String> {
-    in_place::repack_mod_in_place(game_root, mod_pak, to_iostore, obfuscate, oodle_level, app)
+    in_place::repack_mod_in_place(
+        game_root,
+        mod_pak,
+        to_iostore,
+        obfuscate,
+        oodle_level,
+        compression,
+        app,
+    )
 }
 
 /// Drop cached listings for these containers. The cache key is `(path, size)`, so a repack that

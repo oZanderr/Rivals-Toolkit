@@ -80,13 +80,18 @@ import { cn } from "@/lib/utils";
 // Everything a repack run needs. `kind` says where the assets come from; the options are the
 // same either way, which is what lets both routes share one dialog.
 type RepackPrompt = {
-  kind: "folder" | "in-place";
+  kind: "folder" | "in-place" | "all-mods";
   // Folder of loose assets, or the mod's own .pak for an in-place run.
   source: string;
   label: string;
   toIoStore: boolean;
   obfuscate: boolean;
+  compression: PackCompression;
 };
+
+// Only what the game is known to decode. Oodle is what Rivals ships; Zlib is UE's built-in
+// fallback. Zstd and LZ4 exist in the writers but are unverified against this game.
+type PackCompression = "oodle" | "zlib";
 type StatusType = "ok" | "err" | "info";
 
 // One long-running job, owned by the handler that started it. Progress events only update the
@@ -97,6 +102,9 @@ type Operation = {
   current: number;
   total: number;
   cancel: () => void;
+  // Set by a batch to count its items. Progress events only touch phase/current/total, so the
+  // per-asset numbers coming from the backend cannot clobber "3 of 20".
+  scope?: string;
 };
 
 // Backend events that report into the active operation, with the phase name to fall back on when
@@ -1143,6 +1151,7 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
       label: folderName,
       toIoStore: folderToIoStore,
       obfuscate: false,
+      compression: "oodle",
     });
   }
 
@@ -1155,6 +1164,36 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
       label: pak.split(/[/\\]/).pop() ?? pak,
       toIoStore: isIoStore,
       obfuscate: !!info?.obfuscated,
+      compression: "oodle",
+    });
+  }
+
+  function promptRepackAll() {
+    const mods = pakList.filter((p) => /[/\\]~mods[/\\]/i.test(p.path));
+    if (mods.length === 0) return showNotice("No mods installed to repack.", "info");
+    setRepackPrompt({
+      kind: "all-mods",
+      source: "",
+      label: `${mods.length} mod${mods.length === 1 ? "" : "s"}`,
+      // A mixed library has no single current format, so the batch states its own intent.
+      toIoStore: true,
+      obfuscate: false,
+      compression: "oodle",
+    });
+  }
+
+  async function repackOneInPlace(modPak: string, prompt: RepackPrompt) {
+    return invoke<{
+      container_name: string;
+      assets_in: number;
+      assets_out: number;
+      carried_pak_entries: number;
+    }>("repack_mod_in_place", {
+      gameRoot: gamePath,
+      modPak,
+      toIostore: prompt.toIoStore,
+      obfuscate: prompt.obfuscate,
+      compression: prompt.compression,
     });
   }
 
@@ -1163,6 +1202,46 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
     const prompt = repackPrompt;
     setRepackPrompt(null);
     const label = prompt.toIoStore ? (prompt.obfuscate ? "obfuscated IoStore" : "IoStore") : "pak";
+
+    if (prompt.kind === "all-mods") {
+      if (!gamePath) return showNotice("Set the game path first.", "err");
+      const mods = pakList.filter((p) => /[/\\]~mods[/\\]/i.test(p.path));
+      setBusy(true);
+      startOperation(`Repacking ${prompt.label} to ${label}`, [
+        "cancel_legacy_extraction",
+        "cancel_repack_iostore",
+      ]);
+      let done = 0;
+      const failures: string[] = [];
+      for (const mod of mods) {
+        const name = mod.path.split(/[/\\]/).pop() ?? mod.path;
+        setOperation((op) => op && { ...op, scope: `${done + 1} of ${mods.length}` });
+        try {
+          await repackOneInPlace(mod.path, prompt);
+          pakContentsCacheRef.current.delete(mod.path);
+          done++;
+        } catch (e: unknown) {
+          // Each mod is verified and swapped on its own, so one failure leaves the rest alone.
+          failures.push(`${name}: ${String(e)}`);
+        }
+      }
+      setOperation(null);
+      setBusy(false);
+      if (failures.length > 0) {
+        console.error("Batch repack failures:", failures);
+        showNotice(
+          `Repacked ${done} of ${mods.length}; ${failures.length} failed, see the console.`,
+          "err",
+          { duration: 8000 }
+        );
+      } else {
+        showNotice(`Repacked ${done} mod${done === 1 ? "" : "s"} to ${label}`, "ok");
+      }
+      const modsFolder = mods[0]?.path.replace(/[\\/][^\\/]+$/, "");
+      if (modsFolder) emitModsChanged({ modsFolder, source: "AssetManager" });
+      await listPaks();
+      return;
+    }
 
     if (prompt.kind === "in-place") {
       if (!gamePath) return showNotice("Set the game path first.", "err");
@@ -1173,17 +1252,7 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
       ]);
       showNotice(`Repacking ${prompt.label} to ${label}\u2026`, "info");
       try {
-        const report = await invoke<{
-          container_name: string;
-          assets_in: number;
-          assets_out: number;
-          carried_pak_entries: number;
-        }>("repack_mod_in_place", {
-          gameRoot: gamePath,
-          modPak: prompt.source,
-          toIostore: prompt.toIoStore,
-          obfuscate: prompt.obfuscate,
-        });
+        const report = await repackOneInPlace(prompt.source, prompt);
         const carried = report.carried_pak_entries
           ? `, ${report.carried_pak_entries} pak file(s) carried over`
           : "";
@@ -1229,9 +1298,14 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
           inputDir: prompt.source,
           outputUtoc: output,
           obfuscate: prompt.obfuscate,
+          compression: prompt.compression,
         });
       } else {
-        await invoke("repack_pak", { inputDir: prompt.source, outputPak: output });
+        await invoke("repack_pak", {
+          inputDir: prompt.source,
+          outputPak: output,
+          compression: prompt.compression,
+        });
       }
       showNotice(`Repacked ${label} to: ${output}`, "ok", { revealPath: output });
       emitModsChanged({
@@ -1389,7 +1463,8 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
         {operation && (
           <div className="flex min-w-0 items-center gap-2">
             <span className="min-w-0 shrink truncate text-[11px] text-muted-foreground">
-              {operation.label} · {operation.phase}
+              {operation.label}
+              {operation.scope ? ` (${operation.scope})` : ""} · {operation.phase}
             </span>
             {operation.total > 0 ? (
               <>
@@ -1415,6 +1490,12 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
           </div>
         )}
         <div className="ml-auto flex shrink-0 items-center gap-2">
+          <Tip content="Repack every installed mod in place, with one set of options">
+            <Button variant="outline" size="sm" onClick={promptRepackAll} disabled={busy}>
+              <Layers size={15} />
+              Repack All
+            </Button>
+          </Tip>
           <Button variant="blue" size="sm" onClick={openAndRepack} disabled={busy}>
             <PackageOpen size={15} />
             Repack Folder
@@ -2050,10 +2131,20 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>
-              {displayRepackPrompt?.kind === "in-place" ? "Repack mod" : "Repack folder"}
+              {displayRepackPrompt?.kind === "in-place"
+                ? "Repack mod"
+                : displayRepackPrompt?.kind === "all-mods"
+                  ? "Repack every mod"
+                  : "Repack folder"}
             </AlertDialogTitle>
             <AlertDialogDescription>
-              {displayRepackPrompt?.kind === "in-place" ? (
+              {displayRepackPrompt?.kind === "all-mods" ? (
+                <>
+                  Rebuilds all <span className="font-mono">{displayRepackPrompt.label}</span> in{" "}
+                  <span className="font-mono">~mods</span>, one at a time. Each is verified before
+                  it replaces the original, and one failure leaves the rest untouched.
+                </>
+              ) : displayRepackPrompt?.kind === "in-place" ? (
                 <>
                   Rebuilds <span className="font-mono">{displayRepackPrompt.label}</span> and
                   replaces it in <span className="font-mono">~mods</span>. The original is put back
@@ -2104,6 +2195,28 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
                 </button>
               );
             })}
+          </div>
+
+          <div className="flex items-center gap-3">
+            <span className="shrink-0 text-[12px] text-muted-foreground">Compression</span>
+            <div className="flex items-center">
+              {(["oodle", "zlib"] as const).map((method, i) => (
+                <Button
+                  key={method}
+                  variant={repackPrompt?.compression === method ? "secondary" : "outline"}
+                  size="sm"
+                  className={i === 0 ? "rounded-r-none" : "rounded-l-none border-l-0"}
+                  onClick={() => setRepackPrompt((p) => p && { ...p, compression: method })}
+                >
+                  {method === "oodle" ? "Oodle" : "Zlib"}
+                </Button>
+              ))}
+            </div>
+            <span className="text-[11px] text-muted-foreground">
+              {repackPrompt?.compression === "oodle"
+                ? "What the game ships with."
+                : "Larger, but decodable by any UE build."}
+            </span>
           </div>
 
           <AlertDialogFooter>

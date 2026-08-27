@@ -6,15 +6,16 @@ use retoc::OodleCompressionLevel;
 use walkdir::WalkDir;
 
 use super::crypto::make_aes_key;
-use super::profile::RIVALS_PROFILE;
+use super::profile::{PackCompression, RIVALS_PROFILE};
 
 fn pak_builder_with_level(
     oodle_level: Option<OodleCompressionLevel>,
+    compression: PackCompression,
 ) -> Result<repak::PakBuilder, String> {
     let mut builder = repak::PakBuilder::new()
         .profile(RIVALS_PROFILE.repak_profile())
         .key(make_aes_key()?)
-        .compression(RIVALS_PROFILE.compression());
+        .compression(compression.repak());
     if let Some(level) = oodle_level {
         builder = builder.oodle_level(level);
     }
@@ -30,7 +31,7 @@ pub(super) fn write_empty_pak(
     }
 
     let out_file = fs::File::create(output_pak).map_err(|e| e.to_string())?;
-    let pak_writer = pak_builder_with_level(oodle_level)?.writer(
+    let pak_writer = pak_builder_with_level(oodle_level, PackCompression::default())?.writer(
         BufWriter::new(out_file),
         RIVALS_PROFILE.pak_version(),
         RIVALS_PROFILE.mount_point().to_string(),
@@ -45,6 +46,7 @@ pub(super) fn write_pak_bytes(
     output_pak: &str,
     mut files: Vec<(String, Vec<u8>)>,
     oodle_level: Option<OodleCompressionLevel>,
+    compression: PackCompression,
 ) -> Result<(), String> {
     if files.is_empty() {
         return Err("No files provided for pak build.".to_string());
@@ -54,7 +56,7 @@ pub(super) fn write_pak_bytes(
     }
 
     let out_file = fs::File::create(output_pak).map_err(|e| e.to_string())?;
-    let mut pak_writer = pak_builder_with_level(oodle_level)?.writer(
+    let mut pak_writer = pak_builder_with_level(oodle_level, compression)?.writer(
         BufWriter::new(out_file),
         RIVALS_PROFILE.pak_version(),
         RIVALS_PROFILE.mount_point().to_string(),
@@ -86,7 +88,7 @@ pub(super) fn write_pak_streaming(
     }
 
     let out_file = fs::File::create(output_pak).map_err(|e| e.to_string())?;
-    let mut pak_writer = pak_builder_with_level(oodle_level)?.writer(
+    let mut pak_writer = pak_builder_with_level(oodle_level, PackCompression::default())?.writer(
         BufWriter::new(out_file),
         RIVALS_PROFILE.pak_version(),
         RIVALS_PROFILE.mount_point().to_string(),
@@ -108,6 +110,7 @@ pub(super) fn repack_pak(
     input_dir: &str,
     output_pak: &str,
     oodle_level: Option<OodleCompressionLevel>,
+    compression: PackCompression,
 ) -> Result<(), String> {
     let input = Path::new(input_dir);
     if !input.exists() {
@@ -139,5 +142,5 @@ pub(super) fn repack_pak(
         return Err("No files found in the input directory.".to_string());
     }
 
-    write_pak_bytes(output_pak, files, oodle_level)
+    write_pak_bytes(output_pak, files, oodle_level, compression)
 }
