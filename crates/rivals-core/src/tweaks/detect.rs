@@ -8,7 +8,7 @@ use super::catalogue::{TweakDefinition, TweakKind, TweakState};
 use super::parser::{find_key_value, pattern_present_anywhere, values_equal};
 
 /// Detect the state of each tweak from flat key=value content with no section structure.
-pub(crate) fn detect_active_tweaks_unscoped(
+pub fn detect_active_tweaks_unscoped(
     content: &str,
     catalogue: &[TweakDefinition],
 ) -> Vec<TweakState> {

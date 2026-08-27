@@ -1,0 +1,18 @@
+[package]
+name = "rivals-core"
+description = "Marvel Rivals pak and config-tweak engine, free of any UI framework"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+repak.workspace = true
+retoc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+aes.workspace = true
+hex.workspace = true
+walkdir.workspace = true
+dirs.workspace = true
+blake3.workspace = true
+sysinfo.workspace = true

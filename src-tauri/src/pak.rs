@@ -1,13 +1,13 @@
 //! Pak and IoStore (utoc/ucas) read/write/extract/repack via forked repak/retoc/rebnk crates.
 
 pub(crate) mod commands;
-pub(crate) mod crypto;
 mod game_rebuild;
 mod in_place;
 mod iostore;
-pub(crate) mod profile;
 mod reader;
 mod writer;
+
+pub(crate) use rivals_core::pak::{crypto, profile};
 
 use std::{
     collections::HashMap,

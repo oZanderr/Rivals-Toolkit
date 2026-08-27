@@ -3465,6 +3465,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "rivals-cli"
+version = "0.13.1"
+dependencies = [
+ "clap",
+ "dirs 5.0.1",
+ "rivals-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "rivals-core"
+version = "0.13.1"
+dependencies = [
+ "aes",
+ "blake3",
+ "dirs 5.0.1",
+ "hex",
+ "repak",
+ "retoc",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "walkdir",
+]
+
+[[package]]
 name = "rivals-toolkit"
 version = "0.13.1"
 dependencies = [
@@ -3477,6 +3504,7 @@ dependencies = [
  "rebnk",
  "repak",
  "retoc",
+ "rivals-core",
  "serde",
  "serde_json",
  "sevenz-rust2",

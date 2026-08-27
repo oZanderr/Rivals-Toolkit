@@ -4,11 +4,11 @@ use std::{fs, io::BufReader, path::Path};
 
 use super::profile::RIVALS_PROFILE;
 
-pub(crate) fn make_aes_key() -> Result<aes::Aes256, String> {
+pub fn make_aes_key() -> Result<aes::Aes256, String> {
     RIVALS_PROFILE.make_aes_key()
 }
 
-pub(crate) fn open_pak(pak_path: &Path) -> Result<repak::PakReader, String> {
+pub fn open_pak(pak_path: &Path) -> Result<repak::PakReader, String> {
     // Patch containers (e.g. pakchunkPatch07) encrypt their index under a named key; repak picks
     // the key matching the pak footer's GUID from the chain, falling back to the default key.
     let file = fs::File::open(pak_path).map_err(|e| e.to_string())?;

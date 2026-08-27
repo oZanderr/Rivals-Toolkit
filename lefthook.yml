@@ -13,7 +13,7 @@ pre-commit:
     format-rust:
       run: pnpm format:rust
       stage_fixed: true
-      glob: "src-tauri/**/*.rs"
+      glob: "{src-tauri,crates}/**/*.rs"
     clippy:
       run: pnpm lint:rust
-      glob: "src-tauri/**/*.rs"
+      glob: "{src-tauri,crates}/**/*.rs"

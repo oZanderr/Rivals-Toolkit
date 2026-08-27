@@ -4,10 +4,10 @@ use tauri::State;
 
 use crate::pak_tweaks;
 use crate::pak_tweaks::{
-    PakIniFileContent, PakIniInfo, PakIniListing, PakIniListingScan, PakIniScan, PakTweakEdit,
+    PakIniFileContent, PakIniInfo, PakIniListing, PakIniListingScan, PakIniScan,
 };
 use crate::settings::{SettingsState, recursive_mod_scan};
-use crate::tweaks::{TweakDefinition, TweakState};
+use crate::tweaks::{TweakDefinition, TweakSetting, TweakState};
 
 #[tauri::command]
 pub(crate) fn get_tweak_definitions() -> Vec<TweakDefinition> {
@@ -61,17 +61,24 @@ pub(crate) async fn detect_pak_tweaks(pak_path: String) -> Result<Vec<TweakState
         .map_err(|e| e.to_string())?
 }
 
+/// Put the named tweaks into the requested state.
+///
+/// The id-to-edit translation lives in `rivals_core`, so this and the CLI cannot disagree about
+/// what a tweak writes.
 #[tauri::command]
-pub(crate) async fn apply_pak_tweak_edits(
+pub(crate) async fn apply_pak_tweak_settings(
     pak_path: String,
-    edits: Vec<PakTweakEdit>,
+    settings: Vec<TweakSetting>,
 ) -> Result<String, String> {
     if crate::game_status::should_block_for_game() {
         return Err(crate::game_status::game_running_error());
     }
-    tauri::async_runtime::spawn_blocking(move || pak_tweaks::apply_pak_tweaks(&pak_path, &edits))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        let edits = pak_tweaks::edits_for_settings(&settings)?;
+        pak_tweaks::apply_pak_tweaks(&pak_path, &edits)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

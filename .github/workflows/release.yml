@@ -84,7 +84,7 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           workspaces: |
-            src-tauri -> target
+            . -> target
           shared-key: tauri-release
           save-if: false
 
@@ -94,12 +94,16 @@ jobs:
       - name: Build Windows executable (no bundles)
         run: pnpm tauri build --no-bundle
 
-      - name: Verify release executable exists
+      - name: Build CLI
+        run: cargo build --release -p rivals-cli
+
+      - name: Verify release executables exist
         shell: pwsh
         run: |
-          $exePath = "src-tauri/target/release/rivals-toolkit.exe"
-          if (-not (Test-Path $exePath)) {
-            throw "Expected executable not found at $exePath"
+          foreach ($exePath in @("target/release/rivals-toolkit.exe", "target/release/rivals-cli.exe")) {
+            if (-not (Test-Path $exePath)) {
+              throw "Expected executable not found at $exePath"
+            }
           }
 
       - name: Package release zip
@@ -108,15 +112,16 @@ jobs:
           $tag = "${{ steps.vars.outputs.tag }}"
           $assetBase = "rivals-toolkit-$tag-windows-x64"
           $repoRoot = $env:GITHUB_WORKSPACE
-          $releaseDir = Join-Path $repoRoot "src-tauri/target/release"
+          $releaseDir = Join-Path $repoRoot "target/release"
           $zipPath = Join-Path $releaseDir "$assetBase.zip"
           $stagingRoot = Join-Path $releaseDir "_package"
           $stagingDir = Join-Path $stagingRoot $assetBase
 
           $exePath = Join-Path $releaseDir "rivals-toolkit.exe"
+          $cliPath = Join-Path $releaseDir "rivals-cli.exe"
           $oo2corePath = Join-Path $repoRoot "src-tauri/resources/oo2core_9_win64.dll"
 
-          foreach ($required in @($exePath, $oo2corePath)) {
+          foreach ($required in @($exePath, $cliPath, $oo2corePath)) {
             if (-not (Test-Path $required)) {
               throw "Required release file not found: $required"
             }
@@ -133,6 +138,8 @@ jobs:
 
           # Keep executable name clean while versioning the archive itself.
           Copy-Item $exePath "$stagingDir/rivals-toolkit.exe" -Force
+          # Shares the Oodle DLL staged alongside it, so no second copy is needed.
+          Copy-Item $cliPath "$stagingDir/rivals-cli.exe" -Force
           Copy-Item $oo2corePath "$stagingDir/oo2core_9_win64.dll" -Force
 
           Compress-Archive -Path "$stagingDir/*" -DestinationPath $zipPath -CompressionLevel Optimal
@@ -145,7 +152,7 @@ jobs:
         run: |
           $tag = "${{ steps.vars.outputs.tag }}"
           $assetName = "rivals-toolkit-$tag-windows-x64.zip"
-          $assetPath = Join-Path $env:GITHUB_WORKSPACE "src-tauri/target/release/$assetName"
+          $assetPath = Join-Path $env:GITHUB_WORKSPACE "target/release/$assetName"
           $notesPath = Join-Path $env:RUNNER_TEMP "release-notes.md"
 
           if (-not (Test-Path $assetPath)) {

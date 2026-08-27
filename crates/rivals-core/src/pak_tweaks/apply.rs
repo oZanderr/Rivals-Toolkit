@@ -25,7 +25,7 @@ const ENGINE_TARGETS: [PakIniTarget; 3] = [
 /// file present. Every other file that already contains an edited key is kept in sync
 /// so no higher-priority file shadows the user's edit; keys absent from a file are
 /// never injected into it.
-pub(crate) fn apply_pak_tweaks(pak_path: &str, edits: &[PakTweakEdit]) -> Result<String, String> {
+pub fn apply_pak_tweaks(pak_path: &str, edits: &[PakTweakEdit]) -> Result<String, String> {
     let pak = Path::new(pak_path);
     let info = inspect_pak_for_ini(pak)?
         .ok_or_else(|| "No INI config files found in this pak.".to_string())?;
@@ -169,7 +169,7 @@ fn source_label(target: PakIniTarget) -> &'static str {
 /// Replace raw INI file contents in a pak and repack in place. `files` writes are
 /// applied first (creating parent dirs for brand-new entries), then `deletes` are
 /// removed from the temp tree; repack picks up whatever remains.
-pub(crate) fn save_pak_ini(
+pub fn save_pak_ini(
     pak_path: &str,
     files: Vec<PakIniFileContent>,
     deletes: Vec<String>,

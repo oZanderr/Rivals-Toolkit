@@ -1,0 +1,18 @@
+[package]
+name = "rivals-cli"
+description = "Script Marvel Rivals pak edits and config tweaks"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+build = "build.rs"
+
+[[bin]]
+name = "rivals-cli"
+path = "src/main.rs"
+
+[dependencies]
+rivals-core = { path = "../rivals-core" }
+clap.workspace = true
+dirs.workspace = true
+serde.workspace = true
+serde_json.workspace = true

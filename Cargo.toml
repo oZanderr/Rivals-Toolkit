@@ -1,0 +1,31 @@
+[workspace]
+members = ["src-tauri", "crates/rivals-core", "crates/rivals-cli"]
+resolver = "3"
+
+[workspace.package]
+version = "0.13.1"
+edition = "2024"
+authors = ["Zander"]
+
+# Shared so the app, the core and the CLI can never drift onto different forks.
+[workspace.dependencies]
+repak = { git = "https://github.com/oZanderr/repak", branch = "master", features = [
+    "oodle",
+] }
+retoc = { git = "https://github.com/oZanderr/retoc", branch = "master" }
+rebnk = { git = "https://github.com/oZanderr/rebnk", branch = "master" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+aes = "0.8.4"
+hex = "0.4"
+walkdir = "2"
+dirs = "5"
+blake3 = "1"
+rayon = "1"
+clap = { version = "4", features = ["derive"] }
+sysinfo = { version = "0.33", default-features = false, features = ["system"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
