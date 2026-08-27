@@ -124,30 +124,6 @@ fn remove_cvar_key(lines: &mut Vec<String>, key_lower: &str) {
     });
 }
 
-/// Remove matching CVar lines only within the section starting at `section_start` (header index).
-/// Stops at the next section header or end of file.
-fn remove_cvar_key_in_section(lines: &mut Vec<String>, section_start: usize, key_lower: &str) {
-    let mut i = section_start + 1;
-    while i < lines.len() {
-        let t = lines[i].trim();
-        if t.starts_with('[') {
-            break;
-        }
-        if t.starts_with(';') || t.is_empty() {
-            i += 1;
-            continue;
-        }
-        match parse_cvar_line(t) {
-            Some((k, _)) if k.to_ascii_lowercase() == key_lower => {
-                lines.remove(i);
-            }
-            _ => {
-                i += 1;
-            }
-        }
-    }
-}
-
 /// Format a CVar assignment line.
 fn format_cvar_line(key: &str, val: &str, preserve_prefix: bool) -> String {
     if preserve_prefix {
@@ -177,85 +153,80 @@ fn find_section_insert_point(lines: &[String], section_start: usize) -> usize {
     insert
 }
 
-/// Apply edits inside the `[Windows DeviceProfile]` section.
-fn apply_device_profiles_edits(lines: &mut Vec<String>, edits: &[PakTweakEdit]) {
-    let mut section_start: Option<usize> = None;
-    let mut section_end: Option<usize> = None;
+/// Line ranges of every `[Windows DeviceProfile]` section, as `(header index, end)`.
+///
+/// Combo paks concatenate several mods' configs, so this header can appear more than once and the
+/// same key can sit in each copy.
+fn device_profile_sections(lines: &[String]) -> Vec<(usize, usize)> {
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| is_windows_device_profile_header(line.trim()))
+        .map(|(i, _)| (i, find_section_end(lines, i)))
+        .collect()
+}
 
-    for (i, line) in lines.iter().enumerate() {
-        let trimmed = line.trim();
-        if is_windows_device_profile_header(trimmed) {
-            section_start = Some(i);
-        } else if trimmed.starts_with('[') && section_start.is_some() && section_end.is_none() {
-            section_end = Some(i);
-        }
-    }
-
-    // No section yet: create it so value inserts land somewhere. Skip when there's
-    // nothing to insert (pure removals) to avoid leaving an empty section behind.
-    let start = match section_start {
-        Some(start) => start,
-        None => {
-            if !edits.iter().any(|e| e.value.is_some()) {
-                return;
-            }
-            if lines.last().is_some_and(|l| !l.trim().is_empty()) {
-                lines.push(String::new());
-            }
-            lines.push("[Windows DeviceProfile]".to_string());
-            lines.len() - 1
-        }
-    };
-    let end = section_end.unwrap_or(lines.len());
-
-    for edit in edits {
-        let key_lower = edit.key.to_ascii_lowercase();
-
-        let mut found_idx = None;
-        for (i, line) in lines
-            .iter()
-            .enumerate()
-            .take(end.min(lines.len()))
-            .skip(start + 1)
-        {
+/// Every line under a `[Windows DeviceProfile]` header that sets `key_lower`, in file order.
+fn device_profile_key_hits(lines: &[String], key_lower: &str) -> Vec<usize> {
+    let mut hits = Vec::new();
+    for (start, end) in device_profile_sections(lines) {
+        for (offset, line) in lines[start + 1..end].iter().enumerate() {
             let trimmed = line.trim();
-            if trimmed.starts_with('[') {
-                break;
-            }
             if trimmed.is_empty() || trimmed.starts_with(';') {
                 continue;
             }
             if let Some((k, _)) = parse_cvar_line(trimmed)
                 && k.to_ascii_lowercase() == key_lower
             {
-                found_idx = Some(i);
-                break;
+                hits.push(start + 1 + offset);
             }
         }
+    }
+    hits
+}
 
-        match (&edit.value, found_idx) {
-            (Some(val), Some(_)) => {
-                let end_now = section_end.unwrap_or(lines.len());
-                for i in (start + 1)..end_now.min(lines.len()) {
-                    let t = lines[i].trim().to_string();
-                    if t.starts_with(';') || t.is_empty() {
-                        continue;
-                    }
-                    if let Some((k, _)) = parse_cvar_line(&t)
-                        && k.to_ascii_lowercase() == key_lower
-                    {
-                        let has_prefix = t.to_ascii_lowercase().starts_with("+cvars=");
-                        lines[i] = format_cvar_line(&edit.key, val, has_prefix);
-                    }
+/// Apply edits across every `[Windows DeviceProfile]` section.
+///
+/// Reads are last-wins over the whole file, so touching a single occurrence of a key is invisible
+/// when a later duplicate survives. Every occurrence is handled, and a set collapses them to one
+/// line so repeated saves cannot grow the file.
+fn apply_device_profiles_edits(lines: &mut Vec<String>, edits: &[PakTweakEdit]) {
+    for edit in edits {
+        let key_lower = edit.key.to_ascii_lowercase();
+        let hits = device_profile_key_hits(lines, &key_lower);
+
+        match (&edit.value, hits.split_last()) {
+            // Keep the occurrence a read would land on and drop the earlier duplicates.
+            (Some(val), Some((&last, earlier))) => {
+                let has_prefix = lines[last]
+                    .trim()
+                    .to_ascii_lowercase()
+                    .starts_with("+cvars=");
+                lines[last] = format_cvar_line(&edit.key, val, has_prefix);
+                for &i in earlier.iter().rev() {
+                    lines.remove(i);
+                }
+            }
+            (None, Some(_)) => {
+                for &i in hits.iter().rev() {
+                    lines.remove(i);
                 }
             }
             (Some(val), None) => {
+                let start = match device_profile_sections(lines).last() {
+                    Some(&(start, _)) => start,
+                    None => {
+                        if lines.last().is_some_and(|l| !l.trim().is_empty()) {
+                            lines.push(String::new());
+                        }
+                        lines.push("[Windows DeviceProfile]".to_string());
+                        lines.len() - 1
+                    }
+                };
                 let insert_at = find_section_insert_point(lines, start);
                 lines.insert(insert_at, format_cvar_line(&edit.key, val, true));
             }
-            (None, Some(_)) => {
-                remove_cvar_key_in_section(lines, start, &key_lower);
-            }
+            // Nothing to remove, and a pure removal never creates a section.
             (None, None) => {}
         }
     }
@@ -1126,5 +1097,106 @@ mod roundtrip_tests {
             !dp_after.to_ascii_lowercase().contains("applicationscale"),
             "DeviceProfiles should never receive engine-section keys:\n{dp_after}"
         );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod device_profile_tests {
+    use super::*;
+
+    /// A combo pak: several mods' configs concatenated, so the profile header and the keys under it
+    /// both appear more than once.
+    fn combo() -> String {
+        [
+            "[Windows DeviceProfile]",
+            "+CVars=r.PostProcessing.DisableMaterials=1",
+            "+CVars=r.CustomDepth=0",
+            "",
+            "[SomeOtherSection]",
+            "Unrelated=1",
+            "",
+            "[Windows DeviceProfile]",
+            "+CVars=r.PostProcessing.DisableMaterials=1",
+            "+CVars=r.CustomDepth=0",
+            "",
+        ]
+        .join("\r\n")
+    }
+
+    fn edit(key: &str, value: Option<&str>) -> PakTweakEdit {
+        PakTweakEdit {
+            key: key.to_string(),
+            value: value.map(str::to_string),
+            engine_section: None,
+        }
+    }
+
+    fn value_of(content: &str, key: &str) -> Option<String> {
+        parse_console_vars(content, "DefaultDeviceProfiles.ini")
+            .into_iter()
+            .rfind(|v| v.key.eq_ignore_ascii_case(key))
+            .map(|v| v.value)
+    }
+
+    #[test]
+    fn removal_clears_the_key_in_every_section() {
+        let out = apply_edits_to_ini(
+            &combo(),
+            &[edit("r.PostProcessing.DisableMaterials", None)],
+            IniType::DeviceProfiles,
+        );
+        assert_eq!(value_of(&out, "r.PostProcessing.DisableMaterials"), None);
+        assert!(!out.to_ascii_lowercase().contains("disablematerials"));
+        // The untouched key survives in both sections.
+        assert_eq!(out.matches("r.CustomDepth=0").count(), 2);
+    }
+
+    #[test]
+    fn set_collapses_duplicates_to_a_single_line() {
+        let out = apply_edits_to_ini(
+            &combo(),
+            &[edit("r.CustomDepth", Some("3"))],
+            IniType::DeviceProfiles,
+        );
+        assert_eq!(value_of(&out, "r.CustomDepth").as_deref(), Some("3"));
+        assert_eq!(out.matches("r.CustomDepth=").count(), 1);
+        assert!(!out.contains("r.CustomDepth=0"));
+    }
+
+    /// The bug that grew the user's INI: with the key never found, every save appended another line.
+    #[test]
+    fn repeated_sets_do_not_grow_the_file() {
+        let once = apply_edits_to_ini(
+            &combo(),
+            &[edit("r.CustomDepth", Some("3"))],
+            IniType::DeviceProfiles,
+        );
+        let twice = apply_edits_to_ini(
+            &once,
+            &[edit("r.CustomDepth", Some("3"))],
+            IniType::DeviceProfiles,
+        );
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn a_set_lands_where_a_read_will_find_it() {
+        let out = apply_edits_to_ini(
+            &combo(),
+            &[edit("r.NewKey", Some("7"))],
+            IniType::DeviceProfiles,
+        );
+        assert_eq!(value_of(&out, "r.NewKey").as_deref(), Some("7"));
+    }
+
+    #[test]
+    fn a_removal_never_creates_a_section() {
+        let out = apply_edits_to_ini(
+            "[SomeOtherSection]\r\nUnrelated=1\r\n",
+            &[edit("r.CustomDepth", None)],
+            IniType::DeviceProfiles,
+        );
+        assert!(!out.contains("[Windows DeviceProfile]"));
     }
 }
