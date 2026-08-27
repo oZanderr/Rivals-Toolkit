@@ -84,6 +84,7 @@ pub fn run() {
             pak::commands::repack_pak,
             pak::commands::repack_iostore,
             pak::commands::cancel_repack_iostore,
+            pak::commands::is_utoc_obfuscated,
             pak::commands::list_utoc_contents,
             pak::commands::extract_utoc,
             pak::commands::extract_utoc_file,

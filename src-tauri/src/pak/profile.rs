@@ -129,6 +129,12 @@ pub(crate) fn guid_from_bytes(bytes: &[u8; 16]) -> Result<retoc::FGuid, String> 
     retoc::FGuid::de(&mut std::io::Cursor::new(&bytes[..])).map_err(|e| e.to_string())
 }
 
+/// Key used to obfuscate containers we write: the default-GUID key the game already holds, so
+/// the runtime decrypts transparently while readers without it see ciphertext.
+pub(super) fn obfuscation_key() -> Result<retoc::AesKey, String> {
+    MARVEL_AES_KEY_HEX.parse().map_err(|e| format!("{e}"))
+}
+
 /// Build a retoc `Config` with every known AES key wired in (the default-GUID key plus
 /// any named keys). Shared by every IoStore read path so encrypted containers decrypt
 /// consistently.

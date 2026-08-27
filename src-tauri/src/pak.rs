@@ -106,9 +106,14 @@ pub(crate) fn repack_iostore(
     input_dir: &str,
     output_utoc: &str,
     oodle_level: Option<retoc::OodleCompressionLevel>,
+    obfuscate: bool,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
-    iostore::repack_iostore(input_dir, output_utoc, oodle_level, app)
+    iostore::repack_iostore(input_dir, output_utoc, oodle_level, obfuscate, app)
+}
+
+pub(crate) fn utoc_is_obfuscated(utoc_path: &str) -> bool {
+    iostore::utoc_is_obfuscated(std::path::Path::new(utoc_path))
 }
 
 pub(crate) fn cancel_repack_iostore() {

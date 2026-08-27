@@ -104,6 +104,7 @@ pub(crate) async fn repack_iostore(
     state: State<'_, SettingsState>,
     input_dir: String,
     output_utoc: String,
+    obfuscate: bool,
     app: AppHandle,
 ) -> Result<(), String> {
     if crate::game_status::should_block_for_game() {
@@ -111,10 +112,15 @@ pub(crate) async fn repack_iostore(
     }
     let level = Some(mod_compression_level(&state).to_oodle());
     tauri::async_runtime::spawn_blocking(move || {
-        pak::repack_iostore(&input_dir, &output_utoc, level, app)
+        pak::repack_iostore(&input_dir, &output_utoc, level, obfuscate, app)
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub(crate) fn is_utoc_obfuscated(utoc_path: String) -> bool {
+    pak::utoc_is_obfuscated(&utoc_path)
 }
 
 #[tauri::command]

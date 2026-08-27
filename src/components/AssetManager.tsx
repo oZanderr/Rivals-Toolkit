@@ -42,6 +42,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Button, buttonVariants } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -126,6 +127,7 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
   const [manualPaks, setManualPaks] = useState<Set<string>>(new Set());
   const [debouncedFilter, setDebouncedFilter] = useState("");
   const [repackFormat, setRepackFormat] = useState<RepackFormat>("pak");
+  const [obfuscate, setObfuscate] = useState(false);
   const [legacyConfirm, setLegacyConfirm] = useState<{
     count: number;
     utocPath: string;
@@ -297,6 +299,25 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
   useEffect(() => {
     pakContentsCacheRef.current.clear();
   }, [knownHeroIds]);
+
+  // Seed the repack toggle from the selected container so extracting an obfuscated mod and
+  // repacking the folder round-trips it instead of quietly producing a plain container.
+  useEffect(() => {
+    if (!selectedPak) return;
+    let cancelled = false;
+    invoke<boolean>("is_utoc_obfuscated", {
+      utocPath: selectedPak.replace(/\.pak$/i, ".utoc"),
+    })
+      .then((v) => {
+        if (!cancelled) setObfuscate(v);
+      })
+      .catch(() => {
+        if (!cancelled) setObfuscate(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedPak]);
 
   const pakContentsLower = useMemo(() => {
     const hit = selectedPak ? pakContentsCacheRef.current.get(selectedPak) : null;
@@ -1127,7 +1148,7 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
       setBusy(true);
       showNotice("Repacking to IoStore\u2026", "info");
       try {
-        await invoke("repack_iostore", { inputDir, outputUtoc });
+        await invoke("repack_iostore", { inputDir, outputUtoc, obfuscate });
         setRepackProgress(null);
         showNotice(`Repacked IoStore to: ${outputUtoc}`, "ok", { revealPath: outputUtoc });
         emitModsChanged({
@@ -1385,6 +1406,22 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
           </div>
         )}
         <div className="ml-auto flex shrink-0 items-center gap-2">
+          <Tip content="Encrypt the container with the game's own key. The game still loads it, other tools see ciphertext. IoStore only.">
+            <span className="flex items-center gap-1.5">
+              <Checkbox
+                id="repack-obfuscate"
+                checked={obfuscate}
+                onCheckedChange={(v) => setObfuscate(v === true)}
+                disabled={busy || repackFormat !== "iostore"}
+              />
+              <label
+                htmlFor="repack-obfuscate"
+                className="text-[12px] font-medium text-muted-foreground select-none peer-disabled:opacity-50"
+              >
+                Obfuscate
+              </label>
+            </span>
+          </Tip>
           <div className="flex items-center">
             <Select value={repackFormat} onValueChange={(v) => setRepackFormat(v as RepackFormat)}>
               <SelectTrigger

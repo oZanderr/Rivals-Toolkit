@@ -26,6 +26,8 @@ use retoc::{
 use crate::concurrency;
 
 const MOUNT_POINT: &str = "../../../";
+const TOC_MAGIC: &[u8; 16] = b"-==--==--==--==-";
+const TOC_ENCRYPTED_FLAG: u8 = 0b0010;
 
 static LEGACY_CANCEL: AtomicBool = AtomicBool::new(false);
 static REPACK_CANCEL: AtomicBool = AtomicBool::new(false);
@@ -56,6 +58,7 @@ pub(crate) fn repack_iostore(
     input_dir: &str,
     output_utoc: &str,
     oodle_level: Option<retoc::OodleCompressionLevel>,
+    obfuscate: bool,
     app: AppHandle,
 ) -> Result<(), String> {
     REPACK_CANCEL.store(false, Ordering::Relaxed);
@@ -105,6 +108,9 @@ pub(crate) fn repack_iostore(
     .with_compression_block_size(crate::pak::profile::RIVALS_BLOCK_SIZE);
     if let Some(level) = oodle_level {
         writer = writer.with_compression_level(level);
+    }
+    if obfuscate {
+        writer = writer.with_encryption(super::profile::obfuscation_key()?);
     }
 
     let mut guard = IoStoreCleanupGuard {
@@ -277,18 +283,10 @@ fn open_utoc(utoc_path: &str) -> Result<Box<dyn IoStoreTrait>, String> {
 /// aborting a whole merged open with "missing encryption key" (a future game patch could ship a
 /// container keyed to a GUID we do not have).
 pub(crate) fn utoc_is_decryptable(utoc_path: &Path) -> bool {
-    const MAGIC: &[u8; 16] = b"-==--==--==--==-";
-    const ENCRYPTED_FLAG: u8 = 0b0010;
-    let Ok(mut file) = std::fs::File::open(utoc_path) else {
+    let Some(header) = read_toc_header_probe(utoc_path) else {
         return false;
     };
-    // TOC header is 0x90 bytes; the encryption-key GUID (offset 64) and container flags
-    // (offset 80) are all we need to decide decryptability.
-    let mut header = [0u8; 81];
-    if file.read_exact(&mut header).is_err() || &header[0..16] != MAGIC {
-        return false;
-    }
-    if header[80] & ENCRYPTED_FLAG == 0 {
+    if header[80] & TOC_ENCRYPTED_FLAG == 0 {
         return true;
     }
     let guid = &header[64..80];
@@ -296,6 +294,24 @@ pub(crate) fn utoc_is_decryptable(utoc_path: &Path) -> bool {
         || super::profile::NAMED_AES_KEYS
             .iter()
             .any(|(known, _)| known == guid)
+}
+
+/// Whether a container is obfuscated, meaning it carries the Encrypted flag. Mods use it with the
+/// game's own default-GUID key, so this is a presentation detail rather than a barrier: it seeds
+/// the repack option so an obfuscated mod does not come back out plain.
+pub(crate) fn utoc_is_obfuscated(utoc_path: &Path) -> bool {
+    read_toc_header_probe(utoc_path).is_some_and(|header| header[80] & TOC_ENCRYPTED_FLAG != 0)
+}
+
+/// The leading 81 bytes of a TOC header, covering the magic, the encryption-key GUID (offset 64)
+/// and the container flags (offset 80). `None` when the file is unreadable or is not a TOC.
+fn read_toc_header_probe(utoc_path: &Path) -> Option<[u8; 81]> {
+    let mut file = std::fs::File::open(utoc_path).ok()?;
+    let mut header = [0u8; 81];
+    if file.read_exact(&mut header).is_err() || &header[0..16] != TOC_MAGIC {
+        return None;
+    }
+    Some(header)
 }
 
 /// Container stems under `paks_dir` encrypted with a key GUID the app does not hold. These
@@ -794,6 +810,34 @@ mod tests {
         header[0..16].copy_from_slice(b"-==--==--==--==-");
         std::fs::create_dir_all(path.parent().expect("parent")).expect("create dir");
         std::fs::write(path, &header).expect("write stub utoc");
+    }
+
+    #[test]
+    fn detects_the_obfuscation_flag() {
+        let dir = std::env::temp_dir().join(format!("rivals-obfuscation-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create dir");
+
+        let plain = dir.join("plain.utoc");
+        let obfuscated = dir.join("obfuscated.utoc");
+        write_stub_utoc(&plain);
+        let mut header = vec![0u8; 0x90];
+        header[0..16].copy_from_slice(TOC_MAGIC);
+        header[80] = TOC_ENCRYPTED_FLAG;
+        std::fs::write(&obfuscated, &header).expect("write stub");
+
+        assert!(!utoc_is_obfuscated(&plain));
+        assert!(utoc_is_obfuscated(&obfuscated));
+        assert!(!utoc_is_obfuscated(&dir.join("missing.utoc")));
+        // The flag alone is not a barrier: the payload is under the default-GUID key we hold.
+        assert!(utoc_is_decryptable(&obfuscated));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn obfuscation_key_parses() {
+        assert!(super::super::profile::obfuscation_key().is_ok());
     }
 
     /// Mods live under `~mods`, so a guard that rebuilt the path from `paks_dir` and the
