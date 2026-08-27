@@ -74,13 +74,27 @@ export function ConfigTweaks({ gamePath, isActive }: Props) {
         )}
       </div>
 
-      {/* Warning banner: anti-cheat for tweaks, overwrite caveat for game-settings. */}
-      <div className="flex items-center gap-2.5 rounded-md border border-warn/20 bg-warn/5 px-3 py-2">
-        <AlertTriangle size={15} className="shrink-0 text-warn" />
-        <span className="flex-1 text-[12px] text-warn">
+      {/* Banner: a ban risk for pak tweaks, a much milder overwrite caveat for game-settings, so
+          the two do not share a severity. */}
+      <div
+        className={cn(
+          "flex items-center gap-2.5 rounded-md border px-3 py-2",
+          subTab === "game-settings" ? "border-warn/20 bg-warn/5" : "border-err/25 bg-err/5"
+        )}
+      >
+        <AlertTriangle
+          size={15}
+          className={cn("shrink-0", subTab === "game-settings" ? "text-warn" : "text-err")}
+        />
+        <span
+          className={cn(
+            "flex-1 text-[12px]",
+            subTab === "game-settings" ? "text-warn" : "text-err"
+          )}
+        >
           {subTab === "game-settings"
             ? "Marvel Rivals overwrites this file when it saves settings. Close the game before editing, and changes may reset when the game writes its own preferences."
-            : "The game now detects graphics-altering config tweaks. No punishments yet, but use at your own risk."}
+            : "The game detects graphics-altering config tweaks, and people have been banned for using them. Use at your own risk."}
         </span>
       </div>
 
