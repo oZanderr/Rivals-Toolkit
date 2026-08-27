@@ -4,8 +4,11 @@
 
 Oxide ASI Loader (`oxiloader`) by oZanderr, redistributed unmodified.
 Source: https://github.com/oZanderr/oxiloader
-Build: v0.2.1 release asset `dsound.dll`.
-SHA-512: 263815e9332d01d824cb0bd872c04d6c33a6a8d2af81ace1d07d10170649ae1cc0813873f180f32954e5380ff9c9ff120b7d54e81e90527d395713c43f491bf3
+Build: v0.3.0 release asset `dsound.dll`.
+SHA-512: ca72085ed583f86b096c10e691781e08d46273b7e55fae9531a9d321ce406a86d16f61a21163474b041fd63c1c1c86975e42c2844ca3d71fbd24d06d22713f42
+
+v0.2.1 crashed the game and is treated as superseded by `mods::bypass`, which replaces it on
+Install. Its SHA-256 is listed there; add this build's hash to that list when it is next replaced.
 
 Licensed under the MIT License, Copyright (c) 2026 oZanderr. The full license
 text is in `oxiloader-LICENSE.txt` alongside this file.

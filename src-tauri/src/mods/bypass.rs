@@ -14,6 +14,43 @@ const PAYLOAD_ASI_FILENAME: &str = "MarvelRivalsUTOCSignatureBypass.asi";
 const SUPERSEDED_DLL_FILENAME: &str = "version.dll";
 const SUPERSEDED_ASI_FILENAME: &str = "RivalsSigBypass.asi";
 
+/// SHA-256 of `dsound.dll` builds this toolkit shipped and has since replaced.
+///
+/// The loader keeps its filename across releases, so a bad build can only be spotted by content.
+/// Only builds we shipped are listed: an unrecognized `dsound.dll` is someone's own choice of
+/// loader and is left alone. Add the outgoing hash here whenever the bundled loader changes.
+const SUPERSEDED_LOADER_SHA256: &[&str] = &[
+    // oxiloader v0.2.1, which crashes the game.
+    "2ec12163ddcba1182a6008848c66f42d0f48647c82ff107789479cc0e9dcbf2c",
+    // The self-contained proxy shipped before the loader/payload split, same filename.
+    "bb8767f918c52a2ad055d2de9baffd2478598643b9894f09abd20d1f1ffd170c",
+];
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hasher.finalize().iter().fold(String::new(), |mut acc, b| {
+        use std::fmt::Write;
+        let _ = write!(acc, "{b:02x}");
+        acc
+    })
+}
+
+/// True when the installed loader is a build we shipped and have since replaced. An unreadable
+/// file is not treated as stale, so a locked DLL never triggers a rewrite that would fail anyway.
+fn loader_is_superseded(loader_dll: &std::path::Path) -> bool {
+    loader_matches_any(loader_dll, SUPERSEDED_LOADER_SHA256)
+}
+
+fn loader_matches_any(loader_dll: &std::path::Path, hashes: &[&str]) -> bool {
+    let Ok(bytes) = fs::read(loader_dll) else {
+        return false;
+    };
+    let digest = sha256_hex(&bytes);
+    hashes.contains(&digest.as_str())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum BypassKind {
@@ -43,13 +80,18 @@ fn bypass_paths(game_root: &str) -> BypassPaths {
 /// Installed = a `dsound.dll` loader plus the payload `.asi` in `plugins`. A third-party
 /// `dsound.dll` counts, since it loads the same payload and there is nothing to fix.
 /// Leftovers from the older `version.dll` scheme report `Outdated` even when that pair is
-/// already in place, so Install gets a chance to clear them.
+/// already in place, so Install gets a chance to clear them. A loader matching a build we shipped
+/// and have since replaced is `Outdated` too, which is the only way a bad loader reaches users who
+/// already installed one, since the filename never changes.
 pub(crate) fn bypass_install_kind(game_root: &str) -> BypassKind {
     let paths = bypass_paths(game_root);
     if paths.superseded_dll.exists() || paths.superseded_asi.exists() {
         return BypassKind::Outdated;
     }
     if paths.loader_dll.exists() && paths.payload_asi.exists() {
+        if loader_is_superseded(&paths.loader_dll) {
+            return BypassKind::Outdated;
+        }
         return BypassKind::Installed;
     }
     BypassKind::None
@@ -252,6 +294,53 @@ mod tests {
         );
         assert_eq!(bypass_install_kind(gr), BypassKind::Installed);
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sha256_hex_matches_a_known_vector() {
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn a_loader_matching_a_superseded_hash_reads_as_outdated() {
+        let root = scratch_game_root();
+        let gr = root.to_str().unwrap();
+        let paths = bypass_paths(gr);
+        touch(&paths.loader_dll);
+        touch(&paths.payload_asi);
+
+        let digest = sha256_hex(&fs::read(&paths.loader_dll).expect("loader"));
+        assert!(loader_matches_any(&paths.loader_dll, &[&digest]));
+        assert!(!loader_matches_any(&paths.loader_dll, &[]));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A loader we do not recognize belongs to whoever put it there, so it must keep reading as
+    /// installed rather than being replaced.
+    #[test]
+    fn an_unrecognized_loader_is_left_alone() {
+        let root = scratch_game_root();
+        let gr = root.to_str().unwrap();
+        let paths = bypass_paths(gr);
+        touch(&paths.loader_dll);
+        touch(&paths.payload_asi);
+
+        assert!(!loader_is_superseded(&paths.loader_dll));
+        assert_eq!(bypass_install_kind(gr), BypassKind::Installed);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Listing the shipped build as superseded would make every install report Outdated forever.
+    #[test]
+    fn the_bundled_loader_is_not_itself_superseded() {
+        let digest = sha256_hex(BYPASS_ASI_LOADER);
+        assert!(
+            !SUPERSEDED_LOADER_SHA256.contains(&digest.as_str()),
+            "the bundled loader ({digest}) is listed as superseded"
+        );
     }
 
     #[test]
