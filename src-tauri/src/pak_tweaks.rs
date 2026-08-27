@@ -32,6 +32,29 @@ pub(crate) struct PakIniInfo {
     pub windows_engine_entry: Option<String>,
 }
 
+/// A pak the scan could not read. Reported rather than skipped, so a mod that fails to open is
+/// visibly broken instead of silently missing from the list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct PakScanError {
+    pub pak_name: String,
+    pub pak_path: String,
+    pub error: String,
+}
+
+/// Curated-tweak scan results plus whatever could not be read.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct PakIniScan {
+    pub paks: Vec<PakIniInfo>,
+    pub unreadable: Vec<PakScanError>,
+}
+
+/// Any-INI scan results plus whatever could not be read.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct PakIniListingScan {
+    pub paks: Vec<PakIniListing>,
+    pub unreadable: Vec<PakScanError>,
+}
+
 /// Any-INI listing for paks shown in the Pak INI Editor tab.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct PakIniListing {

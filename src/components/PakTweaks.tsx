@@ -38,6 +38,7 @@ import { useSaveHotkeys } from "@/hooks/useSaveHotkeys";
 import { useScrollAtBottom } from "@/hooks/useScrollAtBottom";
 import { normalizeFolderPath, onModsChanged } from "@/lib/modsEvents";
 import { emitPakChanged, onPakChanged } from "@/lib/pakEvents";
+import { unreadableScanMessage, type PakScanError } from "@/lib/pakScan";
 import { emitTweakProfilesChanged, onTweakProfilesChanged } from "@/lib/tweakProfileEvents";
 import { cn } from "@/lib/utils";
 
@@ -623,9 +624,11 @@ export function PakTweaks({ gamePath, isActive }: Props) {
     if (!gamePath) return;
     setScanning(true);
     try {
-      const results = await invoke<PakIniInfo[]>("scan_mod_paks_for_ini", {
-        gameRoot: gamePath,
-      });
+      const scanned = await invoke<{ paks: PakIniInfo[]; unreadable: PakScanError[] }>(
+        "scan_mod_paks_for_ini",
+        { gameRoot: gamePath }
+      );
+      const results = scanned.paks;
       // Keep manually-browsed paks that still exist and still contain tweakable INI entries.
       const manualOnly = paks.filter((p) => !results.find((r) => r.pak_path === p.pak_path));
       const inspectedManual = await Promise.all(
@@ -668,6 +671,10 @@ export function PakTweaks({ gamePath, isActive }: Props) {
         if (!silent) showNotice(formatModsFoundMessage(merged.length, removedMissing), "ok");
       } else {
         if (!silent) showNotice(formatModsFoundMessage(merged.length, removedMissing), "ok");
+      }
+      if (scanned.unreadable.length > 0) {
+        console.error("Paks that could not be read:", scanned.unreadable);
+        if (!silent) showNotice(unreadableScanMessage(scanned.unreadable), "err", 8000);
       }
     } catch (e: unknown) {
       console.error("Scan failed:", e);

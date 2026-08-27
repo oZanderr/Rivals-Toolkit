@@ -59,6 +59,7 @@ import {
 import { Tip } from "@/components/ui/tooltip";
 import { emitModsChanged, normalizeFolderPath, onModsChanged } from "@/lib/modsEvents";
 import { emitPakChanged, onPakChanged } from "@/lib/pakEvents";
+import { unreadableScanMessage, type PakScanError } from "@/lib/pakScan";
 import { cn } from "@/lib/utils";
 
 // ── Types matching Rust backend ─────────────────────────────────────
@@ -317,9 +318,11 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
       if (!gamePath) return;
       setScanning(true);
       try {
-        const results = await invoke<PakIniListing[]>("scan_mod_paks_any_ini", {
-          gameRoot: gamePath,
-        });
+        const scanned = await invoke<{ paks: PakIniListing[]; unreadable: PakScanError[] }>(
+          "scan_mod_paks_any_ini",
+          { gameRoot: gamePath }
+        );
+        const results = scanned.paks;
         // Re-inspect manually-browsed paks not in the folder scan; drop those that no longer have INI entries.
         const manualOnly = paks.filter((p) => !results.find((r) => r.pak_path === p.pak_path));
         const inspectedManual = await Promise.all(
@@ -347,6 +350,10 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
           if (!silent) showNotice("No paks with INI files found", "info");
         } else if (!silent) {
           showNotice(`Found ${merged.length} pak${merged.length !== 1 ? "s" : ""} with INI`, "ok");
+        }
+        if (scanned.unreadable.length > 0) {
+          console.error("Paks that could not be read:", scanned.unreadable);
+          if (!silent) showNotice(unreadableScanMessage(scanned.unreadable), "err", 8000);
         }
       } catch (e) {
         console.error("Scan failed:", e);

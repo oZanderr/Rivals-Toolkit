@@ -3,7 +3,9 @@
 use tauri::State;
 
 use crate::pak_tweaks;
-use crate::pak_tweaks::{PakIniFileContent, PakIniInfo, PakIniListing, PakTweakEdit};
+use crate::pak_tweaks::{
+    PakIniFileContent, PakIniInfo, PakIniListing, PakIniListingScan, PakIniScan, PakTweakEdit,
+};
 use crate::settings::{SettingsState, recursive_mod_scan};
 use crate::tweaks::{TweakDefinition, TweakState};
 
@@ -23,7 +25,7 @@ pub(crate) async fn inspect_pak_path(pak_path: String) -> Result<Option<PakIniIn
 pub(crate) async fn scan_mod_paks_for_ini(
     state: State<'_, SettingsState>,
     game_root: String,
-) -> Result<Vec<PakIniInfo>, String> {
+) -> Result<PakIniScan, String> {
     let recursive = recursive_mod_scan(&state);
     tauri::async_runtime::spawn_blocking(move || pak_tweaks::scan_mod_paks(&game_root, recursive))
         .await
@@ -43,7 +45,7 @@ pub(crate) async fn inspect_pak_path_any_ini(
 pub(crate) async fn scan_mod_paks_any_ini(
     state: State<'_, SettingsState>,
     game_root: String,
-) -> Result<Vec<PakIniListing>, String> {
+) -> Result<PakIniListingScan, String> {
     let recursive = recursive_mod_scan(&state);
     tauri::async_runtime::spawn_blocking(move || {
         pak_tweaks::scan_mod_paks_any_ini(&game_root, recursive)

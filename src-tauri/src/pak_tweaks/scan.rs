@@ -10,7 +10,9 @@ use super::io::{
     create_empty_pak, extract_file_to_string, extract_optional_entry, inspect_pak_for_any_ini,
     inspect_pak_for_ini,
 };
-use super::{PakIniInfo, PakIniListing, PakTweakState};
+use super::{
+    PakIniInfo, PakIniListing, PakIniListingScan, PakIniScan, PakScanError, PakTweakState,
+};
 
 /// Inspect one pak and return INI metadata when present.
 pub(crate) fn inspect_single_pak(pak_path: &str) -> Result<Option<PakIniInfo>, String> {
@@ -21,53 +23,64 @@ pub(crate) fn inspect_single_pak_any_ini(pak_path: &str) -> Result<Option<PakIni
     inspect_pak_for_any_ini(Path::new(pak_path))
 }
 
-/// Scan `~mods` and return paks that contain tweakable INI files.
-pub(crate) fn scan_mod_paks(game_root: &str, recursive: bool) -> Result<Vec<PakIniInfo>, String> {
-    let mods_dir = mods_dir(game_root);
-    if !mods_dir.is_dir() {
-        return Ok(Vec::new());
+fn scan_error(path: &Path, error: String) -> PakScanError {
+    PakScanError {
+        pak_name: path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned(),
+        pak_path: path.to_string_lossy().into_owned(),
+        error,
     }
-
-    let mut results = Vec::new();
-    for rel_path in crate::mods::walk_mod_files(&mods_dir, recursive) {
-        let path = mods_dir.join(&rel_path);
-        if path.extension().and_then(|x| x.to_str()) != Some("pak") {
-            continue;
-        }
-        match inspect_pak_for_ini(&path) {
-            Ok(Some(info)) => results.push(info),
-            Ok(None) => {}
-            Err(_) => {}
-        }
-    }
-    results.sort_by(|a, b| a.pak_name.cmp(&b.pak_name));
-    Ok(results)
 }
 
-/// Scan `~mods` and return paks that contain any `.ini` file.
+/// Every `.pak` under `~mods`, in listing order.
+fn mod_pak_paths(game_root: &str, recursive: bool) -> Vec<std::path::PathBuf> {
+    let mods_dir = mods_dir(game_root);
+    if !mods_dir.is_dir() {
+        return Vec::new();
+    }
+    crate::mods::walk_mod_files(&mods_dir, recursive)
+        .into_iter()
+        .map(|rel| mods_dir.join(rel))
+        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("pak"))
+        .collect()
+}
+
+/// Scan `~mods` and return paks that contain tweakable INI files, plus any that could not be read.
+pub(crate) fn scan_mod_paks(game_root: &str, recursive: bool) -> Result<PakIniScan, String> {
+    let mut paks = Vec::new();
+    let mut unreadable = Vec::new();
+    for path in mod_pak_paths(game_root, recursive) {
+        match inspect_pak_for_ini(&path) {
+            Ok(Some(info)) => paks.push(info),
+            Ok(None) => {}
+            Err(e) => unreadable.push(scan_error(&path, e)),
+        }
+    }
+    paks.sort_by(|a, b| a.pak_name.cmp(&b.pak_name));
+    unreadable.sort_by(|a, b| a.pak_name.cmp(&b.pak_name));
+    Ok(PakIniScan { paks, unreadable })
+}
+
+/// Scan `~mods` and return paks that contain any `.ini` file, plus any that could not be read.
 pub(crate) fn scan_mod_paks_any_ini(
     game_root: &str,
     recursive: bool,
-) -> Result<Vec<PakIniListing>, String> {
-    let mods_dir = mods_dir(game_root);
-    if !mods_dir.is_dir() {
-        return Ok(Vec::new());
-    }
-
-    let mut results = Vec::new();
-    for rel_path in crate::mods::walk_mod_files(&mods_dir, recursive) {
-        let path = mods_dir.join(&rel_path);
-        if path.extension().and_then(|x| x.to_str()) != Some("pak") {
-            continue;
-        }
+) -> Result<PakIniListingScan, String> {
+    let mut paks = Vec::new();
+    let mut unreadable = Vec::new();
+    for path in mod_pak_paths(game_root, recursive) {
         match inspect_pak_for_any_ini(&path) {
-            Ok(Some(info)) => results.push(info),
+            Ok(Some(info)) => paks.push(info),
             Ok(None) => {}
-            Err(_) => {}
+            Err(e) => unreadable.push(scan_error(&path, e)),
         }
     }
-    results.sort_by(|a, b| a.pak_name.cmp(&b.pak_name));
-    Ok(results)
+    paks.sort_by(|a, b| a.pak_name.cmp(&b.pak_name));
+    unreadable.sort_by(|a, b| a.pak_name.cmp(&b.pak_name));
+    Ok(PakIniListingScan { paks, unreadable })
 }
 
 /// Read CVar values from pak INI files, merged in runtime priority order (lowest first,
@@ -174,4 +187,31 @@ pub(crate) fn create_new_mod_pak(game_root: &str, name: &str) -> Result<PakIniLi
         pak_path: pak_path.to_string_lossy().into_owned(),
         ini_entries: Vec::new(),
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_pak_that_cannot_be_read_is_reported_not_skipped() {
+        let root = std::env::temp_dir().join(format!("rivals-scan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mods = mods_dir(root.to_str().unwrap());
+        std::fs::create_dir_all(&mods).expect("create mods dir");
+        std::fs::write(mods.join("Broken.pak"), b"not a pak at all").expect("write pak");
+
+        let scan = scan_mod_paks(root.to_str().unwrap(), false).expect("scan");
+
+        assert!(scan.paks.is_empty());
+        assert_eq!(scan.unreadable.len(), 1);
+        assert_eq!(scan.unreadable[0].pak_name, "Broken.pak");
+        assert!(!scan.unreadable[0].error.is_empty());
+
+        let listing = scan_mod_paks_any_ini(root.to_str().unwrap(), false).expect("scan");
+        assert_eq!(listing.unreadable.len(), 1);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
