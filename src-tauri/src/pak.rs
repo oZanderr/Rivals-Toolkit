@@ -3,6 +3,7 @@
 pub(crate) mod commands;
 pub(crate) mod crypto;
 mod game_rebuild;
+mod in_place;
 mod iostore;
 pub(crate) mod profile;
 mod reader;
@@ -23,6 +24,7 @@ static UTOC_LIST_CACHE: LazyLock<ListCache> = LazyLock::new(|| Mutex::new(HashMa
 
 pub(crate) use game_rebuild::extract::ExtractReport;
 pub(crate) use game_rebuild::rebuild::RebuildReport;
+pub(crate) use in_place::InPlaceReport;
 pub(crate) use reader::PakFileInfo;
 
 pub(crate) fn list_pak_files(game_root: &str, recursive: bool) -> Result<Vec<String>, String> {
@@ -110,6 +112,33 @@ pub(crate) fn repack_iostore(
     app: tauri::AppHandle,
 ) -> Result<(), String> {
     iostore::repack_iostore(input_dir, output_utoc, oodle_level, obfuscate, app)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn repack_mod_in_place(
+    game_root: &str,
+    mod_pak: &str,
+    to_iostore: bool,
+    obfuscate: bool,
+    oodle_level: Option<retoc::OodleCompressionLevel>,
+    app: tauri::AppHandle,
+) -> Result<InPlaceReport, String> {
+    in_place::repack_mod_in_place(game_root, mod_pak, to_iostore, obfuscate, oodle_level, app)
+}
+
+/// Drop cached listings for these containers. The cache key is `(path, size)`, so a repack that
+/// lands on the same byte count would otherwise keep serving the old contents.
+pub(super) fn invalidate_list_caches(paths: &[&std::path::Path]) {
+    let keys: Vec<String> = paths
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    if let Ok(mut cache) = PAK_LIST_CACHE.lock() {
+        cache.retain(|(path, _), _| !keys.contains(path));
+    }
+    if let Ok(mut cache) = UTOC_LIST_CACHE.lock() {
+        cache.retain(|(path, _), _| !keys.contains(path));
+    }
 }
 
 pub(crate) fn utoc_is_obfuscated(utoc_path: &str) -> bool {

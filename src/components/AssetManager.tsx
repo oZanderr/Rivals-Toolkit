@@ -7,6 +7,7 @@ import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
+  Check,
   CheckCircle2,
   CheckSquare2,
   Copy,
@@ -19,6 +20,7 @@ import {
   Hammer,
   Layers,
   Loader2,
+  Lock,
   MinusSquare,
   Package,
   PackageOpen,
@@ -42,7 +44,6 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Button, buttonVariants } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -76,13 +77,72 @@ import { emitModsChanged, normalizeFolderPath, onModsChanged } from "@/lib/modsE
 import { useShowHeroIcons } from "@/lib/showHeroIcons";
 import { cn } from "@/lib/utils";
 
-type RepackFormat = "pak" | "iostore";
+// Everything a repack run needs. `kind` says where the assets come from; the options are the
+// same either way, which is what lets both routes share one dialog.
+type RepackPrompt = {
+  kind: "folder" | "in-place";
+  // Folder of loose assets, or the mod's own .pak for an in-place run.
+  source: string;
+  label: string;
+  toIoStore: boolean;
+  obfuscate: boolean;
+};
 type StatusType = "ok" | "err" | "info";
+
+// One long-running job, owned by the handler that started it. Progress events only update the
+// active operation, so an event arriving with nothing running cannot leave an orphan bar behind.
+type Operation = {
+  label: string;
+  phase: string;
+  current: number;
+  total: number;
+  cancel: () => void;
+};
+
+// Backend events that report into the active operation, with the phase name to fall back on when
+// the payload does not carry one.
+const PROGRESS_EVENTS: [string, string][] = [
+  ["legacy-extraction-progress", "converting assets"],
+  ["repack-iostore-progress", "packing"],
+  ["vanilla-extract-progress", "extracting"],
+  ["vanilla-rebuild-progress", "rebuilding"],
+];
+
+// The three things a repack can produce. Obfuscation is a property of an IoStore container rather
+// than a format of its own, so it rides along here instead of as a separate toggle that would be
+// dead half the time.
+const REPACK_OUTPUTS = [
+  {
+    label: "Pak",
+    hint: "Loose files in a .pak, no container",
+    icon: Package,
+    iconClass: "text-foreground",
+    toIoStore: false,
+    obfuscate: false,
+  },
+  {
+    label: "IoStore",
+    hint: "A .utoc and .ucas container",
+    icon: Layers,
+    iconClass: "text-foreground",
+    toIoStore: true,
+    obfuscate: false,
+  },
+  {
+    label: "Obfuscated",
+    hint: "IoStore, encrypted with the game's own key",
+    icon: Lock,
+    iconClass: "text-violet-400",
+    toIoStore: true,
+    obfuscate: true,
+  },
+] as const;
 
 interface PakFileInfo {
   path: string;
   has_utoc: boolean;
   has_ucas: boolean;
+  obfuscated: boolean;
   optional_pak: string | null;
   optional_has_utoc: boolean;
   optional_has_ucas: boolean;
@@ -126,8 +186,12 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
   const [busy, setBusy] = useState(false);
   const [manualPaks, setManualPaks] = useState<Set<string>>(new Set());
   const [debouncedFilter, setDebouncedFilter] = useState("");
-  const [repackFormat, setRepackFormat] = useState<RepackFormat>("pak");
-  const [obfuscate, setObfuscate] = useState(false);
+  const [repackPrompt, setRepackPrompt] = useState<RepackPrompt | null>(null);
+  const lastRepackPromptRef = useRef(repackPrompt);
+  if (repackPrompt) lastRepackPromptRef.current = repackPrompt;
+  const displayRepackPrompt = repackPrompt ?? lastRepackPromptRef.current;
+  // A folder repack has no container to copy settings from, so the last choice carries over.
+  const [folderToIoStore, setFolderToIoStore] = useState(false);
   const [legacyConfirm, setLegacyConfirm] = useState<{
     count: number;
     utocPath: string;
@@ -137,21 +201,7 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
   const lastLegacyConfirmRef = useRef(legacyConfirm);
   if (legacyConfirm) lastLegacyConfirmRef.current = legacyConfirm;
   const displayLegacyConfirm = legacyConfirm ?? lastLegacyConfirmRef.current;
-  const [legacyProgress, setLegacyProgress] = useState<{
-    current: number;
-    total: number;
-  } | null>(null);
-  const [repackProgress, setRepackProgress] = useState<{
-    phase: string;
-    current: number;
-    total: number;
-  } | null>(null);
-  const [vanillaProgress, setVanillaProgress] = useState<{
-    op: "extract" | "rebuild";
-    phase: string;
-    current: number;
-    total: number;
-  } | null>(null);
+  const [operation, setOperation] = useState<Operation | null>(null);
   const [vanillaConfirm, setVanillaConfirm] = useState<{
     kind: "rebuild";
     sourceUtoc: string;
@@ -201,62 +251,26 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
     });
   }, [gamePath]);
 
-  // Listen for legacy extraction progress events
-  useEffect(() => {
-    let cancelled = false;
-    let unlisten: (() => void) | undefined;
-    listen<{ current: number; total: number }>("legacy-extraction-progress", (event) => {
-      setLegacyProgress(event.payload);
-    }).then((fn) => {
-      if (cancelled) fn();
-      else unlisten = fn;
-    });
-    return () => {
-      cancelled = true;
-      unlisten?.();
-    };
-  }, []);
-
-  // Listen for IoStore repack progress events
-  useEffect(() => {
-    let cancelled = false;
-    let unlisten: (() => void) | undefined;
-    listen<{ phase: string; current: number; total: number }>(
-      "repack-iostore-progress",
-      (event) => {
-        setRepackProgress(event.payload);
-      }
-    ).then((fn) => {
-      if (cancelled) fn();
-      else unlisten = fn;
-    });
-    return () => {
-      cancelled = true;
-      unlisten?.();
-    };
-  }, []);
-
   useEffect(() => {
     let cancelled = false;
     const unlisteners: Array<() => void> = [];
-    listen<{ phase: string; current: number; total: number }>(
-      "vanilla-extract-progress",
-      (event) => {
-        setVanillaProgress({ op: "extract", ...event.payload });
-      }
-    ).then((fn) => {
-      if (cancelled) fn();
-      else unlisteners.push(fn);
-    });
-    listen<{ phase: string; current: number; total: number }>(
-      "vanilla-rebuild-progress",
-      (event) => {
-        setVanillaProgress({ op: "rebuild", ...event.payload });
-      }
-    ).then((fn) => {
-      if (cancelled) fn();
-      else unlisteners.push(fn);
-    });
+    for (const [event, fallbackPhase] of PROGRESS_EVENTS) {
+      listen<{ phase?: string; current: number; total: number }>(event, ({ payload }) => {
+        setOperation((op) =>
+          op
+            ? {
+                ...op,
+                phase: payload.phase ?? fallbackPhase,
+                current: payload.current,
+                total: payload.total,
+              }
+            : op
+        );
+      }).then((fn) => {
+        if (cancelled) fn();
+        else unlisteners.push(fn);
+      });
+    }
     return () => {
       cancelled = true;
       unlisteners.forEach((fn) => fn());
@@ -299,25 +313,6 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
   useEffect(() => {
     pakContentsCacheRef.current.clear();
   }, [knownHeroIds]);
-
-  // Seed the repack toggle from the selected container so extracting an obfuscated mod and
-  // repacking the folder round-trips it instead of quietly producing a plain container.
-  useEffect(() => {
-    if (!selectedPak) return;
-    let cancelled = false;
-    invoke<boolean>("is_utoc_obfuscated", {
-      utocPath: selectedPak.replace(/\.pak$/i, ".utoc"),
-    })
-      .then((v) => {
-        if (!cancelled) setObfuscate(v);
-      })
-      .catch(() => {
-        if (!cancelled) setObfuscate(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [selectedPak]);
 
   const pakContentsLower = useMemo(() => {
     const hit = selectedPak ? pakContentsCacheRef.current.get(selectedPak) : null;
@@ -416,6 +411,12 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
     [selectedPak]
   );
 
+  // Vanilla containers are encrypted by design, so only a mod counts as obfuscated.
+  const selectedObfuscated = useMemo(() => {
+    const info = pakList.find((p) => p.path === selectedPak);
+    return !!info?.obfuscated && !selectedIsVanilla;
+  }, [pakList, selectedPak, selectedIsVanilla]);
+
   // Virtualizer for the contents list
   const contentsVirtualizer = useVirtualizer({
     count: visible.length,
@@ -496,15 +497,17 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
 
     let info = infoOverride ?? pakList.find((p) => p.path === pak);
     if (!info) {
-      const [hasUtoc, hasUcas] = await Promise.all([
+      const [hasUtoc, hasUcas, obfuscated] = await Promise.all([
         invoke<boolean>("path_exists", { path: pak.replace(/\.pak$/i, ".utoc") }),
         invoke<boolean>("path_exists", { path: pak.replace(/\.pak$/i, ".ucas") }),
+        invoke<boolean>("is_utoc_obfuscated", { utocPath: pak.replace(/\.pak$/i, ".utoc") }),
       ]);
       if (gen !== loadGenRef.current) return;
       info = {
         path: pak,
         has_utoc: hasUtoc,
         has_ucas: hasUcas,
+        obfuscated,
         optional_pak: null,
         optional_has_utoc: false,
         optional_has_ucas: false,
@@ -613,14 +616,16 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
       filters: [{ name: "Pak files", extensions: ["pak"] }],
     });
     if (typeof selected === "string") {
-      const [hasUtoc, hasUcas] = await Promise.all([
+      const [hasUtoc, hasUcas, obfuscated] = await Promise.all([
         invoke<boolean>("path_exists", { path: selected.replace(/\.pak$/i, ".utoc") }),
         invoke<boolean>("path_exists", { path: selected.replace(/\.pak$/i, ".ucas") }),
+        invoke<boolean>("is_utoc_obfuscated", { utocPath: selected.replace(/\.pak$/i, ".utoc") }),
       ]);
       const info: PakFileInfo = {
         path: selected,
         has_utoc: hasUtoc,
         has_ucas: hasUcas,
+        obfuscated,
         optional_pak: null,
         optional_has_utoc: false,
         optional_has_ucas: false,
@@ -846,7 +851,7 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
 
   async function runLegacyExtraction(utocPath: string, outputDir: string, filter: string[] = []) {
     setBusy(true);
-    setLegacyProgress(null);
+    startOperation("Converting to legacy", ["cancel_legacy_extraction"]);
     showNotice("Converting to legacy format\u2026", "info");
     try {
       const files = await invoke<string[]>("extract_utoc_legacy", {
@@ -858,40 +863,40 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
       const warning = files.find((f) => f.startsWith("__warnings__:"));
       const exported = files.filter((f) => !f.startsWith("__warnings__:"));
       if (warning) {
-        setLegacyProgress(null);
         showNotice(
           `Exported ${exported.length} asset(s) to ${outputDir} (some failed to convert)`,
           "err",
           { revealPath: outputDir }
         );
       } else {
-        setLegacyProgress(null);
         showNotice(`Exported ${exported.length} asset(s) to ${outputDir}`, "ok", {
           revealPath: outputDir,
         });
       }
     } catch (e: unknown) {
-      setLegacyProgress(null);
       showNotice(String(e), "err");
     } finally {
+      setOperation(null);
       setBusy(false);
     }
   }
 
-  async function cancelLegacyExtraction() {
-    try {
-      await invoke("cancel_legacy_extraction");
-    } catch {
-      // Best-effort — extraction loop will stop on next batch regardless
-    }
-  }
-
-  async function cancelRepackIostore() {
-    try {
-      await invoke("cancel_repack_iostore");
-    } catch {
-      // Best-effort
-    }
+  // Claims the progress row for one operation. `cancel` stops whatever the operation is currently
+  // doing, which for a composite job means every backend it can reach.
+  function startOperation(label: string, cancels: string[]) {
+    setOperation({
+      label,
+      phase: "starting",
+      current: 0,
+      total: 0,
+      cancel: () => {
+        // Best-effort: each backend resets its own flag when it next starts, and a command for a
+        // step that is not running is a no-op.
+        for (const command of cancels) {
+          invoke(command).catch(() => {});
+        }
+      },
+    });
   }
 
   function handleEntryClick(index: number, e: React.MouseEvent) {
@@ -1131,58 +1136,113 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
   async function openAndRepack() {
     const inputDir = await open({ directory: true, multiple: false });
     if (!inputDir || typeof inputDir !== "string") return;
-
-    // Derive default output name from folder name
     const folderName = inputDir.replace(/\\/g, "/").split("/").pop() ?? "mod_output";
-    const baseName = folderName.replace(/_9999999_P$/i, "");
-    const modsDir = `${gamePath}\\MarvelGame\\Marvel\\Content\\Paks\\~mods`;
+    setRepackPrompt({
+      kind: "folder",
+      source: inputDir,
+      label: folderName,
+      toIoStore: folderToIoStore,
+      obfuscate: false,
+    });
+  }
 
-    if (repackFormat === "iostore") {
-      // IoStore: output is .utoc (companion .ucas and .pak are created automatically)
-      const defaultPath = `${modsDir}\\${baseName}_9999999_P.utoc`;
-      const outputUtoc = await save({
-        defaultPath,
-        filters: [{ name: "IoStore container", extensions: ["utoc"] }],
-      });
-      if (!outputUtoc) return;
+  function promptRepackInPlace(pak: string) {
+    const info = pakList.find((p) => p.path === pak);
+    const isIoStore = !!(info?.has_utoc && info?.has_ucas);
+    setRepackPrompt({
+      kind: "in-place",
+      source: pak,
+      label: pak.split(/[/\\]/).pop() ?? pak,
+      toIoStore: isIoStore,
+      obfuscate: !!info?.obfuscated,
+    });
+  }
+
+  async function runRepack() {
+    if (!repackPrompt) return;
+    const prompt = repackPrompt;
+    setRepackPrompt(null);
+    const label = prompt.toIoStore ? (prompt.obfuscate ? "obfuscated IoStore" : "IoStore") : "pak";
+
+    if (prompt.kind === "in-place") {
+      if (!gamePath) return showNotice("Set the game path first.", "err");
       setBusy(true);
-      showNotice("Repacking to IoStore\u2026", "info");
+      startOperation(`Repacking ${prompt.label}`, [
+        "cancel_legacy_extraction",
+        "cancel_repack_iostore",
+      ]);
+      showNotice(`Repacking ${prompt.label} to ${label}\u2026`, "info");
       try {
-        await invoke("repack_iostore", { inputDir, outputUtoc, obfuscate });
-        setRepackProgress(null);
-        showNotice(`Repacked IoStore to: ${outputUtoc}`, "ok", { revealPath: outputUtoc });
+        const report = await invoke<{
+          container_name: string;
+          assets_in: number;
+          assets_out: number;
+          carried_pak_entries: number;
+        }>("repack_mod_in_place", {
+          gameRoot: gamePath,
+          modPak: prompt.source,
+          toIostore: prompt.toIoStore,
+          obfuscate: prompt.obfuscate,
+        });
+        const carried = report.carried_pak_entries
+          ? `, ${report.carried_pak_entries} pak file(s) carried over`
+          : "";
+        showNotice(
+          `Repacked ${report.container_name} to ${label}: ${report.assets_in} item(s)${carried}`,
+          "ok",
+          { revealPath: prompt.source }
+        );
+        pakContentsCacheRef.current.delete(prompt.source);
         emitModsChanged({
-          modsFolder: outputUtoc.replace(/[\\/][^\\/]+$/, ""),
+          modsFolder: prompt.source.replace(/[\\/][^\\/]+$/, ""),
           source: "AssetManager",
         });
+        await listPaks();
       } catch (e: unknown) {
-        setRepackProgress(null);
         showNotice(String(e), "err");
       } finally {
+        setOperation(null);
         setBusy(false);
       }
-    } else {
-      // Pak: standard pak repack
-      const defaultPath = `${modsDir}\\${baseName}_9999999_P.pak`;
-      const outputPak = await save({
-        defaultPath,
-        filters: [{ name: "Pak files", extensions: ["pak"] }],
-      });
-      if (!outputPak) return;
-      setBusy(true);
-      showNotice("Repacking\u2026", "info");
-      try {
-        await invoke("repack_pak", { inputDir, outputPak });
-        showNotice(`Repacked to: ${outputPak}`, "ok", { revealPath: outputPak });
-        emitModsChanged({
-          modsFolder: outputPak.replace(/[\\/][^\\/]+$/, ""),
-          source: "AssetManager",
+      return;
+    }
+
+    setFolderToIoStore(prompt.toIoStore);
+    const baseName = prompt.label.replace(/_9999999_P$/i, "");
+    const modsDir = `${gamePath}\\MarvelGame\\Marvel\\Content\\Paks\\~mods`;
+    const ext = prompt.toIoStore ? "utoc" : "pak";
+    const output = await save({
+      defaultPath: `${modsDir}\\${baseName}_9999999_P.${ext}`,
+      filters: [
+        prompt.toIoStore
+          ? { name: "IoStore container", extensions: ["utoc"] }
+          : { name: "Pak files", extensions: ["pak"] },
+      ],
+    });
+    if (!output) return;
+    setBusy(true);
+    startOperation(`Repacking ${baseName}`, ["cancel_repack_iostore"]);
+    showNotice(`Repacking to ${label}\u2026`, "info");
+    try {
+      if (prompt.toIoStore) {
+        await invoke("repack_iostore", {
+          inputDir: prompt.source,
+          outputUtoc: output,
+          obfuscate: prompt.obfuscate,
         });
-      } catch (e: unknown) {
-        showNotice(String(e), "err");
-      } finally {
-        setBusy(false);
+      } else {
+        await invoke("repack_pak", { inputDir: prompt.source, outputPak: output });
       }
+      showNotice(`Repacked ${label} to: ${output}`, "ok", { revealPath: output });
+      emitModsChanged({
+        modsFolder: output.replace(/[\\/][^\\/]+$/, ""),
+        source: "AssetManager",
+      });
+    } catch (e: unknown) {
+      showNotice(String(e), "err");
+    } finally {
+      setOperation(null);
+      setBusy(false);
     }
   }
 
@@ -1203,7 +1263,7 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
     const outputDir = `${dir}\\${pakBaseName}`;
     const sourceUtoc = selectedPak.replace(/\.pak$/i, ".utoc");
     setBusy(true);
-    setVanillaProgress({ op: "extract", phase: "starting", current: 0, total: 0 });
+    startOperation(`Extracting ${pakBaseName}`, ["cancel_vanilla_extract"]);
     showNotice("Extracting vanilla container…", "info");
     try {
       const report = await invoke<{
@@ -1233,7 +1293,7 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
       showNotice(String(e), "err");
     } finally {
       setBusy(false);
-      setVanillaProgress(null);
+      setOperation(null);
     }
   }
 
@@ -1260,7 +1320,7 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
     const { sourceUtoc, legacyDir, outputDir } = vanillaConfirm;
     setVanillaConfirm(null);
     setBusy(true);
-    setVanillaProgress({ op: "rebuild", phase: "starting", current: 0, total: 0 });
+    startOperation("Rebuilding vanilla container", ["cancel_vanilla_rebuild"]);
     showNotice("Rebuilding vanilla container…", "info");
     try {
       const report = await invoke<{
@@ -1288,20 +1348,7 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
       showNotice(String(e), "err");
     } finally {
       setBusy(false);
-      setVanillaProgress(null);
-    }
-  }
-
-  async function cancelVanillaOp() {
-    if (!vanillaProgress) return;
-    try {
-      if (vanillaProgress.op === "extract") {
-        await invoke("cancel_vanilla_extract");
-      } else {
-        await invoke("cancel_vanilla_rebuild");
-      }
-    } catch (e) {
-      console.error(e);
+      setOperation(null);
     }
   }
 
@@ -1316,7 +1363,7 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
     <div ref={rootRef} className="flex flex-1 min-h-0 flex-col gap-4">
       <div className="flex min-h-8 shrink-0 items-center gap-3">
         <h2 className="shrink-0 text-xl font-bold">Asset Manager</h2>
-        {notice && !vanillaProgress && (
+        {notice && !operation && (
           <Tip content="Click to reveal in explorer" disabled={!notice.revealPath}>
             <span
               className={cn(
@@ -1339,57 +1386,19 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
             </span>
           </Tip>
         )}
-        {legacyProgress && (
+        {operation && (
           <div className="flex min-w-0 items-center gap-2">
-            <Progress
-              value={(legacyProgress.current / legacyProgress.total) * 100}
-              className="h-2 w-32"
-            />
-            <span className="shrink-0 text-[11px] text-muted-foreground">
-              {legacyProgress.current}/{legacyProgress.total}
+            <span className="min-w-0 shrink truncate text-[11px] text-muted-foreground">
+              {operation.label} · {operation.phase}
             </span>
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-6 px-2 text-[11px]"
-              onClick={cancelLegacyExtraction}
-            >
-              Cancel
-            </Button>
-          </div>
-        )}
-        {repackProgress && (
-          <div className="flex min-w-0 items-center gap-2">
-            <Progress
-              value={(repackProgress.current / repackProgress.total) * 100}
-              className="h-2 w-32"
-            />
-            <span className="shrink-0 text-[11px] text-muted-foreground">
-              {repackProgress.current}/{repackProgress.total}
-            </span>
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-6 px-2 text-[11px]"
-              onClick={cancelRepackIostore}
-            >
-              Cancel
-            </Button>
-          </div>
-        )}
-        {vanillaProgress && (
-          <div className="flex min-w-0 items-center gap-2">
-            <span className="shrink-0 text-[11px] text-muted-foreground">
-              {vanillaProgress.op} · {vanillaProgress.phase}
-            </span>
-            {vanillaProgress.total > 0 ? (
+            {operation.total > 0 ? (
               <>
                 <Progress
-                  value={(vanillaProgress.current / vanillaProgress.total) * 100}
-                  className="h-2 w-32"
+                  value={(operation.current / operation.total) * 100}
+                  className="h-2 w-32 shrink-0"
                 />
                 <span className="shrink-0 text-[11px] text-muted-foreground">
-                  {vanillaProgress.current}/{vanillaProgress.total}
+                  {operation.current}/{operation.total}
                 </span>
               </>
             ) : (
@@ -1398,69 +1407,18 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
             <Button
               variant="outline"
               size="sm"
-              className="h-6 px-2 text-[11px]"
-              onClick={cancelVanillaOp}
+              className="h-6 shrink-0 px-2 text-[11px]"
+              onClick={operation.cancel}
             >
               Cancel
             </Button>
           </div>
         )}
         <div className="ml-auto flex shrink-0 items-center gap-2">
-          <Tip content="Encrypt the container with the game's own key. The game still loads it, other tools see ciphertext. IoStore only.">
-            <span className="flex items-center gap-1.5">
-              <Checkbox
-                id="repack-obfuscate"
-                checked={obfuscate}
-                onCheckedChange={(v) => setObfuscate(v === true)}
-                disabled={busy || repackFormat !== "iostore"}
-              />
-              <label
-                htmlFor="repack-obfuscate"
-                className="text-[12px] font-medium text-muted-foreground select-none peer-disabled:opacity-50"
-              >
-                Obfuscate
-              </label>
-            </span>
-          </Tip>
-          <div className="flex items-center">
-            <Select value={repackFormat} onValueChange={(v) => setRepackFormat(v as RepackFormat)}>
-              <SelectTrigger
-                size="sm"
-                className="h-8 w-30 rounded-r-none border-r-0 text-sm font-medium"
-              >
-                <SelectValue>
-                  <span className="flex items-center gap-1.5">
-                    {repackFormat === "pak" ? (
-                      <Package size={15} strokeWidth={2} className="text-foreground" />
-                    ) : (
-                      <Layers size={15} strokeWidth={2} className="text-foreground" />
-                    )}
-                    {repackFormat === "pak" ? "Pak" : "IoStore"}
-                  </span>
-                </SelectValue>
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="pak">
-                  <Package size={13} className="text-foreground inline-block mr-1.5 -mt-px" />
-                  Pak
-                </SelectItem>
-                <SelectItem value="iostore">
-                  <Layers size={13} className="text-foreground inline-block mr-1.5 -mt-px" />
-                  IoStore
-                </SelectItem>
-              </SelectContent>
-            </Select>
-            <Button
-              variant="blue"
-              size="sm"
-              className="rounded-l-none"
-              onClick={openAndRepack}
-              disabled={busy}
-            >
-              <PackageOpen size={15} />
-              Repack Folder
-            </Button>
-          </div>
+          <Button variant="blue" size="sm" onClick={openAndRepack} disabled={busy}>
+            <PackageOpen size={15} />
+            Repack Folder
+          </Button>
         </div>
       </div>
 
@@ -1501,13 +1459,18 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
                     const isMod = /[/\\]~mods[/\\]/i.test(p);
                     const isManual = manualPaks.has(p);
                     const isIoStore = info.has_utoc && info.has_ucas;
+                    const isObfuscated = info.obfuscated && isMod;
                     const fileName = p.split(/[/\\]/).pop();
                     const modsIdx = p.search(/[/\\]~mods[/\\]/i);
                     const displayName =
                       isMod && modsIdx !== -1 ? p.slice(modsIdx + 1).replace(/\\/g, "/") : fileName;
                     return (
                       <ContextMenu key={p}>
-                        <Tip content={fileName} side="top" align="end">
+                        <Tip
+                          content={isObfuscated ? `${fileName} (obfuscated)` : fileName}
+                          side="top"
+                          align="end"
+                        >
                           <ContextMenuTrigger asChild>
                             <li
                               className={cn(
@@ -1531,6 +1494,9 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
                                 />
                               )}
                               <span className="flex-1 truncate text-[12px]">{displayName}</span>
+                              {isObfuscated && (
+                                <Lock size={12} className="shrink-0 text-violet-400" />
+                              )}
                               {isIoStore && (
                                 <span className="shrink-0 rounded bg-ok/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase leading-none text-ok">
                                   IoStore
@@ -1548,6 +1514,12 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
                             <FolderOpen size={14} />
                             Reveal in File Explorer
                           </ContextMenuItem>
+                          {isMod && (
+                            <ContextMenuItem onSelect={() => promptRepackInPlace(p)}>
+                              <Hammer size={14} />
+                              Repack in place…
+                            </ContextMenuItem>
+                          )}
                           <ContextMenuSeparator />
                           <ContextMenuItem onSelect={() => copyToClipboard(p, "path")}>
                             <Copy size={14} />
@@ -1597,6 +1569,11 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
                         {selectedIsIoStore ? "iostore" : "pak"}
                       </span>
                     )}
+                    {selectedObfuscated && (
+                      <span className="shrink-0 rounded bg-violet-400/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase leading-none text-violet-400">
+                        obfuscated
+                      </span>
+                    )}
                   </div>
                 </Tip>
                 <Tip
@@ -1640,6 +1617,18 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
                       </Button>
                     </Tip>
                   </>
+                )}
+                {!selectedIsVanilla && selectedPak && (
+                  <Tip content="Repack this mod in place, with format and obfuscation options">
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      onClick={() => promptRepackInPlace(selectedPak)}
+                      disabled={busy || !gamePath}
+                    >
+                      <Hammer size={15} />
+                    </Button>
+                  </Tip>
                 )}
                 {hasSelectedBnk && (
                   <Tip content="Extract sound WAVs from this mod's soundbank">
@@ -2047,6 +2036,84 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
               onClick={runRebuildVanilla}
             >
               Rebuild
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={!!repackPrompt}
+        onOpenChange={(open) => {
+          if (!open) setRepackPrompt(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {displayRepackPrompt?.kind === "in-place" ? "Repack mod" : "Repack folder"}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {displayRepackPrompt?.kind === "in-place" ? (
+                <>
+                  Rebuilds <span className="font-mono">{displayRepackPrompt.label}</span> and
+                  replaces it in <span className="font-mono">~mods</span>. The original is put back
+                  if anything fails, and the repack is abandoned if any asset would be lost.
+                </>
+              ) : (
+                <>
+                  Packs <span className="font-mono">{displayRepackPrompt?.label}</span> into a new
+                  mod. You choose where to save it next.
+                </>
+              )}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+
+          <div className="flex flex-col overflow-hidden rounded-md border border-border">
+            {REPACK_OUTPUTS.map((output, i) => {
+              const Icon = output.icon;
+              const active =
+                !!repackPrompt &&
+                repackPrompt.toIoStore === output.toIoStore &&
+                repackPrompt.obfuscate === output.obfuscate;
+              return (
+                <button
+                  key={output.label}
+                  type="button"
+                  onClick={() =>
+                    setRepackPrompt(
+                      (p) =>
+                        p && {
+                          ...p,
+                          toIoStore: output.toIoStore,
+                          obfuscate: output.obfuscate,
+                        }
+                    )
+                  }
+                  className={cn(
+                    "flex items-center gap-2.5 px-3 py-2.5 text-left transition-colors",
+                    i > 0 && "border-t border-border",
+                    active ? "bg-secondary" : "hover:bg-secondary/50"
+                  )}
+                >
+                  <Icon size={15} strokeWidth={2} className={cn("shrink-0", output.iconClass)} />
+                  <span className="flex-1">
+                    <span className="block text-[13px] font-medium">{output.label}</span>
+                    <span className="block text-[11px] text-muted-foreground">{output.hint}</span>
+                  </span>
+                  {active && <Check size={15} className="shrink-0 text-ok" />}
+                </button>
+              );
+            })}
+          </div>
+
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              autoFocus
+              className={buttonVariants({ variant: "blue" })}
+              onClick={runRepack}
+            >
+              Repack
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

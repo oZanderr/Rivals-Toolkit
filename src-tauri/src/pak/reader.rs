@@ -1,7 +1,11 @@
 //! Pak file listing, inspection, and content extraction.
 
 use std::collections::{HashMap, HashSet};
-use std::{fs, io::BufReader, path::Path};
+use std::{
+    fs,
+    io::BufReader,
+    path::{Path, PathBuf},
+};
 
 use serde::Serialize;
 use walkdir::WalkDir;
@@ -15,6 +19,9 @@ pub(crate) struct PakFileInfo {
     pub path: String,
     pub has_utoc: bool,
     pub has_ucas: bool,
+    /// Container ships its payload encrypted. Vanilla containers always do, so only on a mod
+    /// does this mean obfuscation; callers scope the distinction.
+    pub obfuscated: bool,
     pub optional_pak: Option<String>,
     pub optional_has_utoc: bool,
     pub optional_has_ucas: bool,
@@ -218,9 +225,12 @@ pub(super) fn list_pak_files_info(
                 None => (false, false),
             };
 
+            let utoc = PathBuf::from(format!("{base}.utoc"));
+            let has_utoc = utoc.exists();
             PakFileInfo {
-                has_utoc: Path::new(&format!("{base}.utoc")).exists(),
+                has_utoc,
                 has_ucas: Path::new(&format!("{base}.ucas")).exists(),
+                obfuscated: has_utoc && super::iostore::utoc_is_obfuscated(&utoc),
                 optional_pak,
                 optional_has_utoc,
                 optional_has_ucas,
