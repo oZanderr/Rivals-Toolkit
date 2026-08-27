@@ -1,6 +1,6 @@
 {
   "source": "https://raw.githubusercontent.com/donutman07/MarvelRivalsCharacterIDs/main/MarvelRivalsCharacterIDs.md",
-  "generated_at": "2026-08-21T06:55:08.953Z",
+  "generated_at": "2026-08-27T17:30:56.092Z",
   "characters": {
     "1011": {
       "name": "Hulk",
@@ -346,6 +346,7 @@
         "1032304": "TINSEL TAIL",
         "1032305": "RED PANDA",
         "1032306": "MAUREEN ALLENE: THE PROGRAMMER",
+        "1032308": "ACORN DIVINITY",
         "1032500": "Urban Hunter",
         "1032501": "Symbiote Squirrel"
       }
@@ -543,6 +544,7 @@
         "1042304": "SKELETON",
         "1042305": "BADLANDS LULLABY",
         "1042306": "PENI PARKER: THE FRESHMAN",
+        "1042307": "LIQUID SHELL",
         "1042308": "TOXIC TINT",
         "1042309": "CERULEAN CORRUPTION",
         "1042500": "VEN#M",
@@ -817,7 +819,8 @@
         "1056300": "ACE OF SPADES",
         "1056500": "Skuld 2099",
         "1056501": "ODIN'S BEAUTIFUL DAUGHTER",
-        "1056502": "DOOM ANGEL"
+        "1056502": "DOOM ANGEL",
+        "1056503": "QUEEN OF HEL"
       }
     },
     "1057": {
