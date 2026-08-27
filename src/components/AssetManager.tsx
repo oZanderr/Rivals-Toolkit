@@ -86,12 +86,15 @@ type RepackPrompt = {
   label: string;
   toIoStore: boolean;
   obfuscate: boolean;
-  compression: PackCompression;
 };
 
-// Only what the game is known to decode. Oodle is what Rivals ships; Zlib is UE's built-in
-// fallback. Zstd and LZ4 exist in the writers but are unverified against this game.
 type PackCompression = "oodle" | "zlib";
+
+// Not offered as a choice: measured on a real mod, Oodle beat every alternative on size and on
+// pack time (Zlib +5% and 5x slower, Zstd +16%, LZ4 +54%), the game ships Oodle, and every tool in
+// this ecosystem bundles the DLL. The commands still take the parameter, so re-exposing it later is
+// a matter of adding the control back.
+const REPACK_COMPRESSION: PackCompression = "oodle";
 type StatusType = "ok" | "err" | "info";
 
 // One long-running job, owned by the handler that started it. Progress events only update the
@@ -1151,7 +1154,6 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
       label: folderName,
       toIoStore: folderToIoStore,
       obfuscate: false,
-      compression: "oodle",
     });
   }
 
@@ -1164,13 +1166,15 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
       label: pak.split(/[/\\]/).pop() ?? pak,
       toIoStore: isIoStore,
       obfuscate: !!info?.obfuscated,
-      compression: "oodle",
     });
   }
 
   function promptRepackAll() {
     const mods = pakList.filter((p) => /[/\\]~mods[/\\]/i.test(p.path));
     if (mods.length === 0) return showNotice("No mods installed to repack.", "info");
+    // With a single mod there is nothing to batch, and the per-mod prompt is strictly better: it
+    // seeds format and obfuscation from that container rather than guessing.
+    if (mods.length === 1) return promptRepackInPlace(mods[0].path);
     setRepackPrompt({
       kind: "all-mods",
       source: "",
@@ -1178,7 +1182,6 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
       // A mixed library has no single current format, so the batch states its own intent.
       toIoStore: true,
       obfuscate: false,
-      compression: "oodle",
     });
   }
 
@@ -1193,7 +1196,7 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
       modPak,
       toIostore: prompt.toIoStore,
       obfuscate: prompt.obfuscate,
-      compression: prompt.compression,
+      compression: REPACK_COMPRESSION,
     });
   }
 
@@ -1298,13 +1301,13 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
           inputDir: prompt.source,
           outputUtoc: output,
           obfuscate: prompt.obfuscate,
-          compression: prompt.compression,
+          compression: REPACK_COMPRESSION,
         });
       } else {
         await invoke("repack_pak", {
           inputDir: prompt.source,
           outputPak: output,
-          compression: prompt.compression,
+          compression: REPACK_COMPRESSION,
         });
       }
       showNotice(`Repacked ${label} to: ${output}`, "ok", { revealPath: output });
@@ -1725,10 +1728,9 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
                 )}
                 {selectedEntries.size > 0 &&
                   selectedIsIoStore &&
-                  !selectedIsVanilla &&
                   selectedUtocEntries.length > 0 && (
                     <Tip
-                      content={`Convert ${selectedUtocEntries.length} selected mod assets to editable .uasset/.uexp legacy`}
+                      content={`Convert ${selectedUtocEntries.length} selected asset(s) to editable .uasset/.uexp legacy`}
                     >
                       <Button
                         variant="ghost"
@@ -2048,22 +2050,20 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
                             </ContextMenuSubContent>
                           </ContextMenuSub>
                         )}
-                        {entry.source === "utoc" &&
-                          !entry.path.endsWith(".ubulk") &&
-                          !selectedIsVanilla && (
-                            <ContextMenuItem
-                              onSelect={() =>
-                                selectedUtocEntries.length > 0
-                                  ? exportLegacySelected()
-                                  : exportLegacySingle(entry)
-                              }
-                            >
-                              <FileOutput />
-                              {selectedUtocEntries.length > 1
-                                ? `Export ${selectedUtocEntries.length} Legacy (.uasset/.uexp)…`
-                                : "Export Legacy (.uasset/.uexp)…"}
-                            </ContextMenuItem>
-                          )}
+                        {entry.source === "utoc" && !entry.path.endsWith(".ubulk") && (
+                          <ContextMenuItem
+                            onSelect={() =>
+                              selectedUtocEntries.length > 0
+                                ? exportLegacySelected()
+                                : exportLegacySingle(entry)
+                            }
+                          >
+                            <FileOutput />
+                            {selectedUtocEntries.length > 1
+                              ? `Export ${selectedUtocEntries.length} Legacy (.uasset/.uexp)…`
+                              : "Export Legacy (.uasset/.uexp)…"}
+                          </ContextMenuItem>
+                        )}
                         <ContextMenuSeparator />
                         <ContextMenuItem onSelect={() => selectByExtension(ext)} disabled={!ext}>
                           <Layers />
@@ -2140,9 +2140,9 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
             <AlertDialogDescription>
               {displayRepackPrompt?.kind === "all-mods" ? (
                 <>
-                  Rebuilds all <span className="font-mono">{displayRepackPrompt.label}</span> in{" "}
-                  <span className="font-mono">~mods</span>, one at a time. Each is verified before
-                  it replaces the original, and one failure leaves the rest untouched.
+                  Rebuilds {displayRepackPrompt.label} in <span className="font-mono">~mods</span>,
+                  one at a time. Each is verified before it replaces the original, so a failure
+                  leaves the others alone.
                 </>
               ) : displayRepackPrompt?.kind === "in-place" ? (
                 <>
@@ -2195,28 +2195,6 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
                 </button>
               );
             })}
-          </div>
-
-          <div className="flex items-center gap-3">
-            <span className="shrink-0 text-[12px] text-muted-foreground">Compression</span>
-            <div className="flex items-center">
-              {(["oodle", "zlib"] as const).map((method, i) => (
-                <Button
-                  key={method}
-                  variant={repackPrompt?.compression === method ? "secondary" : "outline"}
-                  size="sm"
-                  className={i === 0 ? "rounded-r-none" : "rounded-l-none border-l-0"}
-                  onClick={() => setRepackPrompt((p) => p && { ...p, compression: method })}
-                >
-                  {method === "oodle" ? "Oodle" : "Zlib"}
-                </Button>
-              ))}
-            </div>
-            <span className="text-[11px] text-muted-foreground">
-              {repackPrompt?.compression === "oodle"
-                ? "What the game ships with."
-                : "Larger, but decodable by any UE build."}
-            </span>
           </div>
 
           <AlertDialogFooter>
