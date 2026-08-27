@@ -61,12 +61,6 @@ interface PakIniInfo {
 // Runtime priority for shared keys: device_profiles > windows_engine > engine > base_engine.
 type PakIniTarget = "base_engine" | "engine" | "windows_engine" | "device_profiles";
 
-interface PakTweakEdit {
-  key: string;
-  value: string | null;
-  engine_section?: string;
-}
-
 interface TweakSetting {
   id: string;
   enabled: boolean;
@@ -142,11 +136,11 @@ interface BatchToggleTweak extends TweakBase {
 
 type TweakDefinition = RemoveLinesTweak | ToggleTweak | SliderTweak | BatchToggleTweak;
 
-// Per-pak state cache that preserves tweak states and unsaved edits when switching between paks
+// Per-pak state cache that preserves tweak states and unsaved changes when switching between paks
 interface PakCacheEntry {
   tweakStates: TweakState[];
   savedTweakStates: TweakState[];
-  edits: PakTweakEdit[];
+  pending: TweakSetting[];
 }
 
 interface Props {
@@ -172,7 +166,7 @@ export function PakTweaks({ gamePath, isActive }: Props) {
   const [selectedPak, setSelectedPak] = useState<PakIniInfo | null>(null);
   const [tweakStates, setTweakStates] = useState<TweakState[]>([]);
   const [savedTweakStates, setSavedTweakStates] = useState<TweakState[]>([]);
-  const [edits, setEdits] = useState<PakTweakEdit[]>([]);
+  const [pending, setPending] = useState<TweakSetting[]>([]);
   const [scanning, setScanning] = useState(false);
   const [loading, setLoading] = useState(false);
   const [applying, setApplying] = useState(false);
@@ -285,79 +279,24 @@ export function PakTweaks({ gamePath, isActive }: Props) {
       // An added/removed INI can change which paks qualify, so refresh the list.
       scanRef.current(true);
       if (selectedPak?.pak_path !== e.pakPath) return;
-      if (edits.length > 0) {
+      if (pending.length > 0) {
         showNotice("Pak changed elsewhere; reload manually to discard changes", "info", 6000);
         return;
       }
       forceReloadPak(selectedPak);
     });
-  }, [selectedPak, edits.length]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [selectedPak, pending.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function toggleQuickTweak(id: string) {
     const def = definitions.find((d) => d.id === id);
     if (!def) return;
 
     const currentState = tweakStates.find((s) => s.id === id);
-    const savedState = savedTweakStates.find((s) => s.id === id);
     const newEnabled = !(currentState?.active ?? false);
 
     // Optimistically update local state so the UI responds immediately
     setTweakStates((prev) => prev.map((s) => (s.id === id ? { ...s, active: newEnabled } : s)));
-
-    switch (def.kind) {
-      case "RemoveLines":
-        for (const line of def.lines) {
-          const eqIdx = line.pattern.indexOf("=");
-          const key = eqIdx >= 0 ? line.pattern.substring(0, eqIdx) : line.pattern;
-          const patternVal = eqIdx >= 0 ? line.pattern.substring(eqIdx + 1) : "0";
-          // When replace_with is set, enabled state writes that value instead of removing
-          let replaceVal: string | null = null;
-          if (line.replace_with != null) {
-            const rwEqIdx = line.replace_with.indexOf("=");
-            replaceVal =
-              rwEqIdx >= 0 ? line.replace_with.substring(rwEqIdx + 1) : line.replace_with;
-          }
-          const isSavedActive = savedState?.active ?? false;
-          const originalVal = isSavedActive ? replaceVal : patternVal;
-          const newVal = newEnabled ? replaceVal : patternVal;
-          queueEdit(key, newVal, originalVal, line.engine_section ?? undefined);
-        }
-        break;
-      case "Toggle": {
-        const originalVal = (savedState?.active ?? false) ? def.on_value : (def.off_value ?? null);
-        queueEdit(
-          def.key,
-          newEnabled ? def.on_value : (def.off_value ?? null),
-          originalVal,
-          def.engine_section
-        );
-        break;
-      }
-      case "Slider": {
-        const sliderDef = def as SliderTweak;
-        const currentVal = currentState?.current_value ?? String(sliderDef.default_value);
-        const offVal = sliderDef.write_default_on_disable ? String(sliderDef.default_value) : null;
-        const originalVal =
-          (savedState?.active ?? false)
-            ? (savedState?.current_value ?? String(sliderDef.default_value))
-            : offVal;
-        queueEdit(def.key, newEnabled ? currentVal : offVal, originalVal, def.engine_section);
-        break;
-      }
-      case "BatchToggle": {
-        for (const entry of def.entries) {
-          const originalVal =
-            (savedState?.active ?? false) ? entry.on_value : (entry.off_value ?? null);
-          queueEdit(
-            entry.key,
-            newEnabled ? entry.on_value : (entry.off_value ?? null),
-            originalVal,
-            entry.engine_section
-          );
-        }
-        break;
-      }
-    }
+    queueSetting(id, newEnabled, currentState?.current_value ?? null);
   }
 
   const refreshPresets = async () => {
@@ -402,100 +341,40 @@ export function PakTweaks({ gamePath, isActive }: Props) {
       return;
     }
 
-    // Build a map for fast lookup
+    // Only tweaks the preset names are touched; everything else keeps its current state.
     const presetMap = new Map(preset.settings.map((s) => [s.id, s]));
 
-    // Optimistic state update for UI: only override tweaks present in preset.
-    // Leave others at their current state (disk-loaded or user-modified).
-    const newStates: TweakState[] = tweakStates.map((s) => {
-      const target = presetMap.get(s.id);
-      if (!target) return s;
-      return {
-        id: s.id,
-        active: target.enabled,
-        current_value: target.value,
-      };
-    });
-    setTweakStates(newStates);
+    setTweakStates((prev) =>
+      prev.map((s) => {
+        const target = presetMap.get(s.id);
+        if (!target) return s;
+        return { id: s.id, active: target.enabled, current_value: target.value };
+      })
+    );
 
-    // Build edit list by diffing preset entries against savedTweakStates.
-    // Tweaks not in preset are left untouched (no edit queued for them).
-    const newEdits: PakTweakEdit[] = [...edits];
-    const upsertEdit = (
-      key: string,
-      value: string | null,
-      originalValue: string | null | undefined,
-      engineSection?: string
-    ) => {
-      const idx = newEdits.findIndex((e) => e.key.toLowerCase() === key.toLowerCase());
-      if (originalValue !== undefined && value === originalValue) {
-        if (idx >= 0) newEdits.splice(idx, 1);
-        return;
-      }
-      if (idx >= 0) newEdits[idx] = { key, value, engine_section: engineSection };
-      else newEdits.push({ key, value, engine_section: engineSection });
-    };
-
+    const next: TweakSetting[] = [...pending];
     for (const def of definitions) {
       const target = presetMap.get(def.id);
-      if (!target) continue; // Skip tweaks not in preset
-      const newEnabled = target.enabled;
-      const savedState = savedTweakStates.find((s) => s.id === def.id);
-      const isSavedActive = savedState?.active ?? false;
+      if (!target) continue;
+      // A remove-only tweak cannot be restored, and its row is hidden once saved active.
+      if (!target.enabled && def.kind === "RemoveLines" && def.remove_only) continue;
 
-      switch (def.kind) {
-        case "RemoveLines": {
-          for (const line of def.lines) {
-            const eqIdx = line.pattern.indexOf("=");
-            const key = eqIdx >= 0 ? line.pattern.substring(0, eqIdx) : line.pattern;
-            const patternVal = eqIdx >= 0 ? line.pattern.substring(eqIdx + 1) : "0";
-            let replaceVal: string | null = null;
-            if (line.replace_with != null) {
-              const rwEqIdx = line.replace_with.indexOf("=");
-              replaceVal =
-                rwEqIdx >= 0 ? line.replace_with.substring(rwEqIdx + 1) : line.replace_with;
-            }
-            const originalVal = isSavedActive ? replaceVal : patternVal;
-            const newVal = newEnabled ? replaceVal : patternVal;
-            upsertEdit(key, newVal, originalVal, line.engine_section ?? undefined);
-          }
-          break;
-        }
-        case "Toggle": {
-          const originalVal = isSavedActive ? def.on_value : (def.off_value ?? null);
-          upsertEdit(
-            def.key,
-            newEnabled ? def.on_value : (def.off_value ?? null),
-            originalVal,
-            def.engine_section
-          );
-          break;
-        }
-        case "Slider": {
-          const targetVal = target.value ?? String(def.default_value);
-          const offVal = def.write_default_on_disable ? String(def.default_value) : null;
-          const originalVal = isSavedActive
-            ? (savedState?.current_value ?? String(def.default_value))
-            : offVal;
-          upsertEdit(def.key, newEnabled ? targetVal : offVal, originalVal, def.engine_section);
-          break;
-        }
-        case "BatchToggle": {
-          for (const entry of def.entries) {
-            const originalVal = isSavedActive ? entry.on_value : (entry.off_value ?? null);
-            upsertEdit(
-              entry.key,
-              newEnabled ? entry.on_value : (entry.off_value ?? null),
-              originalVal,
-              entry.engine_section
-            );
-          }
-          break;
-        }
+      const saved = savedTweakStates.find((s) => s.id === def.id);
+      const idx = next.findIndex((e) => e.id === def.id);
+      const unchanged =
+        target.enabled === (saved?.active ?? false) &&
+        target.value === (saved?.current_value ?? null);
+
+      if (unchanged) {
+        if (idx >= 0) next.splice(idx, 1);
+        continue;
       }
+      const entry = { id: def.id, enabled: target.enabled, value: target.value };
+      if (idx >= 0) next[idx] = entry;
+      else next.push(entry);
     }
 
-    setEdits(newEdits);
+    setPending(next);
     setAppliedPresetAt(preset.modified_at);
   }
 
@@ -587,15 +466,9 @@ export function PakTweaks({ gamePath, isActive }: Props) {
   function setQuickTweakValue(id: string, val: string) {
     const def = definitions.find((d) => d.id === id);
     if (!def || def.kind !== "Slider") return;
-    const sliderDef = def as SliderTweak;
-    const savedState = savedTweakStates.find((s) => s.id === id);
-    const offVal = sliderDef.write_default_on_disable ? String(sliderDef.default_value) : null;
-    const originalVal =
-      (savedState?.active ?? false)
-        ? (savedState?.current_value ?? String(sliderDef.default_value))
-        : offVal;
+    const active = tweakStates.find((s) => s.id === id)?.active ?? false;
     setTweakStates((prev) => prev.map((s) => (s.id === id ? { ...s, current_value: val } : s)));
-    queueEdit(sliderDef.key, val, originalVal, sliderDef.engine_section);
+    queueSetting(id, active, val);
   }
 
   async function browse() {
@@ -650,7 +523,7 @@ export function PakTweaks({ gamePath, isActive }: Props) {
         setSelectedPak(null);
         setTweakStates([]);
         setSavedTweakStates([]);
-        setEdits([]);
+        setPending([]);
         if (!silent) showNotice("No config mods found", "info");
       } else if (!selectedPak) {
         // Nothing selected yet — auto-select if only one
@@ -666,7 +539,7 @@ export function PakTweaks({ gamePath, isActive }: Props) {
           setSelectedPak(null);
           setTweakStates([]);
           setSavedTweakStates([]);
-          setEdits([]);
+          setPending([]);
         }
         if (!silent) showNotice(formatModsFoundMessage(merged.length, removedMissing), "ok");
       } else {
@@ -689,7 +562,7 @@ export function PakTweaks({ gamePath, isActive }: Props) {
       pakCache.current.set(selectedPak.pak_path, {
         tweakStates,
         savedTweakStates,
-        edits,
+        pending,
       });
     }
 
@@ -698,7 +571,7 @@ export function PakTweaks({ gamePath, isActive }: Props) {
       setSelectedPak(pak);
       setTweakStates(cached.tweakStates);
       setSavedTweakStates(cached.savedTweakStates);
-      setEdits(cached.edits);
+      setPending(cached.pending);
       return;
     }
 
@@ -709,17 +582,17 @@ export function PakTweaks({ gamePath, isActive }: Props) {
       const states = await invoke<TweakState[]>("detect_pak_tweaks", { pakPath: pak.pak_path });
       setTweakStates(states);
       setSavedTweakStates(states);
-      setEdits([]);
+      setPending([]);
       pakCache.current.set(pak.pak_path, {
         tweakStates: states,
         savedTweakStates: states,
-        edits: [],
+        pending: [],
       });
     } catch (e: unknown) {
       // Clear on failure so stale state doesn't linger
       setTweakStates([]);
       setSavedTweakStates([]);
-      setEdits([]);
+      setPending([]);
       if (isPakMissingError(e)) {
         removePak(pak.pak_path);
         showNotice("That pak file is missing now. Removed it from the list.", "info");
@@ -739,11 +612,11 @@ export function PakTweaks({ gamePath, isActive }: Props) {
       const states = await invoke<TweakState[]>("detect_pak_tweaks", { pakPath: pak.pak_path });
       setTweakStates(states);
       setSavedTweakStates(states);
-      setEdits([]);
+      setPending([]);
       pakCache.current.set(pak.pak_path, {
         tweakStates: states,
         savedTweakStates: states,
-        edits: [],
+        pending: [],
       });
     } catch (e: unknown) {
       if (isPakMissingError(e)) {
@@ -756,39 +629,36 @@ export function PakTweaks({ gamePath, isActive }: Props) {
     }
   }
 
-  function queueEdit(
-    key: string,
-    value: string | null,
-    originalValue: string | null | undefined,
-    engineSection?: string
-  ) {
-    setEdits((prev) => {
-      const existing = prev.findIndex((e) => e.key.toLowerCase() === key.toLowerCase());
-      // If the new value restores to original, cancel out this edit
-      if (originalValue !== undefined && value === originalValue) {
-        if (existing >= 0) {
-          const updated = [...prev];
-          updated.splice(existing, 1);
-          return updated;
-        }
-        return prev;
+  /** Record a tweak's desired state, or drop it once it matches disk. Comparing against
+   * savedTweakStates rather than the previous click is what makes toggling back and forth end clean. */
+  function queueSetting(id: string, enabled: boolean, value: string | null) {
+    const saved = savedTweakStates.find((s) => s.id === id);
+    const unchanged =
+      enabled === (saved?.active ?? false) && value === (saved?.current_value ?? null);
+    setPending((prev) => {
+      const existing = prev.findIndex((e) => e.id === id);
+      if (unchanged) {
+        if (existing < 0) return prev;
+        const updated = [...prev];
+        updated.splice(existing, 1);
+        return updated;
       }
       if (existing >= 0) {
         const updated = [...prev];
-        updated[existing] = { key, value, engine_section: engineSection };
+        updated[existing] = { id, enabled, value };
         return updated;
       }
-      return [...prev, { key, value, engine_section: engineSection }];
+      return [...prev, { id, enabled, value }];
     });
   }
 
   async function applyEdits() {
-    if (!selectedPak || edits.length === 0) return;
+    if (!selectedPak || pending.length === 0) return;
     setApplying(true);
     try {
-      const msg = await invoke<string>("apply_pak_tweak_edits", {
+      const msg = await invoke<string>("apply_pak_tweak_settings", {
         pakPath: selectedPak.pak_path,
-        edits,
+        settings: pending,
       });
       showNotice(msg, "ok");
       emitPakChanged({ pakPath: selectedPak.pak_path, source: "PakTweaks" });
@@ -806,7 +676,7 @@ export function PakTweaks({ gamePath, isActive }: Props) {
     }
   }
 
-  const dirty = edits.length > 0;
+  const dirty = pending.length > 0;
 
   const { atBottom, scrollRef, sentinelRef } = useScrollAtBottom();
   const discardEdits = () => {
@@ -834,7 +704,7 @@ export function PakTweaks({ gamePath, isActive }: Props) {
         setSelectedPak(null);
         setTweakStates([]);
         setSavedTweakStates([]);
-        setEdits([]);
+        setPending([]);
       }
     }
   }
@@ -1207,33 +1077,31 @@ export function PakTweaks({ gamePath, isActive }: Props) {
         <div className="flex shrink-0 items-center gap-2 pt-2">
           <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
             <span className="text-[11px] font-semibold uppercase text-muted-foreground">
-              Pending ({edits.length})
+              Pending ({pending.length})
             </span>
-            {edits.map((edit) => (
-              <Badge
-                key={edit.key}
-                variant="outline"
-                className={cn(
-                  "rounded-sm px-1.5 py-0 text-[11px] font-mono",
-                  edit.value === null
-                    ? "border-destructive/40 bg-destructive/10 text-destructive"
-                    : "border-ok/40 bg-ok/10 text-ok"
-                )}
-              >
-                {edit.value === null ? `- ${edit.key}` : `${edit.key}=${edit.value}`}
-              </Badge>
-            ))}
+            {pending.map((entry) => {
+              const label = definitions.find((d) => d.id === entry.id)?.label ?? entry.id;
+              return (
+                <Badge
+                  key={entry.id}
+                  variant="outline"
+                  className={cn(
+                    "rounded-sm px-1.5 py-0 text-[11px]",
+                    entry.enabled
+                      ? "border-ok/40 bg-ok/10 text-ok"
+                      : "border-destructive/40 bg-destructive/10 text-destructive"
+                  )}
+                >
+                  {entry.enabled ? label : `- ${label}`}
+                </Badge>
+              );
+            })}
           </div>
           <Button variant="outline" size="sm" onClick={discardEdits} disabled={loading}>
             <Undo2 size={14} />
             Discard
           </Button>
-          <Button
-            variant="blue"
-            size="sm"
-            onClick={applyEdits}
-            disabled={!dirty || applying || edits.length === 0}
-          >
+          <Button variant="blue" size="sm" onClick={applyEdits} disabled={!dirty || applying}>
             {applying ? <RefreshCw size={14} className="animate-spin" /> : <Save size={14} />}
             {applying ? "Repacking…" : "Save"}
           </Button>

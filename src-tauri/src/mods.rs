@@ -21,32 +21,7 @@ static BYPASS_ASI_LOADER: &[u8] = include_bytes!("../resources/bypass/dsound.dll
 static BYPASS_PAYLOAD_ASI: &[u8] =
     include_bytes!("../resources/bypass/MarvelRivalsUTOCSignatureBypass.asi");
 
-/// Collect relative paths of mod-related files (.pak, .ucas, .utoc, and their
-/// `.disabled` variants) under the given root directory. When `recursive` is
-/// false, only direct children of `root` are scanned (matches UE's native
-/// `~mods` load behavior).
-pub(crate) fn walk_mod_files(root: &std::path::Path, recursive: bool) -> Vec<std::path::PathBuf> {
-    let mut walker = walkdir::WalkDir::new(root);
-    if !recursive {
-        walker = walker.max_depth(1);
-    }
-    walker
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
-        .filter(|e| {
-            let name = e.file_name().to_string_lossy();
-            let base = name.strip_suffix(".disabled").unwrap_or(&name);
-            matches!(
-                std::path::Path::new(base)
-                    .extension()
-                    .and_then(|x| x.to_str()),
-                Some("pak" | "ucas" | "utoc")
-            )
-        })
-        .filter_map(|e| e.path().strip_prefix(root).ok().map(|r| r.to_path_buf()))
-        .collect()
-}
+pub(crate) use rivals_core::mods::walk_mod_files;
 
 /// Total on-disk size of a mod pak plus companion `.ucas`/`.utoc` when present.
 /// Mirrors the size reported in `ModEntry::size_bytes` so hero-cache validation

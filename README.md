@@ -97,11 +97,38 @@ Build desktop binaries:
 pnpm tauri build
 ```
 
+## Command Line
+
+`rivals-cli.exe` ships in the release zip next to the desktop app and scripts the same config-tweak
+and pak INI engine. It reads the game path the app saved, so `--game-root` is only needed when that
+is unset or you want a different install.
+
+```bash
+rivals-cli paks list                                  # paks in ~mods with editable INIs
+rivals-cli tweaks list                                # the tweak catalogue
+rivals-cli tweaks status --pak MyMod                  # which tweaks a pak has on
+
+rivals-cli tweaks apply --pak MyMod --on fix_dark_maps --off cas_sharpening
+rivals-cli tweaks apply --pak MyMod --set brightness=2.8 --dry-run
+
+rivals-cli ini get   --pak MyMod --key r.TonemapperGamma
+rivals-cli ini set   --pak MyMod r.Foo=1 r.Bar=2
+rivals-cli ini unset --pak MyMod r.Foo
+```
+
+`--pak` takes a pak path or a bare mod name to look up in `~mods`. `--json` makes every command
+emit machine-readable output, and failures exit non-zero. Mutating commands refuse to run while
+Marvel Rivals is open, since the game holds the pak files; `--force` overrides that.
+
+Keep `oo2core_9_win64.dll` beside the executable, as shipped, or Oodle-compressed paks will not read.
+
 ## Project Layout
 
 - `src/`: React frontend
 - `src-tauri/src/`: Rust backend and Tauri commands
 - `src-tauri/resources/`: bundled runtime resources (for example bypass files)
+- `crates/rivals-core/`: pak and config-tweak engine shared by the app and the CLI
+- `crates/rivals-cli/`: the `rivals-cli` binary
 
 ## Signature Bypass
 

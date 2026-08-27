@@ -38,7 +38,7 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           workspaces: |
-            src-tauri -> target
+            . -> target
           shared-key: tauri-release
           cache-on-failure: true
 

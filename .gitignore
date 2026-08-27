@@ -26,3 +26,6 @@ dist-ssr
 # Claude Code
 .claude/
 CLAUDE.md
+
+# Rust build output (workspace root)
+/target/

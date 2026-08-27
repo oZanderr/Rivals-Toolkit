@@ -1,9 +1,9 @@
 [package]
 name = "rivals-toolkit"
-version = "0.13.0"
+version.workspace = true
 description = "Toolkit for Marvel Rivals configuration and mod files"
-authors = ["Zander"]
-edition = "2024"
+authors.workspace = true
+edition.workspace = true
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -18,32 +18,28 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+rivals-core = { path = "../crates/rivals-core" }
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-repak = { git = "https://github.com/oZanderr/repak", branch = "master", features = ["oodle"] }
-rebnk = { git = "https://github.com/oZanderr/rebnk", branch = "master" }
-retoc = { git = "https://github.com/oZanderr/retoc", branch = "master" }
-aes = "0.8.4"
-hex = "0.4"
-walkdir = "2"
+serde.workspace = true
+serde_json.workspace = true
+repak.workspace = true
+rebnk.workspace = true
+retoc.workspace = true
+aes.workspace = true
+hex.workspace = true
+walkdir.workspace = true
 winreg = "0.52"
-dirs = "5"
+dirs.workspace = true
 zip = { version = "8.2.0", default-features = false, features = ["deflate"] }
 sevenz-rust2 = { version = "0.20", default-features = false, features = ["compress", "util"] }
 # UnRAR licence: redistribution is allowed, but the source may not be used to build a
 # RAR-compatible archiver. Extraction only.
 unrar = "0.5"
-blake3 = "1"
+blake3.workspace = true
 sha2 = "0.10"
-rayon = "1"
+rayon.workspace = true
 ureq = { version = "3", features = ["json"] }
 lewton = "0.10"
-sysinfo = { version = "0.33", default-features = false, features = ["system"] }
-
-[profile.release]
-opt-level = 3
-lto = "thin"
-strip = true
+sysinfo.workspace = true

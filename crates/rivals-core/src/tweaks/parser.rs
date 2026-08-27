@@ -2,7 +2,7 @@
 
 /// Compare a string value from an INI file against a default `f64`.
 /// Handles mismatches like `"1"` vs `1.0` by parsing both as numbers.
-pub(crate) fn values_equal(file_value: &str, default: f64) -> bool {
+pub fn values_equal(file_value: &str, default: f64) -> bool {
     if let Ok(v) = file_value.trim().parse::<f64>() {
         (v - default).abs() < f64::EPSILON
     } else {
@@ -11,7 +11,7 @@ pub(crate) fn values_equal(file_value: &str, default: f64) -> bool {
 }
 
 /// Check whether a non-comment line is an assignment to `key_lower`, including `+CVars=` form.
-pub(crate) fn matches_key(trimmed_line: &str, key_lower: &str) -> bool {
+pub fn matches_key(trimmed_line: &str, key_lower: &str) -> bool {
     let line_lower = trimmed_line.to_ascii_lowercase();
     let prefix = format!("{}=", key_lower);
     let cvars_prefix = format!("+cvars={}=", key_lower);
@@ -19,7 +19,7 @@ pub(crate) fn matches_key(trimmed_line: &str, key_lower: &str) -> bool {
 }
 
 /// Find the last value of `key`, including `+CVars=key=value` lines.
-pub(crate) fn find_key_value(content: &str, key: &str) -> Option<String> {
+pub fn find_key_value(content: &str, key: &str) -> Option<String> {
     let key_lower = key.to_ascii_lowercase();
     let prefix = format!("{}=", key_lower);
     let cvars_prefix = format!("+cvars={}=", key_lower);
@@ -43,7 +43,7 @@ pub(crate) fn find_key_value(content: &str, key: &str) -> Option<String> {
 }
 
 /// Find the last value of `key` within `[section]` only. Last-wins inside the section.
-pub(crate) fn find_key_value_in_section(content: &str, section: &str, key: &str) -> Option<String> {
+pub fn find_key_value_in_section(content: &str, section: &str, key: &str) -> Option<String> {
     let key_lower = key.to_ascii_lowercase();
     let prefix = format!("{}=", key_lower);
     let cvars_prefix = format!("+cvars={}=", key_lower);
@@ -73,7 +73,7 @@ pub(crate) fn find_key_value_in_section(content: &str, section: &str, key: &str)
 /// Whether any non-comment line in `content` matches the full `pattern`, ignoring
 /// section structure. Pattern can be `key=value` (full match required) or just `key`
 /// (key-only match). Handles `+CVars=` prefix on both pattern and lines.
-pub(crate) fn pattern_present_anywhere(content: &str, pattern: &str) -> bool {
+pub fn pattern_present_anywhere(content: &str, pattern: &str) -> bool {
     let inner_pattern = if pattern.to_ascii_lowercase().starts_with("+cvars=") {
         &pattern["+CVars=".len()..]
     } else {

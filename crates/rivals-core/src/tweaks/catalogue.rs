@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 /// One line pattern used by a `RemoveLines` tweak.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct TweakLine {
+pub struct TweakLine {
     pub pattern: String,
     /// Target Engine.ini section for pak edits (defaults to `[ConsoleVariables]` when `None`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -16,7 +16,7 @@ pub(crate) struct TweakLine {
 
 /// One key/value assignment used by a `BatchToggle` tweak.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct BatchToggleEntry {
+pub struct BatchToggleEntry {
     pub key: String,
     pub on_value: String,
     /// Value to write when disabled. If absent, the key is removed from the file instead.
@@ -30,7 +30,7 @@ pub(crate) struct BatchToggleEntry {
 /// Tweak behavior definition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind")]
-pub(crate) enum TweakKind {
+pub enum TweakKind {
     RemoveLines {
         lines: Vec<TweakLine>,
         /// When true, lines are only removed and can never be restored.
@@ -81,7 +81,7 @@ pub(crate) enum TweakKind {
 
 /// User-facing tweak definition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct TweakDefinition {
+pub struct TweakDefinition {
     pub id: String,
     pub label: String,
     pub category: String,
@@ -94,7 +94,7 @@ pub(crate) struct TweakDefinition {
 
 /// Detected state of a tweak.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct TweakState {
+pub struct TweakState {
     pub id: String,
     pub active: bool,
     pub current_value: Option<String>,
@@ -102,14 +102,14 @@ pub(crate) struct TweakState {
 
 /// Requested setting for a tweak.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct TweakSetting {
+pub struct TweakSetting {
     pub id: String,
     pub enabled: bool,
     pub value: Option<String>,
 }
 
 /// Build the tweak catalogue.
-pub(crate) fn tweak_catalogue() -> Vec<TweakDefinition> {
+pub fn tweak_catalogue() -> Vec<TweakDefinition> {
     vec![
         // Gameplay Fixes
         TweakDefinition {
@@ -685,7 +685,7 @@ const GUS_SCALABILITY: &str = "ScalabilityGroups";
 
 /// Curated tweaks for the user's saved GameUserSettings.ini. Its sections and keys
 /// differ from the pak tweak catalogue, so this is a separate catalogue.
-pub(crate) fn game_user_settings_catalogue() -> Vec<TweakDefinition> {
+pub fn game_user_settings_catalogue() -> Vec<TweakDefinition> {
     let toggle = |id: &str,
                   label: &str,
                   category: &str,

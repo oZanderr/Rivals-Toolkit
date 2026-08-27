@@ -1,6 +1,6 @@
 //! INI parsing and CVar edit application for pak-embedded config files.
 
-use super::{PakTweakEdit, PakTweakState};
+use super::{PakCvar, PakTweakEdit};
 
 #[derive(Clone, Copy)]
 pub(super) enum IniType {
@@ -33,7 +33,7 @@ pub(super) fn apply_edits_to_ini(
 }
 
 /// Parse CVar key/value lines from Engine or DeviceProfiles INI content.
-pub(super) fn parse_console_vars(content: &str, source: &str) -> Vec<PakTweakState> {
+pub(super) fn parse_console_vars(content: &str, source: &str) -> Vec<PakCvar> {
     let mut vars = Vec::new();
     let is_device_profiles = source.contains("DeviceProfiles");
 
@@ -52,7 +52,7 @@ pub(super) fn parse_console_vars(content: &str, source: &str) -> Vec<PakTweakSta
             }
 
             if let Some(kv) = parse_cvar_line(trimmed) {
-                vars.push(PakTweakState {
+                vars.push(PakCvar {
                     key: kv.0,
                     value: kv.1,
                     source: source.to_string(),
@@ -75,7 +75,7 @@ pub(super) fn parse_console_vars(content: &str, source: &str) -> Vec<PakTweakSta
             }
 
             if let Some(kv) = parse_cvar_line(trimmed) {
-                vars.push(PakTweakState {
+                vars.push(PakCvar {
                     key: kv.0,
                     value: kv.1,
                     source: source.to_string(),
@@ -322,67 +322,28 @@ mod roundtrip_tests {
     use crate::tweaks::detect_tweaks_unscoped;
     use std::collections::HashSet;
 
-    /// Mirrors the frontend `toggleQuickTweak` logic for the ON case.
+    /// ON-state edits, built by the same `edits_for_tweak` both front ends call, so this round trip
+    /// tests the shipped translation rather than a copy of it.
     fn edits_for_on(def: &TweakDefinition) -> Vec<PakTweakEdit> {
-        match &def.kind {
-            TweakKind::RemoveLines { lines, .. } => lines
-                .iter()
-                .map(|line| {
-                    let key = line
-                        .pattern
-                        .split_once('=')
-                        .map(|(k, _)| k)
-                        .unwrap_or(&line.pattern)
-                        .to_string();
-                    let replace_val: Option<String> = line.replace_with.as_ref().map(|rw| {
-                        rw.split_once('=')
-                            .map(|(_, v)| v.to_string())
-                            .unwrap_or_else(|| rw.clone())
-                    });
-                    PakTweakEdit {
-                        key,
-                        value: replace_val, // None for plain remove, Some for replace_with
-                        engine_section: line.engine_section.clone(),
-                    }
-                })
-                .collect(),
-            TweakKind::Toggle {
-                key,
-                on_value,
-                engine_section,
-                ..
-            } => vec![PakTweakEdit {
-                key: key.clone(),
-                value: Some(on_value.clone()),
-                engine_section: engine_section.clone(),
-            }],
+        // Sliders only detect as active away from their default, so pick the far end of the range.
+        let slider_value = match &def.kind {
             TweakKind::Slider {
-                key,
+                min,
+                max,
                 default_value,
-                engine_section,
                 ..
             } => {
-                // Pick a non-default value so detection registers as active.
-                let v = if (*default_value - 0.0).abs() < f64::EPSILON {
-                    "1".to_string()
+                let away = if (default_value - min).abs() < f64::EPSILON {
+                    max
                 } else {
-                    "0".to_string()
+                    min
                 };
-                vec![PakTweakEdit {
-                    key: key.clone(),
-                    value: Some(v),
-                    engine_section: engine_section.clone(),
-                }]
+                Some(format!("{away}"))
             }
-            TweakKind::BatchToggle { entries, .. } => entries
-                .iter()
-                .map(|e| PakTweakEdit {
-                    key: e.key.clone(),
-                    value: Some(e.on_value.clone()),
-                    engine_section: e.engine_section.clone(),
-                })
-                .collect(),
-        }
+            _ => None,
+        };
+        crate::pak_tweaks::edits_for_tweak(def, true, slider_value.as_deref())
+            .unwrap_or_else(|e| panic!("'{}' failed to translate: {e}", def.id))
     }
 
     /// Four-file equivalent: simulate the full `apply_pak_tweaks` pipeline against
@@ -643,7 +604,7 @@ mod roundtrip_tests {
         merge_to_synthetic_quad("", engine, "", dp, false, true, false, true)
     }
 
-    /// Four-file variant of merge_to_synthetic; matches `read_pak_tweaks` priority chain.
+    /// Four-file variant of merge_to_synthetic; matches `read_pak_cvars` priority chain.
     #[allow(clippy::too_many_arguments)]
     fn merge_to_synthetic_quad(
         base: &str,
@@ -661,7 +622,7 @@ mod roundtrip_tests {
             (windows, present_windows, "WindowsEngine.ini"),
             (dp, present_dp, "DefaultDeviceProfiles.ini"),
         ];
-        let mut merged: Vec<PakTweakState> = Vec::new();
+        let mut merged: Vec<PakCvar> = Vec::new();
         for (content, present, label) in layers {
             if !present {
                 continue;

@@ -10,16 +10,14 @@ use super::io::{
     create_empty_pak, extract_file_to_string, extract_optional_entry, inspect_pak_for_any_ini,
     inspect_pak_for_ini,
 };
-use super::{
-    PakIniInfo, PakIniListing, PakIniListingScan, PakIniScan, PakScanError, PakTweakState,
-};
+use super::{PakCvar, PakIniInfo, PakIniListing, PakIniListingScan, PakIniScan, PakScanError};
 
 /// Inspect one pak and return INI metadata when present.
-pub(crate) fn inspect_single_pak(pak_path: &str) -> Result<Option<PakIniInfo>, String> {
+pub fn inspect_single_pak(pak_path: &str) -> Result<Option<PakIniInfo>, String> {
     inspect_pak_for_ini(Path::new(pak_path))
 }
 
-pub(crate) fn inspect_single_pak_any_ini(pak_path: &str) -> Result<Option<PakIniListing>, String> {
+pub fn inspect_single_pak_any_ini(pak_path: &str) -> Result<Option<PakIniListing>, String> {
     inspect_pak_for_any_ini(Path::new(pak_path))
 }
 
@@ -49,7 +47,7 @@ fn mod_pak_paths(game_root: &str, recursive: bool) -> Vec<std::path::PathBuf> {
 }
 
 /// Scan `~mods` and return paks that contain tweakable INI files, plus any that could not be read.
-pub(crate) fn scan_mod_paks(game_root: &str, recursive: bool) -> Result<PakIniScan, String> {
+pub fn scan_mod_paks(game_root: &str, recursive: bool) -> Result<PakIniScan, String> {
     let mut paks = Vec::new();
     let mut unreadable = Vec::new();
     for path in mod_pak_paths(game_root, recursive) {
@@ -65,7 +63,7 @@ pub(crate) fn scan_mod_paks(game_root: &str, recursive: bool) -> Result<PakIniSc
 }
 
 /// Scan `~mods` and return paks that contain any `.ini` file, plus any that could not be read.
-pub(crate) fn scan_mod_paks_any_ini(
+pub fn scan_mod_paks_any_ini(
     game_root: &str,
     recursive: bool,
 ) -> Result<PakIniListingScan, String> {
@@ -87,7 +85,7 @@ pub(crate) fn scan_mod_paks_any_ini(
 /// highest overrides): BaseEngine, DefaultEngine, WindowsEngine, DeviceProfiles. The map
 /// is keyed by lowercased CVar name so insert is O(1); a Vec/retain merge here was O(N^2)
 /// and stalled multi-second on mod paks with full engine INI overrides.
-pub(crate) fn read_pak_tweaks(pak_path: &str) -> Result<Vec<PakTweakState>, String> {
+pub fn read_pak_cvars(pak_path: &str) -> Result<Vec<PakCvar>, String> {
     let pak_path = Path::new(pak_path);
     let info = inspect_pak_for_ini(pak_path)?
         .ok_or_else(|| "No INI config files found in this pak.".to_string())?;
@@ -102,8 +100,7 @@ pub(crate) fn read_pak_tweaks(pak_path: &str) -> Result<Vec<PakTweakState>, Stri
         ),
     ];
 
-    let mut merged: std::collections::HashMap<String, PakTweakState> =
-        std::collections::HashMap::new();
+    let mut merged: std::collections::HashMap<String, PakCvar> = std::collections::HashMap::new();
     for (entry, label) in layers {
         let Some(entry) = entry else { continue };
         let content = extract_file_to_string(pak_path, entry)?;
@@ -116,8 +113,8 @@ pub(crate) fn read_pak_tweaks(pak_path: &str) -> Result<Vec<PakTweakState>, Stri
 }
 
 /// Detect active tweaks from pak INI content using the shared tweak detector.
-pub(crate) fn detect_pak_tweaks(pak_path: &str) -> Result<Vec<TweakState>, String> {
-    let merged = read_pak_tweaks(pak_path)?;
+pub fn detect_pak_tweaks(pak_path: &str) -> Result<Vec<TweakState>, String> {
+    let merged = read_pak_cvars(pak_path)?;
     let synthetic: String = merged
         .iter()
         .map(|s| format!("{}={}", s.key, s.value))
@@ -128,13 +125,13 @@ pub(crate) fn detect_pak_tweaks(pak_path: &str) -> Result<Vec<TweakState>, Strin
 }
 
 /// Extract a single file from a pak as a UTF-8 string.
-pub(crate) fn extract_pak_ini(pak_path: &str, entry: &str) -> Result<String, String> {
+pub fn extract_pak_ini(pak_path: &str, entry: &str) -> Result<String, String> {
     extract_file_to_string(Path::new(pak_path), entry)
 }
 
 /// Pull the game's stock copy of an INI from pakchunk0 so new mod entries can
 /// start with the real defaults instead of an empty section header.
-pub(crate) fn extract_game_default_ini(
+pub fn extract_game_default_ini(
     game_root: &str,
     in_pak_path: &str,
 ) -> Result<Option<String>, String> {
@@ -168,7 +165,7 @@ fn normalize_pak_filename(raw: &str) -> Result<String, String> {
 }
 
 /// Create an empty mod pak in `~mods/` ready to be populated via the INI editor.
-pub(crate) fn create_new_mod_pak(game_root: &str, name: &str) -> Result<PakIniListing, String> {
+pub fn create_new_mod_pak(game_root: &str, name: &str) -> Result<PakIniListing, String> {
     let filename = normalize_pak_filename(name)?;
     let mods = mods_dir(game_root);
     if !mods.is_dir() {
