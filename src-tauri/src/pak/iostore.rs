@@ -328,6 +328,19 @@ pub(crate) fn undecryptable_container_stems(paks_dir: &Path) -> HashSet<String> 
         .collect()
 }
 
+/// Container stems that live under `~mods`. Identifying mods by folder rather than by the
+/// `_9999999_` naming convention matters because a plainly named mod follows no convention, and
+/// letting one into the base-game store makes it resolve as vanilla content.
+fn mod_container_stems(paks_dir: &Path) -> HashSet<String> {
+    WalkDir::new(paks_dir.join("~mods"))
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .map(walkdir::DirEntry::into_path)
+        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("utoc"))
+        .filter_map(|p| p.file_stem().and_then(|s| s.to_str()).map(str::to_string))
+        .collect()
+}
+
 /// Open base game containers only (excludes mods, patches, and any container we cannot decrypt).
 fn open_base_game_paks(
     paks_dir: &Path,
@@ -335,6 +348,7 @@ fn open_base_game_paks(
 ) -> Result<Box<dyn IoStoreTrait>, String> {
     let target = target_container.to_string();
     let undecryptable = undecryptable_container_stems(paks_dir);
+    let mods = mod_container_stems(paks_dir);
     retoc::iostore::open_filtered(paks_dir, super::profile::make_config()?, move |name| {
         if undecryptable.contains(name) {
             return false;
@@ -342,7 +356,9 @@ fn open_base_game_paks(
         if name == target {
             return true;
         }
-        if name.contains("_9999999_") {
+        // Folder first, then the naming convention as a fallback for mods dropped straight into
+        // Paks rather than ~mods.
+        if mods.contains(name) || name.contains("_9999999_") {
             return false;
         }
         if name.starts_with("Patch_") {
@@ -810,6 +826,30 @@ mod tests {
         header[0..16].copy_from_slice(b"-==--==--==--==-");
         std::fs::create_dir_all(path.parent().expect("parent")).expect("create dir");
         std::fs::write(path, &header).expect("write stub utoc");
+    }
+
+    #[test]
+    fn mod_containers_are_identified_by_folder_not_by_name() {
+        let paks_dir = std::env::temp_dir().join(format!("rivals-modstems-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&paks_dir);
+        write_stub_utoc(&paks_dir.join("~mods").join("PlainName.utoc"));
+        write_stub_utoc(
+            &paks_dir
+                .join("~mods")
+                .join("Nested")
+                .join("Deep_9999999_P.utoc"),
+        );
+        write_stub_utoc(&paks_dir.join("pakchunk0-Windows.utoc"));
+
+        let stems = mod_container_stems(&paks_dir);
+
+        assert!(
+            stems.contains("PlainName"),
+            "a mod that skips the _9999999_P convention still has to be excluded from the base store"
+        );
+        assert!(stems.contains("Deep_9999999_P"));
+        assert!(!stems.contains("pakchunk0-Windows"));
+        let _ = std::fs::remove_dir_all(&paks_dir);
     }
 
     #[test]
