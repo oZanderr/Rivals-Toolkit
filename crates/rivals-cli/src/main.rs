@@ -10,6 +10,27 @@ use rivals_core::pak_tweaks::{self, PakIniFileContent, PakTweakEdit};
 use rivals_core::tweaks::{TweakDefinition, TweakKind, TweakSetting, catalogue::tweak_catalogue};
 use serde::Serialize;
 
+/// `outln!` that exits quietly when the reader closes the pipe, as `| head` or quitting `less`
+/// does. The standard macro panics on that write error, which is noise, not a failure.
+macro_rules! outln {
+    ($($arg:tt)*) => {{
+        use std::io::Write;
+        if writeln!(std::io::stdout(), $($arg)*).is_err() {
+            std::process::exit(0);
+        }
+    }};
+}
+
+/// `out!` counterpart to [`outln`], for output that must not gain a trailing newline.
+macro_rules! out {
+    ($($arg:tt)*) => {{
+        use std::io::Write;
+        if write!(std::io::stdout(), $($arg)*).is_err() {
+            std::process::exit(0);
+        }
+    }};
+}
+
 #[derive(Parser)]
 #[command(
     name = "rivals-cli",
@@ -179,7 +200,7 @@ fn main() -> std::process::ExitCode {
         Err(message) => {
             if cli.json {
                 let body = serde_json::json!({ "ok": false, "error": message });
-                println!("{body}");
+                outln!("{body}");
             } else {
                 eprintln!("error: {message}");
             }
@@ -209,7 +230,7 @@ fn run(cli: &Cli) -> Result<(), String> {
 fn emit<T: Serialize>(cli: &Cli, value: &T, human: impl FnOnce()) -> Result<(), String> {
     if cli.json {
         let rendered = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
-        println!("{rendered}");
+        outln!("{rendered}");
     } else {
         human();
     }
@@ -297,11 +318,11 @@ fn tweaks_list(cli: &Cli) -> Result<(), String> {
         for row in &rows {
             if row.category != category {
                 category = row.category.clone();
-                println!("\n{category}");
+                outln!("\n{category}");
             }
-            println!("  {:width$}  {}  {}", row.id, row.kind, row.label);
+            outln!("  {:width$}  {}  {}", row.id, row.kind, row.label);
         }
-        println!("\n{} tweaks", rows.len());
+        outln!("\n{} tweaks", rows.len());
     })
 }
 
@@ -338,12 +359,12 @@ fn tweaks_status(cli: &Cli, app: &settings::AppSettings, pak: &PakArgs) -> Resul
         let width = rows.iter().map(|r| r.id.len()).max().unwrap_or(0);
         for row in rows.iter().filter(|r| r.active) {
             match &row.current_value {
-                Some(v) => println!("on   {:width$}  {} = {v}", row.id, row.label),
-                None => println!("on   {:width$}  {}", row.id, row.label),
+                Some(v) => outln!("on   {:width$}  {} = {v}", row.id, row.label),
+                None => outln!("on   {:width$}  {}", row.id, row.label),
             }
         }
         let on = rows.iter().filter(|r| r.active).count();
-        println!("\n{on} of {} tweaks active", rows.len());
+        outln!("\n{on} of {} tweaks active", rows.len());
     })
 }
 
@@ -414,7 +435,7 @@ fn ini_list(cli: &Cli, app: &settings::AppSettings, pak: &PakArgs) -> Result<(),
 
     emit(cli, &listing, || {
         for entry in &listing.ini_entries {
-            println!("{entry}");
+            outln!("{entry}");
         }
     })
 }
@@ -427,7 +448,7 @@ fn ini_get(cli: &Cli, app: &settings::AppSettings, args: &GetArgs) -> Result<(),
         return emit(
             cli,
             &serde_json::json!({ "entry": entry, "content": content }),
-            || print!("{content}"),
+            || out!("{content}"),
         );
     }
 
@@ -438,13 +459,13 @@ fn ini_get(cli: &Cli, app: &settings::AppSettings, args: &GetArgs) -> Result<(),
             .iter()
             .find(|c| c.key.eq_ignore_ascii_case(key))
             .ok_or_else(|| format!("{path} does not set '{key}'"))?;
-        return emit(cli, hit, || println!("{}", hit.value));
+        return emit(cli, hit, || outln!("{}", hit.value));
     }
 
     emit(cli, &cvars, || {
         let width = cvars.iter().map(|c| c.key.len()).max().unwrap_or(0);
         for cvar in &cvars {
-            println!("{:width$} = {}  ({})", cvar.key, cvar.value, cvar.source);
+            outln!("{:width$} = {}  ({})", cvar.key, cvar.value, cvar.source);
         }
     })
 }
@@ -468,7 +489,7 @@ fn ini_set(cli: &Cli, app: &settings::AppSettings, args: &SetArgs) -> Result<(),
             return emit(
                 cli,
                 &serde_json::json!({ "pak": path, "replaces": names, "applied": false }),
-                || println!("would replace {} INI file(s) in {path}", names.len()),
+                || outln!("would replace {} INI file(s) in {path}", names.len()),
             );
         }
         guard_running_game()?;
@@ -476,7 +497,7 @@ fn ini_set(cli: &Cli, app: &settings::AppSettings, args: &SetArgs) -> Result<(),
         return emit(
             cli,
             &serde_json::json!({ "pak": path, "applied": true, "message": message }),
-            || println!("{message}"),
+            || outln!("{message}"),
         );
     }
 
@@ -526,7 +547,7 @@ fn apply_edits(
         };
         return emit(cli, &result, || {
             for edit in &result.edits {
-                println!("would set {}", describe(edit));
+                outln!("would set {}", describe(edit));
             }
         });
     }
@@ -541,10 +562,10 @@ fn apply_edits(
     };
     emit(cli, &result, || {
         for edit in &result.edits {
-            println!("set {}", describe(edit));
+            outln!("set {}", describe(edit));
         }
         if let Some(message) = &result.message {
-            println!("{message}");
+            outln!("{message}");
         }
     })
 }
@@ -564,7 +585,7 @@ fn paks_list(cli: &Cli, app: &settings::AppSettings, args: &PaksListArgs) -> Res
         let found = pak_tweaks::scan_mod_paks_any_ini(&game_root, recursive)?;
         return emit(cli, &found, || {
             for pak in &found.paks {
-                println!("{}  ({} INI files)", pak.pak_name, pak.ini_entries.len());
+                outln!("{}  ({} INI files)", pak.pak_name, pak.ini_entries.len());
             }
             report_unreadable(found.unreadable.len(), found.paks.len());
             for bad in &found.unreadable {
@@ -589,7 +610,7 @@ fn paks_list(cli: &Cli, app: &settings::AppSettings, args: &PaksListArgs) -> Res
             if pak.has_base_engine {
                 kinds.push("BaseEngine");
             }
-            println!("{}  [{}]", pak.pak_name, kinds.join(", "));
+            outln!("{}  [{}]", pak.pak_name, kinds.join(", "));
         }
         report_unreadable(found.unreadable.len(), found.paks.len());
         for bad in &found.unreadable {
@@ -599,7 +620,7 @@ fn paks_list(cli: &Cli, app: &settings::AppSettings, args: &PaksListArgs) -> Res
 }
 
 fn report_unreadable(unreadable: usize, paks: usize) {
-    println!("\n{paks} pak(s) with editable INI files");
+    outln!("\n{paks} pak(s) with editable INI files");
     if unreadable > 0 {
         eprintln!("{unreadable} pak(s) could not be read:");
     }

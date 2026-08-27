@@ -9,12 +9,17 @@ It combines a React frontend with a Tauri/Rust backend to provide:
 - pak-based INI and game settings tweak tooling
 - shader cache cleanup and game launch helpers
 
+It also ships `rivals-cli`, a command-line tool over the same engine for scripting config tweaks and
+pak INI edits. See [Command Line](#command-line).
+
 Current platform support: Windows only.
 
 ## Tech Stack
 
 - Frontend: React, TypeScript, Vite
 - Backend: Tauri 2, Rust
+- Layout: Cargo workspace. `crates/rivals-core` holds the pak and tweak engine and never depends on
+  Tauri, which is what lets the CLI build without the frontend.
 - Tooling: ESLint, Prettier, Clippy, rustfmt
 
 ## Prerequisites
@@ -97,28 +102,50 @@ Build desktop binaries:
 pnpm tauri build
 ```
 
+Build the CLI:
+
+```bash
+cargo build --release -p rivals-cli
+```
+
+## Tests
+
+```bash
+cargo test --workspace
+```
+
+There is no JavaScript test framework. `pnpm lint` and `pnpm exec tsc --noEmit` cover the frontend.
+
 ## Command Line
 
 `rivals-cli.exe` ships in the release zip next to the desktop app and scripts the same config-tweak
 and pak INI engine. It reads the game path the app saved, so `--game-root` is only needed when that
-is unset or you want a different install.
+is unset or you want a different install. In a dev checkout, run it with
+`cargo run -p rivals-cli -- <args>`.
 
 ```bash
 rivals-cli paks list                                  # paks in ~mods with editable INIs
+rivals-cli paks list --all-ini --no-recursive         # any INI, top level of ~mods only
+
 rivals-cli tweaks list                                # the tweak catalogue
 rivals-cli tweaks status --pak MyMod                  # which tweaks a pak has on
+rivals-cli tweaks apply  --pak MyMod --on fix_dark_maps --off cas_sharpening
+rivals-cli tweaks apply  --pak MyMod --set brightness=2.8 --dry-run
 
-rivals-cli tweaks apply --pak MyMod --on fix_dark_maps --off cas_sharpening
-rivals-cli tweaks apply --pak MyMod --set brightness=2.8 --dry-run
-
+rivals-cli ini list  --pak MyMod                      # INI files the pak ships
 rivals-cli ini get   --pak MyMod --key r.TonemapperGamma
+rivals-cli ini get   --pak MyMod --entry Marvel/Config/DefaultEngine.ini
 rivals-cli ini set   --pak MyMod r.Foo=1 r.Bar=2
+rivals-cli ini set   --pak MyMod --file Marvel/Config/DefaultEngine.ini=./Engine.ini
 rivals-cli ini unset --pak MyMod r.Foo
 ```
 
 `--pak` takes a pak path or a bare mod name to look up in `~mods`. `--json` makes every command
-emit machine-readable output, and failures exit non-zero. Mutating commands refuse to run while
-Marvel Rivals is open, since the game holds the pak files; `--force` overrides that.
+emit machine-readable output, and failures exit non-zero. `--dry-run` reports what a write command
+would change without touching the pak, and `--section` pins an Engine.ini edit to a given section
+instead of letting the app resolve it. Mutating commands refuse to run while Marvel Rivals is open,
+since the game holds the pak files; `--force` overrides that. `rivals-cli <command> --help` lists
+every flag.
 
 Keep `oo2core_9_win64.dll` beside the executable, as shipped, or Oodle-compressed paks will not read.
 
