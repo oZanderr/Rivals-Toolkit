@@ -1,6 +1,6 @@
 {
   "source": "https://raw.githubusercontent.com/donutman07/MarvelRivalsCharacterIDs/main/MarvelRivalsCharacterIDs.md",
-  "generated_at": "2026-08-27T17:30:56.092Z",
+  "generated_at": "2026-09-04T10:59:02.655Z",
   "characters": {
     "1011": {
       "name": "Hulk",
@@ -258,7 +258,10 @@
         "1028101": "Golden Ultron",
         "1028102": "WILL OF GALACTA",
         "1028300": "Wasteland Robot",
+        "1028301": "B-BOY PRIME",
         "1028302": "CYBERNETIC DRIP",
+        "1028303": "MUSTARD BEAT",
+        "1028304": "CARAMEL CREW",
         "1028500": "X-Tron",
         "1028502": "ODINFORCE ULTRON",
         "1028503": "ULTRON-15",
@@ -861,7 +864,8 @@
         "1058302": "MR. X",
         "1058303": "ALLURING ACE",
         "1058304": "DEAD MAN'S HAND",
-        "1058500": "BARRIER BUSTER"
+        "1058500": "BARRIER BUSTER",
+        "1058800": "X-MEN '97 SEASON 2"
       }
     },
     "1059": {
@@ -950,7 +954,8 @@
         "1065500": "STARLIT REBEL",
         "1065501": "RAIDER PRIME",
         "1065502": "MIDNIGHT MIRAGE",
-        "1065503": "HIGH NOON"
+        "1065503": "HIGH NOON",
+        "1065800": "X-MEN '97 SEASON 2"
       }
     },
     "1066": {
