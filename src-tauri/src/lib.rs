@@ -2,11 +2,13 @@
 
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 
+mod asset_view;
 mod audio;
 mod concurrency;
 mod detect;
 mod game_status;
 mod game_user_settings;
+mod import_index;
 mod launch_record;
 mod mods;
 mod pak;
@@ -159,6 +161,29 @@ pub fn run() {
             mods::profiles::overwrite_mod_profile,
             mods::profiles::preview_mod_profile,
             mods::profiles::apply_mod_profile,
+            // asset_view
+            asset_view::inspect_asset,
+            asset_view::get_mappings_status,
+            asset_view::set_mappings_path,
+            asset_view::get_asset_mod_name,
+            asset_view::set_asset_mod_name,
+            asset_view::get_asset_save_target,
+            asset_view::set_asset_save_target,
+            asset_view::export_bytes_view,
+            asset_view::export_script_view,
+            asset_view::export_payload,
+            asset_view::export_bulk,
+            asset_view::enum_options,
+            asset_view::save_asset_edits,
+            asset_view::plan_export_removal,
+            asset_view::plan_import_removal,
+            asset_view::plan_export_edits,
+            asset_view::plan_dependency_edits,
+            asset_view::plan_export_copy,
+            asset_view::save_export_copy,
+            import_index::import_index_status,
+            import_index::build_import_index,
+            import_index::importers_of,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

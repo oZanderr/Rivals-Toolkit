@@ -67,6 +67,7 @@ import {
 } from "@/lib/iniSearch";
 import { emitModsChanged, normalizeFolderPath, onModsChanged } from "@/lib/modsEvents";
 import { emitPakChanged, onPakChanged } from "@/lib/pakEvents";
+import { previewPakFilename } from "@/lib/pakName";
 import { unreadableScanMessage, type PakScanError } from "@/lib/pakScan";
 import { cn } from "@/lib/utils";
 
@@ -1764,16 +1765,6 @@ function AddIniPopover({
       </div>
     </div>
   );
-}
-
-function previewPakFilename(raw: string): string {
-  const trimmed = raw
-    .trim()
-    .replace(/[<>:"/\\|?*]/g, "")
-    .replace(/\.pak$/i, "")
-    .replace(/_9999999_P$/i, "");
-  if (!trimmed) return "";
-  return `${trimmed}_9999999_P.pak`;
 }
 
 function NewPakPopover({

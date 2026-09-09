@@ -268,8 +268,11 @@ function App() {
               >
                 <AssetManager
                   gamePath={gamePath}
+                  gameRunning={gameBlocking}
+                  isActive={activeTab === "pak-manager"}
                   pendingPak={pendingAssetPak}
                   onPendingPakConsumed={() => setPendingAssetPak(null)}
+                  onOpenSettings={() => setActiveTab("settings")}
                 />
               </div>
             )}

@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 rivals-core = { path = "../rivals-core" }
+rivals-uasset = { path = "../rivals-uasset" }
 clap.workspace = true
 dirs.workspace = true
 serde.workspace = true

@@ -19,6 +19,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 rivals-core = { path = "../crates/rivals-core" }
+rivals-uasset = { path = "../crates/rivals-uasset" }
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"

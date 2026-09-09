@@ -94,6 +94,16 @@ pub(crate) struct Settings {
     pub(crate) game_running_check_enabled: bool,
     #[serde(default = "default_true")]
     pub(crate) mod_conflict_check_enabled: bool,
+    /// Path to a .usmap mappings file, or a folder holding one. Reading asset properties needs it.
+    #[serde(default)]
+    pub(crate) usmap_path: Option<String>,
+    /// The mod pak asset edits were last saved into, so the inspector can offer it again.
+    #[serde(default)]
+    pub(crate) asset_mod_name: Option<String>,
+    /// What an asset edit is saved as. The game reads packages only from IoStore, so an unset
+    /// setting means IoStore; a plain pak is for tooling that converts it onward itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) asset_save_target: Option<rivals_core::asset_edit::SaveTarget>,
 }
 
 fn default_true() -> bool {
@@ -115,6 +125,9 @@ impl Default for Settings {
             vanilla_compression_level: default_vanilla_compression_level(),
             game_running_check_enabled: true,
             mod_conflict_check_enabled: true,
+            usmap_path: None,
+            asset_mod_name: None,
+            asset_save_target: None,
         }
     }
 }

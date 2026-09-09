@@ -14,6 +14,13 @@ pub struct AppSettings {
     pub recursive_mod_scan: bool,
     #[serde(default = "yes")]
     pub game_running_check_enabled: bool,
+    #[serde(default)]
+    pub usmap_path: Option<String>,
+    /// The mod pak the desktop app last saved asset edits into.
+    #[serde(default)]
+    pub asset_mod_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asset_save_target: Option<rivals_core::asset_edit::SaveTarget>,
 }
 
 fn yes() -> bool {

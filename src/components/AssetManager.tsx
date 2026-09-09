@@ -32,6 +32,7 @@ import {
   XCircle,
 } from "lucide-react";
 
+import AssetInspector from "@/components/AssetInspector";
 import { HeroIcon } from "@/components/HeroIcon";
 import {
   AlertDialog,
@@ -95,6 +96,9 @@ type PackCompression = "oodle" | "zlib";
 // this ecosystem bundles the DLL. The commands still take the parameter, so re-exposing it later is
 // a matter of adding the control back.
 const REPACK_COMPRESSION: PackCompression = "oodle";
+
+// Only packages carry properties; every other extension is opaque payload.
+const INSPECTABLE = /[.](uasset|umap)$/i;
 type StatusType = "ok" | "err" | "info";
 
 // One long-running job, owned by the handler that started it. Progress events only update the
@@ -180,11 +184,28 @@ interface CharacterSummary {
 
 interface Props {
   gamePath: string;
+  gameRunning: boolean;
   pendingPak?: string | null;
+  /** Whether this tab is the one on screen; hidden tabs stay mounted. */
+  isActive?: boolean;
   onPendingPakConsumed?: () => void;
+  onOpenSettings?: () => void;
 }
 
-export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Props) {
+export function AssetManager({
+  gamePath,
+  gameRunning,
+  pendingPak,
+  isActive = true,
+  onPendingPakConsumed,
+  onOpenSettings,
+}: Props) {
+  const [inspecting, setInspecting] = useState<ContentEntry | null>(null);
+  /// A mod pak to read the inspected entry from instead of the selected container: the copy a
+  /// save just wrote.
+  const [inspectFrom, setInspectFrom] = useState<string | null>(null);
+  // A loose asset is addressed by path alone, so it carries no container.
+  const [looseAsset, setLooseAsset] = useState<string | null>(null);
   const [pakList, setPakList] = useState<PakFileInfo[]>([]);
   const [selectedPak, setSelectedPak] = useState<string>("");
   const [pakContents, setPakContents] = useState<ContentEntry[]>([]);
@@ -618,6 +639,17 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
       showNotice(String(e), "err");
     } finally {
       if (gen === loadGenRef.current) setBusy(false);
+    }
+  }
+
+  // Extracted assets live outside any container, so they are inspected straight from disk.
+  async function openLooseAsset() {
+    const picked = await open({
+      multiple: false,
+      filters: [{ name: "Unreal asset", extensions: ["uasset", "umap"] }],
+    });
+    if (typeof picked === "string") {
+      setLooseAsset(picked);
     }
   }
 
@@ -1437,7 +1469,7 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
       : `${visible.length} file(s)${visible.length !== pakContents.length ? ` of ${pakContents.length}` : ""} inside ${pakName} \u2014 click to select, double-click to extract`;
 
   return (
-    <div ref={rootRef} className="flex flex-1 min-h-0 flex-col gap-4">
+    <div ref={rootRef} className="relative flex flex-1 min-h-0 flex-col gap-4">
       <div className="flex min-h-8 shrink-0 items-center gap-3">
         <h2 className="shrink-0 text-xl font-bold">Asset Manager</h2>
         {notice && !operation && (
@@ -1515,6 +1547,11 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
                 <Tip content="Browse for a pak file">
                   <Button variant="ghost" size="icon-sm" onClick={openPak} disabled={busy}>
                     <FolderOpen size={15} />
+                  </Button>
+                </Tip>
+                <Tip content="Inspect an already-extracted .uasset from disk">
+                  <Button variant="ghost" size="icon-sm" onClick={openLooseAsset} disabled={busy}>
+                    <Search size={15} />
                   </Button>
                 </Tip>
                 <Tip content="Refresh game paks">
@@ -1967,6 +2004,17 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
                         </div>
                       </ContextMenuTrigger>
                       <ContextMenuContent>
+                        {INSPECTABLE.test(entry.path) && (
+                          <ContextMenuItem
+                            onSelect={() => {
+                              setInspectFrom(null);
+                              setInspecting(entry);
+                            }}
+                          >
+                            <Search />
+                            Inspect Contents
+                          </ContextMenuItem>
+                        )}
                         <ContextMenuItem
                           onSelect={() => {
                             if (showExtractSelected) {
@@ -2248,6 +2296,46 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {looseAsset && (
+        <AssetInspector
+          key={looseAsset}
+          gamePath={gamePath}
+          gameRunning={gameRunning}
+          isActive={isActive}
+          container=""
+          entry={looseAsset}
+          onClose={() => setLooseAsset(null)}
+          onOpenSettings={() => {
+            setLooseAsset(null);
+            onOpenSettings?.();
+          }}
+        />
+      )}
+
+      {inspecting && (
+        <AssetInspector
+          key={`${inspectFrom ?? selectedPak}\u0000${inspecting.path}`}
+          gamePath={gamePath}
+          gameRunning={gameRunning}
+          isActive={isActive}
+          container={
+            inspectFrom ??
+            (inspecting.source === "utoc" ? selectedPak.replace(/[.]pak$/i, ".utoc") : selectedPak)
+          }
+          entry={inspecting.path}
+          onClose={() => {
+            setInspectFrom(null);
+            setInspecting(null);
+          }}
+          onOpenSettings={() => {
+            setInspectFrom(null);
+            setInspecting(null);
+            onOpenSettings?.();
+          }}
+          onOpenCopy={setInspectFrom}
+        />
+      )}
     </div>
   );
 }

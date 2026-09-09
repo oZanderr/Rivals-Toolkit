@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
@@ -58,6 +58,19 @@ interface InstallInfo {
   path: string;
   source: string;
   launch_url: string;
+}
+
+interface MappingsStatus {
+  path: string | null;
+  loaded: boolean;
+  struct_count: number;
+  enum_count: number;
+  error: string | null;
+}
+
+/** Windows paths arrive with backslashes; the settings row only shows the file name. */
+function fileNameOf(path: string | null): string {
+  return (path ?? "").split("\\").join("/").split("/").pop() ?? "";
 }
 
 type CompressionLevel = "None" | "Fast" | "Normal" | "Optimal1" | "Optimal2" | "Optimal3";
@@ -141,6 +154,7 @@ export function Settings({
   const [savedAutoSyncHeroes, setSavedAutoSyncHeroes] = useState<boolean | null>(null);
   const [draftShowHeroIcons, setDraftShowHeroIcons] = useState<boolean | null>(null);
   const [savedShowHeroIcons, setSavedShowHeroIcons] = useState<boolean | null>(null);
+  const [mappings, setMappings] = useState<MappingsStatus | null>(null);
   const [draftModLevel, setDraftModLevel] = useState<CompressionLevel | null>(null);
   const [savedModLevel, setSavedModLevel] = useState<CompressionLevel | null>(null);
   const [draftVanillaLevel, setDraftVanillaLevel] = useState<CompressionLevel | null>(null);
@@ -357,6 +371,14 @@ export function Settings({
         setSavedConflictCheck(true);
       });
   }, []);
+
+  const refreshMappings = useCallback(() => {
+    invoke<MappingsStatus>("get_mappings_status")
+      .then(setMappings)
+      .catch(() => setMappings(null));
+  }, []);
+
+  useEffect(refreshMappings, [refreshMappings]);
 
   useEffect(() => {
     invoke<CharacterDataInfo>("get_character_data_info")
@@ -938,6 +960,66 @@ export function Settings({
                 disabled={draftConflictCheck === null}
               />
             </label>
+          </div>
+
+          {/* ── Asset Mappings ── */}
+          <div className="flex flex-col overflow-hidden rounded-md border border-border">
+            <div className="border-b border-border bg-card px-3 py-2">
+              <h3 className="text-sm font-semibold">Asset Mappings</h3>
+            </div>
+            <div className="flex items-center gap-3 rounded-sm px-3 py-3 hover:bg-secondary/50">
+              <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                <span className="text-[13px] font-medium">Mappings file (.usmap)</span>
+                <span className="text-[11px] text-muted-foreground">
+                  Marvel Rivals ships packages without property names or types, so reading asset
+                  contents needs a mappings file that supplies the schema. Regenerate it after a
+                  game patch.
+                </span>
+                {mappings?.loaded ? (
+                  <span
+                    className="truncate text-[11px] text-emerald-400"
+                    title={mappings.path ?? ""}
+                  >
+                    {mappings.struct_count.toLocaleString()} structs,{" "}
+                    {mappings.enum_count.toLocaleString()} enums loaded from{" "}
+                    {fileNameOf(mappings.path)}
+                  </span>
+                ) : (
+                  <span className="text-[11px] text-amber-400">
+                    {mappings?.error ?? "Not set. Asset contents cannot be read."}
+                  </span>
+                )}
+              </div>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-8"
+                onClick={async () => {
+                  const picked = await open({
+                    multiple: false,
+                    filters: [{ name: "Unreal mappings", extensions: ["usmap"] }],
+                  });
+                  if (typeof picked !== "string") return;
+                  await invoke("set_mappings_path", { path: picked });
+                  refreshMappings();
+                }}
+              >
+                Choose…
+              </Button>
+              {mappings?.path && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-8"
+                  onClick={async () => {
+                    await invoke("set_mappings_path", { path: null });
+                    refreshMappings();
+                  }}
+                >
+                  Clear
+                </Button>
+              )}
+            </div>
           </div>
 
           {/* ── Compression ── */}
