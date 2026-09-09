@@ -320,22 +320,17 @@ fn swap_into_place(
 ) -> Result<(), String> {
     let dir = live_pak.parent().ok_or("Mod has no parent folder")?;
 
-    let mut backups: Vec<(PathBuf, PathBuf)> = Vec::new();
-    for ext in ["pak", "utoc", "ucas"] {
-        let live = dir.join(format!("{stem}.{ext}"));
-        if !live.is_file() {
-            continue;
-        }
-        let backup = dir.join(format!("{stem}.{ext}.bak"));
-        let _ = fs::remove_file(&backup);
-        match fs::rename(&live, &backup) {
-            Ok(()) => backups.push((live, backup)),
-            Err(e) => {
-                restore(&backups);
-                return Err(format!("back up {}: {e}", live.display()));
-            }
-        }
-    }
+    let backups: Vec<(PathBuf, PathBuf)> = ["pak", "utoc", "ucas"]
+        .iter()
+        .map(|ext| {
+            (
+                dir.join(format!("{stem}.{ext}")),
+                dir.join(format!("{stem}.{ext}.bak")),
+            )
+        })
+        .filter(|(live, _)| live.is_file())
+        .collect();
+    rivals_core::mods::rename_all(&backups)?;
 
     let wanted: &[&str] = if to_iostore {
         &["pak", "utoc", "ucas"]
@@ -347,11 +342,12 @@ fn swap_into_place(
         let to = dir.join(format!("{stem}.{ext}"));
         // Temp is often on another volume, so this copies rather than renames.
         if let Err(e) = fs::copy(&from, &to) {
-            for (live, _) in &backups {
-                let _ = fs::remove_file(live);
-            }
-            restore(&backups);
-            return Err(format!("install {}: {e}", to.display()));
+            rivals_core::mods::put_back(&backups);
+            return Err(format!(
+                "install {}: {e}{}",
+                to.display(),
+                rivals_core::mods::held_open_hint(&e)
+            ));
         }
     }
 
@@ -361,12 +357,6 @@ fn swap_into_place(
         let _ = fs::remove_file(backup);
     }
     Ok(())
-}
-
-fn restore(backups: &[(PathBuf, PathBuf)]) {
-    for (live, backup) in backups {
-        let _ = fs::rename(backup, live);
-    }
 }
 
 #[cfg(test)]

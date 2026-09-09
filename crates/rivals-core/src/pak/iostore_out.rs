@@ -399,16 +399,17 @@ pub fn swap_into_place(
     staged: &Path,
     extensions: &[&str],
 ) -> Result<(), String> {
-    let mut backups: Vec<(PathBuf, PathBuf)> = Vec::new();
-    for extension in extensions {
-        let live = dir.join(format!("{stem}.{extension}"));
-        if live.is_file() {
-            let backup = dir.join(format!("{stem}.{extension}.bak"));
-            std::fs::rename(&live, &backup)
-                .map_err(|e| format!("Could not set {} aside: {e}", live.display()))?;
-            backups.push((live, backup));
-        }
-    }
+    let backups: Vec<(PathBuf, PathBuf)> = extensions
+        .iter()
+        .map(|extension| {
+            (
+                dir.join(format!("{stem}.{extension}")),
+                dir.join(format!("{stem}.{extension}.bak")),
+            )
+        })
+        .filter(|(live, _)| live.is_file())
+        .collect();
+    crate::mods::rename_all(&backups)?;
     for extension in extensions {
         let from = staged.join(format!("{stem}.{extension}"));
         if !from.is_file() {
@@ -416,13 +417,12 @@ pub fn swap_into_place(
         }
         let to = dir.join(format!("{stem}.{extension}"));
         if let Err(e) = std::fs::copy(&from, &to) {
-            for (live, _) in &backups {
-                let _ = std::fs::remove_file(live);
-            }
-            for (live, backup) in &backups {
-                let _ = std::fs::rename(backup, live);
-            }
-            return Err(format!("Could not install {}: {e}", to.display()));
+            crate::mods::put_back(&backups);
+            return Err(format!(
+                "Could not install {}: {e}{}",
+                to.display(),
+                crate::mods::held_open_hint(&e)
+            ));
         }
     }
     // Anything the new form does not use was set aside and is simply not restored.
@@ -671,6 +671,46 @@ mod tests {
             !dir.join("Mod.pak.bak").exists(),
             "no backup is left behind"
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A swap that cannot set every file aside has to put back the ones it moved. Half-swapping is
+    /// how a working mod loses its container while keeping its data, which is unloadable.
+    #[test]
+    fn a_swap_that_cannot_move_a_file_puts_back_the_ones_it_did() {
+        let dir = scratch("halfswap");
+        let staged = dir.join("staged");
+        std::fs::create_dir_all(&staged).expect("staged");
+        for (extension, body) in [
+            ("pak", "live pak"),
+            ("utoc", "live toc"),
+            ("ucas", "live cas"),
+        ] {
+            std::fs::write(dir.join(format!("Mod.{extension}")), body).expect("write");
+            std::fs::write(staged.join(format!("Mod.{extension}")), "new").expect("write");
+        }
+        // A directory where the backup would go is a rename the OS refuses, which is what a file
+        // another process holds open looks like from here.
+        std::fs::create_dir_all(dir.join("Mod.ucas.bak")).expect("blocker");
+
+        let error = swap_into_place(&dir, "Mod", &staged, &["pak", "utoc", "ucas"])
+            .expect_err("the third file cannot be set aside");
+        assert!(error.contains("Mod.ucas"), "{error}");
+        for (extension, body) in [
+            ("pak", "live pak"),
+            ("utoc", "live toc"),
+            ("ucas", "live cas"),
+        ] {
+            assert_eq!(
+                std::fs::read(dir.join(format!("Mod.{extension}"))).expect("still there"),
+                body.as_bytes(),
+                "Mod.{extension} was put back"
+            );
+            assert!(
+                !dir.join(format!("Mod.{extension}.bak")).is_file(),
+                "no backup is left behind"
+            );
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 

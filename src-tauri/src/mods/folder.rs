@@ -48,7 +48,6 @@ pub(crate) fn toggle_mod_enabled(
     enabled: bool,
 ) -> Result<(), String> {
     let dir = Path::new(mods_folder);
-    let from = dir.join(full_name);
     let to = if enabled {
         let base = full_name
             .strip_suffix(".disabled")
@@ -57,8 +56,6 @@ pub(crate) fn toggle_mod_enabled(
     } else {
         dir.join(format!("{full_name}.disabled"))
     };
-    std::fs::rename(&from, &to).map_err(|e| e.to_string())?;
-
     let stem = if enabled {
         full_name
             .strip_suffix(".pak.disabled")
@@ -68,6 +65,10 @@ pub(crate) fn toggle_mod_enabled(
             .strip_suffix(".pak")
             .ok_or_else(|| format!("expected .pak: {full_name}"))?
     };
+
+    // Every name is worked out before anything moves, so a mod cannot end up half toggled by a
+    // suffix that did not parse, and the whole set moves or none of it does.
+    let mut moves = vec![(dir.join(full_name), to)];
     for ext in COMPANION_EXTS {
         let (c_from, c_to) = if enabled {
             (
@@ -81,10 +82,10 @@ pub(crate) fn toggle_mod_enabled(
             )
         };
         if c_from.exists() {
-            std::fs::rename(&c_from, &c_to).map_err(|e| e.to_string())?;
+            moves.push((c_from, c_to));
         }
     }
-    Ok(())
+    rivals_core::mods::rename_all(&moves)
 }
 
 /// Toggle multiple mods in sequence, collecting per-item failures.
@@ -218,21 +219,19 @@ pub(crate) fn rename_mod(
         }
     }
 
-    std::fs::rename(dir.join(full_name), dir.join(&new_full_name))
-        .map_err(|e| format!("Failed to rename pak: {e}"))?;
-
+    let mut moves = vec![(dir.join(full_name), dir.join(&new_full_name))];
     for ext in COMPANION_EXTS {
         for suffix in ["", ".disabled"] {
-            let old_companion = format!("{old_rel_stem}.{ext}{suffix}");
-            let new_companion = join_rel(&format!("{new_base}.{ext}{suffix}"));
-            let old_path = dir.join(&old_companion);
+            let old_path = dir.join(format!("{old_rel_stem}.{ext}{suffix}"));
             if old_path.exists() {
-                std::fs::rename(&old_path, dir.join(&new_companion))
-                    .map_err(|e| format!("Failed to rename {old_companion}: {e}"))?;
+                let renamed = join_rel(&format!("{new_base}.{ext}{suffix}"));
+                moves.push((old_path, dir.join(renamed)));
             }
         }
     }
-
+    // A pak renamed without its container leaves the old container still mounted under the old
+    // name, so the set moves together or not at all.
+    rivals_core::mods::rename_all(&moves)?;
     Ok(new_full_name)
 }
 
@@ -535,4 +534,91 @@ fn export_7z(dest_path: &str, files: &[(std::path::PathBuf, String)]) -> Result<
         .finish()
         .map_err(|e| format!("Failed to finalize 7z: {e}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("rivals-folder-{tag}-{stamp}"));
+        std::fs::create_dir_all(&dir).expect("scratch");
+        dir
+    }
+
+    fn trio(dir: &Path, suffix: &str) {
+        for ext in ["pak", "ucas", "utoc"] {
+            std::fs::write(dir.join(format!("Mod.{ext}{suffix}")), ext).expect("write");
+        }
+    }
+
+    /// A mod that is disabled by its pak and enabled by its container still mounts, so the toggle
+    /// has to move the whole trio or leave it alone.
+    #[test]
+    fn a_toggle_that_cannot_move_a_companion_leaves_the_mod_as_it_was() {
+        let dir = scratch("toggle");
+        trio(&dir, "");
+        // A directory where the companion is headed is a rename the OS refuses, standing in for a
+        // file the game holds open.
+        std::fs::create_dir_all(dir.join("Mod.utoc.disabled")).expect("blocker");
+
+        let error = toggle_mod_enabled(&dir.to_string_lossy(), "Mod.pak", false)
+            .expect_err("the utoc cannot move");
+        assert!(error.contains("Mod.utoc"), "{error}");
+        for ext in ["pak", "ucas", "utoc"] {
+            assert!(
+                dir.join(format!("Mod.{ext}")).is_file(),
+                "Mod.{ext} is still enabled"
+            );
+        }
+        assert!(
+            !dir.join("Mod.pak.disabled").exists(),
+            "the pak was not left disabled on its own"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_toggle_moves_the_whole_trio() {
+        let dir = scratch("toggle-ok");
+        trio(&dir, "");
+        toggle_mod_enabled(&dir.to_string_lossy(), "Mod.pak", false).expect("disable");
+        for ext in ["pak", "ucas", "utoc"] {
+            assert!(dir.join(format!("Mod.{ext}.disabled")).is_file());
+            assert!(!dir.join(format!("Mod.{ext}")).exists());
+        }
+        toggle_mod_enabled(&dir.to_string_lossy(), "Mod.pak.disabled", true).expect("enable");
+        for ext in ["pak", "ucas", "utoc"] {
+            assert!(dir.join(format!("Mod.{ext}")).is_file());
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Renaming a pak without its container leaves the container mounted under the old name.
+    #[test]
+    fn a_rename_that_cannot_move_a_companion_leaves_the_name_alone() {
+        let dir = scratch("rename");
+        trio(&dir, "");
+        std::fs::create_dir_all(dir.join("New.ucas")).expect("blocker");
+
+        let error =
+            rename_mod(&dir.to_string_lossy(), "Mod.pak", "New").expect_err("the ucas cannot move");
+        assert!(error.contains("Mod.ucas"), "{error}");
+        for ext in ["pak", "ucas", "utoc"] {
+            assert!(
+                dir.join(format!("Mod.{ext}")).is_file(),
+                "Mod.{ext} keeps its name"
+            );
+        }
+        assert!(
+            !dir.join("New.pak").exists(),
+            "the pak was not left renamed"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
