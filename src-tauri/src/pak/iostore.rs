@@ -1,14 +1,13 @@
 //! IoStore (utoc/ucas) read, extract, and repack operations.
 
 use std::collections::{HashMap, HashSet};
-use std::io::Read;
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use rayon::prelude::*;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
-use walkdir::WalkDir;
 
 use retoc::asset_conversion::{self, FZenPackageContext};
 use retoc::container_header::{EIoContainerHeaderVersion, StoreEntry};
@@ -26,8 +25,6 @@ use retoc::{
 use crate::concurrency;
 
 const MOUNT_POINT: &str = "../../../";
-const TOC_MAGIC: &[u8; 16] = b"-==--==--==--==-";
-const TOC_ENCRYPTED_FLAG: u8 = 0b0010;
 
 static LEGACY_CANCEL: AtomicBool = AtomicBool::new(false);
 static REPACK_CANCEL: AtomicBool = AtomicBool::new(false);
@@ -274,101 +271,12 @@ impl Drop for IoStoreCleanupGuard<'_> {
     }
 }
 
-fn open_utoc(utoc_path: &str) -> Result<Box<dyn IoStoreTrait>, String> {
-    retoc::iostore::open(utoc_path, super::profile::make_config()?).map_err(|e| e.to_string())
-}
+use rivals_core::pak::containers::open_utoc;
 
-/// The app holds the default (all-zero) GUID key plus the named keys in
-/// [`super::profile::NAMED_AES_KEYS`]. A container encrypted under any other key GUID cannot be
-/// decrypted; probing the TOC header for it lets callers skip such a container instead of
-/// aborting a whole merged open with "missing encryption key" (a future game patch could ship a
-/// container keyed to a GUID we do not have).
-pub(crate) fn utoc_is_decryptable(utoc_path: &Path) -> bool {
-    let Some(header) = read_toc_header_probe(utoc_path) else {
-        return false;
-    };
-    if header[80] & TOC_ENCRYPTED_FLAG == 0 {
-        return true;
-    }
-    let guid = &header[64..80];
-    guid.iter().all(|&b| b == 0)
-        || super::profile::NAMED_AES_KEYS
-            .iter()
-            .any(|(known, _)| known == guid)
-}
-
-/// Whether a container is obfuscated, meaning it carries the Encrypted flag. Mods use it with the
-/// game's own default-GUID key, so this is a presentation detail rather than a barrier: it seeds
-/// the repack option so an obfuscated mod does not come back out plain.
-pub(crate) fn utoc_is_obfuscated(utoc_path: &Path) -> bool {
-    read_toc_header_probe(utoc_path).is_some_and(|header| header[80] & TOC_ENCRYPTED_FLAG != 0)
-}
-
-/// The leading 81 bytes of a TOC header, covering the magic, the encryption-key GUID (offset 64)
-/// and the container flags (offset 80). `None` when the file is unreadable or is not a TOC.
-fn read_toc_header_probe(utoc_path: &Path) -> Option<[u8; 81]> {
-    let mut file = std::fs::File::open(utoc_path).ok()?;
-    let mut header = [0u8; 81];
-    if file.read_exact(&mut header).is_err() || &header[0..16] != TOC_MAGIC {
-        return None;
-    }
-    Some(header)
-}
-
-/// Container stems under `paks_dir` encrypted with a key GUID the app does not hold. These
-/// poison a merged `open_filtered` with "missing encryption key", so callers exclude them
-/// from the container filter.
-pub(crate) fn undecryptable_container_stems(paks_dir: &Path) -> HashSet<String> {
-    WalkDir::new(paks_dir)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .map(walkdir::DirEntry::into_path)
-        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("utoc"))
-        .filter(|p| !utoc_is_decryptable(p))
-        .filter_map(|p| p.file_stem().and_then(|s| s.to_str()).map(str::to_string))
-        .collect()
-}
-
-/// Container stems that live under `~mods`. Identifying mods by folder rather than by the
-/// `_9999999_` naming convention matters because a plainly named mod follows no convention, and
-/// letting one into the base-game store makes it resolve as vanilla content.
-fn mod_container_stems(paks_dir: &Path) -> HashSet<String> {
-    WalkDir::new(paks_dir.join("~mods"))
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .map(walkdir::DirEntry::into_path)
-        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("utoc"))
-        .filter_map(|p| p.file_stem().and_then(|s| s.to_str()).map(str::to_string))
-        .collect()
-}
-
-/// Open base game containers only (excludes mods, patches, and any container we cannot decrypt).
-fn open_base_game_paks(
-    paks_dir: &Path,
-    target_container: &str,
-) -> Result<Box<dyn IoStoreTrait>, String> {
-    let target = target_container.to_string();
-    let undecryptable = undecryptable_container_stems(paks_dir);
-    let mods = mod_container_stems(paks_dir);
-    retoc::iostore::open_filtered(paks_dir, super::profile::make_config()?, move |name| {
-        if undecryptable.contains(name) {
-            return false;
-        }
-        if name == target {
-            return true;
-        }
-        // Folder first, then the naming convention as a fallback for mods dropped straight into
-        // Paks rather than ~mods.
-        if mods.contains(name) || name.contains("_9999999_") {
-            return false;
-        }
-        if name.starts_with("Patch_") {
-            return false;
-        }
-        true
-    })
-    .map_err(|e| e.to_string())
-}
+use rivals_core::pak::containers::{open_base_game_paks, open_target_only};
+pub(crate) use rivals_core::pak::containers::{
+    undecryptable_container_stems, utoc_is_decryptable, utoc_is_obfuscated,
+};
 
 /// List asset paths inside a .utoc container, stripped of the mount point prefix.
 /// Directory-index-only: skips chunk metadata and the .ucas sibling, so disabled
@@ -528,7 +436,7 @@ fn resolve_target_packages(
     game_root: &str,
     target_container: &str,
     filter: &[String],
-) -> Result<(Box<dyn IoStoreTrait>, PackageList), String> {
+) -> Result<(Arc<dyn IoStoreTrait>, PackageList), String> {
     let paks_dir = crate::paths::paks_dir(game_root);
     let store = open_base_game_paks(&paks_dir, target_container)?;
 
@@ -554,27 +462,6 @@ fn resolve_target_packages(
         .collect();
 
     Ok((store, packages))
-}
-
-/// Open the target container in isolation (no base game, no other mods). `utoc_path` is where
-/// the container actually lives, which is rarely `paks_dir` itself since mods sit under `~mods`.
-fn open_target_only(
-    paks_dir: &Path,
-    utoc_path: &Path,
-    target_container: &str,
-) -> Result<Box<dyn IoStoreTrait>, String> {
-    // Only a readable container under an unknown key GUID is an encryption failure. A missing or
-    // unreadable file fails the same check, so let it reach the honest error further down.
-    if utoc_path.is_file() && !utoc_is_decryptable(utoc_path) {
-        return Err(format!(
-            "{target_container} is encrypted with a key this app does not have and cannot be extracted."
-        ));
-    }
-    let target = target_container.to_string();
-    retoc::iostore::open_filtered(paks_dir, super::profile::make_config()?, move |name| {
-        name == target
-    })
-    .map_err(|e| e.to_string())
 }
 
 /// Count legacy-convertible packages in a .utoc container.
@@ -615,7 +502,7 @@ pub(crate) fn count_utoc_legacy_packages(
 /// IoStore wrapper that scopes bulk data reads to the target container,
 /// preventing base-game bulk data from leaking into mod legacy output.
 struct ModScopedStore {
-    full: Box<dyn IoStoreTrait>,
+    full: Arc<dyn IoStoreTrait>,
     target: Box<dyn IoStoreTrait>,
 }
 
@@ -693,6 +580,12 @@ impl IoStoreTrait for ModScopedStore {
     }
     fn lookup_package_redirect(&self, source_package_id: FPackageId) -> Option<FPackageId> {
         self.full.lookup_package_redirect(source_package_id)
+    }
+    fn container_header(&self) -> Option<&retoc::container_header::FIoContainerHeader> {
+        self.full.container_header()
+    }
+    fn compression_methods(&self) -> &[retoc::compression::CompressionMethod] {
+        self.full.compression_methods()
     }
 }
 
@@ -813,92 +706,4 @@ pub(crate) fn extract_utoc_legacy(
     }
 
     Ok(extracted)
-}
-
-#[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
-mod tests {
-    use super::*;
-
-    /// Minimal TOC header: valid magic, encryption flag clear, so the decryptability probe
-    /// passes and only the container's location is under test.
-    fn write_stub_utoc(path: &Path) {
-        let mut header = vec![0u8; 0x90];
-        header[0..16].copy_from_slice(b"-==--==--==--==-");
-        std::fs::create_dir_all(path.parent().expect("parent")).expect("create dir");
-        std::fs::write(path, &header).expect("write stub utoc");
-    }
-
-    #[test]
-    fn mod_containers_are_identified_by_folder_not_by_name() {
-        let paks_dir = std::env::temp_dir().join(format!("rivals-modstems-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&paks_dir);
-        write_stub_utoc(&paks_dir.join("~mods").join("PlainName.utoc"));
-        write_stub_utoc(
-            &paks_dir
-                .join("~mods")
-                .join("Nested")
-                .join("Deep_9999999_P.utoc"),
-        );
-        write_stub_utoc(&paks_dir.join("pakchunk0-Windows.utoc"));
-
-        let stems = mod_container_stems(&paks_dir);
-
-        assert!(
-            stems.contains("PlainName"),
-            "a mod that skips the _9999999_P convention still has to be excluded from the base store"
-        );
-        assert!(stems.contains("Deep_9999999_P"));
-        assert!(!stems.contains("pakchunk0-Windows"));
-        let _ = std::fs::remove_dir_all(&paks_dir);
-    }
-
-    #[test]
-    fn detects_the_obfuscation_flag() {
-        let dir = std::env::temp_dir().join(format!("rivals-obfuscation-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("create dir");
-
-        let plain = dir.join("plain.utoc");
-        let obfuscated = dir.join("obfuscated.utoc");
-        write_stub_utoc(&plain);
-        let mut header = vec![0u8; 0x90];
-        header[0..16].copy_from_slice(TOC_MAGIC);
-        header[80] = TOC_ENCRYPTED_FLAG;
-        std::fs::write(&obfuscated, &header).expect("write stub");
-
-        assert!(!utoc_is_obfuscated(&plain));
-        assert!(utoc_is_obfuscated(&obfuscated));
-        assert!(!utoc_is_obfuscated(&dir.join("missing.utoc")));
-        // The flag alone is not a barrier: the payload is under the default-GUID key we hold.
-        assert!(utoc_is_decryptable(&obfuscated));
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn obfuscation_key_parses() {
-        assert!(super::super::profile::obfuscation_key().is_ok());
-    }
-
-    /// Mods live under `~mods`, so a guard that rebuilt the path from `paks_dir` and the
-    /// container name found nothing and reported every mod as encrypted.
-    #[test]
-    fn container_in_a_subfolder_is_not_reported_as_encrypted() {
-        let paks_dir =
-            std::env::temp_dir().join(format!("rivals-iostore-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&paks_dir);
-        let utoc_path = paks_dir.join("~mods").join("SomeMod_9999999_P.utoc");
-        write_stub_utoc(&utoc_path);
-
-        let err = open_target_only(&paks_dir, &utoc_path, "SomeMod_9999999_P")
-            .err()
-            .unwrap_or_default();
-
-        assert!(
-            !err.contains("encrypted with a key"),
-            "guard rejected a container it should have found: {err}"
-        );
-        let _ = std::fs::remove_dir_all(&paks_dir);
-    }
 }

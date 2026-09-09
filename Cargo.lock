@@ -3392,7 +3392,7 @@ dependencies = [
 [[package]]
 name = "retoc"
 version = "0.1.5"
-source = "git+https://github.com/oZanderr/retoc?branch=master#88d38a20e7535de51f2351ef75589367f511ed60"
+source = "git+https://github.com/oZanderr/retoc?branch=master#012ddb05d9ba0546a6d4bee2a8ba9f2154f45fa3"
 dependencies = [
  "aes",
  "anyhow",
@@ -3471,6 +3471,7 @@ dependencies = [
  "clap",
  "dirs 5.0.1",
  "rivals-core",
+ "rivals-uasset",
  "serde",
  "serde_json",
 ]
@@ -3480,11 +3481,14 @@ name = "rivals-core"
 version = "0.14.1"
 dependencies = [
  "aes",
+ "anyhow",
  "blake3",
+ "cityhasher",
  "dirs 5.0.1",
  "hex",
  "repak",
  "retoc",
+ "rivals-uasset",
  "serde",
  "serde_json",
  "sysinfo",
@@ -3505,6 +3509,7 @@ dependencies = [
  "repak",
  "retoc",
  "rivals-core",
+ "rivals-uasset",
  "serde",
  "serde_json",
  "sevenz-rust2",
@@ -3519,6 +3524,16 @@ dependencies = [
  "walkdir",
  "winreg 0.52.0",
  "zip",
+]
+
+[[package]]
+name = "rivals-uasset"
+version = "0.14.1"
+dependencies = [
+ "retoc",
+ "serde",
+ "serde_json",
+ "usmap",
 ]
 
 [[package]]
@@ -5084,6 +5099,23 @@ dependencies = [
  "serde",
  "unic-ucd-ident",
  "url",
+]
+
+[[package]]
+name = "usmap"
+version = "0.1.1"
+source = "git+https://github.com/trumank/jmap.git?rev=07b0c13e7e3950fc9012b3858a2469b8974300ab#07b0c13e7e3950fc9012b3858a2469b8974300ab"
+dependencies = [
+ "anyhow",
+ "byteorder",
+ "clap",
+ "ser-hex",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "strum",
+ "tracing",
+ "zstd",
 ]
 
 [[package]]

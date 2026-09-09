@@ -1,0 +1,14 @@
+[package]
+name = "rivals-uasset"
+description = "Decodes Unreal Engine 5 package export data into readable property trees"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+retoc.workspace = true
+serde.workspace = true
+usmap.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

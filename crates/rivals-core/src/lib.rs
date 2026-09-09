@@ -5,9 +5,14 @@
 
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 
+pub mod asset;
+pub mod asset_edit;
 pub mod game_status;
+pub mod import_index;
+pub mod mappings;
 pub mod mods;
 pub mod pak;
 pub mod pak_tweaks;
 pub mod paths;
+pub mod schema_synth;
 pub mod tweaks;

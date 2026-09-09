@@ -6,6 +6,8 @@ edition.workspace = true
 authors.workspace = true
 
 [dependencies]
+anyhow.workspace = true
+rivals-uasset = { path = "../rivals-uasset" }
 repak.workspace = true
 retoc.workspace = true
 serde.workspace = true
@@ -14,5 +16,6 @@ aes.workspace = true
 hex.workspace = true
 walkdir.workspace = true
 dirs.workspace = true
+cityhasher.workspace = true
 blake3.workspace = true
 sysinfo.workspace = true

@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
+  pull_request:
 
 permissions:
   contents: read
@@ -45,5 +46,23 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Typecheck
+        run: pnpm exec tsc --noEmit
+
+      - name: ESLint
+        run: pnpm lint:web
+
       - name: Build
         run: pnpm tauri build --no-bundle
+
+      - name: Format check
+        run: pnpm format:check
+
+      - name: Clippy
+        run: pnpm lint:rust:strict
+
+      # After the build: tauri-build needs dist/, and the pak tests need Oodle to write a pak.
+      - name: Test
+        run: cargo test --workspace
+        env:
+          OODLE_LIB_PATH: ${{ github.workspace }}/src-tauri/resources/oo2core_9_win64.dll

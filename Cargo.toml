@@ -1,5 +1,10 @@
 [workspace]
-members = ["src-tauri", "crates/rivals-core", "crates/rivals-cli"]
+members = [
+    "src-tauri",
+    "crates/rivals-core",
+    "crates/rivals-cli",
+    "crates/rivals-uasset",
+]
 resolver = "3"
 
 [workspace.package]
@@ -14,12 +19,16 @@ repak = { git = "https://github.com/oZanderr/repak", branch = "master", features
 ] }
 retoc = { git = "https://github.com/oZanderr/retoc", branch = "master" }
 rebnk = { git = "https://github.com/oZanderr/rebnk", branch = "master" }
+# Same repo and rev retoc already pulls in, so this shares the existing checkout.
+usmap = { git = "https://github.com/trumank/jmap.git", rev = "07b0c13e7e3950fc9012b3858a2469b8974300ab" }
+anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 aes = "0.8.4"
 hex = "0.4"
 walkdir = "2"
 dirs = "5"
+cityhasher = "0.1"
 blake3 = "1"
 rayon = "1"
 clap = { version = "4", features = ["derive"] }
