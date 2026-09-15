@@ -52,6 +52,9 @@ jobs:
       - name: ESLint
         run: pnpm lint:web
 
+      - name: Web tests
+        run: pnpm test
+
       - name: Build
         run: pnpm tauri build --no-bundle
 

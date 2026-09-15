@@ -25,6 +25,7 @@ mod updater;
 pub fn run() {
     concurrency::init_global_pool();
     updater::cleanup_stale_update_files();
+    pak_tweaks::commands::clear_ini_staging();
     let loaded_settings = settings::Settings::load();
     game_status::set_check_enabled(loaded_settings.game_running_check_enabled);
     tauri::Builder::default()
@@ -107,6 +108,7 @@ pub fn run() {
             pak_tweaks::commands::extract_game_default_ini,
             pak_tweaks::commands::create_new_mod_pak,
             pak_tweaks::commands::save_pak_ini,
+            pak_tweaks::commands::stage_pak_ini_chunk,
             pak_tweaks::commands::inspect_pak_path_any_ini,
             pak_tweaks::commands::scan_mod_paks_any_ini,
             pak_tweaks::commands::get_tweak_definitions,

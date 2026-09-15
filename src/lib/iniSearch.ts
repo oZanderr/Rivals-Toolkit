@@ -138,38 +138,41 @@ export function matchBefore(
   return null;
 }
 
-export interface LineReplacement {
-  changes: { from: number; to: number; insert: string }[];
-  lines: string[];
-  replaced: number;
+export interface LineChange {
+  from: number;
+  to: number;
+  insert: string;
 }
 
-/// Rewrite every occurrence, reporting both a per-changed-line change list and the full
-/// line array.
+/// Every rewrite a Replace All would make, as one change list against `doc`, plus how many
+/// occurrences it covers.
 ///
-/// One change spec per match is what takes the renderer down: hundreds of thousands of
-/// small objects allocated in one burst, then retained by the undo history. Per-line specs
-/// keep the count to the lines that actually changed, and the line array lets the caller
-/// fall back to a single rope swap when even that is too many.
-export function replaceAllLines(
+/// Whole lines rather than one change per match. A spec per occurrence is hundreds of thousands of
+/// objects on a large config, where the lines that actually change are a fraction of that, and a
+/// per-line change set leaves the untouched majority of the rope shared rather than rebuilt. The
+/// previous version built an array of every line, changed or not, then past a threshold swapped the
+/// whole rope, so a replace on a config of a million lines cost several full copies of it.
+///
+/// One list rather than batches applied as they are produced. Batching bounded what was alive
+/// during the rewrite, but each dispatch is its own history event: measured on a real 143 MB
+/// config, a Replace All landed as 117 of them, so undo put back a hundredth of the file per press.
+export function replaceAllChanges(
   doc: Text,
   needle: string,
   replacement: string,
   caseSensitive: boolean
-): LineReplacement {
+): { changes: LineChange[]; replaced: number } {
   const ndl = caseSensitive ? needle : needle.toLowerCase();
-  const changes: { from: number; to: number; insert: string }[] = [];
-  const lines: string[] = [];
+  const changes: LineChange[] = [];
+  if (!ndl) return { changes, replaced: 0 };
+
   let replaced = 0;
   let pos = 0;
-
   for (const iter = doc.iterLines(); !iter.next().done; ) {
     const line = iter.value;
     const hay = caseSensitive ? line : line.toLowerCase();
-    let at = ndl ? hay.indexOf(ndl) : -1;
-    if (at === -1) {
-      lines.push(line);
-    } else {
+    let at = hay.indexOf(ndl);
+    if (at !== -1) {
       let out = "";
       let cut = 0;
       while (at !== -1) {
@@ -179,11 +182,9 @@ export function replaceAllLines(
         at = hay.indexOf(ndl, cut);
       }
       out += line.slice(cut);
-      lines.push(out);
       changes.push({ from: pos, to: pos + line.length, insert: out });
     }
     pos += line.length + 1;
   }
-
-  return { changes, lines, replaced };
+  return { changes, replaced };
 }

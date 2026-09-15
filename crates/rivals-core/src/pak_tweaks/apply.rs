@@ -27,53 +27,70 @@ impl LayerFile {
     }
 }
 
-/// Apply `edits` across every INI file a pak ships.
-///
-/// A value is written to every file, so opening any one of them shows the tweak and no file can
-/// shadow another with a stale copy. A removal clears the key from every file and every section
-/// that sets it, since whichever copy survives is the one the game ends up reading. Engine-section
-/// settings are not console variables, so they stay inside engine files.
+/// Drive a whole pak's worth of files the way `apply_pak_tweaks` does, for the tests that assert
+/// across every layer at once.
+#[cfg(test)]
 pub(super) fn apply_edits_to_layers(files: &mut [LayerFile], edits: &[PakTweakEdit]) {
+    for file in files.iter_mut() {
+        apply_edits_to_file(file, edits);
+    }
+}
+
+/// Apply `edits` to one INI file, reporting whether they changed it.
+///
+/// Callers run this over every file a pak ships. A value is written to all of them, so opening any
+/// one shows the tweak and no file can shadow another with a stale copy. A removal clears the key
+/// from every file and every section that sets it, since whichever copy survives is the one the
+/// game ends up reading. Engine-section settings are not console variables, so they stay inside
+/// engine files.
+///
+/// One file at a time is the unit because they are independent: a pak of large configs never has
+/// to hold more than the file being edited.
+pub(super) fn apply_edits_to_file(file: &mut LayerFile, edits: &[PakTweakEdit]) -> bool {
     let (engine_section_edits, plain_edits): (Vec<PakTweakEdit>, Vec<PakTweakEdit>) = edits
         .iter()
         .cloned()
         .partition(|e| e.engine_section.is_some());
 
-    apply_group(files, &plain_edits, |_| true);
-    apply_group(files, &engine_section_edits, PakIniTarget::is_engine);
+    let plain = apply_group(file, &plain_edits, |_| true);
+    let engine = apply_group(file, &engine_section_edits, PakIniTarget::is_engine);
+    plain || engine
 }
 
 fn apply_group(
-    files: &mut [LayerFile],
+    file: &mut LayerFile,
     edits: &[PakTweakEdit],
     eligible: fn(PakIniTarget) -> bool,
-) {
-    if edits.is_empty() {
-        return;
+) -> bool {
+    if edits.is_empty() || !eligible(file.target) {
+        return false;
     }
     let any_removal = edits.iter().any(|e| e.value.is_none());
 
-    for file in files.iter_mut().filter(|f| eligible(f.target)) {
-        // A removal has nothing to do in a file that never sets the key, and skipping it keeps
-        // that file byte-for-byte instead of reformatting it for nothing.
-        let present: HashSet<String> = if any_removal {
-            parse_console_vars(&file.content, file.target.source_label())
-                .into_iter()
-                .map(|v| v.key.to_ascii_lowercase())
-                .collect()
-        } else {
-            HashSet::new()
-        };
-        let applicable: Vec<PakTweakEdit> = edits
-            .iter()
-            .filter(|e| e.value.is_some() || present.contains(&e.key.to_ascii_lowercase()))
-            .cloned()
-            .collect();
-        if applicable.is_empty() {
-            continue;
-        }
-        file.content = apply_edits_to_ini(&file.content, &applicable, file.ini_type());
+    // A removal has nothing to do in a file that never sets the key, and skipping it keeps
+    // that file byte-for-byte instead of reformatting it for nothing.
+    let present: HashSet<String> = if any_removal {
+        parse_console_vars(&file.content, file.target.source_label())
+            .into_iter()
+            .map(|v| v.key.to_ascii_lowercase())
+            .collect()
+    } else {
+        HashSet::new()
+    };
+    let applicable: Vec<PakTweakEdit> = edits
+        .iter()
+        .filter(|e| e.value.is_some() || present.contains(&e.key.to_ascii_lowercase()))
+        .cloned()
+        .collect();
+    if applicable.is_empty() {
+        return false;
     }
+    let next = apply_edits_to_ini(&file.content, &applicable, file.ini_type());
+    if next == file.content {
+        return false;
+    }
+    file.content = next;
+    true
 }
 
 /// Apply catalogue-driven edits to a pak INI files and repack in place.
@@ -89,28 +106,22 @@ pub fn apply_pak_tweaks(pak_path: &str, edits: &[PakTweakEdit]) -> Result<String
         .map(|(target, entry)| (target, entry.to_string()))
         .collect();
 
+    // One file at a time. A config mod can ship hundreds of megabytes of INI, and holding every
+    // file plus a copy of each to compare against cost well over a gigabyte for a single tweak.
     with_unpacked_pak(pak, |temp_dir| {
-        let mut files = Vec::with_capacity(layers.len());
         for (target, entry) in &layers {
             let path = temp_dir.join(strip_mount_prefix(entry));
             let content = fs::read_to_string(&path)
                 .map_err(|e| format!("Failed to read extracted INI {}: {}", path.display(), e))?;
-            files.push(LayerFile {
+            let mut file = LayerFile {
                 target: *target,
                 content,
-            });
-        }
-        let originals: Vec<String> = files.iter().map(|f| f.content.clone()).collect();
-
-        apply_edits_to_layers(&mut files, edits);
-
-        for (((_, entry), file), original) in layers.iter().zip(&files).zip(&originals) {
-            if &file.content == original {
-                continue;
+            };
+            if apply_edits_to_file(&mut file, edits) {
+                fs::write(&path, &file.content).map_err(|e| {
+                    format!("Failed to write modified INI {}: {}", path.display(), e)
+                })?;
             }
-            let path = temp_dir.join(strip_mount_prefix(entry));
-            fs::write(&path, &file.content)
-                .map_err(|e| format!("Failed to write modified INI {}: {}", path.display(), e))?;
         }
         Ok(())
     })?;
@@ -138,8 +149,18 @@ pub fn save_pak_ini(
                 fs::create_dir_all(parent)
                     .map_err(|e| format!("Failed to create {}: {}", parent.display(), e))?;
             }
-            fs::write(&dest, &file.content)
-                .map_err(|e| format!("Failed to write {}: {}", dest.display(), e))?;
+            match &file.staged_path {
+                // Staged text is moved rather than read back through memory, so a file that was
+                // too large to hand over in one piece is never held whole here either.
+                Some(staged) => {
+                    fs::copy(staged, &dest).map_err(|e| {
+                        format!("Failed to write {} from {staged}: {}", dest.display(), e)
+                    })?;
+                    let _ = fs::remove_file(staged);
+                }
+                None => fs::write(&dest, &file.content)
+                    .map_err(|e| format!("Failed to write {}: {}", dest.display(), e))?,
+            }
         }
         for entry in &deletes {
             let rel = strip_mount_prefix(entry);
@@ -175,6 +196,79 @@ mod tests {
     use crate::pak_tweaks::{PakCvar, edits_for_settings, edits_for_tweak};
     use crate::tweaks::catalogue::{TweakDefinition, TweakKind, tweak_catalogue};
     use crate::tweaks::{TweakSetting, TweakState, detect_tweaks_unscoped};
+
+    /// The editor names this field as the struct spells it. Getting that wrong would not fail
+    /// loudly: the field would read as absent and the save would write an empty file over the
+    /// config the user had just edited.
+    #[test]
+    fn a_staged_path_arrives_under_the_name_the_editor_sends() {
+        let from_editor = r#"{"entry":"Marvel/Config/DefaultEngine.ini","content":"","staged_path":"C:/tmp/x.ini"}"#;
+        let parsed: PakIniFileContent =
+            serde_json::from_str(from_editor).expect("deserialize a staged file");
+        assert_eq!(parsed.staged_path.as_deref(), Some("C:/tmp/x.ini"));
+
+        // A file with no staged text still parses, which is what every inline save sends.
+        let inline = r#"{"entry":"a.ini","content":"x=1"}"#;
+        let parsed: PakIniFileContent =
+            serde_json::from_str(inline).expect("deserialize an inline file");
+        assert_eq!(parsed.staged_path, None);
+        assert_eq!(parsed.content, "x=1");
+    }
+
+    /// Text handed over as a staged file has to land in the pak exactly as inline text would,
+    /// or a large config would save as something subtly different from a small one.
+    #[test]
+    fn a_staged_file_saves_the_same_bytes_as_an_inline_one() {
+        let dir = std::env::temp_dir().join(format!(
+            "rivals-ini-staged-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch");
+        let entry = "Marvel/Config/DefaultEngine.ini";
+        let body = "[ConsoleVariables]\r\nr.One=1\r\nr.Two=2";
+
+        let saved = |files: Vec<PakIniFileContent>, name: &str| -> Vec<u8> {
+            let pak = dir.join(name);
+            crate::pak_tweaks::io::create_empty_pak(&pak).expect("pak");
+            save_pak_ini(&pak.to_string_lossy(), files, Vec::new()).expect("save");
+            let out = dir.join(format!("{name}-unpacked"));
+            std::fs::create_dir_all(&out).expect("out");
+            crate::pak_tweaks::io::unpack_to_dir(&pak, &out).expect("unpack");
+            std::fs::read(out.join(entry)).expect("read back")
+        };
+
+        let inline = saved(
+            vec![PakIniFileContent {
+                entry: entry.to_string(),
+                content: body.to_string(),
+                staged_path: None,
+            }],
+            "inline.pak",
+        );
+
+        let staged_file = dir.join("staged.txt");
+        std::fs::write(&staged_file, body).expect("stage");
+        let staged = saved(
+            vec![PakIniFileContent {
+                entry: entry.to_string(),
+                content: String::new(),
+                staged_path: Some(staged_file.to_string_lossy().into_owned()),
+            }],
+            "staged.pak",
+        );
+
+        assert_eq!(inline, body.as_bytes(), "inline content round trips");
+        assert_eq!(staged, inline, "staged content is the same bytes as inline");
+        assert!(
+            !staged_file.exists(),
+            "the staging file is consumed by the save"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     /// Windows device profiles the shipping client can run. `Windows` is the active one and the
     /// rest inherit from it, so a CVar parked in any of them still reaches the game.
@@ -511,6 +605,60 @@ mod tests {
             files[4].content
         );
         assert!(is_active(&files, "force_default_material"));
+    }
+
+    /// A stray copy in a file the merged view does not speak for is still cleared by a removal.
+    ///
+    /// Detection answers what the game ends up seeing, so the highest-priority layer decides what
+    /// a key reads as for the whole pak. A hand-written config mod can leave the key set in a
+    /// lower layer while a higher one turns it off, and the row then reports the state the caller
+    /// already wanted. Treating "already in that state" as "nothing to write" leaves those copies
+    /// in place, which is why the preset queues its tweaks whatever the pak reports.
+    #[test]
+    fn a_removal_clears_copies_the_merged_view_does_not_report() {
+        let def = tweak_catalogue()
+            .into_iter()
+            .find(|t| t.id == "force_default_material")
+            .expect("force_default_material");
+        let key = "r.debug.ForceDefaultMtl";
+
+        let dp = |value: &str| {
+            format!(
+                "{}\r\nDeviceType=Windows\r\n+CVars={key}={value}\r\n\r\n",
+                DP_SECTIONS[0]
+            )
+        };
+        let mut files = vec![
+            layer(
+                PakIniTarget::BaseEngine,
+                format!("{}\r\n{key}=1\r\n\r\n", ENGINE_SECTIONS[0]),
+            ),
+            layer(
+                PakIniTarget::Engine,
+                format!("{}\r\n\r\n", ENGINE_SECTIONS[0]),
+            ),
+            layer(PakIniTarget::BaseDeviceProfiles, dp("1")),
+            layer(PakIniTarget::DeviceProfiles, dp("0")),
+        ];
+
+        assert_eq!(key_hits(&files, key).len(), 3, "seeded into three files");
+        assert!(
+            !is_active(&files, "force_default_material"),
+            "the highest-priority layer turns it off, so the pak reads as off"
+        );
+
+        // The state the caller wants is the state the pak already reports, so anything comparing
+        // the two decides there is nothing to do. Applying the removal anyway is what reaches the
+        // two files still carrying it.
+        let off = edits_off(&def).expect("force_default_material can be turned off");
+        for file in files.iter_mut() {
+            apply_edits_to_file(file, &off);
+        }
+        assert!(
+            key_hits(&files, key).is_empty(),
+            "every copy has to go, including the ones the merged view never reported: {:#?}",
+            key_hits(&files, key)
+        );
     }
 
     // ── Whole-catalogue sweeps ────────────────────────────────────────

@@ -1,7 +1,14 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
-import { EditorState, StateField, StateEffect, RangeSetBuilder, Text } from "@codemirror/state";
+import {
+  ChangeSet,
+  EditorState,
+  StateField,
+  StateEffect,
+  RangeSetBuilder,
+  Text,
+} from "@codemirror/state";
 import {
   EditorView,
   keymap,
@@ -62,7 +69,7 @@ import {
   matchAtOrAfter,
   matchBefore,
   ordinalOf,
-  replaceAllLines,
+  replaceAllChanges,
   scanLines,
 } from "@/lib/iniSearch";
 import { emitModsChanged, normalizeFolderPath, onModsChanged } from "@/lib/modsEvents";
@@ -82,6 +89,7 @@ interface PakIniListing {
 interface PakIniFileContent {
   entry: string;
   content: string;
+  staged_path?: string;
 }
 
 type NoticeType = "ok" | "err" | "info";
@@ -120,9 +128,13 @@ const currentMatchMark = Decoration.mark({ class: "cm-search-match-current" });
 const COUNT_DEBOUNCE_MS = 200;
 // Coalesces the keystrokes that feed the counter into one state change.
 const DOC_VERSION_DEBOUNCE_MS = 150;
-// Past this many changed lines, Replace All swaps the whole rope instead of listing every
-// line, trading granular undo for a bounded transaction.
-const REPLACE_ALL_LINE_LIMIT = 20000;
+
+// A save crosses to the backend as one JSON string, and a string has a hard ceiling of about
+// half a gigabyte. This editor opens config files that individually run to a hundred megabytes
+// and more, so saving several at once used to exceed it and fail with `RangeError: Invalid
+// string length`. Anything past this goes over in pieces instead, which also means the whole
+// file is never held as a single string on this side.
+const STAGE_ABOVE = 4 << 20;
 // Undo history is kept for this many recently visited entries, or this many characters of
 // document, whichever binds first. Dirty entries are exempt.
 const MAX_CACHED_STATES = 6;
@@ -216,6 +228,18 @@ function normalizeLineEndings(s: string): string {
   return s.replace(/\r\n/g, "\n");
 }
 
+/// Split a file into the lines a document is built from, dropping carriage returns as it goes.
+///
+/// Normalising with a regex first copies the whole file: measured at 131 MB and 150 ms on this
+/// editor's largest config, for a copy thrown away as soon as the document existed.
+function toDoc(raw: string): Text {
+  const lines = raw.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].endsWith("\r")) lines[i] = lines[i].slice(0, -1);
+  }
+  return Text.of(lines);
+}
+
 // In-pak path convention: every entry stored in `contents` is the full path
 // repak returns, which always has the UE mount prefix prepended.
 const MOUNT_PREFIX = "../../../";
@@ -260,13 +284,20 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
   const [paks, setPaks] = useState<PakIniListing[]>([]);
   const [selectedPak, setSelectedPak] = useState<PakIniListing | null>(null);
   const [scanning, setScanning] = useState(false);
-  const [loading, setLoading] = useState(false);
+  // Which entry is being read, if any. There is no whole-pak load to wait for any more: selecting
+  // a pak reads its index only, and the tab strip is drawn from that while a file arrives behind it.
+  const [entryLoading, setEntryLoading] = useState<string | null>(null);
+  const [entryError, setEntryError] = useState<{ entry: string; message: string } | null>(null);
+  // A load generation. A read that lands after a reload or a pak switch belongs to text that was
+  // already discarded, and writing it back would resurrect it under the new pak's name.
+  const loadTokenRef = useRef({});
+  const inFlightRef = useRef<Set<string>>(new Set());
 
   // ── Editor content (per INI entry) ──
   const [activeEntry, setActiveEntry] = useState<string | null>(null);
   // Text as loaded from disk. It seeds a fresh editor and lists the tabs; it is not
   // updated per keystroke, because the live CodeMirror document is the source of truth.
-  const [contents, setContents] = useState<Record<string, string>>({});
+  const [contents, setContents] = useState<Record<string, string | Text>>({});
   // Entries edited since the last load or save. A name instead of a second full copy of
   // the file: comparing multi-megabyte strings on every render is what this replaces.
   const [dirtySet, setDirtySet] = useState<ReadonlySet<string>>(new Set());
@@ -354,12 +385,14 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
     () => [...dirtySet].filter((entry) => !pendingDeletes.has(entry)),
     [dirtySet, pendingDeletes]
   );
-  // Tabs ignore pending-delete entries; new entries naturally appear via
-  // Object.keys order (insertion-order).
-  const displayedEntries = useMemo(
-    () => Object.keys(contents).filter((e) => !pendingDeletes.has(e)),
-    [contents, pendingDeletes]
-  );
+  // Tabs come from the pak's own index, so every one of them is there before any is read.
+  // Entries added this session are not in that index yet and follow it, in the insertion order
+  // `contents` keeps. Pending deletes are hidden.
+  const displayedEntries = useMemo(() => {
+    const onDisk = selectedPak?.ini_entries ?? [];
+    const added = Object.keys(contents).filter((e) => !onDisk.includes(e));
+    return [...onDisk, ...added].filter((e) => !pendingDeletes.has(e));
+  }, [selectedPak, contents, pendingDeletes]);
   // Save fires if there are edits OR pending deletes of entries that were on disk.
   const realDeletes = useMemo(
     () => [...pendingDeletes].filter((e) => onDiskRef.current.has(e)),
@@ -488,6 +521,8 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
           onDiskRef.current = new Set();
           editorStatesRef.current.clear();
           setPendingDeletes(new Set());
+          loadTokenRef.current = {};
+          inFlightRef.current.clear();
         }
         if (merged.length === 0) {
           if (!silent) showNotice("No paks with INI files found", "info");
@@ -609,48 +644,26 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
     });
   }, [selectedPak, isDirty]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Selecting a pak reads its index, not its contents. Extracting every INI up front cost
-  // a full copy of each one before you had opened any of them, and on a pak with a large
-  // INI that is seconds of stall and tens of megabytes for a file you may never look at.
-  async function loadPak(pak: PakIniListing) {
+  // Selecting a pak reads its index, not its contents. A config mod can hold hundreds of
+  // megabytes of INI across its files, so each one is read when its tab is first opened rather
+  // than up front for files you may never look at.
+  function loadPak(pak: PakIniListing) {
     const isPakSwitch = selectedPak?.pak_path !== pak.pak_path;
     setSelectedPak(pak);
     setContents({});
     setDirtySet(new Set());
-    onDiskRef.current = new Set();
     editorStatesRef.current.clear();
     setPendingDeletes(new Set());
-    setLoading(true);
+    setEntryLoading(null);
+    setEntryError(null);
+    loadTokenRef.current = {};
+    inFlightRef.current.clear();
+    onDiskRef.current = new Set(pak.ini_entries);
+    setPakEpoch((n) => n + 1);
 
-    try {
-      const loaded: Record<string, string> = {};
-      for (const entry of pak.ini_entries) {
-        try {
-          const raw = await invoke<string>("extract_pak_ini", {
-            pakPath: pak.pak_path,
-            entry,
-          });
-          loaded[entry] = normalizeLineEndings(raw);
-        } catch (e) {
-          console.error(`Failed to read ${entry}:`, e);
-        }
-      }
-      setContents(loaded);
-      onDiskRef.current = new Set(Object.keys(loaded));
-      setPakEpoch((n) => n + 1);
-
-      // Preserve the active entry across reloads when it still exists; otherwise pick the first.
-      const firstEntry = pak.ini_entries.find((e) => loaded[e] !== undefined) ?? null;
-      if (isPakSwitch) {
-        setActiveEntry(firstEntry);
-      } else if (activeEntry === null || loaded[activeEntry] === undefined) {
-        setActiveEntry(firstEntry);
-      }
-    } catch (e) {
-      showNotice(String(e), "err");
-      console.error(e);
-    } finally {
-      setLoading(false);
+    // Preserve the active entry across reloads when it still exists; otherwise pick the first.
+    if (isPakSwitch || activeEntry === null || !pak.ini_entries.includes(activeEntry)) {
+      setActiveEntry(pak.ini_entries[0] ?? null);
     }
   }
 
@@ -669,7 +682,7 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
       setPakSwitchOpen(true);
       return;
     }
-    void loadPak(pak);
+    loadPak(pak);
   }
 
   const requestLoadPakRef = useRef(requestLoadPak);
@@ -677,17 +690,17 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
     requestLoadPakRef.current = requestLoadPak;
   });
 
-  async function reload() {
+  function reload() {
     if (!selectedPak) return;
-    await loadPak(selectedPak);
+    loadPak(selectedPak);
     showNotice("Reloaded from disk", "ok");
   }
 
   // Throwing the edits away means going back to what the pak holds, so re-read it rather
   // than keeping a second copy of every file around purely to answer this.
-  async function discard() {
+  function discard() {
     if (!isDirty || !selectedPak) return;
-    await loadPak(selectedPak);
+    loadPak(selectedPak);
     showNotice("Discarded unsaved changes", "ok");
   }
 
@@ -737,7 +750,7 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
       setActiveEntry(entry);
       return;
     }
-    if (contents[entry] !== undefined) {
+    if (onDiskRef.current.has(entry) || contents[entry] !== undefined) {
       showNotice(`${entryBasename(entry)} already exists in this pak`, "err");
       return;
     }
@@ -762,6 +775,37 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
     setActiveEntry(entry);
   }
 
+  // Reads the active entry the first time it is opened. This is the only place a file's text is
+  // pulled out of a pak; everything else about one comes from its index.
+  useEffect(() => {
+    const pak = selectedPak;
+    const entry = activeEntry;
+    if (!pak || entry === null) return;
+    if (contents[entry] !== undefined || !onDiskRef.current.has(entry)) return;
+    if (inFlightRef.current.has(entry)) return;
+
+    const token = loadTokenRef.current;
+    inFlightRef.current.add(entry);
+    setEntryLoading(entry);
+    setEntryError(null);
+    void (async () => {
+      try {
+        const raw = await invoke<string>("extract_pak_ini", { pakPath: pak.pak_path, entry });
+        if (loadTokenRef.current !== token) return;
+        const text = toDoc(raw);
+        setContents((prev) => (prev[entry] !== undefined ? prev : { ...prev, [entry]: text }));
+      } catch (e) {
+        console.error(`Failed to read ${entry}:`, e);
+        if (loadTokenRef.current === token) setEntryError({ entry, message: String(e) });
+      } finally {
+        if (loadTokenRef.current === token) {
+          inFlightRef.current.delete(entry);
+          setEntryLoading((cur) => (cur === entry ? null : cur));
+        }
+      }
+    })();
+  }, [activeEntry, selectedPak, contents]);
+
   // A dirty entry lives in the editor, not in React state, so read it back from there.
   function docFor(entry: string): Text | null {
     if (entry === activeEntry && editorViewRef.current) return editorViewRef.current.state.doc;
@@ -770,7 +814,30 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
       : undefined;
     if (cached) return cached.state.doc;
     const seed = contents[entry];
-    return seed === undefined ? null : Text.of(seed.split("\n"));
+    if (seed === undefined) return null;
+    return typeof seed === "string" ? Text.of(seed.split("\n")) : seed;
+  }
+
+  // Hands a document over in pieces and answers where the backend assembled it. Lines are
+  // joined exactly as `sliceString(.., "\r\n")` would, so a staged file and an inline one are
+  // the same bytes.
+  async function stageDoc(doc: Text): Promise<string> {
+    let path: string | null = null;
+    let buffer = "";
+    let first = true;
+    const flush = async () => {
+      if (!buffer) return;
+      path = await invoke<string>("stage_pak_ini_chunk", { path, chunk: buffer });
+      buffer = "";
+    };
+    for (const iter = doc.iterLines(); !iter.next().done; ) {
+      buffer += first ? iter.value : "\r\n" + iter.value;
+      first = false;
+      if (buffer.length >= STAGE_ABOVE) await flush();
+    }
+    await flush();
+    if (path === null) path = await invoke<string>("stage_pak_ini_chunk", { path, chunk: "" });
+    return path;
   }
 
   async function save() {
@@ -780,9 +847,16 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
       // sliceString emits the CRLF form directly, instead of a toString plus a regex
       // pass over the whole file.
       const files: PakIniFileContent[] = [];
+      const saved = new Map<string, Text>();
       for (const entry of dirtyEntries) {
         const doc = docFor(entry);
-        if (doc) files.push({ entry, content: doc.sliceString(0, doc.length, "\r\n") });
+        if (!doc) continue;
+        saved.set(entry, doc);
+        if (doc.length >= STAGE_ABOVE) {
+          files.push({ entry, content: "", staged_path: await stageDoc(doc) });
+        } else {
+          files.push({ entry, content: doc.sliceString(0, doc.length, "\r\n") });
+        }
       }
       const deletes = [...pendingDeletes].filter((entry) => onDiskRef.current.has(entry));
 
@@ -814,13 +888,19 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
 
       // Everything that was dirty is now on disk. The editor still holds the text, so
       // there is no disk round-trip here and the cursor and undo history survive.
+      //
+      // Point `contents` at the documents that were written. It seeds a fresh editor, and a
+      // cached state is only exempt from eviction while its entry is dirty, so leaving the
+      // pre-save text here showed the save undone as soon as one aged out. Those documents are
+      // already in memory, so this copies nothing.
+      setContents((prev) => ({ ...prev, ...Object.fromEntries(saved) }));
       for (const entry of dirtyEntries) onDiskRef.current.add(entry);
       for (const entry of pendingDeletes) onDiskRef.current.delete(entry);
       setDirtySet(new Set());
       // Drop deleted (and discarded-add) entries from contents.
       if (pendingDeletes.size > 0) {
         setContents((prev) => {
-          const next: Record<string, string> = {};
+          const next: Record<string, string | Text> = {};
           for (const [entry, value] of Object.entries(prev)) {
             if (pendingDeletes.has(entry)) continue;
             next[entry] = value;
@@ -831,10 +911,7 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
       setPendingDeletes(new Set());
       // If the active entry was deleted, switch to first remaining.
       if (activeEntry !== null && pendingDeletes.has(activeEntry)) {
-        const remaining = Object.keys(contents).find(
-          (e) => e !== activeEntry && !pendingDeletes.has(e)
-        );
-        setActiveEntry(remaining ?? null);
+        setActiveEntry(displayedEntries.find((e) => e !== activeEntry) ?? null);
       }
     } catch (e) {
       showNotice(String(e), "err", 8000);
@@ -860,21 +937,21 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
     openSearchRef.current = openSearch;
   });
 
-  function scrollToPos(view: EditorView, pos: number) {
-    requestAnimationFrame(() => {
-      const coords = view.coordsAtPos(pos);
-      if (!coords) return;
-      const scroller = view.scrollDOM;
-      const rect = scroller.getBoundingClientRect();
-      scroller.scrollTop += coords.top - rect.top - rect.height / 2;
-    });
+  // Scrolling has to go through the editor rather than the scroller. `coordsAtPos` only answers
+  // for positions the editor has actually rendered, and it renders a window around the viewport,
+  // so on a file of a million lines every match outside that window returned null and the view
+  // silently stayed put while the counter moved.
+  function scrollEffect(pos: number) {
+    return EditorView.scrollIntoView(pos, { y: "center" });
   }
 
   function jumpToMatch(pos: number, index: number) {
     const view = editorViewRef.current;
     if (!view) return;
-    view.dispatch({ selection: { anchor: pos, head: pos + searchTerm.length } });
-    scrollToPos(view, pos);
+    view.dispatch({
+      selection: { anchor: pos, head: pos + searchTerm.length },
+      effects: scrollEffect(pos),
+    });
     setMatchInfo((prev) => ({ ...prev, index }));
   }
 
@@ -972,35 +1049,30 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
         ? matchInfo.index
         : 0;
 
-    view.dispatch({ selection: { anchor: next, head: next + searchTerm.length } });
-    scrollToPos(view, next);
+    view.dispatch({
+      selection: { anchor: next, head: next + searchTerm.length },
+      effects: scrollEffect(next),
+    });
     setMatchInfo((prev) => ({ ...prev, count, index }));
   }
 
-  // One change spec per match blows up the ChangeSet and the undo history: hundreds of
-  // thousands of small objects allocated in one burst is what took the renderer down.
-  // Rewriting whole lines keeps the spec count to the lines that actually changed, and
-  // past that a single rope swap keeps it to one.
+  // A common key matches hundreds of thousands of lines in a large config. One change per changed
+  // line keeps the rope sharing everything it does not touch, and one dispatch keeps the whole
+  // rewrite to a single press of undo.
   function replaceAllMatches() {
     const view = editorViewRef.current;
     if (!view || !searchTerm) return;
-    const doc = view.state.doc;
 
-    const { changes, lines, replaced } = replaceAllLines(
-      doc,
-      searchTerm,
-      replaceTerm,
-      caseSensitive
-    );
+    const doc = view.state.doc;
+    const { changes, replaced } = replaceAllChanges(doc, searchTerm, replaceTerm, caseSensitive);
     if (replaced === 0) return;
 
-    const anchor = Math.min(view.state.selection.main.from, doc.length);
+    // The cursor has to be placed against the document the replace leaves behind: a replacement
+    // shorter than the term moves the end of the file, and an anchor measured before that throws.
+    const set = ChangeSet.of(changes, doc.length);
     view.dispatch({
-      changes:
-        changes.length <= REPLACE_ALL_LINE_LIMIT
-          ? changes
-          : { from: 0, to: doc.length, insert: Text.of(lines) },
-      selection: { anchor },
+      changes: set,
+      selection: { anchor: Math.min(view.state.selection.main.from, set.newLength) },
       scrollIntoView: false,
       userEvent: "input.replace.all",
     });
@@ -1158,9 +1230,12 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
       view.destroy();
       editorViewRef.current = null;
     };
-    // Only recreate when switching entries or loading new content from disk (pakEpoch bump)
+    // Recreate when switching entries, when a load brings new content (pakEpoch bump), and when
+    // the active entry's text arrives: that read lands after this effect has already run, so
+    // without the last one the editor would never mount. `contents` is not written per keystroke,
+    // so this does not churn while typing, and a remount restores unsaved work from the cache.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeEntry, pakEpoch]);
+  }, [activeEntry, pakEpoch, currentContent]);
 
   // ── Sync search config + auto-jump (single atomic dispatch) ──
   useEffect(() => {
@@ -1176,10 +1251,9 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
     if (first !== null) {
       setMatchInfo((prev) => ({ ...prev, index: 0 }));
       view.dispatch({
-        effects,
+        effects: [effects, scrollEffect(first)],
         selection: { anchor: first, head: first + search.length },
       });
-      scrollToPos(view, first);
     } else {
       setMatchInfo((prev) => ({ ...prev, index: -1 }));
       view.dispatch({ effects });
@@ -1230,11 +1304,11 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
 
   // Auto-select when exactly one pak is found
   useEffect(() => {
-    if (paks.length === 1 && !selectedPak && !loading) {
+    if (paks.length === 1 && !selectedPak) {
       loadPak(paks[0]);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- fire-once after scan populates paks
-  }, [paks, selectedPak, loading]);
+  }, [paks, selectedPak]);
 
   // Reset scan flag when game path changes
   useEffect(() => {
@@ -1247,6 +1321,8 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
     onDiskRef.current = new Set();
     editorStatesRef.current.clear();
     setPendingDeletes(new Set());
+    loadTokenRef.current = {};
+    inFlightRef.current.clear();
   }, [gamePath]);
 
   return (
@@ -1350,7 +1426,7 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
       </div>
 
       {/* ── Editor area ── */}
-      {selectedPak && !loading && (
+      {selectedPak && (
         <div className="flex flex-1 min-h-0 flex-col rounded-md border border-border overflow-hidden">
           {/* File tabs + toolbar */}
           <div className="flex items-center justify-between border-b border-border px-3 py-1.5">
@@ -1435,7 +1511,7 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
 
             <div className="flex shrink-0 items-center gap-1">
               <Tip content="Reload from disk">
-                <Button variant="ghost" size="sm" onClick={reload} disabled={loading || saving}>
+                <Button variant="ghost" size="sm" onClick={reload} disabled={saving}>
                   <RefreshCw size={13} />
                 </Button>
               </Tip>
@@ -1546,6 +1622,17 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
           {/* CodeMirror editor (mounted only when an entry is active) */}
           {currentContent !== null && activeEntry !== null ? (
             <div ref={editorContainerRef} className="flex-1 min-h-0 w-full overflow-hidden" />
+          ) : entryLoading !== null && entryLoading === activeEntry ? (
+            <div className="flex flex-1 min-h-0 items-center justify-center">
+              <RefreshCw size={20} className="animate-spin text-muted-foreground" />
+            </div>
+          ) : entryError !== null && entryError.entry === activeEntry ? (
+            <div className="flex flex-1 min-h-0 flex-col items-center justify-center gap-2 px-4 text-center">
+              <AlertTriangle size={22} className="text-warn" />
+              <span className="text-[12px] text-muted-foreground">
+                Could not read {entryBasename(entryError.entry)}: {entryError.message}
+              </span>
+            </div>
           ) : (
             <div className="flex flex-1 min-h-0 flex-col items-center justify-center gap-2 px-4 text-center">
               <FileText size={22} className="text-muted-foreground/50" />
@@ -1593,15 +1680,8 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
         </div>
       )}
 
-      {/* Loading state */}
-      {loading && (
-        <div className="flex flex-1 min-h-0 items-center justify-center rounded-md border border-border">
-          <RefreshCw size={20} className="animate-spin text-muted-foreground" />
-        </div>
-      )}
-
       {/* Empty state */}
-      {!selectedPak && !loading && (
+      {!selectedPak && (
         <div className="flex flex-1 min-h-0 items-center justify-center rounded-md border border-border">
           <span className="text-[13px] text-muted-foreground">
             Select a pak with INI files to start editing
@@ -1631,7 +1711,7 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
             <AlertDialogAction
               onClick={() => {
                 setPakSwitchOpen(false);
-                if (pakSwitchPrompt) void loadPak(pakSwitchPrompt.pak);
+                if (pakSwitchPrompt) loadPak(pakSwitchPrompt.pak);
               }}
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >

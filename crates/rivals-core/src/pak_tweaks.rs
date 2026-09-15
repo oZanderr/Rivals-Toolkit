@@ -168,7 +168,13 @@ impl PakIniTarget {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PakIniFileContent {
     pub entry: String,
+    #[serde(default)]
     pub content: String,
+    /// Where the text is instead, when it was too large to hand over in one piece. A save
+    /// crosses the app's IPC boundary as a single JSON string, so a few hundred megabytes of
+    /// config across several files cannot travel inline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staged_path: Option<String>,
 }
 
 #[cfg(test)]
