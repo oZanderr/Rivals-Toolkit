@@ -40,18 +40,32 @@ pub fn preview_edits(
     request: &AssetEditRequest<'_>,
     mappings: Option<&Mappings>,
 ) -> Result<(PatchedBundle, FSerializedAssetBundle), String> {
+    if request.changes.is_empty() {
+        return Err("No changes to save".into());
+    }
+    let (loaded, parsed) = read_package(request, mappings)?;
+    preview_read_edits(request, mappings, loaded, &parsed)
+}
+
+/// [`preview_edits`] for a caller that has already read and parsed the package, so a run over many
+/// assets reads each one once rather than once per stage.
+pub fn preview_read_edits(
+    request: &AssetEditRequest<'_>,
+    mappings: Option<&Mappings>,
+    loaded: FSerializedAssetBundle,
+    parsed: &rivals_uasset::ParsedPackage,
+) -> Result<(PatchedBundle, FSerializedAssetBundle), String> {
     let changes = &request.changes;
     if changes.is_empty() {
         return Err("No changes to save".into());
     }
-    let (loaded, parsed) = read_package(request, mappings)?;
     let patched = rivals_uasset::patch_package_with(
         &bundle_of(&loaded),
         rivals_uasset::Sidecars {
             bulk: loaded.bulk_data_buffer.as_deref(),
             optional_bulk: loaded.optional_bulk_data_buffer.as_deref(),
         },
-        &parsed,
+        parsed,
         changes,
         mappings,
     )?;
@@ -64,7 +78,7 @@ pub fn preview_edits(
     };
     let after =
         schema_synth::parse_package_opts(&reread, mappings, &source_of(request), editor_options())?;
-    rivals_uasset::verify_patch(&parsed, &after, changes, &patched.applied)?;
+    rivals_uasset::verify_patch(parsed, &after, changes, &patched.applied)?;
     Ok((patched, loaded))
 }
 
@@ -307,13 +321,22 @@ fn read_package(
         request.entry,
         request.kind,
     )?;
-    let parsed = schema_synth::parse_package_opts(
-        &bundle_of(&loaded),
+    let parsed = parse_loaded(request, mappings, &loaded)?;
+    Ok((loaded, parsed))
+}
+
+/// The editor's parse of a bundle the caller already holds.
+pub fn parse_loaded(
+    request: &AssetEditRequest<'_>,
+    mappings: Option<&Mappings>,
+    loaded: &FSerializedAssetBundle,
+) -> Result<rivals_uasset::ParsedPackage, String> {
+    schema_synth::parse_package_opts(
+        &bundle_of(loaded),
         mappings,
         &source_of(request),
         editor_options(),
-    )?;
-    Ok((loaded, parsed))
+    )
 }
 
 fn bundle_of(loaded: &FSerializedAssetBundle) -> AssetBundle<'_> {

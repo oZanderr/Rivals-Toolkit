@@ -175,6 +175,22 @@ stores: a slot left to its archetype stays that way.
 rivals-cli asset sweep --container pakchunk0-Windows.utoc --filter CameraShake   --set Amplitude=0 --set AnimScale=0 --mod-name NoShake --dry-run
 ```
 
+`--filter` matches the package path, which misses anything named differently. `--class` matches what
+a package actually holds, at the cost of reading every package the path filter allowed through:
+
+```bash
+rivals-cli asset sweep --container pakchunk0-Windows.utoc --class LegacyCameraShakePattern   --set Amplitude=0 --set AnimScale=0 --mod-name NoShake --dry-run
+```
+
+A sweep reads from `--container` every time, so a second sweep over packages the mod already holds
+replaces what the first one wrote rather than adding to it. It says so when that happens. Pass
+`--layer` to read the mod's own copies where it has them, which is how several sweeps build one mod:
+
+```bash
+rivals-cli asset sweep --container pakchunk0-Windows.utoc --filter CameraShake   --set Amplitude=0 --mod-name NoShake
+rivals-cli asset sweep --container pakchunk0-Windows.utoc --filter CameraShake   --set AnimPlayRate=0.001 --mod-name NoShake --layer
+```
+
 Every writing command reads the vanilla asset, splices in the change, proves the result parses back
 the same way, and only then writes it into a mod container in `~mods` that overrides the original.
 Nothing in the game's own containers is touched. `--mod-name` picks the container and `--replace`

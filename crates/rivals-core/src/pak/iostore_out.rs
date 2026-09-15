@@ -4,7 +4,7 @@
 //! a container of its own: a plain pak only ever delivers loose files. The writer has no append
 //! mode, so replacing one package means writing the container again around it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use retoc::iostore_writer::IoStoreWriter;
@@ -58,8 +58,9 @@ pub struct PackageFiles<'a> {
 #[derive(Debug)]
 pub struct IoStoreReport {
     pub utoc: PathBuf,
-    /// Whether the container already held this package, rather than gaining it.
-    pub replaced: bool,
+    /// How many of the packages written were already in the container, rather than new to it.
+    /// Each one replaced a copy that was there, which is a loss of whatever it held.
+    pub replaced: usize,
     /// Chunks carried over from the container as it was.
     pub carried_chunks: usize,
     /// How many packages the write put in.
@@ -70,17 +71,15 @@ pub struct IoStoreReport {
     pub carried_redirects: usize,
 }
 
-/// Removes a staging directory unless the work reached the end.
+/// Removes a staging directory when it goes out of scope. Whatever owns this decides how long the
+/// staged files live, which is how a container survives between being built and being swapped in.
 struct Staging {
     dir: PathBuf,
-    keep: bool,
 }
 
 impl Drop for Staging {
     fn drop(&mut self) {
-        if !self.keep {
-            let _ = std::fs::remove_dir_all(&self.dir);
-        }
+        let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
 
@@ -91,6 +90,16 @@ pub fn utoc_holds_entry(utoc: &Path, entry: &str) -> Result<bool, String> {
     Ok(store
         .chunks()
         .any(|chunk| chunk.path().is_some_and(|path| comparable(&path) == wanted)))
+}
+
+/// Everything the container carries, keyed the way [`utoc_holds_entry`] compares. Asking once beats
+/// asking per entry, which reopens the container each time.
+pub fn utoc_entries(utoc: &Path) -> Result<HashSet<String>, String> {
+    let store = open_utoc(&utoc.to_string_lossy())?;
+    Ok(store
+        .chunks()
+        .filter_map(|chunk| chunk.path().map(|path| comparable(&path)))
+        .collect())
 }
 
 fn comparable(path: &str) -> String {
@@ -105,28 +114,97 @@ const PACKAGE_CHUNKS: [EIoChunkType; 4] = [
     EIoChunkType::MemoryMappedBulkData,
 ];
 
+/// One package's bytes, owned, so the writer can take them and let them go again. A batch is
+/// produced one of these at a time rather than handed over as a whole.
+pub struct PackageBytes {
+    /// Mount-relative, as the container names it.
+    pub entry: String,
+    pub asset: Vec<u8>,
+    pub exports: Vec<u8>,
+    pub bulk: Option<Vec<u8>>,
+    pub optional_bulk: Option<Vec<u8>>,
+    pub memory_mapped_bulk: Option<Vec<u8>>,
+    pub shader_map_hashes: Vec<FSHAHash>,
+}
+
+impl PackageFiles<'_> {
+    fn owned(&self) -> PackageBytes {
+        PackageBytes {
+            entry: self.entry.to_string(),
+            asset: self.asset.to_vec(),
+            exports: self.exports.to_vec(),
+            bulk: self.bulk.map(<[u8]>::to_vec),
+            optional_bulk: self.optional_bulk.map(<[u8]>::to_vec),
+            memory_mapped_bulk: self.memory_mapped_bulk.map(<[u8]>::to_vec),
+            shader_map_hashes: self.shader_map_hashes.clone(),
+        }
+    }
+}
+
+impl PackageBytes {
+    /// The file names this package puts in the container, for the listing beside it.
+    fn names(&self) -> Vec<String> {
+        let stem_path = format!("{RIVALS_MOUNT_POINT}{}", self.entry);
+        let without_extension = stem_path
+            .rsplit_once('.')
+            .map_or(stem_path.as_str(), |(head, _)| head)
+            .to_string();
+        let mut names = vec![stem_path, format!("{without_extension}.uexp")];
+        for (bytes, extension) in [
+            (&self.bulk, "ubulk"),
+            (&self.optional_bulk, "uptnl"),
+            (&self.memory_mapped_bulk, "m.ubulk"),
+        ] {
+            if bytes.is_some() {
+                names.push(format!("{without_extension}.{extension}"));
+            }
+        }
+        names
+    }
+}
+
 /// Writes `package` into the container at `utoc`, keeping everything else it holds. The container
 /// is built beside the original and swapped in, so a failure leaves what was there untouched.
 ///
-/// See [`write_many_into_iostore`] to put a batch in with a single rewrite.
+/// See [`write_batch_into_iostore`] to put many in with a single rewrite.
 pub fn write_into_iostore(
     utoc: &Path,
     package: PackageFiles<'_>,
     options: &IoStoreOptions,
 ) -> Result<IoStoreReport, String> {
-    write_many_into_iostore(utoc, std::slice::from_ref(&package), options)
+    let mut once = Some(package.owned());
+    write_batch_into_iostore(utoc, 1, |_| once.take(), options)
 }
 
-/// The same for a batch. Rewriting a container is a whole-file operation, so writing packages one
-/// at a time repeats it once per package; a sweep over hundreds does it once instead.
-pub fn write_many_into_iostore(
+/// [`stage_batch_into_iostore`] committed straight away, for a caller holding nothing open.
+pub fn write_batch_into_iostore(
     utoc: &Path,
-    packages: &[PackageFiles<'_>],
+    count: usize,
+    produce: impl FnMut(usize) -> Option<PackageBytes>,
     options: &IoStoreOptions,
 ) -> Result<IoStoreReport, String> {
-    if packages.is_empty() {
-        return Err("no packages to write".into());
-    }
+    stage_batch_into_iostore(utoc, count, produce, options)?
+        .ok_or_else(|| "no packages to write".to_string())?
+        .commit()
+}
+
+/// Builds the container a batch would replace this one with, without swapping it in. `Ok(None)`
+/// when `produce` had nothing to give, which is not a failure: the caller knows why.
+///
+/// Rewriting a container is a whole-file operation, so writing packages one at a time repeats it
+/// once per package. Taking them as a slice instead would mean holding the whole batch in memory,
+/// which is what forces a size limit; `produce` hands over one package, it is written, and its
+/// bytes are dropped before the next is asked for. `produce` returns `None` for an index it has
+/// nothing for, which is how a caller skips a package it could not prepare.
+///
+/// The packages go in first and the container's other chunks are carried over afterwards, since
+/// what to carry is "everything not already written" and that is only known once they are in.
+pub fn stage_batch_into_iostore(
+    utoc: &Path,
+    count: usize,
+    mut produce: impl FnMut(usize) -> Option<PackageBytes>,
+    options: &IoStoreOptions,
+) -> Result<Option<StagedContainer>, String> {
     let stem = utoc
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
@@ -136,36 +214,8 @@ pub fn write_many_into_iostore(
         .ok_or("the container has no folder")?
         .to_path_buf();
 
-    // Convert before touching anything: a package that will not convert is not worth staging for.
-    let shader_maps: HashMap<String, Vec<FSHAHash>> = HashMap::new();
-    let mut built = Vec::with_capacity(packages.len());
-    for package in packages {
-        let mounted: UEPathBuf = format!("{RIVALS_MOUNT_POINT}{}", package.entry).into();
-        let bundle = FSerializedAssetBundle {
-            asset_file_buffer: package.asset.to_vec(),
-            exports_file_buffer: package.exports.to_vec(),
-            bulk_data_buffer: package.bulk.map(<[u8]>::to_vec),
-            optional_bulk_data_buffer: package.optional_bulk.map(<[u8]>::to_vec),
-            memory_mapped_bulk_data_buffer: package.memory_mapped_bulk.map(<[u8]>::to_vec),
-        };
-        let converted = retoc::zen_asset_conversion::build_zen_asset(
-            bundle,
-            &shader_maps,
-            mounted.as_ref(),
-            Some(ENGINE.package_file_version()),
-            ENGINE.container_header_version(),
-            false,
-            None,
-            None,
-            &retoc::logging::Log::no_log(),
-        )
-        .map_err(|e| format!("convert {} for IoStore: {e}", package.entry))?;
-        built.push(converted);
-    }
-
     let staging = Staging {
         dir: dir.join(format!(".{stem}_iostore")),
-        keep: false,
     };
     if staging.dir.exists() {
         std::fs::remove_dir_all(&staging.dir).ok();
@@ -177,9 +227,9 @@ pub fn write_many_into_iostore(
 
     let mut report = IoStoreReport {
         utoc: utoc.to_path_buf(),
-        replaced: false,
+        replaced: 0,
         carried_chunks: 0,
-        written: packages.len(),
+        written: 0,
         carried_localized: 0,
         carried_redirects: 0,
     };
@@ -194,29 +244,13 @@ pub fn write_many_into_iostore(
     let obfuscate = options
         .obfuscate
         .unwrap_or_else(|| utoc.is_file() && utoc_is_obfuscated(utoc));
-
-    if let Some(store) = &existing {
-        if store.container_header_version() != Some(ENGINE.container_header_version()) {
-            return Err(format!(
-                "{} was built for another engine version, so this editor will not rewrite it",
-                utoc.display()
-            ));
-        }
-        for (converted, package) in built.iter_mut().zip(packages) {
-            if store.package_store_entry(converted.package_id).is_some() {
-                report.replaced = true;
-            }
-            if converted.store_entry().shader_map_hashes.is_empty() {
-                let restored = store
-                    .package_store_entry(converted.package_id)
-                    .map(|entry| entry.shader_map_hashes)
-                    .filter(|hashes| !hashes.is_empty())
-                    .unwrap_or_else(|| package.shader_map_hashes.clone());
-                if !restored.is_empty() {
-                    converted.set_shader_map_hashes(restored);
-                }
-            }
-        }
+    if let Some(store) = &existing
+        && store.container_header_version() != Some(ENGINE.container_header_version())
+    {
+        return Err(format!(
+            "{} was built for another engine version, so this editor will not rewrite it",
+            utoc.display()
+        ));
     }
 
     let mut writer = IoStoreWriter::new(
@@ -261,23 +295,72 @@ pub fn write_many_into_iostore(
         report.carried_redirects = redirects.len();
     }
 
+    let shader_maps: HashMap<String, Vec<FSHAHash>> = HashMap::new();
     let mut names: Vec<String> = Vec::new();
+    let mut written: HashSet<FIoChunkId> = HashSet::new();
+    for index in 0..count {
+        let Some(package) = produce(index) else {
+            continue;
+        };
+        names.extend(package.names());
+        let mounted: UEPathBuf = format!("{RIVALS_MOUNT_POINT}{}", package.entry).into();
+        let entry = package.entry;
+        let fallback_hashes = package.shader_map_hashes;
+        let bundle = FSerializedAssetBundle {
+            asset_file_buffer: package.asset,
+            exports_file_buffer: package.exports,
+            bulk_data_buffer: package.bulk,
+            optional_bulk_data_buffer: package.optional_bulk,
+            memory_mapped_bulk_data_buffer: package.memory_mapped_bulk,
+        };
+        let mut converted = retoc::zen_asset_conversion::build_zen_asset(
+            bundle,
+            &shader_maps,
+            mounted.as_ref(),
+            Some(ENGINE.package_file_version()),
+            ENGINE.container_header_version(),
+            false,
+            None,
+            None,
+            &retoc::logging::Log::no_log(),
+        )
+        .map_err(|e| format!("convert {entry} for IoStore: {e}"))?;
+
+        if let Some(store) = &existing {
+            if store.package_store_entry(converted.package_id).is_some() {
+                report.replaced += 1;
+            }
+            if converted.store_entry().shader_map_hashes.is_empty() {
+                let restored = store
+                    .package_store_entry(converted.package_id)
+                    .map(|entry| entry.shader_map_hashes)
+                    .filter(|hashes| !hashes.is_empty())
+                    .unwrap_or(fallback_hashes);
+                if !restored.is_empty() {
+                    converted.set_shader_map_hashes(restored);
+                }
+            }
+        }
+        written.extend(PACKAGE_CHUNKS.iter().map(|kind| {
+            FIoChunkId::from_package_id(converted.package_id, 0, *kind)
+                .with_version(ENGINE.toc_version())
+        }));
+        converted
+            .write_package_data(&mut writer)
+            .map_err(|e| e.to_string())?;
+        converted
+            .write_and_release_bulk_data(&mut writer)
+            .map_err(|e| e.to_string())?;
+        report.written += 1;
+    }
+    if report.written == 0 {
+        return Ok(None);
+    }
+
     if let Some(store) = &existing {
-        let superseded: Vec<FIoChunkId> = built
-            .iter()
-            .flat_map(|converted| {
-                PACKAGE_CHUNKS.iter().map(move |kind| {
-                    FIoChunkId::from_package_id(converted.package_id, 0, *kind)
-                        .with_version(ENGINE.toc_version())
-                })
-            })
-            .collect();
         for chunk in store.chunks_all() {
             let id = chunk.id().with_version(ENGINE.toc_version());
-            if id.get_chunk_type() == EIoChunkType::ContainerHeader {
-                continue;
-            }
-            if superseded.contains(&id) {
+            if id.get_chunk_type() == EIoChunkType::ContainerHeader || written.contains(&id) {
                 continue;
             }
             let path = chunk.path();
@@ -291,7 +374,7 @@ pub fn write_many_into_iostore(
             if id.get_chunk_type() == EIoChunkType::ExportBundleData {
                 let entry = store
                     .package_store_entry(id.get_package_id())
-                    .ok_or_else(|| format!("{} lists a package with no store entry", stem))?;
+                    .ok_or_else(|| format!("{stem} lists a package with no store entry"))?;
                 if compressed {
                     writer.write_package_chunk(id, as_path, &data, &entry)
                 } else {
@@ -306,43 +389,51 @@ pub fn write_many_into_iostore(
             report.carried_chunks += 1;
         }
     }
-
-    for converted in &mut built {
-        converted
-            .write_package_data(&mut writer)
-            .map_err(|e| e.to_string())?;
-        converted
-            .write_and_release_bulk_data(&mut writer)
-            .map_err(|e| e.to_string())?;
-    }
     writer.finalize().map_err(|e| e.to_string())?;
 
-    for package in packages {
-        let stem_path = format!("{RIVALS_MOUNT_POINT}{}", package.entry);
-        let without_extension = stem_path
-            .rsplit_once('.')
-            .map_or(stem_path.as_str(), |(head, _)| head)
-            .to_string();
-        names.push(stem_path);
-        names.push(format!("{without_extension}.uexp"));
-        for (bytes, extension) in [
-            (package.bulk, "ubulk"),
-            (package.optional_bulk, "uptnl"),
-            (package.memory_mapped_bulk, "m.ubulk"),
-        ] {
-            if bytes.is_some() {
-                names.push(format!("{without_extension}.{extension}"));
-            }
-        }
-    }
     names.sort();
     names.dedup();
     write_names_pak(&staging.dir.join(format!("{stem}.pak")), utoc, &names)?;
 
-    swap_into_place(&dir, &stem, &staging.dir, &["pak", "utoc", "ucas"])?;
-    let mut staging = staging;
-    staging.keep = false;
-    Ok(report)
+    // The swap renames the live container, which it cannot do while this still has it open. The
+    // caller's own stores are the other half of that, and dropping them is what committing is for.
+    drop(existing);
+    Ok(Some(StagedContainer {
+        staging,
+        dir,
+        stem,
+        report,
+    }))
+}
+
+/// A container built beside the one it replaces, waiting to be swapped in.
+///
+/// Nothing the caller read from has to stay open for the swap, so it holds the staged files until
+/// [`StagedContainer::commit`] is called and the caller has let go of whatever it was reading.
+/// Dropping it instead leaves the live container exactly as it was.
+pub struct StagedContainer {
+    staging: Staging,
+    dir: PathBuf,
+    stem: String,
+    report: IoStoreReport,
+}
+
+impl StagedContainer {
+    /// What the staged container would report, for a caller deciding whether to commit it.
+    pub fn report(&self) -> &IoStoreReport {
+        &self.report
+    }
+
+    /// Moves the staged files over the live ones.
+    pub fn commit(self) -> Result<IoStoreReport, String> {
+        swap_into_place(
+            &self.dir,
+            &self.stem,
+            &self.staging.dir,
+            &["pak", "utoc", "ucas"],
+        )?;
+        Ok(self.report)
+    }
 }
 
 /// The stub pak beside a container: whatever non-package files the mod already carried, plus the
@@ -436,6 +527,8 @@ pub fn swap_into_place(
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    const BACKSLASH: char = '\\';
 
     fn oodle_available() -> bool {
         std::env::var_os("OODLE_LIB_PATH").is_some()
@@ -601,25 +694,22 @@ mod tests {
                     .expect("load")
             })
             .collect();
-        let files: Vec<PackageFiles<'_>> = entries
-            .iter()
-            .zip(&loaded)
-            .map(|(entry, held)| PackageFiles {
-                entry,
-                asset: &held.asset_file_buffer,
-                exports: &held.exports_file_buffer,
-                bulk: None,
-                optional_bulk: None,
-                memory_mapped_bulk: None,
-                shader_map_hashes: Vec::new(),
-            })
-            .collect();
-
         let dir = scratch("batch");
         let utoc = dir.join("Batch.utoc");
-        let report = write_many_into_iostore(
+        let report = write_batch_into_iostore(
             &utoc,
-            &files,
+            entries.len(),
+            |index| {
+                Some(PackageBytes {
+                    entry: entries[index].to_string(),
+                    asset: loaded[index].asset_file_buffer.clone(),
+                    exports: loaded[index].exports_file_buffer.clone(),
+                    bulk: None,
+                    optional_bulk: None,
+                    memory_mapped_bulk: None,
+                    shader_map_hashes: Vec::new(),
+                })
+            },
             &IoStoreOptions {
                 compression: PackCompression::Zlib,
                 ..Default::default()
@@ -627,7 +717,7 @@ mod tests {
         )
         .expect("batch write");
         assert_eq!(report.written, entries.len());
-        assert!(!report.replaced, "nothing was there to replace");
+        assert_eq!(report.replaced, 0, "nothing was there to replace");
 
         for entry in entries {
             assert!(
@@ -647,6 +737,122 @@ mod tests {
             );
         }
         drop(store);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A staged container is not the live one until it is committed. This is the property the whole
+    /// split exists for: the caller gets to close what it read from before anything is renamed.
+    #[test]
+    fn a_staged_container_that_is_never_committed_leaves_the_live_one_alone() {
+        let Ok(root) = std::env::var("RIVALS_GAME_ROOT") else {
+            return;
+        };
+        if !oodle_available() {
+            return;
+        }
+        let source = format!(
+            "{}/MarvelGame/Marvel/Content/Paks/pakchunk0-Windows.utoc",
+            root.replace(BACKSLASH, "/")
+        );
+        let entry = "Marvel/Content/Marvel/AbilitySystem/1011/101111/CameraShake_101111.uasset";
+        let loaded =
+            crate::asset::load_bundle(&root, &source, entry, crate::asset::AssetSource::Utoc)
+                .expect("load");
+
+        let dir = scratch("staged");
+        let utoc = dir.join("Held.utoc");
+        std::fs::write(&utoc, b"the live container").expect("write");
+        let bytes = || {
+            Some(PackageBytes {
+                entry: entry.to_string(),
+                asset: loaded.asset_file_buffer.clone(),
+                exports: loaded.exports_file_buffer.clone(),
+                bulk: None,
+                optional_bulk: None,
+                memory_mapped_bulk: None,
+                shader_map_hashes: Vec::new(),
+            })
+        };
+        // A .utoc that is not a container at all would fail to open, so stage into a fresh name.
+        std::fs::remove_file(&utoc).expect("clear");
+        let staging = dir.join(".Held_iostore");
+
+        let staged = stage_batch_into_iostore(
+            &utoc,
+            1,
+            |_| bytes(),
+            &IoStoreOptions {
+                compression: PackCompression::Zlib,
+                ..Default::default()
+            },
+        )
+        .expect("stage")
+        .expect("a package was produced");
+        assert_eq!(staged.report().written, 1);
+        assert!(staging.is_dir(), "the staged container is on disk");
+        assert!(!utoc.exists(), "and the live one has not been touched yet");
+
+        drop(staged);
+        assert!(
+            !staging.exists(),
+            "an abandoned staging directory is cleaned up"
+        );
+        assert!(!utoc.exists(), "and still nothing was installed");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `replaced` is what tells a caller it is about to overwrite work, so it has to count packages
+    /// rather than say whether any were there at all.
+    #[test]
+    fn replacing_a_package_is_counted_per_package() {
+        let Ok(root) = std::env::var("RIVALS_GAME_ROOT") else {
+            return;
+        };
+        if !oodle_available() {
+            return;
+        }
+        let source = format!(
+            "{}/MarvelGame/Marvel/Content/Paks/pakchunk0-Windows.utoc",
+            root.replace(BACKSLASH, "/")
+        );
+        let entries = [
+            "Marvel/Content/Marvel/AbilitySystem/1011/101111/CameraShake_101111.uasset",
+            "Marvel/Content/Marvel/AbilitySystem/1011/101111/CameraShake_101111_Hit.uasset",
+        ];
+        let loaded: Vec<_> = entries
+            .iter()
+            .map(|entry| {
+                crate::asset::load_bundle(&root, &source, entry, crate::asset::AssetSource::Utoc)
+                    .expect("load")
+            })
+            .collect();
+        let options = IoStoreOptions {
+            compression: PackCompression::Zlib,
+            ..Default::default()
+        };
+        let package = |index: usize| {
+            Some(PackageBytes {
+                entry: entries[index].to_string(),
+                asset: loaded[index].asset_file_buffer.clone(),
+                exports: loaded[index].exports_file_buffer.clone(),
+                bulk: None,
+                optional_bulk: None,
+                memory_mapped_bulk: None,
+                shader_map_hashes: Vec::new(),
+            })
+        };
+
+        let dir = scratch("replaced");
+        let utoc = dir.join("Counted.utoc");
+        let first = write_batch_into_iostore(&utoc, 1, |_| package(0), &options).expect("first");
+        assert_eq!(first.replaced, 0, "nothing was there to replace");
+
+        let both = write_batch_into_iostore(&utoc, 2, package, &options).expect("second");
+        assert_eq!(both.written, 2);
+        assert_eq!(
+            both.replaced, 1,
+            "one of the two was already in the container"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

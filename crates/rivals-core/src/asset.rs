@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use retoc::asset_conversion::{self, FZenPackageContext};
 use retoc::iostore::IoStoreTrait;
@@ -215,18 +215,7 @@ fn load_from_utoc(
         format!("{entry} is not a package in {container_name} or the base paks beside it")
     })?;
 
-    let log = retoc::logging::Log::no_log();
-    let context = FZenPackageContext::create(
-        &*store,
-        Some(ENGINE_VERSION.package_file_version()),
-        &log,
-        None,
-    );
-
-    let writer = MemFileWriter::default();
-    asset_conversion::build_legacy(&context, package_id, UEPath::new(&package_path), &writer)
-        .map_err(|e| format!("convert {entry} to legacy: {e:#}"))?;
-    writer.into_bundle(entry)
+    PackageConverter::new(&*store).convert(package_id, &package_path)
 }
 
 /// Package paths carry one extension; `.m.ubulk` is handled by the caller building it back on.
@@ -255,18 +244,37 @@ pub fn list_packages(
     game_root: &str,
     utoc_path: &str,
 ) -> Result<(Arc<dyn IoStoreTrait>, Vec<PackageEntry>), String> {
-    let container_name = Path::new(utoc_path)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .ok_or("invalid .utoc path")?;
+    list_packages_via(game_root, utoc_path, utoc_path)
+}
+
+/// The same, with the store opened around `open_as` rather than around the container being listed.
+///
+/// A store admits its target plus the base game and no other mod, and resolves a chunk through the
+/// highest-priority container holding it. Opening around a mod therefore reads that mod's copy of
+/// anything it carries and the base game's copy of everything else, which is what lets a run build
+/// on a mod without a second store to pay for or to keep in step.
+pub fn list_packages_via(
+    game_root: &str,
+    open_as: &str,
+    utoc_path: &str,
+) -> Result<(Arc<dyn IoStoreTrait>, Vec<PackageEntry>), String> {
+    let name_of = |path: &str| {
+        Path::new(path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(str::to_string)
+            .ok_or_else(|| "invalid .utoc path".to_string())
+    };
+    let container_name = name_of(utoc_path)?;
     let paks_dir = crate::paths::paks_dir(game_root);
-    let store = open_base_game_paks(&paks_dir, container_name)?;
+    let store = open_base_game_paks(&paks_dir, &name_of(open_as)?)?;
 
     let packages = {
         let target = store
             .child_containers()
             .find(|c| c.container_name() == container_name)
             .ok_or_else(|| format!("container not found: {container_name}"))?;
+        let target: &dyn IoStoreTrait = target;
         target
             .packages()
             .filter_map(|pkg| {
@@ -281,23 +289,41 @@ pub fn list_packages(
     Ok((store, packages))
 }
 
-/// Converts one already-resolved package, for callers that hold a store open across many assets.
-pub fn bundle_from_package(
-    store: &dyn IoStoreTrait,
-    package_id: retoc::FPackageId,
-    path: &str,
-) -> Result<FSerializedAssetBundle, String> {
-    let log = retoc::logging::Log::no_log();
-    let context = FZenPackageContext::create(
-        store,
-        Some(ENGINE_VERSION.package_file_version()),
-        &log,
-        None,
-    );
-    let writer = MemFileWriter::default();
-    asset_conversion::build_legacy(&context, package_id, UEPath::new(path), &writer)
-        .map_err(|e| format!("convert {path} to legacy: {e:#}"))?;
-    writer.into_bundle(path)
+/// Conversion has nothing to say, and a context borrows its log for as long as it lives.
+static LOG: LazyLock<retoc::logging::Log> = LazyLock::new(retoc::logging::Log::no_log);
+
+/// The conversion caches for one store, held across as many packages as the caller reads.
+///
+/// A context fills with the store's script object table and the header of every package an import
+/// resolves through. Building one per package costs about forty times the package itself, so any
+/// loop over packages should make one of these and keep it.
+pub struct PackageConverter<'a> {
+    context: FZenPackageContext<'a>,
+}
+
+impl<'a> PackageConverter<'a> {
+    pub fn new(store: &'a dyn IoStoreTrait) -> Self {
+        Self {
+            context: FZenPackageContext::create(
+                store,
+                Some(ENGINE_VERSION.package_file_version()),
+                &LOG,
+                None,
+            ),
+        }
+    }
+
+    /// Converts one already-resolved package back to its legacy form.
+    pub fn convert(
+        &self,
+        package_id: retoc::FPackageId,
+        path: &str,
+    ) -> Result<FSerializedAssetBundle, String> {
+        let writer = MemFileWriter::default();
+        asset_conversion::build_legacy(&self.context, package_id, UEPath::new(path), &writer)
+            .map_err(|e| format!("convert {path} to legacy: {e:#}"))?;
+        writer.into_bundle(path)
+    }
 }
 
 #[cfg(test)]

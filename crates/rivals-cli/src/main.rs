@@ -235,9 +235,20 @@ struct SweepArgs {
     #[arg(long, value_name = "TEXT")]
     filter: Option<String>,
 
+    /// Keep only packages holding an export of this class, such as `LegacyCameraShakePattern`.
+    /// Narrows `--filter` rather than replacing it, and reads every package the filter allows.
+    #[arg(long, value_name = "CLASS")]
+    class: Option<String>,
+
     /// `Name=Value`: every property with that name, at any depth, takes that value. Repeatable.
     #[arg(long = "set", value_name = "NAME=VALUE", required = true)]
     sets: Vec<String>,
+
+    /// Build on the mod's own copies where it already has them, instead of reading the source
+    /// container again. Without it a second sweep over the same packages replaces what the first
+    /// one wrote.
+    #[arg(long)]
+    layer: bool,
 
     /// Read and patch everything, write nothing.
     #[arg(long)]
@@ -1876,6 +1887,7 @@ fn asset_sweep(cli: &Cli, app: &settings::AppSettings, args: &SweepArgs) -> Resu
             game_root: &root,
             container: &args.container,
             filter: args.filter.as_deref(),
+            class: args.class.as_deref(),
             mod_name: args
                 .mod_name
                 .as_deref()
@@ -1883,6 +1895,7 @@ fn asset_sweep(cli: &Cli, app: &settings::AppSettings, args: &SweepArgs) -> Resu
                 .unwrap_or(DEFAULT_MOD_NAME),
             sets,
             limit: args.limit,
+            layer: args.layer,
             dry_run: args.dry_run,
         },
     )?;

@@ -452,14 +452,34 @@ pub fn print_sweep(report: &asset_edit::sweep::SweepReport, out: &mut impl FnMut
         }
     }
     out(String::new());
+    let not_that_class = if report.other_class > 0 {
+        format!(", {} not of that class", report.other_class)
+    } else {
+        String::new()
+    };
     out(format!(
-        "{} package(s) matched, {} changed, {} left alone, {} failed, {} value(s) set",
+        "{} package(s) matched{not_that_class}, {} changed, {} left alone, {} failed, {} value(s) set",
         report.matched,
         report.changed.len(),
         report.untouched,
         report.failed.len(),
         report.edits()
     ));
+    if report.replaced > 0 {
+        if report.layered {
+            out(format!(
+                "{} package(s) were built on the copies this mod already held.",
+                report.replaced
+            ));
+        } else {
+            out(format!(
+                "! {} package(s) already in this mod were replaced by copies read fresh",
+                report.replaced
+            ));
+            out("  from the source, so an earlier sweep's edits to them are gone. Pass".into());
+            out("  --layer to build on what the mod already holds instead.".into());
+        }
+    }
     match &report.written {
         Some(utoc) => out(format!(
             "Wrote {} ({} chunk(s) carried over)",
@@ -1831,10 +1851,11 @@ pub fn synth_check(
         differing: Vec::new(),
         only_synthesised: Vec::new(),
     };
+    let converter = asset::PackageConverter::new(&*store);
     for (index, (package_id, path)) in packages.iter().take(total).enumerate() {
         progress(index + 1, total);
         report.packages_scanned += 1;
-        let Ok(bundle) = asset::bundle_from_package(&*store, *package_id, path) else {
+        let Ok(bundle) = converter.convert(*package_id, path) else {
             continue;
         };
         let bundle = AssetBundle {
@@ -2077,10 +2098,11 @@ pub fn audit(
     let total = limit.map_or(packages.len(), |l| l.min(packages.len()));
 
     let mut acc = Accumulator::new(container.to_string());
+    let converter = asset::PackageConverter::new(&*store);
     for (index, (package_id, path)) in packages.iter().take(total).enumerate() {
         progress(index + 1, total);
         acc.report.packages_scanned += 1;
-        match asset::bundle_from_package(&*store, *package_id, path) {
+        match converter.convert(*package_id, path) {
             Ok(bundle) => acc.absorb(
                 &bundle.asset_file_buffer,
                 &bundle.exports_file_buffer,
@@ -2949,9 +2971,10 @@ pub fn diagnose(
             let (store, packages) = asset::list_packages(game_root, container)?;
             let packages: Vec<_> = packages.into_iter().filter(|(_, p)| matches(p)).collect();
             let total = limit.map_or(packages.len(), |l| l.min(packages.len()));
+            let converter = asset::PackageConverter::new(&*store);
             for (index, (package_id, path)) in packages.iter().take(total).enumerate() {
                 progress("loading", index + 1, total);
-                if let Ok(bundle) = asset::bundle_from_package(&*store, *package_id, path) {
+                if let Ok(bundle) = converter.convert(*package_id, path) {
                     cached.push((
                         path.clone(),
                         bundle.asset_file_buffer,

@@ -6,18 +6,16 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use retoc::iostore::IoStoreTrait;
 use retoc::legacy_asset::FSerializedAssetBundle;
 use rivals_uasset::{
     EditOp, Mappings, PackageEdits, PatchedBundle, PropertyEntry, PropertyValue, ValueEdit, kind_of,
 };
 
-use super::{AssetEditRequest, SaveOptions, SaveTarget, preview_edits};
+use super::{AssetEditRequest, SaveOptions, SaveTarget};
 use crate::asset::{self, AssetSource};
-
-/// Holding every patched package in memory is what lets the batch go in with one rewrite, so a
-/// filter that matches half the game has to be refused rather than swallowed.
-const STAGED_BUDGET: u64 = 2 << 30;
 
 /// One property name and the value every match takes.
 #[derive(Debug, Clone)]
@@ -33,10 +31,16 @@ pub struct SweepRequest<'a> {
     pub container: &'a str,
     /// Substring of the package path, as `asset list --filter` matches it.
     pub filter: Option<&'a str>,
+    /// Keep only packages holding an export of this class. Narrows the path filter rather than
+    /// replacing it, and costs a parse of every package the path filter let through.
+    pub class: Option<&'a str>,
     pub mod_name: &'a str,
     pub sets: Vec<SweepSet>,
     /// Stop after this many matching packages, for trying a sweep out on a handful first.
     pub limit: Option<usize>,
+    /// Read a package from the mod when it already holds one, so repeated sweeps build on each
+    /// other instead of each starting from the source container again.
+    pub layer: bool,
     /// Patch and verify everything, write nothing.
     pub dry_run: bool,
 }
@@ -62,6 +66,13 @@ pub struct SweepReport {
     pub changed: Vec<SweptPackage>,
     /// Matched packages holding no stored value under any of the swept names.
     pub untouched: usize,
+    /// Matched packages dropped by `--class`, which only a class filter produces.
+    pub other_class: usize,
+    /// Written packages the mod already carried. Without `layer` each one replaced what was there,
+    /// which is how an earlier sweep's edits are lost; with it, each was read and built on.
+    pub replaced: usize,
+    /// Whether those packages were built on rather than replaced.
+    pub layered: bool,
     pub failed: Vec<SweepFailure>,
     /// What was matched by name and left alone anyway. A sweep that changes nothing is usually a
     /// misspelt name, and this is where that shows.
@@ -229,7 +240,7 @@ fn edits_for<'a>(
     edits
 }
 
-/// A package patched and verified, held until the whole batch goes in together.
+/// A package patched and verified, on its way straight into the container.
 struct Staged {
     entry: String,
     patched: PatchedBundle,
@@ -238,12 +249,22 @@ struct Staged {
 }
 
 impl Staged {
-    fn bytes(&self) -> u64 {
-        let sidecar = |held: &Option<Vec<u8>>| held.as_ref().map_or(0, Vec::len) as u64;
-        (self.patched.asset.len() + self.patched.exports.len()) as u64
-            + sidecar(&self.loaded.bulk_data_buffer)
-            + sidecar(&self.loaded.optional_bulk_data_buffer)
-            + sidecar(&self.loaded.memory_mapped_bulk_data_buffer)
+    /// The bytes to write, with the sidecars the patch did not touch carried through from the
+    /// package as it was read.
+    fn bytes(self) -> crate::pak::iostore_out::PackageBytes {
+        let sidecar = |patched: Option<Vec<u8>>, read: Option<Vec<u8>>| patched.or(read);
+        crate::pak::iostore_out::PackageBytes {
+            entry: self.entry,
+            asset: self.patched.asset,
+            exports: self.patched.exports,
+            bulk: sidecar(self.patched.bulk, self.loaded.bulk_data_buffer),
+            optional_bulk: sidecar(
+                self.patched.optional_bulk,
+                self.loaded.optional_bulk_data_buffer,
+            ),
+            memory_mapped_bulk: self.loaded.memory_mapped_bulk_data_buffer,
+            shader_map_hashes: Vec::new(),
+        }
     }
 }
 
@@ -262,89 +283,134 @@ pub fn sweep(
                 .into(),
         );
     }
-    let entries = matching(request)?;
-    let mut report = SweepReport {
-        matched: entries.len(),
-        changed: Vec::new(),
-        untouched: 0,
-        failed: Vec::new(),
-        skipped: Skipped::default(),
-        written: None,
-        carried_chunks: 0,
-    };
-    let mut staged: Vec<Staged> = Vec::new();
-    let mut bytes = 0u64;
-    for entry in entries {
-        match stage(request, &entry, mappings, &mut report.skipped) {
-            Ok(Some(one)) => {
-                bytes += one.bytes();
-                if bytes > STAGED_BUDGET {
-                    return Err(format!(
-                        "The sweep matched more than {} GiB of packages, which is more than it \
-                         will hold in memory at once. Narrow the filter or use --limit.",
-                        STAGED_BUDGET >> 30
-                    ));
-                }
-                staged.push(one);
-            }
-            Ok(None) => report.untouched += 1,
-            Err(reason) => report.failed.push(SweepFailure { entry, reason }),
-        }
-    }
-    for one in &staged {
-        report.changed.push(SweptPackage {
-            entry: one.entry.clone(),
-            changes: one.changes.clone(),
-        });
-    }
-    if request.dry_run || staged.is_empty() {
-        return Ok(report);
-    }
-
     let utoc = super::mod_pak_path(request.game_root, request.mod_name)?.with_extension("utoc");
-    if utoc.with_extension("pak").is_file() && !utoc.is_file() {
+    if !request.dry_run && utoc.with_extension("pak").is_file() && !utoc.is_file() {
         return Err(format!(
             "{} is a plain pak mod. Repack it in place as IoStore first, or choose another name.",
             utoc.with_extension("pak").display()
         ));
     }
-    let files: Vec<crate::pak::iostore_out::PackageFiles<'_>> = staged
-        .iter()
-        .map(|one| crate::pak::iostore_out::PackageFiles {
-            entry: &one.entry,
-            asset: &one.patched.asset,
-            exports: &one.patched.exports,
-            bulk: one
-                .patched
-                .bulk
-                .as_deref()
-                .or(one.loaded.bulk_data_buffer.as_deref()),
-            optional_bulk: one
-                .patched
-                .optional_bulk
-                .as_deref()
-                .or(one.loaded.optional_bulk_data_buffer.as_deref()),
-            memory_mapped_bulk: one.loaded.memory_mapped_bulk_data_buffer.as_deref(),
-            shader_map_hashes: Vec::new(),
-        })
-        .collect();
+    // Sweeping a mod as its own source is layering by another name: what it reads is what it is
+    // about to replace, so nothing is lost and the warning would be wrong.
+    let layered = request.layer || same_file(&utoc, request.container);
+    let (store, entries) = matching(request, &utoc)?;
+    let mut report = SweepReport {
+        matched: entries.len(),
+        changed: Vec::new(),
+        untouched: 0,
+        other_class: 0,
+        replaced: 0,
+        layered,
+        failed: Vec::new(),
+        skipped: Skipped::default(),
+        written: None,
+        carried_chunks: 0,
+    };
+
+    // The converter holds the store's conversion caches, which is what makes reading hundreds of
+    // packages cost about what one of them used to.
+    let converter = store
+        .as_ref()
+        .map(|store| asset::PackageConverter::new(&**store));
+    // One package at a time: patched, written, and let go before the next is read. Nothing here
+    // grows with how many the filter matched.
+    let mut prepare = |index: usize| -> Option<crate::pak::iostore_out::PackageBytes> {
+        let (id, entry) = &entries[index];
+        let resolved = converter.as_ref().zip(*id);
+        match stage(request, resolved, entry, mappings, &mut report.skipped) {
+            Ok(Prepared::Ready(one)) => {
+                report.changed.push(SweptPackage {
+                    entry: one.entry.clone(),
+                    changes: one.changes.clone(),
+                });
+                Some(one.bytes())
+            }
+            Ok(Prepared::NothingToChange) => {
+                report.untouched += 1;
+                None
+            }
+            Ok(Prepared::OtherClass) => {
+                report.other_class += 1;
+                None
+            }
+            Err(reason) => {
+                report.failed.push(SweepFailure {
+                    entry: entry.clone(),
+                    reason,
+                });
+                None
+            }
+        }
+    };
+
+    if request.dry_run {
+        for index in 0..entries.len() {
+            drop(prepare(index));
+        }
+        report.replaced = already_held(&utoc, &report.changed);
+        return Ok(report);
+    }
     // A read earlier in this session may still hold the container open, and it is about to be
     // replaced underneath.
     crate::pak::containers::drop_cached_store();
-    let written =
-        crate::pak::iostore_out::write_many_into_iostore(&utoc, &files, &options.iostore)?;
-    report.carried_chunks = written.carried_chunks;
-    report.written = Some(written.utoc);
+    let staged = crate::pak::iostore_out::stage_batch_into_iostore(
+        &utoc,
+        entries.len(),
+        prepare,
+        &options.iostore,
+    )?;
+    // Nothing to write is not a failure to report as one: the report already says why.
+    let Some(staged) = staged else {
+        return Ok(report);
+    };
+    report.replaced = staged.report().replaced;
+    report.carried_chunks = staged.report().carried_chunks;
+    // The swap renames the mod, so everything read along the way has to be closed first. Under
+    // `layer` the mod is one of the containers that was being read.
+    drop(converter);
+    drop(store);
+    report.written = Some(staged.commit()?.utoc);
     Ok(report)
 }
 
-/// Reads one package and patches it, or `None` when it holds nothing the sweep would change.
+/// Whether two paths name the same container, compared the way the file system would.
+fn same_file(utoc: &std::path::Path, container: &str) -> bool {
+    let canonical =
+        |path: &std::path::Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    utoc.is_file() && canonical(utoc) == canonical(std::path::Path::new(container))
+}
+
+/// How many of these the mod already carries, for a dry run to say what a real one would replace.
+fn already_held(utoc: &std::path::Path, changed: &[SweptPackage]) -> usize {
+    if !utoc.is_file() {
+        return 0;
+    }
+    let Ok(held) = crate::pak::iostore_out::utoc_entries(utoc) else {
+        return 0;
+    };
+    changed
+        .iter()
+        .filter(|package| held.contains(&package.entry.replace('\\', "/").to_ascii_lowercase()))
+        .count()
+}
+
+/// What reading one package came to.
+enum Prepared {
+    Ready(Box<Staged>),
+    /// Nothing under any of the swept names is both stored and different.
+    NothingToChange,
+    /// A class filter is set and this package holds no export of that class.
+    OtherClass,
+}
+
+/// Reads one package and patches it, when it holds anything the sweep would change.
 fn stage(
     request: &SweepRequest<'_>,
+    resolved: Option<(&asset::PackageConverter<'_>, retoc::FPackageId)>,
     entry: &str,
     mappings: Option<&Mappings>,
     skipped: &mut Skipped,
-) -> Result<Option<Staged>, String> {
+) -> Result<Prepared, String> {
     let mut edit = AssetEditRequest {
         game_root: request.game_root,
         container: request.container,
@@ -353,57 +419,93 @@ fn stage(
         mod_name: request.mod_name,
         changes: PackageEdits::default(),
     };
-    let (_, parsed) = super::read_package(&edit, mappings)?;
+    let loaded = match resolved {
+        Some((converter, id)) => converter.convert(id, entry)?,
+        None => asset::load_bundle(request.game_root, request.container, entry, edit.kind)?,
+    };
+    let parsed = super::parse_loaded(&edit, mappings, &loaded)?;
+    if let Some(wanted) = request.class
+        && !parsed
+            .exports
+            .iter()
+            .any(|export| export.class_name.eq_ignore_ascii_case(wanted))
+    {
+        return Ok(Prepared::OtherClass);
+    }
     let edits = edits_for(
         parsed.exports.iter().map(|export| &export.properties[..]),
         &request.sets,
         skipped,
     );
     if edits.is_empty() {
-        return Ok(None);
+        return Ok(Prepared::NothingToChange);
     }
     edit.changes = PackageEdits {
         values: edits,
         ..PackageEdits::default()
     };
-    let (patched, loaded) = preview_edits(&edit, mappings)?;
+    let (patched, loaded) = super::preview_read_edits(&edit, mappings, loaded, &parsed)?;
     let changes = patched
         .applied
         .iter()
         .map(|applied| format!("{} = {} -> {}", applied.name, applied.before, applied.after))
         .collect();
-    Ok(Some(Staged {
+    Ok(Prepared::Ready(Box::new(Staged {
         entry: entry.to_string(),
         patched,
         loaded,
         changes,
-    }))
+    })))
 }
 
+/// A container also hands back the store it was listed from: resolving each package by path
+/// again is the slowest thing a run over hundreds of them can do.
+type Listing = (
+    Option<Arc<dyn IoStoreTrait>>,
+    Vec<(Option<retoc::FPackageId>, String)>,
+);
+
 /// The packages the filter names, in path order so a limited run is repeatable.
-fn matching(request: &SweepRequest<'_>) -> Result<Vec<String>, String> {
-    let all: Vec<String> = match source_of(request.container) {
-        AssetSource::Utoc => asset::list_packages(request.game_root, request.container)?
-            .1
-            .into_iter()
-            .map(|(_, path)| path)
-            .collect(),
-        AssetSource::Pak | AssetSource::Loose => asset::list_pak_entries(request.container)?,
+fn matching(request: &SweepRequest<'_>, utoc: &std::path::Path) -> Result<Listing, String> {
+    let (store, all): Listing = match source_of(request.container) {
+        AssetSource::Utoc => {
+            // Opening around the mod is what makes its copies win over the source container's, so
+            // a layered run reads what the last one left and the source for everything else.
+            let open_as = if request.layer && utoc.is_file() {
+                utoc.to_string_lossy().into_owned()
+            } else {
+                request.container.to_string()
+            };
+            let (store, packages) =
+                asset::list_packages_via(request.game_root, &open_as, request.container)?;
+            let listed = packages
+                .into_iter()
+                .map(|(id, path)| (Some(id), path))
+                .collect();
+            (Some(store), listed)
+        }
+        AssetSource::Pak | AssetSource::Loose => (
+            None,
+            asset::list_pak_entries(request.container)?
+                .into_iter()
+                .map(|path| (None, path))
+                .collect(),
+        ),
     };
     let needle = request.filter.map(str::to_lowercase);
-    let mut paths: Vec<String> = all
+    let mut paths: Vec<(Option<retoc::FPackageId>, String)> = all
         .into_iter()
-        .filter(|path| {
+        .filter(|(_, path)| {
             needle
                 .as_ref()
                 .is_none_or(|needle| path.to_lowercase().contains(needle.as_str()))
         })
         .collect();
-    paths.sort();
+    paths.sort_by(|left, right| left.1.cmp(&right.1));
     if let Some(limit) = request.limit {
         paths.truncate(limit);
     }
-    Ok(paths)
+    Ok((store, paths))
 }
 
 fn source_of(container: &str) -> AssetSource {
@@ -637,9 +739,11 @@ mod tests {
                 game_root: &root,
                 container: &container,
                 filter: Some("CameraShake"),
+                class: None,
                 mod_name: "RivalsTestSweep",
                 sets: vec![set("Amplitude", "0"), set("AnimScale", "0")],
                 limit: Some(12),
+                layer: false,
                 dry_run: true,
             },
             Some(&mappings),
@@ -654,6 +758,174 @@ mod tests {
             for change in &package.changes {
                 assert!(change.ends_with("-> 0"), "{} in {}", change, package.entry);
             }
+        }
+    }
+
+    /// A class filter narrows the path filter, so a class no matching package holds drops all of
+    /// them rather than silently sweeping the wrong assets.
+    #[test]
+    fn a_class_filter_drops_packages_that_do_not_hold_it() {
+        let (Ok(root), Ok(usmap)) = (
+            std::env::var("RIVALS_GAME_ROOT"),
+            std::env::var("RIVALS_USMAP"),
+        ) else {
+            return;
+        };
+        if std::env::var_os("OODLE_LIB_PATH").is_none() {
+            return;
+        }
+        let usmap = crate::mappings::resolve(Some(&usmap), None).expect("find the mappings");
+        let mappings = crate::mappings::load(&usmap).expect("load the mappings");
+        let container = format!(
+            "{}/MarvelGame/Marvel/Content/Paks/pakchunk0-Windows.utoc",
+            root.replace(BACKSLASH, "/")
+        );
+        let sweep_with = |class| {
+            sweep(
+                &SweepRequest {
+                    game_root: &root,
+                    container: &container,
+                    filter: Some("CameraShake"),
+                    class,
+                    mod_name: "RivalsTestSweep",
+                    sets: vec![set("Amplitude", "0")],
+                    limit: Some(12),
+                    layer: false,
+                    dry_run: true,
+                },
+                Some(&mappings),
+                &super::super::SaveOptions::default(),
+            )
+            .expect("sweep")
+        };
+        let held = sweep_with(Some("LegacyCameraShakePattern"));
+        assert_eq!(held.other_class, 0, "every camera shake holds one");
+        assert!(held.edits() > 0);
+
+        let missing = sweep_with(Some("StaticMesh"));
+        assert_eq!(
+            missing.other_class, 12,
+            "no camera shake holds a StaticMesh"
+        );
+        assert!(missing.changed.is_empty());
+        assert_eq!(missing.edits(), 0);
+    }
+
+    /// Two sweeps over the same packages: without `layer` the second replaces what the first wrote,
+    /// with it the two compose. This is the only test that writes, since the behaviour only exists
+    /// once something is in the mod.
+    #[test]
+    fn a_second_sweep_replaces_unless_it_is_told_to_layer() {
+        let (Ok(root), Ok(usmap)) = (
+            std::env::var("RIVALS_GAME_ROOT"),
+            std::env::var("RIVALS_USMAP"),
+        ) else {
+            return;
+        };
+        if std::env::var_os("OODLE_LIB_PATH").is_none() {
+            return;
+        }
+        let usmap = crate::mappings::resolve(Some(&usmap), None).expect("find the mappings");
+        let mappings = crate::mappings::load(&usmap).expect("load the mappings");
+        let container = format!(
+            "{}/MarvelGame/Marvel/Content/Paks/pakchunk0-Windows.utoc",
+            root.replace(BACKSLASH, "/")
+        );
+        let entry = "Marvel/Content/Marvel/AbilitySystem/1011/101111/CameraShake_101111.uasset";
+
+        let run = |mod_name: &str, property: &str, value: &str, layer: bool| {
+            sweep(
+                &SweepRequest {
+                    game_root: &root,
+                    container: &container,
+                    filter: Some("AbilitySystem/1011/101111"),
+                    class: None,
+                    mod_name,
+                    sets: vec![set(property, value)],
+                    limit: None,
+                    layer,
+                    dry_run: false,
+                },
+                Some(&mappings),
+                &super::super::SaveOptions::default(),
+            )
+            .expect("sweep")
+        };
+        // Reads one value back out of the written mod, by name at any depth.
+        let read_back = |mod_name: &str, property: &str| -> Option<String> {
+            let utoc = super::super::mod_pak_path(&root, mod_name)
+                .expect("mod path")
+                .with_extension("utoc");
+            let loaded = crate::asset::load_bundle(
+                &root,
+                &utoc.to_string_lossy(),
+                entry,
+                crate::asset::AssetSource::Utoc,
+            )
+            .expect("read the mod back");
+            let parsed = crate::schema_synth::parse_package(
+                &rivals_uasset::AssetBundle {
+                    asset: &loaded.asset_file_buffer,
+                    exports: &loaded.exports_file_buffer,
+                },
+                Some(&mappings),
+                &crate::schema_synth::PackageSource {
+                    game_root: &root,
+                    container: &utoc.to_string_lossy(),
+                    entry,
+                    kind: crate::asset::AssetSource::Utoc,
+                },
+            )
+            .expect("parse");
+            let mut found = Vec::new();
+            for export in &parsed.exports {
+                matches_in(&export.properties, &[set(property, "")], &mut found);
+            }
+            found.iter().find_map(|held| match held {
+                Match::Set { before, .. } => Some(before.clone()),
+                _ => None,
+            })
+        };
+        let clean = |mod_name: &str| {
+            if let Ok(pak) = super::super::mod_pak_path(&root, mod_name) {
+                for extension in ["pak", "utoc", "ucas"] {
+                    std::fs::remove_file(pak.with_extension(extension)).ok();
+                }
+            }
+        };
+
+        for (mod_name, layer) in [("RivalsTestPlain", false), ("RivalsTestLayer", true)] {
+            clean(mod_name);
+            let first = run(mod_name, "Amplitude", "0", false);
+            assert!(first.failed.is_empty(), "{:?}", first.failed);
+            assert_eq!(first.replaced, 0, "the mod was empty");
+            assert_eq!(read_back(mod_name, "Amplitude").as_deref(), Some("0.0"));
+
+            let second = run(mod_name, "OscillationDuration", "0.5", layer);
+            assert!(second.failed.is_empty(), "{:?}", second.failed);
+            assert!(second.replaced > 0, "the mod already held these");
+            assert_eq!(second.layered, layer);
+            assert_eq!(
+                read_back(mod_name, "OscillationDuration").as_deref(),
+                Some("0.5"),
+                "the second sweep landed either way"
+            );
+
+            let amplitude = read_back(mod_name, "Amplitude");
+            if layer {
+                assert_eq!(
+                    amplitude.as_deref(),
+                    Some("0.0"),
+                    "layering keeps what the first sweep wrote"
+                );
+            } else {
+                assert_ne!(
+                    amplitude.as_deref(),
+                    Some("0.0"),
+                    "without layering the second sweep read the source again"
+                );
+            }
+            clean(mod_name);
         }
     }
 
