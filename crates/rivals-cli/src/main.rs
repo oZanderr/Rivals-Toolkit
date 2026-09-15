@@ -636,6 +636,12 @@ struct AuditArgs {
     #[arg(long, value_name = "TEXT")]
     filter: Option<String>,
 
+    /// Leave out exports whose class is Blueprint-generated. Only a mappings dump taken with
+    /// those Blueprints loaded describes them, so a native-only dump reports them as gaps that
+    /// say nothing about native coverage.
+    #[arg(long)]
+    skip_blueprint: bool,
+
     /// Report progress to stderr while scanning.
     #[arg(long)]
     progress: bool,
@@ -1098,6 +1104,7 @@ fn ini_set(cli: &Cli, app: &settings::AppSettings, args: &SetArgs) -> Result<(),
             files.push(PakIniFileContent {
                 entry: entry.to_string(),
                 content,
+                staged_path: None,
             });
         }
         if args.dry_run {
@@ -2435,6 +2442,7 @@ fn asset_audit(cli: &Cli, app: &settings::AppSettings, args: &AuditArgs) -> Resu
             args.filter.as_deref(),
             cli.usmap.as_deref(),
             app.usmap_path.as_deref(),
+            args.skip_blueprint,
             tick,
         )?,
         (Some(container), None) => asset::audit(
@@ -2444,6 +2452,7 @@ fn asset_audit(cli: &Cli, app: &settings::AppSettings, args: &AuditArgs) -> Resu
             args.filter.as_deref(),
             cli.usmap.as_deref(),
             app.usmap_path.as_deref(),
+            args.skip_blueprint,
             tick,
         )?,
         (None, None) => return Err("pass either --container or --dir".into()),

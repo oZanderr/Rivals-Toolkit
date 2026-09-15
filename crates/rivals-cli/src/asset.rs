@@ -1714,6 +1714,10 @@ pub fn print_table(report: &TableReport, out: &mut impl FnMut(String)) {
 pub struct AuditReport {
     pub container: String,
     pub packages_scanned: usize,
+    /// Exports left out because `--skip-blueprint` was passed and their class is generated.
+    /// Counted rather than silently dropped, so the figures still say what was not looked at.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub exports_blueprint_skipped: usize,
     pub exports_total: usize,
     pub exports_complete: usize,
     pub exports_partial: usize,
@@ -2033,6 +2037,7 @@ pub fn audit_dir(
     filter: Option<&str>,
     usmap: Option<&str>,
     configured_usmap: Option<&str>,
+    skip_blueprint: bool,
     mut progress: impl FnMut(usize, usize),
 ) -> Result<AuditReport, String> {
     let path = mappings::resolve(usmap, configured_usmap)?;
@@ -2048,7 +2053,7 @@ pub fn audit_dir(
         .collect();
     let total = limit.map_or(files.len(), |l| l.min(files.len()));
 
-    let mut acc = Accumulator::new(dir.to_string());
+    let mut acc = Accumulator::new(dir.to_string(), skip_blueprint);
     for (index, file) in files.iter().take(total).enumerate() {
         progress(index + 1, total);
         acc.report.packages_scanned += 1;
@@ -2074,6 +2079,7 @@ pub fn audit_dir(
     Ok(acc.finish())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn audit(
     game_root: &str,
     container: &str,
@@ -2081,6 +2087,7 @@ pub fn audit(
     filter: Option<&str>,
     usmap: Option<&str>,
     configured_usmap: Option<&str>,
+    skip_blueprint: bool,
     mut progress: impl FnMut(usize, usize),
 ) -> Result<AuditReport, String> {
     let path = mappings::resolve(usmap, configured_usmap)?;
@@ -2097,7 +2104,7 @@ pub fn audit(
         .collect();
     let total = limit.map_or(packages.len(), |l| l.min(packages.len()));
 
-    let mut acc = Accumulator::new(container.to_string());
+    let mut acc = Accumulator::new(container.to_string(), skip_blueprint);
     let converter = asset::PackageConverter::new(&*store);
     for (index, (package_id, path)) in packages.iter().take(total).enumerate() {
         progress(index + 1, total);
@@ -2121,7 +2128,22 @@ pub fn audit(
 }
 
 /// Shared tallying so the container walk and the directory walk cannot report differently.
+fn is_zero(value: &usize) -> bool {
+    *value == 0
+}
+
+/// Whether an export is an instance of a Blueprint-generated class.
+///
+/// Unreal names a generated class `<Blueprint>_C`, and only a mappings dump taken with that
+/// Blueprint loaded describes it. A native-only dump leaves the reader recovering the layout from
+/// the game's own packages, which mostly works and sometimes does not, so a run that only cares
+/// about native coverage wants these out of the figures rather than counted as gaps.
+fn is_blueprint_class(class_name: &str) -> bool {
+    class_name.ends_with("_C")
+}
+
 struct Accumulator {
+    skip_blueprint: bool,
     report: AuditReport,
     kinds: BTreeMap<String, usize>,
     failures: BTreeMap<String, usize>,
@@ -2144,11 +2166,13 @@ struct Accumulator {
 }
 
 impl Accumulator {
-    fn new(source: String) -> Self {
+    fn new(source: String, skip_blueprint: bool) -> Self {
         Self {
+            skip_blueprint,
             report: AuditReport {
                 container: source,
                 packages_scanned: 0,
+                exports_blueprint_skipped: 0,
                 exports_total: 0,
                 exports_complete: 0,
                 exports_partial: 0,
@@ -2295,6 +2319,10 @@ impl Accumulator {
             }
         }
         for export in &parsed.exports {
+            if self.skip_blueprint && is_blueprint_class(&export.class_name) {
+                self.report.exports_blueprint_skipped += 1;
+                continue;
+            }
             self.report.exports_total += 1;
             let entry = self.classes.entry(export.class_name.clone()).or_default();
             entry.name = export.class_name.clone();
@@ -2567,6 +2595,12 @@ pub fn print_audit(report: &AuditReport, out: &mut impl FnMut(String)) {
         report.exports_partial,
         report.exports_failed
     ));
+    if report.exports_blueprint_skipped > 0 {
+        out(format!(
+            "            {} Blueprint-class export(s) left out by --skip-blueprint",
+            report.exports_blueprint_skipped
+        ));
+    }
     out(format!(
         "decoded     {:.2}% of property blocks ({:.2}% also consumed every declared byte)",
         report.decoded_percent, report.exact_percent

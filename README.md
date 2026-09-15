@@ -165,6 +165,7 @@ rivals-cli asset script  --container ... --entry ... --export 26                
 rivals-cli asset copy-export --container ... --entry ... --from-container ... --from-entry ... --export 274 --name MyLight
 
 rivals-cli asset audit --container pakchunk0-Windows.utoc --filter Data/DataTable
+rivals-cli asset audit --container pakchunk0-Windows.utoc --skip-blueprint   # native classes only
 ```
 
 `asset sweep` sets the same properties across every package a filter matches, by name at any depth,
