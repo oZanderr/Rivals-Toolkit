@@ -10,6 +10,7 @@ mod game_status;
 mod game_user_settings;
 mod import_index;
 mod launch_record;
+mod mappings_remote;
 mod mods;
 mod pak;
 mod pak_tweaks;
@@ -167,6 +168,8 @@ pub fn run() {
             asset_view::inspect_asset,
             asset_view::get_mappings_status,
             asset_view::set_mappings_path,
+            mappings_remote::list_remote_mappings,
+            mappings_remote::download_remote_mapping,
             asset_view::get_asset_mod_name,
             asset_view::set_asset_mod_name,
             asset_view::get_asset_save_target,

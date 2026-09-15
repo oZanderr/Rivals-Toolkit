@@ -35,6 +35,13 @@ pub fn load(path: &Path) -> Result<Arc<Mappings>, String> {
     Ok(mappings)
 }
 
+/// Check bytes really are a mappings file, answering what they hold. Nothing is cached: this is
+/// for validating a download before it replaces the file in use.
+pub fn parse_check(bytes: &[u8]) -> Result<(usize, usize), String> {
+    let mappings = Mappings::load(bytes)?;
+    Ok((mappings.struct_count(), mappings.enum_count()))
+}
+
 pub fn status(path: Option<&Path>) -> MappingsStatus {
     let Some(path) = path else {
         return MappingsStatus {
@@ -57,28 +64,28 @@ pub fn status(path: Option<&Path>) -> MappingsStatus {
     }
 }
 
-/// Resolution order: an explicit path, then the configured one, then the conventional spots.
-/// Returns the newest `.usmap` in a folder when handed a folder rather than a file.
+/// An explicit path, else the configured one. Returns the newest `.usmap` in a folder when
+/// handed a folder rather than a file.
+///
+/// Nowhere else is searched. Guessing at conventional spots meant the file in use was whichever
+/// one happened to be found first, which is the wrong one to read a patched game with, and the
+/// failure had to recite every path it had tried to explain itself.
 pub fn resolve(explicit: Option<&str>, configured: Option<&str>) -> Result<PathBuf, String> {
-    let mut tried = Vec::new();
+    let mut given = false;
     for candidate in [explicit, configured].into_iter().flatten() {
-        let path = Path::new(candidate);
-        if let Some(found) = pick(path) {
+        given = true;
+        if let Some(found) = pick(Path::new(candidate)) {
             return Ok(found);
         }
-        tried.push(candidate.to_string());
-    }
-
-    for fallback in conventional_locations() {
-        if let Some(found) = pick(&fallback) {
-            return Ok(found);
-        }
-        tried.push(fallback.display().to_string());
     }
 
     Err(format!(
-        "no .usmap mappings file found. Reading asset properties needs one because Marvel Rivals ships unversioned properties. Looked in: {}",
-        tried.join(", ")
+        "{} Reading asset properties needs one because Marvel Rivals ships unversioned properties.",
+        if given {
+            "the .usmap mappings file that is set is not there any more."
+        } else {
+            "no .usmap mappings file is set."
+        }
     ))
 }
 
@@ -101,22 +108,6 @@ fn pick(path: &Path) -> Option<PathBuf> {
         }
     }
     newest.map(|(_, path)| path)
-}
-
-fn conventional_locations() -> Vec<PathBuf> {
-    let mut locations = Vec::new();
-    if let Some(config) = dirs::config_dir() {
-        let app = config.join("rivals-toolkit");
-        locations.push(app.join("Mappings.usmap"));
-        locations.push(app.join("mappings"));
-    }
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        locations.push(dir.join("Mappings.usmap"));
-        locations.push(dir.join("mappings"));
-    }
-    locations
 }
 
 fn modified_stamp(path: &Path) -> u64 {
@@ -178,5 +169,26 @@ mod tests {
     fn failing_to_resolve_explains_why_a_mappings_file_is_needed() {
         let err = resolve(Some("Z:/nope/missing.usmap"), None).expect_err("should fail");
         assert!(err.contains("unversioned properties"), "{err}");
+    }
+
+    /// Naming a path that no longer exists reads differently from never having set one, and
+    /// neither says anything about where else a file might have been.
+    #[test]
+    fn failing_to_resolve_names_no_paths_of_its_own() {
+        let missing = resolve(Some("Z:/nope/missing.usmap"), None).expect_err("should fail");
+        assert!(missing.contains("not there any more"), "{missing}");
+        assert!(!missing.contains("Z:/nope"), "{missing}");
+
+        let unset = resolve(None, None).expect_err("should fail");
+        assert!(unset.contains("no .usmap mappings file is set"), "{unset}");
+    }
+
+    /// A file sitting in one of the spots the resolver used to guess at is not picked up.
+    #[test]
+    fn nothing_is_resolved_without_being_asked_for() {
+        let root = scratch("unsearched");
+        std::fs::write(root.join("Mappings.usmap"), b"x").expect("write");
+        assert!(resolve(None, None).is_err());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

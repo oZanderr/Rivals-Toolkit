@@ -22,6 +22,15 @@ import {
   XCircle,
 } from "lucide-react";
 
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -52,6 +61,23 @@ interface TweakProfile {
   settings: TweakSetting[];
   created_at: number;
   modified_at: number;
+}
+
+/// A preset stores an entry for every tweak in the catalogue, so the count that says anything is
+/// how many of them it turns on.
+function describeProfile(profile: TweakProfile): string {
+  const on = profile.settings.filter((s) => s.enabled).length;
+  const count = `${on} tweak${on === 1 ? "" : "s"} on`;
+  // Timestamps arrived after the first presets did and read as 0 when the file predates them.
+  if (!profile.modified_at) return count;
+  return `${count} · updated ${new Date(profile.modified_at * 1000).toLocaleDateString()}`;
+}
+
+interface RemoteMapping {
+  name: string;
+  size: number;
+  changelist: number;
+  label: string;
 }
 
 interface InstallInfo {
@@ -191,6 +217,10 @@ export function Settings({
   } | null>(null);
   const profileNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [renamingProfile, setRenamingProfile] = useState<string | null>(null);
+  const [fetchOpen, setFetchOpen] = useState(false);
+  const [remoteMappings, setRemoteMappings] = useState<RemoteMapping[] | null>(null);
+  const [remoteError, setRemoteError] = useState<string | null>(null);
+  const [downloading, setDownloading] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
 
   const [characterDataInfo, setCharacterDataInfo] = useState<CharacterDataInfo | null>(null);
@@ -379,6 +409,32 @@ export function Settings({
   }, []);
 
   useEffect(refreshMappings, [refreshMappings]);
+
+  // The listing is the same for the life of the window, so it is fetched once and kept.
+  async function openFetch() {
+    setFetchOpen(true);
+    setRemoteError(null);
+    if (remoteMappings !== null) return;
+    try {
+      setRemoteMappings(await invoke<RemoteMapping[]>("list_remote_mappings"));
+    } catch (e) {
+      setRemoteError(String(e));
+    }
+  }
+
+  async function downloadMapping(name: string) {
+    setDownloading(name);
+    setRemoteError(null);
+    try {
+      await invoke<string>("download_remote_mapping", { name });
+      refreshMappings();
+      setFetchOpen(false);
+    } catch (e) {
+      setRemoteError(String(e));
+    } finally {
+      setDownloading(null);
+    }
+  }
 
   useEffect(() => {
     invoke<CharacterDataInfo>("get_character_data_info")
@@ -762,11 +818,11 @@ export function Settings({
             <h2 className="text-xl font-bold">Settings</h2>
           </div>
 
-          {/* ── Game Root ── */}
+          {/* ── Game ── */}
           <div className="flex flex-col overflow-hidden rounded-md border border-border">
             <div className="border-b border-border bg-card px-3 py-2">
               <div className="flex items-center gap-2">
-                <h3 className="text-sm font-semibold">Game Root</h3>
+                <h3 className="text-sm font-semibold">Game</h3>
                 {pathError && (
                   <span className="flex items-center gap-1.5 text-[11px] font-medium text-err">
                     <XCircle size={13} strokeWidth={2.5} />
@@ -817,15 +873,8 @@ export function Settings({
                 </Tip>
               </div>
             </div>
-          </div>
-
-          {/* ── Launch Options ── */}
-          <div className="flex flex-col overflow-hidden rounded-md border border-border">
-            <div className="border-b border-border bg-card px-3 py-2">
-              <h3 className="text-sm font-semibold">Launch Options</h3>
-            </div>
             <Tip content={skipLauncherError} disabled={!skipLauncherError}>
-              <label className="flex items-center gap-3 rounded-sm px-3 py-3 hover:bg-secondary/50">
+              <label className="flex items-center gap-3 border-t border-border px-3 py-3 hover:bg-secondary/50">
                 <div className="flex flex-1 flex-col gap-0.5">
                   <span className={cn("text-[13px] font-medium", skipLauncherError && "text-err")}>
                     Skip Launcher
@@ -925,6 +974,91 @@ export function Settings({
             </div>
           </div>
 
+          {/* ── Signature Bypass ── */}
+          <div className="flex flex-col overflow-hidden rounded-md border border-border">
+            <div className="flex items-center gap-3 border-b border-border bg-card px-3 py-2">
+              <h3 className="text-sm font-semibold">Signature Bypass</h3>
+              {bypassNotice && (
+                <span
+                  className={cn(
+                    "flex items-center gap-1.5 text-[11px] font-medium",
+                    bypassNotice.type === "ok" ? "text-ok" : "text-err"
+                  )}
+                >
+                  {bypassNotice.type === "ok" ? (
+                    <CheckCircle2 size={13} strokeWidth={2.5} />
+                  ) : (
+                    <XCircle size={13} strokeWidth={2.5} />
+                  )}
+                  {bypassNotice.msg}
+                </span>
+              )}
+            </div>
+            <div className="flex items-center gap-3 rounded-sm px-3 py-3 hover:bg-secondary/50">
+              <div className="flex flex-1 flex-col gap-0.5">
+                <span className="text-[13px] font-medium">
+                  {bypassKind === "installed"
+                    ? "Bypass installed"
+                    : bypassKind === "outdated"
+                      ? "Bypass out of date"
+                      : "Install bypass"}
+                </span>
+                <span className="text-[11px] text-muted-foreground">
+                  {bypassKind === "installed" ? (
+                    "Removes the bypass from the game directory."
+                  ) : bypassKind === "outdated" ? (
+                    "An older bypass is installed. Update to swap in the current loader and payload."
+                  ) : (
+                    <>
+                      Installs{" "}
+                      <button
+                        type="button"
+                        onClick={() =>
+                          openUrl("https://github.com/oZanderr/oxiloader").catch(console.error)
+                        }
+                        className="text-foreground underline underline-offset-2 hover:text-primary"
+                      >
+                        oxiloader
+                      </button>{" "}
+                      as <span className="text-foreground">dsound.dll</span> plus the{" "}
+                      <span className="text-foreground">MarvelRivalsUTOCSignatureBypass.asi</span>{" "}
+                      payload into the game directory. Required to load modified containers.
+                    </>
+                  )}
+                </span>
+              </div>
+              {bypassKind === "installed" ? (
+                <Button variant="red" size="sm" onClick={removeBypass} disabled={!draftGamePath}>
+                  <ShieldOff size={13} />
+                  Remove
+                </Button>
+              ) : (
+                <>
+                  {bypassKind === "outdated" && (
+                    <Button
+                      variant="red"
+                      size="sm"
+                      onClick={removeBypass}
+                      disabled={!draftGamePath}
+                    >
+                      <ShieldOff size={13} />
+                      Remove
+                    </Button>
+                  )}
+                  <Button
+                    variant="green"
+                    size="sm"
+                    onClick={installBypass}
+                    disabled={!draftGamePath || bypassKind === null}
+                  >
+                    <Shield size={13} />
+                    {bypassKind === "outdated" ? "Update" : "Install"}
+                  </Button>
+                </>
+              )}
+            </div>
+          </div>
+
           {/* ── Advanced ── */}
           <div className="flex flex-col overflow-hidden rounded-md border border-border">
             <div className="border-b border-border bg-card px-3 py-2">
@@ -990,6 +1124,10 @@ export function Settings({
                   </span>
                 )}
               </div>
+              <Button size="sm" variant="outline" className="h-8" onClick={openFetch}>
+                <Download size={13} />
+                Fetch…
+              </Button>
               <Button
                 size="sm"
                 variant="outline"
@@ -1117,7 +1255,7 @@ export function Settings({
             </div>
             {tweakProfiles.length === 0 ? (
               <p className="px-3 py-4 text-center text-[12px] text-muted-foreground">
-                No presets yet. Save tweaks as a preset from the Pak Config or Config Tweaks tab.
+                No presets yet. Save tweaks as a preset from Config Tweaks → Pak Config.
               </p>
             ) : (
               <ul className="divide-y divide-border/50">
@@ -1130,24 +1268,29 @@ export function Settings({
                         key={p.name}
                         className="flex items-center gap-1 px-3 py-2 hover:bg-secondary/40"
                       >
-                        {isRenaming ? (
-                          <input
-                            autoFocus
-                            value={renameDraft}
-                            onChange={(e) => setRenameDraft(e.target.value)}
-                            onKeyDown={(e) => {
-                              if (e.key === "Enter") commitRename(p.name);
-                              if (e.key === "Escape") {
-                                setRenamingProfile(null);
-                                setRenameDraft("");
-                              }
-                            }}
-                            placeholder="New preset name…"
-                            className="h-7 min-w-0 flex-1 rounded-md border border-border bg-background px-3 text-[12px] outline-none placeholder:text-muted-foreground/50 focus:border-primary"
-                          />
-                        ) : (
-                          <span className="min-w-0 flex-1 truncate text-[13px]">{p.name}</span>
-                        )}
+                        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                          {isRenaming ? (
+                            <input
+                              autoFocus
+                              value={renameDraft}
+                              onChange={(e) => setRenameDraft(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") commitRename(p.name);
+                                if (e.key === "Escape") {
+                                  setRenamingProfile(null);
+                                  setRenameDraft("");
+                                }
+                              }}
+                              placeholder="New preset name…"
+                              className="h-7 w-full rounded-md border border-border bg-background px-3 text-[12px] outline-none placeholder:text-muted-foreground/50 focus:border-primary"
+                            />
+                          ) : (
+                            <span className="truncate text-[13px]">{p.name}</span>
+                          )}
+                          <span className="text-[11px] text-muted-foreground">
+                            {describeProfile(p)}
+                          </span>
+                        </div>
                         {isRenaming ? (
                           <>
                             <Tip content="Save (Enter)">
@@ -1213,91 +1356,6 @@ export function Settings({
                   })}
               </ul>
             )}
-          </div>
-
-          {/* ── Signature Bypass ── */}
-          <div className="flex flex-col overflow-hidden rounded-md border border-border">
-            <div className="flex items-center gap-3 border-b border-border bg-card px-3 py-2">
-              <h3 className="text-sm font-semibold">Signature Bypass</h3>
-              {bypassNotice && (
-                <span
-                  className={cn(
-                    "flex items-center gap-1.5 text-[11px] font-medium",
-                    bypassNotice.type === "ok" ? "text-ok" : "text-err"
-                  )}
-                >
-                  {bypassNotice.type === "ok" ? (
-                    <CheckCircle2 size={13} strokeWidth={2.5} />
-                  ) : (
-                    <XCircle size={13} strokeWidth={2.5} />
-                  )}
-                  {bypassNotice.msg}
-                </span>
-              )}
-            </div>
-            <div className="flex items-center gap-3 rounded-sm px-3 py-3 hover:bg-secondary/50">
-              <div className="flex flex-1 flex-col gap-0.5">
-                <span className="text-[13px] font-medium">
-                  {bypassKind === "installed"
-                    ? "Bypass installed"
-                    : bypassKind === "outdated"
-                      ? "Bypass out of date"
-                      : "Install bypass"}
-                </span>
-                <span className="text-[11px] text-muted-foreground">
-                  {bypassKind === "installed" ? (
-                    "Removes the bypass from the game directory."
-                  ) : bypassKind === "outdated" ? (
-                    "An older bypass is installed. Update to swap in the current loader and payload."
-                  ) : (
-                    <>
-                      Installs{" "}
-                      <button
-                        type="button"
-                        onClick={() =>
-                          openUrl("https://github.com/oZanderr/oxiloader").catch(console.error)
-                        }
-                        className="text-foreground underline underline-offset-2 hover:text-primary"
-                      >
-                        oxiloader
-                      </button>{" "}
-                      as <span className="text-foreground">dsound.dll</span> plus the{" "}
-                      <span className="text-foreground">MarvelRivalsUTOCSignatureBypass.asi</span>{" "}
-                      payload into the game directory. Required to load modified containers.
-                    </>
-                  )}
-                </span>
-              </div>
-              {bypassKind === "installed" ? (
-                <Button variant="red" size="sm" onClick={removeBypass} disabled={!draftGamePath}>
-                  <ShieldOff size={13} />
-                  Remove
-                </Button>
-              ) : (
-                <>
-                  {bypassKind === "outdated" && (
-                    <Button
-                      variant="red"
-                      size="sm"
-                      onClick={removeBypass}
-                      disabled={!draftGamePath}
-                    >
-                      <ShieldOff size={13} />
-                      Remove
-                    </Button>
-                  )}
-                  <Button
-                    variant="green"
-                    size="sm"
-                    onClick={installBypass}
-                    disabled={!draftGamePath || bypassKind === null}
-                  >
-                    <Shield size={13} />
-                    {bypassKind === "outdated" ? "Update" : "Install"}
-                  </Button>
-                </>
-              )}
-            </div>
           </div>
 
           {/* ── Updates ── */}
@@ -1395,6 +1453,54 @@ export function Settings({
           </div>
         </div>
       </div>
+
+      {/* ── Fetch mappings ── */}
+      <AlertDialog open={fetchOpen} onOpenChange={setFetchOpen}>
+        <AlertDialogContent className="max-w-xl">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Fetch mappings</AlertDialogTitle>
+            <AlertDialogDescription>
+              Published by the rivals-depot repository, newest first. Pick the one matching the game
+              build you are reading; a file from another build will misread properties.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          {remoteError && <p className="text-[12px] text-err">{remoteError}</p>}
+          {remoteMappings === null && !remoteError ? (
+            <p className="py-6 text-center text-[12px] text-muted-foreground">Loading…</p>
+          ) : (
+            <ul className="max-h-80 divide-y divide-border/50 overflow-y-auto rounded-md border border-border">
+              {(remoteMappings ?? []).map((m) => (
+                <li
+                  key={m.name}
+                  className="flex items-center gap-2 px-3 py-2 hover:bg-secondary/40"
+                >
+                  <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                    <span className="truncate text-[12px]" title={m.name}>
+                      {m.label} · {m.changelist.toLocaleString()}
+                    </span>
+                    <span className="truncate text-[11px] text-muted-foreground">{m.name}</span>
+                  </div>
+                  <span className="shrink-0 text-[11px] text-muted-foreground">
+                    {Math.round(m.size / 1024).toLocaleString()} KB
+                  </span>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7 shrink-0"
+                    disabled={downloading !== null}
+                    onClick={() => downloadMapping(m.name)}
+                  >
+                    {downloading === m.name ? "Downloading…" : "Use"}
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )}
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={downloading !== null}>Close</AlertDialogCancel>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
