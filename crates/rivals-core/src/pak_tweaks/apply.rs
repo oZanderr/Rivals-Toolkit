@@ -1,12 +1,11 @@
 //! Applies catalogue-driven edits and raw INI content saves to pak files in place.
 
-use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
 use crate::pak::profile::strip_mount_prefix;
 
-use super::cvars::{IniType, apply_edits_to_ini, parse_console_vars};
+use super::cvars::{IniType, apply_edits_to_ini, sets_key};
 use super::io::{inspect_pak_for_ini, with_unpacked_pak};
 use super::{PakIniFileContent, PakIniTarget, PakTweakEdit};
 
@@ -65,21 +64,12 @@ fn apply_group(
     if edits.is_empty() || !eligible(file.target) {
         return false;
     }
-    let any_removal = edits.iter().any(|e| e.value.is_none());
-
-    // A removal has nothing to do in a file that never sets the key, and skipping it keeps
-    // that file byte-for-byte instead of reformatting it for nothing.
-    let present: HashSet<String> = if any_removal {
-        parse_console_vars(&file.content, file.target.source_label())
-            .into_iter()
-            .map(|v| v.key.to_ascii_lowercase())
-            .collect()
-    } else {
-        HashSet::new()
-    };
+    // A removal has nothing to do in a file that never sets the key, and skipping it keeps that
+    // file byte-for-byte instead of reformatting it for nothing. The question is wider than what
+    // the file reports as state: a copy the client never reads still has to go.
     let applicable: Vec<PakTweakEdit> = edits
         .iter()
-        .filter(|e| e.value.is_some() || present.contains(&e.key.to_ascii_lowercase()))
+        .filter(|e| e.value.is_some() || sets_key(&file.content, &e.key))
         .cloned()
         .collect();
     if applicable.is_empty() {
@@ -193,6 +183,7 @@ mod tests {
     //! `[WindowsClient DeviceProfile]` kept applying after the toggle reported the fix as done.
 
     use super::*;
+    use crate::pak_tweaks::cvars::parse_console_vars;
     use crate::pak_tweaks::{PakCvar, edits_for_settings, edits_for_tweak};
     use crate::tweaks::catalogue::{TweakDefinition, TweakKind, tweak_catalogue};
     use crate::tweaks::{TweakSetting, TweakState, detect_tweaks_unscoped};
@@ -930,17 +921,23 @@ mod tests {
         assert!(files[1].content.contains("r.Foo=1"));
     }
 
-    // ── Sections the editor must leave alone ──────────────────────────
+    // ── What a removal reaches ────────────────────────────────────────
 
+    /// Every section, not just the Windows profiles. A config mod writes whatever sections it
+    /// likes: one seen in the wild carries `r.MipMapLODBias=15` under `[ConsoleVariables]` of its
+    /// device profiles file and nowhere else, so a scan limited to device profile sections
+    /// reported the tweak as already applied and then changed nothing.
     #[test]
-    fn non_windows_device_profiles_are_left_alone() {
+    fn a_removal_reaches_every_section_of_a_device_profiles_file() {
         let mut files = vec![layer(
             PakIniTarget::DeviceProfiles,
             concat!(
                 "[Windows DeviceProfile]\r\n",
                 "+CVars=r.MipMapLODBias=15\r\n\r\n",
                 "[IOS DeviceProfile]\r\n",
-                "+CVars=r.MipMapLODBias=15\r\n"
+                "+CVars=r.MipMapLODBias=15\r\n\r\n",
+                "[ConsoleVariables]\r\n",
+                "r.MipMapLODBias=15\r\n"
             )
             .into(),
         )];
@@ -948,11 +945,13 @@ mod tests {
 
         assert_eq!(
             files[0].content.matches("r.MipMapLODBias").count(),
-            1,
-            "only the Windows profile is the game running on this platform:\n{}",
+            0,
+            "a survivor anywhere makes the tweak a no-op:\n{}",
             files[0].content
         );
+        // The sections themselves stay; only the assignments go.
         assert!(files[0].content.contains("[IOS DeviceProfile]"));
+        assert!(files[0].content.contains("[ConsoleVariables]"));
     }
 
     #[test]

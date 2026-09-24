@@ -32,58 +32,67 @@ pub(super) fn apply_edits_to_ini(
     result
 }
 
-/// Parse CVar key/value lines from Engine or DeviceProfiles INI content.
+/// Parse the CVar assignments the game will actually read.
+///
+/// A device profiles file is organised by platform and only the Windows profiles reach a PC
+/// client, so those are the sections that describe what a pak does. An engine file has no such
+/// split and every section counts. Copies parked anywhere else are still edited, see
+/// [`sets_key`] and `device_profile_sections`, but they are not state: reporting them would
+/// answer a question nobody asked, and a mobile profile listed after the Windows one would
+/// decide the merged value.
 pub(super) fn parse_console_vars(content: &str, source: &str) -> Vec<PakCvar> {
+    let device_profiles = source.contains("DeviceProfiles");
     let mut vars = Vec::new();
-    let is_device_profiles = source.contains("DeviceProfiles");
+    let mut in_section = false;
 
-    if is_device_profiles {
-        let mut in_section = false;
-        for line in content.lines() {
-            let trimmed = line.trim();
+    for line in content.lines() {
+        let trimmed = line.trim();
 
-            if trimmed.starts_with('[') {
-                in_section = is_windows_device_profile_header(trimmed);
-                continue;
-            }
-
-            if !in_section || trimmed.is_empty() || trimmed.starts_with(';') {
-                continue;
-            }
-
-            if let Some(kv) = parse_cvar_line(trimmed) {
-                vars.push(PakCvar {
-                    key: kv.0,
-                    value: kv.1,
-                    source: source.to_string(),
-                });
-            }
+        if trimmed.starts_with('[') {
+            in_section = !device_profiles || is_windows_device_profile_header(trimmed);
+            continue;
         }
-    } else {
-        // Engine.ini keys can be outside [ConsoleVariables], so scan all sections.
-        let mut in_any_section = false;
-        for line in content.lines() {
-            let trimmed = line.trim();
 
-            if trimmed.starts_with('[') {
-                in_any_section = true;
-                continue;
-            }
+        if !in_section || trimmed.is_empty() || trimmed.starts_with(';') {
+            continue;
+        }
 
-            if !in_any_section || trimmed.is_empty() || trimmed.starts_with(';') {
-                continue;
-            }
-
-            if let Some(kv) = parse_cvar_line(trimmed) {
-                vars.push(PakCvar {
-                    key: kv.0,
-                    value: kv.1,
-                    source: source.to_string(),
-                });
-            }
+        if let Some(kv) = parse_cvar_line(trimmed) {
+            vars.push(PakCvar {
+                key: kv.0,
+                value: kv.1,
+                source: source.to_string(),
+            });
         }
     }
     vars
+}
+
+/// Whether any section of the file assigns `key`, live or not.
+///
+/// What decides that a file is worth rewriting has to be wider than what counts as state. One
+/// config mod seen in the wild parks `r.MipMapLODBias=15` under `[ConsoleVariables]` of its
+/// device profiles file and nowhere else; that copy is not what the game reads, but leaving it
+/// there is what made the tweak look like it had done nothing.
+pub(super) fn sets_key(content: &str, key: &str) -> bool {
+    let key_lower = key.to_ascii_lowercase();
+    let mut in_section = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_section = true;
+            continue;
+        }
+        if !in_section || trimmed.is_empty() || trimmed.starts_with(';') {
+            continue;
+        }
+        if let Some((k, _)) = parse_cvar_line(trimmed)
+            && k.to_ascii_lowercase() == key_lower
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Parse one CVar line, supporting optional `+CVars=` prefix.
@@ -107,7 +116,7 @@ fn parse_cvar_line(line: &str) -> Option<(String, String)> {
 /// or one of the profiles that inherit from it (`WindowsClient`, `WindowsNoEditor`, ...).
 ///
 /// The shipping client runs the `Windows` profile, but a config mod can park a CVar in any of
-/// its siblings and it still applies, so all of them have to be visible to reads and edits.
+/// its siblings and it still applies, so all of them describe what the pak does.
 fn is_windows_device_profile_header(header: &str) -> bool {
     let Some(inner) = header
         .trim()
@@ -177,11 +186,15 @@ fn find_section_insert_point(lines: &[String], section_start: usize) -> usize {
 ///
 /// Combo paks concatenate several config mods, so a header can appear more than once, and the
 /// same key can sit under `[Windows DeviceProfile]` and `[WindowsClient DeviceProfile]` at once.
+/// Every section of the file. A tweak has to reach a copy wherever it was written: one seen in
+/// the wild parks `r.MipMapLODBias=15` under `[ConsoleVariables]` of a device profiles file and
+/// nowhere else, which a device-profile-only scan neither reported nor edited. This is what the
+/// engine path has always done.
 fn device_profile_sections(lines: &[String]) -> Vec<(usize, usize)> {
     lines
         .iter()
         .enumerate()
-        .filter(|(_, line)| is_windows_device_profile_header(line.trim()))
+        .filter(|(_, line)| line.trim().starts_with('['))
         .map(|(i, _)| (i, find_section_end(lines, i)))
         .collect()
 }
@@ -201,7 +214,7 @@ fn enclosing_section_start(sections: &[(usize, usize)], line_index: usize) -> Op
         .map(|(start, _)| *start)
 }
 
-/// Every line under a Windows device profile header that sets `key_lower`, in file order.
+/// Every line under any section header that sets `key_lower`, in file order.
 fn device_profile_key_hits(lines: &[String], key_lower: &str) -> Vec<usize> {
     let mut hits = Vec::new();
     for (start, end) in device_profile_sections(lines) {
@@ -220,13 +233,13 @@ fn device_profile_key_hits(lines: &[String], key_lower: &str) -> Vec<usize> {
     hits
 }
 
-/// Apply edits across every Windows device profile section.
+/// Apply edits across every section of a device profiles file.
 ///
-/// A removal clears every occurrence: a copy left behind in `[WindowsClient DeviceProfile]` or
-/// in a second `[Windows DeviceProfile]` block still applies at runtime, so one survivor makes
-/// the tweak a no-op. A set collapses the occurrences into a single line in the plain
-/// `[Windows DeviceProfile]` section that the others inherit from, so repeated saves cannot
-/// grow the file.
+/// A removal clears every occurrence: a copy left behind in `[WindowsClient DeviceProfile]`, in a
+/// second `[Windows DeviceProfile]` block, or in an `[ConsoleVariables]` section the file happens
+/// to carry still counts, so one survivor makes the tweak a no-op. A set collapses the occurrences
+/// into a single line in the plain `[Windows DeviceProfile]` section the others inherit from, so
+/// repeated saves cannot grow the file.
 fn apply_device_profiles_edits(lines: &mut Vec<String>, edits: &[PakTweakEdit]) {
     for edit in edits {
         let key_lower = edit.key.to_ascii_lowercase();
@@ -465,5 +478,109 @@ mod device_profile_tests {
             IniType::DeviceProfiles,
         );
         assert!(!out.contains("[Windows DeviceProfile]"));
+    }
+
+    /// A config mod seen in the wild pastes most of an engine config into its device profiles
+    /// file and parks `r.MipMapLODBias=15` under `[ConsoleVariables]` there and nowhere else.
+    /// Reading only the device profile sections made the toggle report the tweak as already
+    /// applied while the edit had nothing to reach, so it was a no-op in both directions.
+    const ENGINE_SECTION_IN_DEVICE_PROFILES: &str = "[Windows DeviceProfile]\r\nDeviceType=Windows\r\n+CVars=r.CustomDepth=0\r\n\r\n[ConsoleVariables]\r\nr.MipMapLODBias=15\r\n";
+
+    /// Reads and edits deliberately differ: a copy outside the Windows profiles is not what the
+    /// game reads, so it is not state, but it is still cleared.
+    #[test]
+    fn a_copy_outside_the_windows_profiles_is_edited_but_not_reported() {
+        assert!(sets_key(
+            ENGINE_SECTION_IN_DEVICE_PROFILES,
+            "r.MipMapLODBias"
+        ));
+        let vars = parse_console_vars(
+            ENGINE_SECTION_IN_DEVICE_PROFILES,
+            "DefaultDeviceProfiles.ini",
+        );
+        assert!(
+            !vars.iter().any(|v| v.key == "r.MipMapLODBias"),
+            "a section the client never reads is not state: {vars:#?}"
+        );
+    }
+
+    #[test]
+    fn a_removal_clears_a_copy_under_console_variables() {
+        let out = apply_edits_to_ini(
+            ENGINE_SECTION_IN_DEVICE_PROFILES,
+            &[edit("r.MipMapLODBias", None)],
+            IniType::DeviceProfiles,
+        );
+        assert!(!out.to_ascii_lowercase().contains("mipmaplodbias"), "{out}");
+        // Nothing else in the file moves.
+        assert!(out.contains("+CVars=r.CustomDepth=0"));
+        assert!(out.contains("[ConsoleVariables]"));
+    }
+
+    /// Widening what an edit reaches must not change where a brand-new key is written: it still
+    /// belongs in the device profile section, with the prefix that section uses.
+    #[test]
+    fn a_new_key_still_lands_in_the_device_profile_section() {
+        let out = apply_edits_to_ini(
+            ENGINE_SECTION_IN_DEVICE_PROFILES,
+            &[edit("r.BrandNew", Some("7"))],
+            IniType::DeviceProfiles,
+        );
+        let before_console = out
+            .split("[ConsoleVariables]")
+            .next()
+            .expect("the file keeps its engine section");
+        assert!(
+            before_console.contains("+CVars=r.BrandNew=7"),
+            "should sit in the device profile section, got:\r\n{out}"
+        );
+    }
+
+    #[test]
+    fn a_system_settings_section_counts_too() {
+        let content = "[Windows DeviceProfile]\r\nDeviceType=Windows\r\n\r\n[SystemSettings]\r\nr.MipMapLODBias=15\r\n";
+        assert!(sets_key(content, "r.MipMapLODBias"));
+        let out = apply_edits_to_ini(
+            content,
+            &[edit("r.MipMapLODBias", None)],
+            IniType::DeviceProfiles,
+        );
+        assert!(!out.to_ascii_lowercase().contains("mipmaplodbias"), "{out}");
+    }
+
+    /// A copy in another platform's profile goes too. It cannot reach a Windows client, but a
+    /// tweak that reports itself as applied while a copy of its key survives anywhere in the file
+    /// is the thing this scan exists to prevent.
+    #[test]
+    fn a_copy_in_another_platforms_profile_is_cleared_too() {
+        let content = "[Windows DeviceProfile]\r\n+CVars=r.MipMapLODBias=15\r\n\r\n[Android DeviceProfile]\r\n+CVars=r.MipMapLODBias=15\r\n";
+        let out = apply_edits_to_ini(
+            content,
+            &[edit("r.MipMapLODBias", None)],
+            IniType::DeviceProfiles,
+        );
+        assert_eq!(out.matches("r.MipMapLODBias").count(), 0, "{out}");
+        assert!(out.contains("[Android DeviceProfile]"), "sections survive");
+    }
+
+    /// A key in a section no reader knows by name is still cleared.
+    #[test]
+    fn a_key_under_an_unrecognised_section_is_cleared() {
+        let content = "[SomethingElse]\r\nr.MipMapLODBias=15\r\n";
+        assert!(sets_key(content, "r.MipMapLODBias"));
+        let out = apply_edits_to_ini(
+            content,
+            &[edit("r.MipMapLODBias", None)],
+            IniType::DeviceProfiles,
+        );
+        assert!(!out.to_ascii_lowercase().contains("mipmaplodbias"), "{out}");
+    }
+
+    /// An engine file has no per-platform split, so every section of one is state.
+    #[test]
+    fn every_section_of_an_engine_file_is_state() {
+        let content = "[SomethingElse]\r\nr.MipMapLODBias=15\r\n";
+        let vars = parse_console_vars(content, "DefaultEngine.ini");
+        assert!(vars.iter().any(|v| v.key == "r.MipMapLODBias"), "{vars:#?}");
     }
 }
