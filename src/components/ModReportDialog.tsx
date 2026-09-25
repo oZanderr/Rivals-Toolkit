@@ -11,7 +11,24 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
+
+interface SearchHit {
+  package: string;
+  export: string;
+  export_index: number;
+  offset?: number;
+  kind: "string" | "call" | "variable" | "object" | "value";
+  term: string;
+  line: string;
+}
+
+interface SearchResult {
+  hits: SearchHit[];
+  unreadable: [string, string][];
+}
 
 interface PackageReport {
   path: string;
@@ -78,6 +95,21 @@ export function ModReportDialog({ gamePath, modName, onClose }: Props) {
     };
   }, [gamePath, modName]);
 
+  const [query, setQuery] = useState("");
+  const [search, setSearch] = useState<{ query: string; result: SearchResult } | null>(null);
+  const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const runSearch = () => {
+    const text = query.trim();
+    if (!text || searching) return;
+    setSearching(true);
+    setSearchError(null);
+    invoke<SearchResult>("search_mod", { gameRoot: gamePath, modName, query: text })
+      .then((result) => setSearch({ query: text, result }))
+      .catch((e: unknown) => setSearchError(String(e)))
+      .finally(() => setSearching(false));
+  };
+
   const overrides = report?.packages.filter((p) => p.overrides_game) ?? [];
   const added = report?.packages.filter((p) => !p.overrides_game) ?? [];
 
@@ -91,10 +123,36 @@ export function ModReportDialog({ gamePath, modName, onClose }: Props) {
             {report?.patch_priority != null && ` · patch priority ${report.patch_priority}`}
           </AlertDialogDescription>
         </AlertDialogHeader>
+        <div className="flex items-center gap-2">
+          <Input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") runSearch();
+            }}
+            placeholder="Search scripts and values: a file name, a function, a variable…"
+            className="h-8 font-mono text-[12px]"
+          />
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={!query.trim() || searching}
+            onClick={runSearch}
+          >
+            {searching ? "Searching…" : "Search"}
+          </Button>
+          {search && (
+            <Button size="sm" variant="ghost" onClick={() => setSearch(null)}>
+              Clear
+            </Button>
+          )}
+        </div>
         <div className="flex-1 overflow-y-auto -mx-6 px-6 text-[12px]">
+          {searchError && <p className="text-err">{searchError}</p>}
+          {search && <SearchResults query={search.query} result={search.result} />}
           {error && <p className="text-err">{error}</p>}
           {!error && !report && <p className="text-muted-foreground">Reading the mod…</p>}
-          {report && (
+          {report && !search && (
             <div className="flex flex-col gap-4">
               <PackageList
                 title={`Replaces game assets (${overrides.length})`}
@@ -132,6 +190,45 @@ export function ModReportDialog({ gamePath, modName, onClose }: Props) {
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>
+  );
+}
+
+function SearchResults({ query, result }: { query: string; result: SearchResult }) {
+  const byPackage = new Map<string, SearchHit[]>();
+  for (const hit of result.hits)
+    byPackage.set(hit.package, [...(byPackage.get(hit.package) ?? []), hit]);
+  return (
+    <section className="flex flex-col gap-3">
+      <p className="text-muted-foreground">
+        {result.hits.length} place{result.hits.length === 1 ? "" : "s"} name “{query}”
+      </p>
+      {[...byPackage].map(([pkg, hits]) => (
+        <div key={pkg}>
+          <p className="truncate font-mono text-[11px] text-muted-foreground">{shortPath(pkg)}</p>
+          {hits.map((hit, i) => (
+            <div key={i} className="flex items-baseline gap-2 pl-3 font-mono text-[11px]">
+              <span className="w-14 shrink-0 font-sans text-[10px] uppercase text-muted-foreground">
+                {hit.kind}
+              </span>
+              <span className="shrink-0 text-blue-accent-foreground">
+                {hit.export}
+                {hit.offset !== undefined &&
+                  ` 0x${hit.offset.toString(16).toUpperCase().padStart(4, "0")}`}
+              </span>
+              <span className="truncate" title={hit.line}>
+                {hit.line}
+              </span>
+            </div>
+          ))}
+        </div>
+      ))}
+      {result.unreadable.length > 0 && (
+        <p className="text-warn">
+          {result.unreadable.length} package{result.unreadable.length === 1 ? "" : "s"} could not be
+          read, so they were not searched: {result.unreadable.map(([p]) => shortPath(p)).join(", ")}
+        </p>
+      )}
+    </section>
   );
 }
 

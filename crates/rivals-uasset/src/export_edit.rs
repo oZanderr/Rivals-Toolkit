@@ -942,6 +942,7 @@ mod tests {
             data_table: None,
             string_table: None,
             struct_definition: None,
+            signature: None,
             trailing_hex: String::new(),
             note: None,
             script: None,

@@ -11,6 +11,7 @@ pub mod game_status;
 pub mod import_index;
 pub mod mappings;
 pub mod mod_report;
+pub mod mod_search;
 pub mod mods;
 pub mod pak;
 pub mod pak_tweaks;

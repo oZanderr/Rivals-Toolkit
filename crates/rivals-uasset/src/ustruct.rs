@@ -3,6 +3,7 @@
 //! references in its layout can be followed.
 
 use retoc::legacy_asset::FLegacyPackageHeader;
+use serde::Serialize;
 use usmap::{Property, PropertyInner, Struct};
 
 use crate::mappings::Mappings;
@@ -16,9 +17,116 @@ const FUNC_NET: u32 = 0x0000_0040;
 /// `FField::FlagsPrivate`, which sits between the field's type and its name.
 const FIELD_FLAGS_BYTES: usize = 4;
 
-/// `ElementSize`, `PropertyFlags` and `RepIndex`, which follow `ArrayDim`. None of them affect how
-/// a value is read, so they are skipped as a block.
+/// `ElementSize`, `PropertyFlags` and `RepIndex`, which follow `ArrayDim`. Only the flags are kept,
+/// for what they say about a function's parameters.
+#[cfg(test)]
 const FIELD_TAIL_BYTES: usize = 4 + 8 + 2;
+const ELEMENT_SIZE_BYTES: usize = 4;
+const REP_INDEX_BYTES: usize = 2;
+
+/// `CPF_Parm`, `CPF_OutParm`, `CPF_ReturnParm` and `CPF_ReferenceParm`.
+const CPF_PARM: u64 = 0x80;
+const CPF_OUT_PARM: u64 = 0x100;
+const CPF_RETURN_PARM: u64 = 0x400;
+const CPF_REFERENCE_PARM: u64 = 0x0800_0000;
+
+/// A function's parameters and locals, read from the field records its export declares.
+#[derive(Debug, Clone, Serialize)]
+pub struct FunctionSignature {
+    pub params: Vec<FunctionField>,
+    pub locals: Vec<FunctionField>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FunctionField {
+    pub name: String,
+    /// The type as a reader would write it: `Str`, `Array<Str>`, `S_MeshEntry`.
+    pub kind: String,
+    pub role: FieldRole,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FieldRole {
+    In,
+    /// Passed by reference: the caller's variable, which the function may change.
+    Ref,
+    Out,
+    Return,
+    Local,
+}
+
+impl FunctionSignature {
+    fn of(fields: &[Property], flags: &[u64]) -> Self {
+        let mut params = Vec::new();
+        let mut locals = Vec::new();
+        for (field, &flag) in fields.iter().zip(flags) {
+            let role = if flag & CPF_PARM == 0 {
+                FieldRole::Local
+            } else if flag & CPF_RETURN_PARM != 0 {
+                FieldRole::Return
+            } else if flag & CPF_REFERENCE_PARM != 0 {
+                FieldRole::Ref
+            } else if flag & CPF_OUT_PARM != 0 {
+                FieldRole::Out
+            } else {
+                FieldRole::In
+            };
+            let entry = FunctionField {
+                name: field.name.clone(),
+                kind: type_text(&field.inner),
+                role,
+            };
+            if role == FieldRole::Local {
+                locals.push(entry);
+            } else {
+                params.push(entry);
+            }
+        }
+        Self { params, locals }
+    }
+
+    /// `Name(In: T, ref R: T) -> Out: T`, with several outputs in parentheses.
+    pub fn render(&self, name: &str) -> String {
+        let inputs: Vec<String> = self
+            .params
+            .iter()
+            .filter(|p| matches!(p.role, FieldRole::In | FieldRole::Ref))
+            .map(|p| {
+                let prefix = if p.role == FieldRole::Ref { "ref " } else { "" };
+                format!("{prefix}{}: {}", p.name, p.kind)
+            })
+            .collect();
+        let outputs: Vec<String> = self
+            .params
+            .iter()
+            .filter(|p| matches!(p.role, FieldRole::Out | FieldRole::Return))
+            .map(|p| format!("{}: {}", p.name, p.kind))
+            .collect();
+        let head = format!("{name}({})", inputs.join(", "));
+        match outputs.len() {
+            0 => head,
+            1 => format!("{head} -> {}", outputs[0]),
+            _ => format!("{head} -> ({})", outputs.join(", ")),
+        }
+    }
+}
+
+/// A field's type written out in full, containers included.
+fn type_text(inner: &PropertyInner) -> String {
+    match inner {
+        PropertyInner::Struct { name } => name.clone(),
+        PropertyInner::Enum { name, inner } if name.is_empty() => type_text(inner),
+        PropertyInner::Enum { name, .. } => name.clone(),
+        PropertyInner::Array { inner } => format!("Array<{}>", type_text(inner)),
+        PropertyInner::Set { key } => format!("Set<{}>", type_text(key)),
+        PropertyInner::Map { key, value } => {
+            format!("Map<{}, {}>", type_text(key), type_text(value))
+        }
+        PropertyInner::Optional { inner } => format!("Optional<{}>", type_text(inner)),
+        other => crate::mappings::kind_name(other).to_string(),
+    }
+}
 
 /// `FBoolProperty` stores its packing here. The width is measured against real assets; the
 /// breakdown of the six bytes is not confirmed, so they are skipped rather than named.
@@ -112,6 +220,8 @@ pub(crate) struct StructTail {
     pub buffer_size: u32,
     /// The field records of a script struct or a class, which are the schema for its own values.
     pub definition: Option<Vec<Property>>,
+    /// A function's parameters and locals, from the same records and their flags.
+    pub signature: Option<FunctionSignature>,
     /// `SuperStruct` as written, zero when there is none.
     pub super_struct: i32,
     /// Where that index sits, so a reparent can splice over it.
@@ -134,8 +244,11 @@ pub(crate) fn scan_struct_tail(
         take_index(cursor, &mut references)?;
     }
     let mut properties = Vec::new();
+    let mut flags = Vec::new();
     for ordinal in 0..read_count(cursor, "UStruct child properties")? {
-        properties.push(read_field(cursor, header, ordinal, &mut references)?);
+        let (field, flag) = read_flagged_field(cursor, header, ordinal, &mut references)?;
+        properties.push(field);
+        flags.push(flag);
     }
     // Bytecode is stored behind its size, so it can be stepped over without being understood.
     let sizes_at = cursor.file_offset();
@@ -183,6 +296,7 @@ pub(crate) fn scan_struct_tail(
                 sizes_at,
                 buffer_size,
                 definition: Some(properties),
+                signature: None,
                 super_struct,
                 super_struct_at,
             });
@@ -205,6 +319,7 @@ pub(crate) fn scan_struct_tail(
             sizes_at,
             buffer_size,
             definition: Some(properties),
+            signature: None,
             super_struct,
             super_struct_at,
         });
@@ -215,6 +330,9 @@ pub(crate) fn scan_struct_tail(
             cursor.remaining()
         )));
     }
+    let signature = chain
+        .contains(&"Function")
+        .then(|| FunctionSignature::of(&properties, &flags));
     Ok(StructTail {
         references,
         bytecode,
@@ -223,6 +341,7 @@ pub(crate) fn scan_struct_tail(
         // A class's own fields are worth keeping: a Blueprint class revised after the mappings
         // were dumped is only readable from here.
         definition: chain.contains(&"Class").then_some(properties),
+        signature,
         super_struct,
         super_struct_at,
     })
@@ -319,21 +438,34 @@ fn read_field(
     ordinal: usize,
     references: &mut Vec<IndexRef>,
 ) -> Result<Property, String> {
+    Ok(read_flagged_field(cursor, header, ordinal, references)?.0)
+}
+
+/// A field record with its `PropertyFlags`.
+fn read_flagged_field(
+    cursor: &mut Cursor<'_>,
+    header: &FLegacyPackageHeader,
+    ordinal: usize,
+    references: &mut Vec<IndexRef>,
+) -> Result<(Property, u64), String> {
     let kind = cursor.read_name(&header.name_map)?;
     let name = cursor.read_name(&header.name_map)?;
     cursor.skip(FIELD_FLAGS_BYTES)?;
     let array_dim = cursor.read_i32()?;
-    cursor.skip(FIELD_TAIL_BYTES)?;
+    cursor.skip(ELEMENT_SIZE_BYTES)?;
+    let flags = cursor.read_u64()?;
+    cursor.skip(REP_INDEX_BYTES)?;
     let _rep_notify = cursor.read_name(&header.name_map)?;
     let _replication_condition = cursor.read_u8()?;
     let inner = read_kind(&kind, cursor, header, references)?;
-    Ok(Property {
+    let property = Property {
         name,
         array_dim: u8::try_from(array_dim.clamp(1, i32::from(u8::MAX)))
             .map_err(|_| cursor.err("implausible ArrayDim"))?,
         index: u16::try_from(ordinal).map_err(|_| cursor.err("too many fields"))?,
         inner,
-    })
+    };
+    Ok((property, flags))
 }
 
 /// The per-type tail. An unknown type name is fatal rather than guessed: reading the wrong width
@@ -487,6 +619,11 @@ mod tests {
         "Run",
         "BlueprintType",
         "ImplementedInterfaces",
+        "IntProperty",
+        "StrProperty",
+        "Index",
+        "Label",
+        "Scratch",
     ];
 
     fn header() -> FLegacyPackageHeader {
@@ -508,6 +645,57 @@ mod tests {
         for value in values {
             out.extend_from_slice(&value.to_le_bytes());
         }
+    }
+
+    /// A field record with no type tail beyond its common part, carrying `flags`.
+    fn plain_field(out: &mut Vec<u8>, kind: &str, field: &str, flags: u64) {
+        name(out, kind);
+        name(out, field);
+        i32s(out, &[0, 1, 4]); // object flags, ArrayDim, ElementSize
+        out.extend_from_slice(&flags.to_le_bytes());
+        out.extend_from_slice(&[0, 0]); // RepIndex
+        name(out, "None"); // RepNotifyFunc
+        out.push(0); // replication condition
+    }
+
+    /// Parameters and locals share one list of records; only the flags tell them apart.
+    #[test]
+    fn a_function_tail_sorts_its_fields_into_parameters_and_locals() {
+        let mut out = Vec::new();
+        i32s(&mut out, &[0, 0, 3]); // no super, no children, three fields
+        plain_field(&mut out, "IntProperty", "Index", CPF_PARM);
+        plain_field(&mut out, "StrProperty", "Label", CPF_PARM | CPF_OUT_PARM);
+        plain_field(&mut out, "IntProperty", "Scratch", 0);
+        i32s(&mut out, &[0, 0]); // no bytecode
+        i32s(&mut out, &[0, 0, 0]); // FunctionFlags, EventGraphFunction, EventGraphCallOffset
+        let mut cursor = Cursor::new(&out, 0);
+        let tail = scan_struct_tail(&mut cursor, &header(), &["Function"]).expect("tail");
+        assert!(tail.definition.is_none(), "a function is not a schema");
+        let signature = tail.signature.expect("signature");
+        assert_eq!(signature.render("Pick"), "Pick(Index: Int) -> Label: Str");
+        assert_eq!(signature.locals.len(), 1);
+        assert_eq!(signature.locals[0].name, "Scratch");
+    }
+
+    #[test]
+    fn a_reference_parameter_is_an_input_marked_ref() {
+        let field = |name: &str, role| FunctionField {
+            name: name.into(),
+            kind: "Array<Str>".into(),
+            role,
+        };
+        let signature = FunctionSignature {
+            params: vec![
+                field("Paths", FieldRole::Ref),
+                field("Sorted", FieldRole::Out),
+                field("Count", FieldRole::Return),
+            ],
+            locals: Vec::new(),
+        };
+        assert_eq!(
+            signature.render("SortPaks"),
+            "SortPaks(ref Paths: Array<Str>) -> (Sorted: Array<Str>, Count: Array<Str>)"
+        );
     }
 
     /// A class with one function child, one object property typed by an import, two bytes of

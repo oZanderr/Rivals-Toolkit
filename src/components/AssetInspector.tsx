@@ -1627,11 +1627,19 @@ function ScriptPane({
   container,
   entry,
   exportIndex,
+  exportNames,
+  focus,
+  onOpen,
 }: {
   gamePath: string;
   container: string;
   entry: string;
   exportIndex: number;
+  /** The package's exports by name, so a call to one of them can be followed. */
+  exportNames: Set<string>;
+  /** A statement to scroll to on opening, when the pane was opened from a call or a caller. */
+  focus: number | null;
+  onOpen: (name: string, offset?: number) => void;
 }) {
   const [view, setView] = useState<ScriptView | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1681,15 +1689,191 @@ function ScriptPane({
           </span>
         )}
       </div>
-      <pre className="whitespace-pre px-3 py-2 font-mono text-[11px] leading-relaxed">
-        {view.text}
-      </pre>
+      {view.signature_text && view.signature && (
+        <div className="border-b border-border/60 px-3 py-1.5 font-mono text-[11px]">
+          <p className="text-blue-accent-foreground">{view.signature_text}</p>
+          {view.signature.locals.length > 0 && (
+            <details className="mt-0.5 text-muted-foreground">
+              <summary className="cursor-pointer font-sans hover:text-foreground">
+                {view.signature.locals.length} local
+                {view.signature.locals.length === 1 ? "" : "s"}
+              </summary>
+              <div className="mt-1 grid grid-cols-[auto_1fr] gap-x-3 pl-3">
+                {view.signature.locals.map((local) => (
+                  <React.Fragment key={local.name}>
+                    <span>{local.name}</span>
+                    <span className="text-muted-foreground">{local.kind}</span>
+                  </React.Fragment>
+                ))}
+              </div>
+            </details>
+          )}
+        </div>
+      )}
+      {view.callers.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5 border-b border-border/60 px-3 py-1.5 text-[11px] text-muted-foreground">
+          <span>Called by:</span>
+          {view.callers.map(([caller, offset]) => (
+            <button
+              key={`${caller}:${offset}`}
+              className="font-mono text-blue-accent-foreground hover:underline"
+              onClick={() => onOpen(caller, offset)}
+            >
+              {caller} {hex(offset)}
+            </button>
+          ))}
+        </div>
+      )}
+      <ScriptLines
+        lines={view.lines}
+        entries={view.entries}
+        exportNames={exportNames}
+        focus={focus}
+        onOpen={onOpen}
+      />
     </div>
   );
 }
 
-interface ScriptView {
+const hex = (offset: number) => `0x${offset.toString(16).toUpperCase().padStart(4, "0")}`;
+
+/** Statements with their jump, pushed-flow and resume targets as links, and the events that
+ *  enter an Ubergraph named where their code starts. */
+function ScriptLines({
+  lines,
+  entries,
+  exportNames,
+  focus,
+  onOpen,
+}: {
+  lines: ScriptLine[];
+  entries: [number, string][];
+  exportNames: Set<string>;
+  focus: number | null;
+  onOpen: (name: string, offset?: number) => void;
+}) {
+  const [focused, setFocused] = useState<number | null>(focus);
+  const rowRefs = useRef(new Map<number, HTMLDivElement>());
+
+  useEffect(() => {
+    if (focus !== null) rowRefs.current.get(focus)?.scrollIntoView({ block: "center" });
+  }, [focus]);
+
+  const incoming = useMemo(() => {
+    const from = new Map<number, number[]>();
+    for (const line of lines) {
+      for (const target of line.targets ?? []) {
+        const list = from.get(target) ?? [];
+        list.push(line.offset);
+        from.set(target, list);
+      }
+    }
+    return from;
+  }, [lines]);
+
+  const eventsAt = useMemo(() => {
+    const at = new Map<number, string[]>();
+    for (const [offset, name] of entries) at.set(offset, [...(at.get(offset) ?? []), name]);
+    return at;
+  }, [entries]);
+
+  const go = (offset: number) => {
+    setFocused(offset);
+    rowRefs.current.get(offset)?.scrollIntoView({ block: "center", behavior: "smooth" });
+  };
+
+  return (
+    <div className="px-3 py-2 font-mono text-[11px] leading-relaxed">
+      {entries.length > 0 && (
+        <div className="mb-2 flex flex-wrap items-center gap-1.5 font-sans text-muted-foreground">
+          <span>Events:</span>
+          {entries.map(([offset, name]) => (
+            <button
+              key={`${offset}:${name}`}
+              className="rounded border border-blue-accent-border bg-blue-accent px-1.5 py-0.5 text-blue-accent-foreground hover:bg-blue-accent-hover"
+              onClick={() => go(offset)}
+            >
+              {name}
+            </button>
+          ))}
+        </div>
+      )}
+      {lines.map((line) => {
+        const from = incoming.get(line.offset);
+        return (
+          <React.Fragment key={line.offset}>
+            {eventsAt.get(line.offset)?.map((name) => (
+              <div key={name} className="mt-2 font-sans font-semibold text-blue-accent-foreground">
+                {name}
+              </div>
+            ))}
+            <div
+              ref={(el) => {
+                if (el) rowRefs.current.set(line.offset, el);
+                else rowRefs.current.delete(line.offset);
+              }}
+              className={cn(
+                "flex gap-3 whitespace-pre rounded-sm",
+                focused === line.offset && "bg-primary/15"
+              )}
+            >
+              <span className="w-12 shrink-0 text-muted-foreground">
+                {hex(line.offset)}
+                {from && (
+                  <Tip content={`Reached from ${from.map(hex).join(", ")}`}>
+                    <span className="ml-0.5 text-blue-accent-foreground">•</span>
+                  </Tip>
+                )}
+              </span>
+              <span>{line.text}</span>
+              {(line.targets ?? []).map((target) => (
+                <button
+                  key={target}
+                  className="shrink-0 font-sans text-blue-accent-foreground hover:underline"
+                  onClick={() => go(target)}
+                >
+                  → {hex(target)}
+                </button>
+              ))}
+              {(line.calls ?? [])
+                .filter((call) => exportNames.has(call))
+                .map((call) => (
+                  <Tip key={call} content={`Open ${call}`}>
+                    <button
+                      className="shrink-0 font-sans text-blue-accent-foreground hover:underline"
+                      onClick={() => onOpen(call)}
+                    >
+                      ↗ {call}
+                    </button>
+                  </Tip>
+                ))}
+            </div>
+          </React.Fragment>
+        );
+      })}
+    </div>
+  );
+}
+
+interface ScriptLine {
+  offset: number;
   text: string;
+  targets?: number[];
+  calls?: string[];
+}
+
+interface FunctionField {
+  name: string;
+  kind: string;
+  role: "in" | "ref" | "out" | "return" | "local";
+}
+
+interface ScriptView {
+  lines: ScriptLine[];
+  entries: [number, string][];
+  signature: { params: FunctionField[]; locals: FunctionField[] } | null;
+  signature_text: string | null;
+  callers: [string, number][];
   complete: boolean;
   stopped: string | null;
   buffer_size: number;
@@ -5494,6 +5678,9 @@ export default function AssetInspector({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(true);
   const [selected, setSelected] = useState(0);
+  /// A statement to land on when a script was opened by following a call; tied to the export it
+  /// was meant for, so picking another export by hand does not inherit it.
+  const [scriptFocus, setScriptFocus] = useState<{ index: number; offset: number } | null>(null);
   /// The package row of the outline is selected, so the main pane shows the package's tables.
   const [showPackage, setShowPackage] = useState(false);
   /// Whether slots an export declares but does not store are listed. Off by default: a class
@@ -5554,6 +5741,26 @@ export default function AssetInspector({
 
   const fileName = entry.split("/").pop() ?? entry;
   const active = pkg?.exports[selected];
+  const exportNames = useMemo(
+    () => new Set((pkg?.exports ?? []).filter((e) => e.script).map((e) => e.object_name)),
+    [pkg]
+  );
+  const openScript = (name: string, offset?: number) => {
+    const at = pkg?.exports.findIndex((e) => e.object_name === name) ?? -1;
+    if (at < 0) return;
+    const go = () => {
+      setSelected(at);
+      setShowPackage(false);
+      setView("script");
+      setScriptFocus(offset === undefined ? null : { index: at, offset });
+    };
+    if (at === selected) go();
+    else
+      guarded(() => {
+        discard();
+        go();
+      });
+  };
   const needsMappings = mappings !== null && !mappings.loaded;
 
   const onSaved = useCallback(() => setEpoch((n) => n + 1), []);
@@ -6219,18 +6426,32 @@ export default function AssetInspector({
                 />
               ) : active && effectiveView === "script" ? (
                 <ScriptPane
-                  key={`${epoch}:${active.index}`}
+                  key={`${epoch}:${active.index}:${scriptFocus?.offset ?? ""}`}
                   gamePath={gamePath}
                   container={container}
                   entry={entry}
                   exportIndex={active.index}
+                  exportNames={exportNames}
+                  focus={scriptFocus?.index === selected ? scriptFocus.offset : null}
+                  onOpen={openScript}
                 />
               ) : active && treeRows.length > 0 ? (
                 <PropertyTree rows={treeRows} />
               ) : (
                 <div className="min-h-0 min-w-0 flex-1 overflow-auto">
                   <p className="p-6 text-center text-sm text-muted-foreground">
-                    {active && inheritedCount > 0 ? (
+                    {active?.script && active.properties.length === 0 ? (
+                      <>
+                        Functions store their parameters, locals and code rather than property
+                        values.{" "}
+                        <button
+                          className="underline hover:text-foreground"
+                          onClick={() => setView("script")}
+                        >
+                          Open the Script view
+                        </button>
+                      </>
+                    ) : active && inheritedCount > 0 ? (
                       <>
                         Stores no properties. {inheritedCount} declared{" "}
                         {inheritedCount === 1

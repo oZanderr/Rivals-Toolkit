@@ -1461,6 +1461,12 @@ pub struct ScriptReport {
     pub object_name: String,
     pub class_name: String,
     pub script: rivals_uasset::Script,
+    /// The events that enter this function when it is a Blueprint's Ubergraph, by start offset.
+    pub entries: Vec<(u32, String)>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature: Option<rivals_uasset::FunctionSignature>,
+    /// The functions in this package that call this one, with the offset of each call.
+    pub callers: Vec<(String, u32)>,
 }
 
 pub fn script(request: &Request<'_>, export: u32) -> Result<ScriptReport, String> {
@@ -1476,11 +1482,26 @@ pub fn script(request: &Request<'_>, export: u32) -> Result<ScriptReport, String
             found.class_name
         ));
     };
+    let scripts = || {
+        parsed
+            .exports
+            .iter()
+            .filter_map(|e| Some((e.object_name.as_str(), e.script.as_ref()?)))
+    };
+    let entries = rivals_uasset::ubergraph_entries(scripts())
+        .remove(&found.object_name)
+        .unwrap_or_default();
+    let callers = rivals_uasset::call_sites(scripts())
+        .remove(&found.object_name)
+        .unwrap_or_default();
     Ok(ScriptReport {
         export,
         object_name: found.object_name.clone(),
         class_name: found.class_name.clone(),
         script: script.clone(),
+        entries,
+        signature: found.signature.clone(),
+        callers,
     })
 }
 
@@ -1499,8 +1520,34 @@ pub fn print_script(report: &ScriptReport, out: &mut impl FnMut(String)) {
             ", stopped".to_string()
         }
     ));
+    if let Some(signature) = &report.signature {
+        out(signature.render(&report.object_name));
+        let locals: Vec<String> = signature
+            .locals
+            .iter()
+            .map(|l| format!("{}: {}", l.name, l.kind))
+            .collect();
+        if !locals.is_empty() {
+            out(format!("locals: {}", locals.join(", ")));
+        }
+    }
+    if !report.callers.is_empty() {
+        let callers: Vec<String> = report
+            .callers
+            .iter()
+            .map(|(caller, at)| format!("{caller} 0x{at:04X}"))
+            .collect();
+        out(format!("called by: {}", callers.join(", ")));
+    }
     out(String::new());
     for line in rivals_uasset::render_script(script).lines() {
+        let offset = line
+            .strip_prefix("0x")
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|hex| u32::from_str_radix(hex, 16).ok());
+        for (_, event) in report.entries.iter().filter(|(at, _)| Some(*at) == offset) {
+            out(format!("        -- {event} --"));
+        }
         out(line.to_string());
     }
 }

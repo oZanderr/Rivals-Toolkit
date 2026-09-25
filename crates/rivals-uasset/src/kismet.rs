@@ -6,6 +6,8 @@
 //! pointer eight and four, so the loaded size is the space every jump offset indexes. That makes
 //! it an exact oracle: a walk that ends anywhere else has read some operand at the wrong width.
 
+use std::collections::BTreeMap;
+
 use serde::Serialize;
 
 use retoc::legacy_asset::FPackageNameMap;
@@ -961,6 +963,186 @@ pub(crate) fn read_script(
     }
 }
 
+/// One statement as a viewer shows it, with every offset it can send execution to.
+#[derive(Debug, Clone, Serialize)]
+pub struct ScriptLine {
+    pub offset: u32,
+    pub text: String,
+    /// Where a jump, a pushed flow, or a latent action's resume point leads, in statement offsets.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub targets: Vec<u32>,
+    /// The functions this statement calls, by name, so a viewer can open the ones it holds.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub calls: Vec<String>,
+}
+
+/// Every statement rendered on its own, alongside the offsets it links to.
+pub fn script_lines(script: &Script) -> Vec<ScriptLine> {
+    script
+        .statements
+        .iter()
+        .map(|statement| {
+            let mut targets = Vec::new();
+            flow_targets(&statement.expr, &mut targets);
+            targets.dedup();
+            let mut calls: Vec<String> = statement_terms(&statement.expr)
+                .into_iter()
+                .filter(|t| t.kind == TermKind::Call)
+                .map(|t| callee_name(&t.text).to_string())
+                .collect();
+            calls.dedup();
+            ScriptLine {
+                offset: statement.offset,
+                text: render(&statement.expr),
+                targets,
+                calls,
+            }
+        })
+        .collect()
+}
+
+/// What a statement names that is worth searching for or following.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TermKind {
+    /// A string constant, which is where file names, URLs and messages live.
+    String,
+    /// A function called: a full object path for a final call, a bare name for a virtual one.
+    Call,
+    /// A property read or written, by its dotted path.
+    Variable,
+    /// An object named outright, such as a class a cast or spawn takes.
+    Object,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Term {
+    pub kind: TermKind,
+    pub text: String,
+}
+
+/// Every string, call, variable and object `expr` names, in bytecode order.
+pub fn statement_terms(expr: &Expr) -> Vec<Term> {
+    let mut out = Vec::new();
+    collect_terms(expr, &mut out);
+    out
+}
+
+fn collect_terms(expr: &Expr, out: &mut Vec<Term>) {
+    let term = |kind, text: &str| Term {
+        kind,
+        text: text.to_string(),
+    };
+    match expr {
+        Expr::StringConst { value, .. } | Expr::UnicodeStringConst { value, .. } => {
+            out.push(term(TermKind::String, value));
+        }
+        Expr::FinalCall { function, .. } => {
+            if let Some(path) = &function.path {
+                out.push(term(TermKind::Call, path));
+            }
+        }
+        Expr::VirtualCall { function, .. } => out.push(term(TermKind::Call, function)),
+        Expr::Variable { property, .. } => out.push(term(TermKind::Variable, &property.path)),
+        Expr::ObjectConst { object } => {
+            if let Some(path) = &object.path {
+                out.push(term(TermKind::Object, path));
+            }
+        }
+        _ => {}
+    }
+    for child in children(expr) {
+        collect_terms(child, out);
+    }
+}
+
+/// Where each function is called from, keyed by the callee's bare name: the calling function and
+/// the offset of the statement that makes the call. `scripts` pairs each function with its script.
+pub fn call_sites<'a>(
+    scripts: impl IntoIterator<Item = (&'a str, &'a Script)>,
+) -> BTreeMap<String, Vec<(String, u32)>> {
+    let mut sites: BTreeMap<String, Vec<(String, u32)>> = BTreeMap::new();
+    for (caller, script) in scripts {
+        for statement in &script.statements {
+            let mut seen = Vec::new();
+            for term in statement_terms(&statement.expr) {
+                if term.kind != TermKind::Call {
+                    continue;
+                }
+                let callee = callee_name(&term.text).to_string();
+                if seen.contains(&callee) {
+                    continue;
+                }
+                sites
+                    .entry(callee.clone())
+                    .or_default()
+                    .push((caller.to_string(), statement.offset));
+                seen.push(callee);
+            }
+        }
+    }
+    sites
+}
+
+/// The function a call names, without the class that owns it: `Class_C:MountMods` is `MountMods`.
+pub fn callee_name(call: &str) -> &str {
+    call.rsplit(':').next().unwrap_or(call)
+}
+
+/// A latent action carries its resume point as an `Offset` constant inside `LatentActionInfo`,
+/// which is why constants count here alongside the jumps.
+fn flow_targets(expr: &Expr, out: &mut Vec<u32>) {
+    match expr {
+        Expr::Jump { target }
+        | Expr::JumpIfNot { target, .. }
+        | Expr::PushExecutionFlow { target } => out.push(*target),
+        Expr::SkipOffsetConst { value } => out.push(*value),
+        _ => {}
+    }
+    for child in children(expr) {
+        flow_targets(child, out);
+    }
+}
+
+/// The events that run inside a Blueprint's Ubergraph, keyed by the Ubergraph function's name.
+///
+/// Each event is a stub function whose whole body calls `ExecuteUbergraph_<Class>(N)`; `N` is the
+/// offset in the Ubergraph where that event's code starts. `scripts` pairs each function's name
+/// with its script.
+pub fn ubergraph_entries<'a>(
+    scripts: impl IntoIterator<Item = (&'a str, &'a Script)>,
+) -> BTreeMap<String, Vec<(u32, String)>> {
+    let mut entries: BTreeMap<String, Vec<(u32, String)>> = BTreeMap::new();
+    for (name, script) in scripts {
+        for statement in &script.statements {
+            let Expr::FinalCall {
+                function, params, ..
+            } = &statement.expr
+            else {
+                continue;
+            };
+            let Some(callee) = function
+                .path
+                .as_deref()
+                .and_then(|p| p.rsplit(':').next())
+                .filter(|f| f.starts_with("ExecuteUbergraph"))
+            else {
+                continue;
+            };
+            if let [Expr::IntConst { value, .. }] = params.as_slice() {
+                entries
+                    .entry(callee.to_string())
+                    .or_default()
+                    .push((*value as u32, name.to_string()));
+            }
+        }
+    }
+    for events in entries.values_mut() {
+        events.sort();
+    }
+    entries
+}
+
 /// One statement per line, offsets as a jump would name them.
 pub fn render_script(script: &Script) -> String {
     let mut out = String::new();
@@ -1030,59 +1212,61 @@ fn collect_literals<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
         out.push(expr);
         return;
     }
+    for child in children(expr) {
+        collect_literals(child, out);
+    }
+}
+
+/// The expressions `expr` holds, in the order their bytes sit in.
+fn children(expr: &Expr) -> Vec<&Expr> {
+    let mut out: Vec<&Expr> = Vec::new();
     match expr {
         Expr::Return { value }
         | Expr::Skip { value, .. }
         | Expr::Conversion { value, .. }
         | Expr::Unary { value, .. }
         | Expr::Member { value, .. }
-        | Expr::Cast { value, .. } => collect_literals(value, out),
-        Expr::JumpIfNot { condition, .. } | Expr::Assert { condition, .. } => {
-            collect_literals(condition, out)
-        }
+        | Expr::Cast { value, .. } => out.push(value),
+        Expr::JumpIfNot { condition, .. } | Expr::Assert { condition, .. } => out.push(condition),
         Expr::Let {
             variable, value, ..
         } => {
-            collect_literals(variable, out);
-            collect_literals(value, out);
+            out.push(variable);
+            out.push(value);
         }
         Expr::Context { object, member, .. } => {
-            collect_literals(object, out);
-            collect_literals(member, out);
+            out.push(object);
+            out.push(member);
         }
-        Expr::VirtualCall { params, .. } | Expr::FinalCall { params, .. } => {
-            collect_each(params, out)
-        }
-        Expr::StructConst { fields, .. } => collect_each(fields, out),
+        Expr::VirtualCall { params, .. } | Expr::FinalCall { params, .. } => out.extend(params),
+        Expr::StructConst { fields, .. } => out.extend(fields),
         Expr::SetArray { array, items } => {
-            collect_literals(array, out);
-            collect_each(items, out);
+            out.push(array);
+            out.extend(items);
         }
         Expr::SetContainer { target, items, .. } => {
-            collect_literals(target, out);
-            collect_each(items, out);
+            out.push(target);
+            out.extend(items);
         }
-        Expr::ContainerConst { items, .. } | Expr::MapConst { items, .. } => {
-            collect_each(items, out)
-        }
-        Expr::ComputedJump { target } => collect_literals(target, out),
+        Expr::ContainerConst { items, .. } | Expr::MapConst { items, .. } => out.extend(items),
+        Expr::ComputedJump { target } => out.push(target),
         Expr::DelegateOp {
             delegate, value, ..
         } => {
-            collect_literals(delegate, out);
-            collect_literals(value, out);
+            out.push(delegate);
+            out.push(value);
         }
         Expr::BindDelegate {
             delegate, object, ..
         } => {
-            collect_literals(delegate, out);
-            collect_literals(object, out);
+            out.push(delegate);
+            out.push(object);
         }
         Expr::CallMulticastDelegate {
             delegate, params, ..
         } => {
-            collect_literals(delegate, out);
-            collect_each(params, out);
+            out.push(delegate);
+            out.extend(params);
         }
         Expr::SwitchValue {
             index,
@@ -1090,16 +1274,16 @@ fn collect_literals<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
             default,
             ..
         } => {
-            collect_literals(index, out);
+            out.push(index);
             for case in cases {
-                collect_literals(&case.value, out);
-                collect_literals(&case.result, out);
+                out.push(&case.value);
+                out.push(&case.result);
             }
-            collect_literals(default, out);
+            out.push(default);
         }
         Expr::ArrayGetByRef { array, index } => {
-            collect_literals(array, out);
-            collect_literals(index, out);
+            out.push(array);
+            out.push(index);
         }
         Expr::TextConst { text } => match text {
             TextLiteral::Empty => {}
@@ -1108,26 +1292,19 @@ fn collect_literals<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
                 key,
                 namespace,
             } => {
-                collect_literals(source, out);
-                collect_literals(key, out);
-                collect_literals(namespace, out);
+                out.push(source);
+                out.push(key);
+                out.push(namespace);
             }
-            TextLiteral::Invariant { source } | TextLiteral::Literal { source } => {
-                collect_literals(source, out)
-            }
+            TextLiteral::Invariant { source } | TextLiteral::Literal { source } => out.push(source),
             TextLiteral::StringTable { table_id, key, .. } => {
-                collect_literals(table_id, out);
-                collect_literals(key, out);
+                out.push(table_id);
+                out.push(key);
             }
         },
         _ => {}
     }
-}
-
-fn collect_each<'a>(items: &'a [Expr], out: &mut Vec<&'a Expr>) {
-    for item in items {
-        collect_literals(item, out);
-    }
+    out
 }
 
 /// The token name of a literal, as the disassembly and the refusals call it.
@@ -2094,6 +2271,167 @@ mod tests {
         assert!(lines[0].contains("411"), "{}", lines[0]);
         assert_eq!(lines[1], "0x000F  Return Nothing");
         assert_eq!(lines[2], "0x0011  EndOfScript");
+    }
+
+    fn script_of(exprs: Vec<(u32, Expr)>) -> Script {
+        Script {
+            buffer_size: 0,
+            storage_size: 0,
+            decoded_size: 0,
+            sizes_at: 0,
+            start: 0,
+            end: 0,
+            statements: exprs
+                .into_iter()
+                .map(|(offset, expr)| Statement {
+                    offset,
+                    at: 0,
+                    expr,
+                })
+                .collect(),
+            stopped: None,
+        }
+    }
+
+    fn object(path: &str) -> ObjectRef {
+        ObjectRef {
+            index: TARGET,
+            path: Some(path.into()),
+        }
+    }
+
+    /// A latent call's resume point is buried in a struct argument, and it is as much a place
+    /// execution goes as any jump.
+    #[test]
+    fn a_line_links_to_its_jumps_pushed_flows_and_latent_resume_points() {
+        let delay = Expr::FinalCall {
+            name: "CallMath",
+            function: object("/Script/Engine.KismetSystemLibrary:Delay"),
+            params: vec![Expr::StructConst {
+                struct_type: object("/Script/Engine.LatentActionInfo"),
+                size: 0,
+                fields: vec![Expr::SkipOffsetConst { value: 0x40 }],
+            }],
+        };
+        let script = script_of(vec![
+            (0x00, Expr::PushExecutionFlow { target: 0x30 }),
+            (
+                0x05,
+                Expr::JumpIfNot {
+                    target: 0x20,
+                    condition: Box::new(Expr::Simple { name: "True" }),
+                },
+            ),
+            (0x10, delay),
+            (
+                0x20,
+                Expr::Simple {
+                    name: "EndOfScript",
+                },
+            ),
+        ]);
+        let lines = script_lines(&script);
+        let targets: Vec<&[u32]> = lines.iter().map(|l| l.targets.as_slice()).collect();
+        assert_eq!(targets, [&[0x30][..], &[0x20], &[0x40], &[]]);
+        assert_eq!(lines[1].offset, 0x05);
+    }
+
+    /// Each event stub names the Ubergraph offset it starts at, which is the only place that
+    /// offset is written down.
+    #[test]
+    fn event_stubs_name_the_ubergraph_offsets_they_enter_at() {
+        let stub = |at: i32| {
+            script_of(vec![(
+                0,
+                Expr::FinalCall {
+                    name: "LocalFinalFunction",
+                    function: object("/Game/X.X_C:ExecuteUbergraph_X"),
+                    params: vec![Expr::IntConst { value: at, at: 0 }],
+                },
+            )])
+        };
+        let tick = stub(10);
+        let begin = stub(2953);
+        let other = script_of(vec![(
+            0,
+            Expr::Simple {
+                name: "EndOfScript",
+            },
+        )]);
+        let entries = ubergraph_entries([
+            ("ReceiveBeginPlay", &begin),
+            ("Tick", &tick),
+            ("Helper", &other),
+        ]);
+        assert_eq!(
+            entries.get("ExecuteUbergraph_X").map(Vec::as_slice),
+            Some(
+                &[
+                    (10, "Tick".to_string()),
+                    (2953, "ReceiveBeginPlay".to_string())
+                ][..]
+            )
+        );
+        assert_eq!(entries.len(), 1);
+    }
+
+    fn call(path: &str, params: Vec<Expr>) -> Expr {
+        Expr::FinalCall {
+            name: "LocalFinalFunction",
+            function: object(path),
+            params,
+        }
+    }
+
+    /// A string buried in a call's arguments is as findable as the call itself.
+    #[test]
+    fn a_statement_names_its_calls_strings_and_variables_in_byte_order() {
+        let expr = Expr::Let {
+            name: "Let",
+            property: None,
+            variable: Box::new(Expr::Variable {
+                name: "LocalVariable",
+                property: PropertyRef {
+                    path: "Loaded".into(),
+                    owner: object("/Game/X.X_C:F"),
+                },
+            }),
+            value: Box::new(call(
+                "/Script/Marvel.MarvelFileUtil:LoadFromFile",
+                vec![Expr::StringConst {
+                    value: "Keys.txt".into(),
+                    at: 0,
+                }],
+            )),
+        };
+        let found = statement_terms(&expr);
+        let terms: Vec<(TermKind, &str)> =
+            found.iter().map(|t| (t.kind, t.text.as_str())).collect();
+        assert_eq!(
+            terms,
+            [
+                (TermKind::Variable, "Loaded"),
+                (TermKind::Call, "/Script/Marvel.MarvelFileUtil:LoadFromFile"),
+                (TermKind::String, "Keys.txt"),
+            ]
+        );
+    }
+
+    #[test]
+    fn call_sites_list_each_caller_once_per_statement_by_the_callees_bare_name() {
+        let both = call(
+            "/Game/X.X_C:Helper",
+            vec![call("/Game/X.X_C:Helper", Vec::new())],
+        );
+        let first = script_of(vec![(0x10, both)]);
+        let second = script_of(vec![(0x20, call("/Game/X.X_C:Helper", Vec::new()))]);
+        let sites = call_sites([("First", &first), ("Second", &second)]);
+        assert_eq!(
+            sites.get("Helper").map(Vec::as_slice),
+            Some(&[("First".to_string(), 0x10), ("Second".to_string(), 0x20)][..])
+        );
+        let lines = script_lines(&first);
+        assert_eq!(lines[0].calls, ["Helper"]);
     }
 
     /// A stop is rendered too, so a partial disassembly says where it gave up.

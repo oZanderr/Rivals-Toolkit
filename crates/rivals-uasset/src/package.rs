@@ -106,6 +106,9 @@ pub struct ParsedExport {
     /// was walked. `None` for everything else, which is what makes a reparent refusable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub super_struct_at: Option<u64>,
+    /// A function's parameters and locals, when its layout walk read them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature: Option<crate::ustruct::FunctionSignature>,
     /// The bytecode this export stores, disassembled. Present for a class or function whose
     /// layout walk reached its script.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1048,6 +1051,7 @@ fn parse_one_inner(
                 Ok(tail) => {
                     diagnostics.references.extend(tail.references);
                     bytecode = tail.bytecode;
+                    base.signature = tail.signature;
                     super_struct_at = Some(tail.super_struct_at);
                     if let Some((from, to)) = tail.bytecode {
                         let base_at = base.serial_offset.max(0) as u64;
@@ -1192,6 +1196,7 @@ fn skeleton(
         data_table: None,
         string_table: None,
         struct_definition: None,
+        signature: None,
         trailing_hex: String::new(),
         note: None,
         script: None,

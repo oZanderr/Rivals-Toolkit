@@ -216,7 +216,16 @@ pub(crate) async fn export_bytes_view(
 /// One export's bytecode, disassembled for reading.
 #[derive(Serialize)]
 pub(crate) struct ScriptView {
-    text: String,
+    lines: Vec<rivals_uasset::ScriptLine>,
+    /// The events that enter this function, when it is a Blueprint's Ubergraph, by the offset
+    /// each one starts at.
+    entries: Vec<(u32, String)>,
+    /// The function's parameters and locals, when the export is a function.
+    signature: Option<rivals_uasset::FunctionSignature>,
+    /// The signature written out, `Name(In: T) -> Out: T`.
+    signature_text: Option<String>,
+    /// The functions in this package that call this one, with each call's offset.
+    callers: Vec<(String, u32)>,
     /// Whether the walk reached the end. A script that stopped is shown as far as it got.
     complete: bool,
     stopped: Option<String>,
@@ -245,8 +254,27 @@ pub(crate) async fn export_script_view(
             .script
             .as_ref()
             .ok_or_else(|| format!("{} carries no bytecode", found.object_name))?;
+        let scripts = || {
+            parsed
+                .exports
+                .iter()
+                .filter_map(|e| Some((e.object_name.as_str(), e.script.as_ref()?)))
+        };
+        let entries = rivals_uasset::ubergraph_entries(scripts())
+            .remove(&found.object_name)
+            .unwrap_or_default();
+        let callers = rivals_uasset::call_sites(scripts())
+            .remove(&found.object_name)
+            .unwrap_or_default();
         Ok(ScriptView {
-            text: rivals_uasset::render_script(script),
+            lines: rivals_uasset::script_lines(script),
+            entries,
+            signature_text: found
+                .signature
+                .as_ref()
+                .map(|s| s.render(&found.object_name)),
+            signature: found.signature.clone(),
+            callers,
             complete: script.stopped.is_none(),
             stopped: script.stopped.as_ref().map(|stop| stop.reason.clone()),
             buffer_size: script.buffer_size,

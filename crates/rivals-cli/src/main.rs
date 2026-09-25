@@ -718,6 +718,8 @@ enum PaksCmd {
     Extract(PaksExtractArgs),
     /// Summarise an IoStore mod: overrides, natives it calls, files and save slots it touches.
     Report(PaksReportArgs),
+    /// Find where an IoStore mod's scripts and values name a string, function, variable or object.
+    Search(PaksSearchArgs),
 }
 
 #[derive(Subcommand)]
@@ -859,6 +861,16 @@ struct PaksExtractArgs {
 }
 
 #[derive(Args)]
+struct PaksSearchArgs {
+    /// The mod: a .utoc or .pak path, or a name in `~mods`.
+    #[arg(long)]
+    pak: String,
+
+    /// Text to look for, ignoring case.
+    query: String,
+}
+
+#[derive(Args)]
 struct PaksReportArgs {
     /// The mod: a .utoc or .pak path, or a name in `~mods`.
     #[arg(long)]
@@ -907,6 +919,7 @@ fn run(cli: &Cli) -> Result<(), String> {
         Command::Paks(PaksCmd::List(a)) => paks_list(cli, &app, a),
         Command::Paks(PaksCmd::Extract(a)) => paks_extract(cli, &app, a),
         Command::Paks(PaksCmd::Report(a)) => paks_report(cli, &app, a),
+        Command::Paks(PaksCmd::Search(a)) => paks_search(cli, &app, a),
         Command::Asset(AssetCmd::List(a)) => asset_list(cli, &app, a),
         Command::Asset(AssetCmd::Info(a)) => asset_info(cli, &app, a),
         Command::Asset(AssetCmd::Dump(a)) => asset_dump(cli, &app, a),
@@ -1521,6 +1534,40 @@ fn paks_extract(
             for name in names {
                 outln!("    {name}");
             }
+        }
+    })
+}
+
+fn paks_search(
+    cli: &Cli,
+    app: &settings::AppSettings,
+    args: &PaksSearchArgs,
+) -> Result<(), String> {
+    let root = resolve::game_root(cli.game_root.as_deref(), app)?;
+    let utoc =
+        Path::new(&resolve::pak(&args.pak, cli.game_root.as_deref(), app)?).with_extension("utoc");
+    if !utoc.is_file() {
+        return Err(format!("{} is not an IoStore mod", utoc.display()));
+    }
+    let schema = rivals_core::mappings::resolve(cli.usmap.as_deref(), app.usmap_path.as_deref())
+        .and_then(|path| rivals_core::mappings::load(&path))
+        .ok();
+    let result = rivals_core::mod_search::mod_search(&root, &utoc, schema.as_deref(), &args.query)?;
+    emit(cli, &result, || {
+        let mut package = "";
+        for hit in &result.hits {
+            if hit.package != package {
+                package = &hit.package;
+                outln!("{package}");
+            }
+            let at = hit
+                .offset
+                .map_or_else(String::new, |o| format!(" 0x{o:04X}"));
+            outln!("  {}{at}  {}", hit.export, hit.line);
+        }
+        outln!("\n{} hit(s)", result.hits.len());
+        for (path, reason) in &result.unreadable {
+            eprintln!("not searched: {path}: {reason}");
         }
     })
 }

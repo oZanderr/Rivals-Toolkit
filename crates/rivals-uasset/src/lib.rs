@@ -49,8 +49,9 @@ pub use import_remove::{
     unused_imports,
 };
 pub use kismet::{
-    Expr, ObjectRef, PropertyRef, Script, ScriptStop, Statement, SwitchCase, TextLiteral, literals,
-    render_script, token_name,
+    Expr, ObjectRef, PropertyRef, Script, ScriptLine, ScriptStop, Statement, SwitchCase, Term,
+    TermKind, TextLiteral, call_sites, callee_name, literals, render_script, script_lines,
+    statement_terms, token_name, ubergraph_entries,
 };
 pub use mappings::{Mappings, Schema, SchemaFixups, SchemaSlot, kind_name};
 pub use package::{
@@ -67,8 +68,9 @@ pub use props::{
 pub use remove::{ClearedReference, Importers, RemovalPlan, RemovedExport, plan_removal};
 pub use stringtable::{StringEntrySpan, StringTable, StringTableEntry, StringTableLayout};
 pub use ustruct::{
-    StructDefinition, definitions_of, mappings_from_definitions, mappings_from_definitions_with,
-    read_struct_definitions, read_struct_definitions_pathed,
+    FieldRole, FunctionField, FunctionSignature, StructDefinition, definitions_of,
+    mappings_from_definitions, mappings_from_definitions_with, read_struct_definitions,
+    read_struct_definitions_pathed,
 };
 pub use value::{MapEntry, PropertyEntry, PropertyValue};
 pub use write::{
