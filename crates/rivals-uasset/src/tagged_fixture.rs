@@ -111,8 +111,7 @@ pub fn package_of(e: Vec<u8>) -> (Vec<u8>, Vec<u8>) {
     };
     summary.versioning_info.package_file_version = FALLBACK_ENGINE_VERSION.package_file_version();
     summary.versioning_info.total_header_size = HEADER_SIZE as i32;
-    // Filtered, as every cooked package is: the header writer lays out an unfiltered summary
-    // differently from how it reads one back.
+    // Filtered, as every cooked package is.
     summary.package_flags = EPackageFlags::Cooked as u32 | EPackageFlags::FilterEditorOnly as u32;
     let header = FLegacyPackageHeader {
         summary,
