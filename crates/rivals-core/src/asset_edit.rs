@@ -1027,6 +1027,21 @@ fn holds_copy(
     }))
 }
 
+/// The container, entry and kind a save with these options reads when it builds on the mod's own
+/// copy, or `None` when it reads the request's source. Edits addressed by offset have to be made
+/// against the same bytes, so anything that writes them for a layered save reads through here.
+pub fn layered_read(
+    request: &AssetEditRequest<'_>,
+    options: &SaveOptions,
+) -> Result<Option<(String, String, AssetSource)>, String> {
+    if !options.layer || options.replace {
+        return Ok(None);
+    }
+    let entry = save_entry(request)?;
+    let held = destination_check(request, &entry, options)?;
+    Ok(layered_source(request, held, options)?.map(|(container, kind)| (container, entry, kind)))
+}
+
 /// Where a layered save reads from: the mod's own copy, when it holds one. The mod's container is
 /// opened like any other, so its copy wins over the game's.
 fn layered_source(
@@ -3503,6 +3518,115 @@ mod game_data_tests {
             };
             assert_eq!(*is, was + by, "{}", was);
         }
+    }
+
+    /// Once the mod holds a copy, a layered save reads that copy, and so does whatever addresses
+    /// edits for it: a dump of the copy diffs to offsets that have moved from the source's, and
+    /// the layered save lands them on top of what the copy already carries.
+    #[test]
+    fn a_layered_diff_is_addressed_into_the_mods_copy() {
+        let Some(fixture) = Fixture::open(STRINGS) else {
+            return;
+        };
+        let scratch = ScratchMod {
+            root: fixture.root.clone(),
+            name: "RivalsToolkitLayerDiffProbe",
+        };
+        drop(ScratchMod {
+            root: fixture.root.clone(),
+            name: "RivalsToolkitLayerDiffProbe",
+        });
+        let row_strings = |parsed: &rivals_uasset::ParsedPackage| -> Vec<PropertyEntry> {
+            parsed.exports[0].data_table.as_ref().expect("table").rows[..2]
+                .iter()
+                .map(|row| {
+                    row.fields
+                        .iter()
+                        .find(|field| matches!(field.value, PropertyValue::Str { .. }))
+                        .expect("a string cell")
+                        .clone()
+                })
+                .collect()
+        };
+        let request = |changes: PackageEdits| AssetEditRequest {
+            game_root: &fixture.root,
+            container: &fixture.container,
+            entry: fixture.entry,
+            kind: AssetSource::Utoc,
+            mod_name: scratch.name,
+            changes,
+        };
+        let layered = SaveOptions {
+            layer: true,
+            ..Default::default()
+        };
+        assert!(
+            layered_read(&request(PackageEdits::default()), &layered)
+                .expect("read")
+                .is_none(),
+            "nothing to build on yet"
+        );
+
+        let source = row_strings(&fixture.parse());
+        let PropertyValue::Str { value: first } = &source[0].value else {
+            unreachable!()
+        };
+        let grown = format!("{first}XYZ");
+        save_edits(
+            &request(PackageEdits {
+                values: vec![ValueEdit {
+                    offset: source[0].span.expect("a span").0,
+                    expect_name: source[0].name.clone(),
+                    expect_element: source[0].element,
+                    expect_kind: "str".into(),
+                    op: EditOp::Set {
+                        text: grown.clone(),
+                    },
+                }],
+                ..Default::default()
+            }),
+            Some(&fixture.schema),
+            &SaveOptions::default(),
+        )
+        .expect("first save");
+
+        let (container, entry, kind) = layered_read(&request(PackageEdits::default()), &layered)
+            .expect("read")
+            .expect("the mod holds a copy");
+        assert_eq!(Path::new(&container), scratch.container());
+        assert_eq!(entry, fixture.entry);
+        assert!(kind == AssetSource::Utoc);
+
+        let copy = read_back(&fixture, Path::new(&container));
+        let mut dump = serde_json::to_value(&copy).expect("dump");
+        let cell = dump["exports"][0]["data_table"]["rows"][1]["fields"]
+            .as_array_mut()
+            .expect("fields")
+            .iter_mut()
+            .find(|field| field["value"]["kind"] == "str")
+            .expect("a string cell");
+        cell["value"]["value"] = serde_json::json!("Layered");
+        let outcome = crate::asset_edit::diff::diff_dump(&copy, &dump).expect("diff");
+        assert_eq!(outcome.edits.values.len(), 1, "{:?}", outcome.notes);
+        let at = outcome.edits.values[0].offset;
+        assert_eq!(at, row_strings(&copy)[1].span.expect("a span").0);
+        assert_ne!(
+            at,
+            source[1].span.expect("a span").0,
+            "row 0 grew in the copy"
+        );
+
+        let changes = outcome.edits.resolve(Path::new(".")).expect("resolve");
+        save_edits(&request(changes), Some(&fixture.schema), &layered).expect("layered save");
+        let now = row_strings(&read_back(&fixture, &scratch.container()));
+        let texts: Vec<&str> = now
+            .iter()
+            .map(|cell| match &cell.value {
+                PropertyValue::Str { value } => value.as_str(),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(texts, [grown.as_str(), "Layered"]);
     }
 
     /// Several packages saved into one mod go in with a single container rewrite, and a second mod

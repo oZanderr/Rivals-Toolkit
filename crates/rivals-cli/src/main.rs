@@ -2219,6 +2219,7 @@ fn asset_diff(cli: &Cli, app: &settings::AppSettings, args: &AssetDiffArgs) -> R
         &request,
         std::path::Path::new(&args.edited),
         args.mod_name.as_deref().or(app.asset_mod_name.as_deref()),
+        DEFAULT_MOD_NAME,
         target,
     )?;
     let text = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;

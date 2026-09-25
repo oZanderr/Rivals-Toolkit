@@ -1200,6 +1200,7 @@ pub fn diff(
     request: &Request<'_>,
     edited: &Path,
     mod_name: Option<&str>,
+    default_mod_name: &str,
     target: asset_edit::SaveTarget,
 ) -> Result<asset_edit::json::EditFile, String> {
     let text =
@@ -1212,15 +1213,37 @@ pub fn diff(
         declared: true,
         ..*request
     };
-    let parsed = parse(&declared)?;
+    // A layered save builds on the mod's own copy where it holds one, so the edits are addressed
+    // into that copy rather than the source.
+    let into = mod_name.unwrap_or(default_mod_name);
+    let layered = asset_edit::layered_read(
+        &edit_request(request, into, PackageEdits::default()),
+        &asset_edit::SaveOptions {
+            layer: request.layer,
+            target,
+            ..Default::default()
+        },
+    )?;
+    let parsed = match &layered {
+        Some((container, entry, _)) => parse(&Request {
+            container: container.as_str(),
+            entry: entry.as_str(),
+            ..declared
+        })?,
+        None => parse(&declared)?,
+    };
     let outcome = asset_edit::diff::diff_dump(&parsed, &json)?;
     Ok(asset_edit::json::EditFile {
         container: request.container.to_string(),
         entry: request.entry.to_string(),
-        mod_name: mod_name.map(str::to_string),
+        // The copy the edits were addressed into is the one they have to land on.
+        mod_name: match layered {
+            Some(_) => Some(into.to_string()),
+            None => mod_name.map(str::to_string),
+        },
         target: Some(target),
         replace: false,
-        layer: false,
+        layer: request.layer,
         notes: outcome.notes,
         edits: outcome.edits,
     })
