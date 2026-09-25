@@ -952,6 +952,105 @@ fn source_shader_maps(request: &AssetEditRequest<'_>, asset: &[u8]) -> Vec<retoc
     asset::shader_map_hashes(request.game_root, container, &header.summary.package_name)
 }
 
+/// What taking an asset back out of a mod did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RevertOutcome {
+    /// The mod no longer carries the asset, so the game's own copy loads again.
+    Reverted,
+    /// The asset was all the mod carried, so the mod is gone.
+    RemovedMod,
+    /// The mod never carried it.
+    NotHeld,
+}
+
+/// Takes one asset back out of the mod at `pak`, keeping everything else it holds. `entry` is the
+/// game path the mod carries it under. A mod left holding nothing is deleted outright.
+pub fn revert_asset(
+    pak: &Path,
+    entry: &str,
+    options: &crate::pak::iostore_out::IoStoreOptions,
+) -> Result<RevertOutcome, String> {
+    use retoc::EIoChunkType;
+    let entry = asset::contained_entry(entry)?;
+    let wanted = comparable(&entry);
+    let dir = pak.parent().ok_or("the mod has no folder")?;
+    let name = pak
+        .file_name()
+        .ok_or("the mod has no name")?
+        .to_string_lossy()
+        .into_owned();
+    // Anything in the pak beside the listing it always carries is content of its own.
+    let pak_content = |pak: &Path| -> Result<bool, String> {
+        Ok(pak.is_file()
+            && asset::list_pak_entries(&pak.to_string_lossy())?
+                .iter()
+                .any(|held| !held.eq_ignore_ascii_case("chunknames")))
+    };
+    let utoc = pak.with_extension("utoc");
+    if utoc.is_file() {
+        let store = crate::pak::containers::open_utoc(&utoc.to_string_lossy())?;
+        let mut packages = std::collections::HashSet::new();
+        let mut target = None;
+        for chunk in store.chunks_all() {
+            let id = chunk.id();
+            if id.get_chunk_type() != EIoChunkType::ExportBundleData {
+                continue;
+            }
+            packages.insert(id.get_package_id());
+            if chunk.path().is_some_and(|path| comparable(&path) == wanted) {
+                target = Some(id.get_package_id());
+            }
+        }
+        drop(store);
+        let Some(target) = target else {
+            return Ok(RevertOutcome::NotHeld);
+        };
+        crate::pak::containers::drop_cached_store();
+        if packages.len() == 1 && !pak_content(pak)? {
+            crate::mods::delete_mod(dir, &name)?;
+            return Ok(RevertOutcome::RemovedMod);
+        }
+        crate::pak::iostore_out::remove_from_iostore(
+            &utoc,
+            &std::collections::HashSet::from([target]),
+            options,
+        )?;
+        return Ok(RevertOutcome::Reverted);
+    }
+    if !pak.is_file() || !holds_entry(pak, &entry)? {
+        return Ok(RevertOutcome::NotHeld);
+    }
+    let stem = entry
+        .rsplit_once('.')
+        .map_or(entry.as_str(), |(stem, _)| stem);
+    let mut empty = false;
+    with_unpacked_pak(pak, |unpacked| {
+        for extension in ["uasset", "umap", "uexp", "ubulk", "uptnl", "m.ubulk"] {
+            let file = unpacked.join(format!("{stem}.{extension}"));
+            if file.is_file() {
+                fs::remove_file(&file)
+                    .map_err(|e| format!("Could not remove {}: {e}", file.display()))?;
+            }
+        }
+        empty = walkdir::WalkDir::new(unpacked)
+            .into_iter()
+            .filter_map(Result::ok)
+            .all(|found| !found.file_type().is_file());
+        Ok(())
+    })?;
+    if empty {
+        crate::mods::delete_mod(dir, &name)?;
+        return Ok(RevertOutcome::RemovedMod);
+    }
+    Ok(RevertOutcome::Reverted)
+}
+
+/// The mod file a mod name saves into, as a save would name it.
+pub fn mod_pak(game_root: &str, mod_name: &str) -> Result<PathBuf, String> {
+    mod_pak_path(game_root, mod_name)
+}
+
 /// Names the game path a save went to when the caller named the package some other way.
 fn placed_as(request: &AssetEditRequest<'_>, entry: &str) -> String {
     if comparable(request.entry) == comparable(entry) {
@@ -1217,6 +1316,48 @@ mod tests {
             assert!(error.contains("not a path inside a container"), "{error}");
         }
         assert!(!pak.exists(), "nothing may be created");
+    }
+
+    /// A plain pak mod gives up the package's files and keeps its other content. Once only the
+    /// package was left, the mod goes with it.
+    #[test]
+    fn a_plain_pak_reverts_the_package_files_and_keeps_the_rest() {
+        if !oodle_available() {
+            return;
+        }
+        let scratch = ScratchRoot::new("revert-pak");
+        let root = scratch.game_root();
+        let pak = mod_pak_path(&root, "Revert").expect("pak path");
+        create_empty_pak(&pak).expect("empty pak");
+        with_unpacked_pak(&pak, |dir| {
+            for (file, body) in [
+                ("Marvel/Content/Test/Thing.uasset", "a"),
+                ("Marvel/Content/Test/Thing.uexp", "b"),
+                ("Marvel/Content/Test/Other.uasset", "c"),
+                ("Marvel/Content/Test/Other.uexp", "d"),
+            ] {
+                let path = dir.join(file);
+                fs::create_dir_all(path.parent().expect("parent")).map_err(|e| e.to_string())?;
+                fs::write(path, body).map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        })
+        .expect("fill the pak");
+        let options = Default::default();
+
+        assert_eq!(
+            revert_asset(&pak, ENTRY, &options).expect("revert"),
+            RevertOutcome::Reverted
+        );
+        assert!(!holds_entry(&pak, ENTRY).expect("list"));
+        assert!(!holds_entry(&pak, "Marvel/Content/Test/Thing.uexp").expect("list"));
+        assert!(holds_entry(&pak, "Marvel/Content/Test/Other.uasset").expect("list"));
+
+        assert_eq!(
+            revert_asset(&pak, "Marvel/Content/Test/Other.uasset", &options).expect("revert"),
+            RevertOutcome::RemovedMod
+        );
+        assert!(!pak.exists(), "nothing was left, so the mod is gone");
     }
 
     /// The game reads packages only from a container, so a plain pak mod cannot simply gain one
@@ -2914,6 +3055,96 @@ mod game_data_tests {
                 .any(|warning| warning.contains("RivalsToolkitBatchProbeA")),
             "{warnings:?}"
         );
+    }
+
+    /// Reverting one asset leaves the rest of the mod as it was; reverting the last one deletes the
+    /// mod, since it would otherwise be an empty container the game still mounts.
+    #[test]
+    fn reverting_takes_one_asset_out_and_the_last_one_takes_the_mod() {
+        let Some(fixture) = Fixture::open(DEFAULTS) else {
+            return;
+        };
+        let Some(strings) = Fixture::open(STRINGS) else {
+            return;
+        };
+        let scratch = ScratchMod {
+            root: fixture.root.clone(),
+            name: "RivalsToolkitRevertProbe",
+        };
+        drop(ScratchMod {
+            root: fixture.root.clone(),
+            name: "RivalsToolkitRevertProbe",
+        });
+        let cell = row_ints(&fixture.parse(), 1).remove(0);
+        let text = field_where(&strings.parse(), "is a stored string", |f| {
+            stored(f) && matches!(f.value, PropertyValue::Str { .. })
+        });
+        for outcome in save_batch(
+            &[
+                AssetEditRequest {
+                    game_root: &fixture.root,
+                    container: &fixture.container,
+                    entry: fixture.entry,
+                    kind: AssetSource::Utoc,
+                    mod_name: scratch.name,
+                    changes: PackageEdits {
+                        values: vec![bump(&cell, 1)],
+                        ..Default::default()
+                    },
+                },
+                AssetEditRequest {
+                    game_root: &strings.root,
+                    container: &strings.container,
+                    entry: strings.entry,
+                    kind: AssetSource::Utoc,
+                    mod_name: scratch.name,
+                    changes: PackageEdits {
+                        values: vec![edit_of(
+                            &text,
+                            EditOp::Set {
+                                text: "Probe".into(),
+                            },
+                        )],
+                        ..Default::default()
+                    },
+                },
+            ],
+            Some(&fixture.schema),
+            &SaveOptions::default(),
+        ) {
+            outcome.expect("saved");
+        }
+        let utoc = scratch.container();
+        let pak = utoc.with_extension("pak");
+        let options = Default::default();
+
+        assert_eq!(
+            revert_asset(&pak, fixture.entry, &options).expect("revert"),
+            RevertOutcome::Reverted
+        );
+        let held = crate::pak::iostore_out::utoc_entries(&utoc).expect("list");
+        assert!(!held.contains(&fixture.entry.to_lowercase()), "taken out");
+        assert!(
+            held.contains(&strings.entry.to_lowercase()),
+            "the rest stays"
+        );
+        asset::load_bundle(
+            &fixture.root,
+            &utoc.to_string_lossy(),
+            strings.entry,
+            AssetSource::Utoc,
+        )
+        .expect("what stays still reads");
+        assert_eq!(
+            revert_asset(&pak, fixture.entry, &options).expect("again"),
+            RevertOutcome::NotHeld
+        );
+
+        assert_eq!(
+            revert_asset(&pak, strings.entry, &options).expect("revert the last"),
+            RevertOutcome::RemovedMod
+        );
+        assert!(!utoc.exists() && !pak.exists(), "the mod is gone");
     }
 
     /// An extracted package opened from disk saves under the path the game ships it at, so the mod

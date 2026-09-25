@@ -27,6 +27,7 @@ import {
   PackageOpen,
   PackagePlus,
   RefreshCw,
+  RotateCcw,
   Search,
   Square,
   Users,
@@ -209,6 +210,8 @@ export function AssetManager({
     offset?: number;
   } | null>(null);
   const [overviewOpen, setOverviewOpen] = useState(false);
+  /// A package the user asked to take back out of the selected mod, awaiting confirmation.
+  const [revertPrompt, setRevertPrompt] = useState<string | null>(null);
   /// A mod pak to read the inspected entry from instead of the selected container: the copy a
   /// save just wrote.
   const [inspectFrom, setInspectFrom] = useState<string | null>(null);
@@ -466,6 +469,34 @@ export function AssetManager({
   });
 
   listPaksRef.current = listPaks;
+
+  /** Takes a package back out of the selected mod, so the game's own copy loads again. */
+  async function revertEntry(path: string) {
+    if (!selectedPak) return;
+    try {
+      const outcome = await invoke<"reverted" | "removed_mod" | "not_held">("revert_mod_asset", {
+        container: selectedPak,
+        entry: path,
+      });
+      const mod = selectedPak.split(/[\\/]/).pop() ?? selectedPak;
+      showNotice(
+        outcome === "removed_mod"
+          ? `${path} was all ${mod} carried, so the mod is deleted`
+          : outcome === "reverted"
+            ? `${mod} no longer carries ${path}`
+            : `${mod} does not carry ${path}`,
+        outcome === "not_held" ? "err" : "ok"
+      );
+      pakContentsCacheRef.current.delete(selectedPak);
+      emitModsChanged({
+        modsFolder: selectedPak.replace(/[\\/][^\\/]+$/, ""),
+        source: "AssetManager",
+      });
+      await listPaks();
+    } catch (e: unknown) {
+      showNotice(String(e), "err");
+    }
+  }
 
   async function listPaks(silent = false) {
     if (!silent) {
@@ -2036,6 +2067,12 @@ export function AssetManager({
                             Inspect Contents
                           </ContextMenuItem>
                         )}
+                        {!selectedIsVanilla && /\.(uasset|umap)$/i.test(entry.path) && (
+                          <ContextMenuItem destructive onSelect={() => setRevertPrompt(entry.path)}>
+                            <RotateCcw />
+                            Revert to the Game's Copy
+                          </ContextMenuItem>
+                        )}
                         <ContextMenuItem
                           onSelect={() => {
                             if (showExtractSelected) {
@@ -2334,12 +2371,45 @@ export function AssetManager({
         />
       )}
 
+      <AlertDialog
+        open={revertPrompt !== null}
+        onOpenChange={(open) => !open && setRevertPrompt(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Revert to the game's copy?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Takes <span className="font-mono">{revertPrompt}</span> out of{" "}
+              {selectedPak.split(/[\\/]/).pop()}, so the game loads its own copy again. The mod
+              keeps everything else it carries; if this is all it carries, the mod is deleted.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className={buttonVariants({ variant: "destructive" })}
+              onClick={() => {
+                const path = revertPrompt;
+                setRevertPrompt(null);
+                if (path) void revertEntry(path);
+              }}
+            >
+              Revert
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       {overviewOpen && selectedPak && (
         <ModReportDialog
           key={selectedPak}
           gamePath={gamePath}
           container={selectedPak}
           onClose={() => setOverviewOpen(false)}
+          onRevert={(path) => {
+            setOverviewOpen(false);
+            setRevertPrompt(path);
+          }}
           onOpenHit={(hit: SearchHit) => {
             setOverviewOpen(false);
             setInspectFrom(null);

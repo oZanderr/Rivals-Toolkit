@@ -168,6 +168,7 @@ pub fn run() {
             asset_view::inspect_asset,
             asset_view::get_mod_report,
             asset_view::mod_copy_of,
+            asset_view::revert_mod_asset,
             asset_view::search_mod,
             asset_view::get_mappings_status,
             asset_view::set_mappings_path,

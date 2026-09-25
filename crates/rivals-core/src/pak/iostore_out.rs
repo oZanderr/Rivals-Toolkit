@@ -70,6 +70,8 @@ pub struct IoStoreReport {
     pub carried_localized: usize,
     /// Package redirects replayed into the new header.
     pub carried_redirects: usize,
+    /// Packages left out of the rewrite on purpose.
+    pub removed: usize,
 }
 
 /// Removes a staging directory when it goes out of scope. Whatever owns this decides how long the
@@ -149,6 +151,31 @@ impl HeaderCarry {
             redirects: header
                 .package_redirects()
                 .map(|(name, id)| (name.into_owned(), id))
+                .collect(),
+        }
+    }
+
+    /// The same, without anything that names one of `dropped`.
+    pub fn without(&self, dropped: &HashSet<FPackageId>) -> Self {
+        let kept = |name: &str| !dropped.contains(&FPackageId::from_name(name));
+        Self {
+            shader_map_hashes: self
+                .shader_map_hashes
+                .iter()
+                .filter(|(id, _)| !dropped.contains(id))
+                .map(|(id, hashes)| (*id, hashes.clone()))
+                .collect(),
+            localized: self
+                .localized
+                .iter()
+                .filter(|name| kept(name))
+                .cloned()
+                .collect(),
+            redirects: self
+                .redirects
+                .iter()
+                .filter(|(name, target)| kept(name) && !dropped.contains(target))
+                .cloned()
                 .collect(),
         }
     }
@@ -270,7 +297,28 @@ pub fn write_batch_into_iostore(
 pub fn stage_batch_into_iostore(
     utoc: &Path,
     count: usize,
+    produce: impl FnMut(usize) -> Option<PackageBytes>,
+    options: &IoStoreOptions,
+) -> Result<Option<StagedContainer>, String> {
+    stage_container(utoc, count, produce, &HashSet::new(), options)
+}
+
+/// Rewrites the container without the packages in `dropped`, keeping everything else it holds.
+pub fn remove_from_iostore(
+    utoc: &Path,
+    dropped: &HashSet<FPackageId>,
+    options: &IoStoreOptions,
+) -> Result<IoStoreReport, String> {
+    stage_container(utoc, 0, |_| None, dropped, options)?
+        .ok_or_else(|| "nothing to remove".to_string())?
+        .commit()
+}
+
+fn stage_container(
+    utoc: &Path,
+    count: usize,
     mut produce: impl FnMut(usize) -> Option<PackageBytes>,
+    dropped: &HashSet<FPackageId>,
     options: &IoStoreOptions,
 ) -> Result<Option<StagedContainer>, String> {
     let stem = utoc
@@ -300,6 +348,7 @@ pub fn stage_batch_into_iostore(
         written: 0,
         carried_localized: 0,
         carried_redirects: 0,
+        removed: 0,
     };
     let existing = utoc
         .is_file()
@@ -337,7 +386,7 @@ pub fn stage_batch_into_iostore(
         writer = writer.with_encryption(profile::obfuscation_key()?);
     }
     if let Some(store) = &existing {
-        let carry = HeaderCarry::from_store(&**store);
+        let carry = HeaderCarry::from_store(&**store).without(dropped);
         carry.replay(&mut writer)?;
         report.carried_localized = carry.localized.len();
         report.carried_redirects = carry.redirects.len();
@@ -403,7 +452,7 @@ pub fn stage_batch_into_iostore(
             .map_err(|e| e.to_string())?;
         report.written += 1;
     }
-    if report.written == 0 {
+    if report.written == 0 && dropped.is_empty() {
         return Ok(None);
     }
 
@@ -411,6 +460,14 @@ pub fn stage_batch_into_iostore(
         for chunk in store.chunks_all() {
             let id = chunk.id().with_version(ENGINE.toc_version());
             if id.get_chunk_type() == EIoChunkType::ContainerHeader || written.contains(&id) {
+                continue;
+            }
+            if PACKAGE_CHUNKS.contains(&id.get_chunk_type())
+                && dropped.contains(&id.get_package_id())
+            {
+                if id.get_chunk_type() == EIoChunkType::ExportBundleData {
+                    report.removed += 1;
+                }
                 continue;
             }
             let path = chunk.path();
@@ -671,6 +728,38 @@ mod tests {
         };
         carry.restore_shader_maps(&mut converted);
         assert_eq!(converted.store_entry().shader_map_hashes, listed);
+    }
+
+    /// A package taken out of a container takes its header declarations with it, and leaves the
+    /// others' alone.
+    #[test]
+    fn a_carry_without_a_package_drops_what_names_it() {
+        let gone = FPackageId::from_name("/Game/Gone");
+        let carry = HeaderCarry {
+            shader_map_hashes: HashMap::from([
+                (gone, vec![FSHAHash::default()]),
+                (
+                    FPackageId::from_name("/Game/Kept"),
+                    vec![FSHAHash::default()],
+                ),
+            ]),
+            localized: vec!["/Game/Gone".into(), "/Game/Kept".into()],
+            redirects: vec![
+                ("/Game/Old".into(), gone),
+                ("/Game/Gone".into(), FPackageId::from_name("/Game/Kept")),
+                ("/Game/Older".into(), FPackageId::from_name("/Game/Kept")),
+            ],
+        };
+        let kept = carry.without(&HashSet::from([gone]));
+        assert_eq!(kept.localized, vec!["/Game/Kept".to_string()]);
+        assert_eq!(
+            kept.redirects,
+            vec![(
+                "/Game/Older".to_string(),
+                FPackageId::from_name("/Game/Kept")
+            )]
+        );
+        assert_eq!(kept.shader_map_hashes.len(), 1);
     }
 
     /// A rewrite carries the header tables across. Without it a localized mod would come out with

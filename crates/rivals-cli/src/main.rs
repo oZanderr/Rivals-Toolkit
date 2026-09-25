@@ -127,6 +127,9 @@ enum AssetCmd {
     Import(ImportArgs),
     /// Remove exports from a package, subobjects included, and write the result into a mod pak.
     RemoveExport(RemoveExportArgs),
+    /// Take one asset back out of a mod so the game's own copy loads again. A mod left holding
+    /// nothing is deleted.
+    Revert(RevertArgs),
     /// Drop every value an export stores so it inherits its class defaults, and write the result
     /// into a mod pak.
     ResetExport(ResetExportArgs),
@@ -361,6 +364,17 @@ struct ImportArgs {
     /// Overwrite an edited copy of this asset that the mod pak already holds.
     #[arg(long)]
     replace: bool,
+}
+
+#[derive(Args)]
+struct RevertArgs {
+    #[command(flatten)]
+    asset: AssetArgs,
+
+    /// Mod to take the asset out of. Defaults to the name the desktop app last saved into, then
+    /// to `AssetEdits`.
+    #[arg(long, value_name = "NAME")]
+    mod_name: Option<String>,
 }
 
 #[derive(Args)]
@@ -932,6 +946,7 @@ fn run(cli: &Cli) -> Result<(), String> {
         Command::Asset(AssetCmd::Sweep(a)) => asset_sweep(cli, &app, a),
         Command::Asset(AssetCmd::Import(a)) => asset_import(cli, &app, a),
         Command::Asset(AssetCmd::RemoveExport(a)) => asset_remove_export(cli, &app, a),
+        Command::Asset(AssetCmd::Revert(a)) => asset_revert(cli, &app, a),
         Command::Asset(AssetCmd::ResetExport(a)) => asset_reset_export(cli, &app, a),
         Command::Asset(AssetCmd::Row(a)) => asset_row(cli, &app, a),
         Command::Asset(AssetCmd::Strings(a)) => asset_strings(cli, &app, a),
@@ -2432,6 +2447,50 @@ fn mod_name_of<'a>(app: &'a settings::AppSettings, explicit: Option<&'a str>) ->
     explicit
         .or(app.asset_mod_name.as_deref())
         .unwrap_or(DEFAULT_MOD_NAME)
+}
+
+fn asset_revert(cli: &Cli, app: &settings::AppSettings, args: &RevertArgs) -> Result<(), String> {
+    let root = resolve::game_root(cli.game_root.as_deref(), app)?;
+    let mod_name = args
+        .mod_name
+        .as_deref()
+        .or(app.asset_mod_name.as_deref())
+        .unwrap_or(DEFAULT_MOD_NAME);
+    let request = asset_request(cli, app, &args.asset, &root);
+    let entry = rivals_core::asset_edit::save_entry(&rivals_core::asset_edit::AssetEditRequest {
+        game_root: &root,
+        container: request.container,
+        entry: request.entry,
+        kind: if args.asset.file.is_some() {
+            rivals_core::asset::AssetSource::Loose
+        } else {
+            rivals_core::asset::AssetSource::Utoc
+        },
+        mod_name,
+        changes: Default::default(),
+    })?;
+    let pak = rivals_core::asset_edit::mod_pak(&root, mod_name)?;
+    if !cli.force && rivals_core::game_status::should_block_for_game() {
+        return Err(rivals_core::game_status::game_running_error());
+    }
+    let outcome = rivals_core::asset_edit::revert_asset(&pak, &entry, &Default::default())?;
+    let name = pak.file_name().unwrap_or_default().to_string_lossy();
+    let message = match outcome {
+        rivals_core::asset_edit::RevertOutcome::Reverted => {
+            format!("{name} no longer carries {entry}")
+        }
+        rivals_core::asset_edit::RevertOutcome::RemovedMod => {
+            format!("{entry} was all {name} carried, so the mod is deleted")
+        }
+        rivals_core::asset_edit::RevertOutcome::NotHeld => {
+            return Err(format!("{name} does not carry {entry}"));
+        }
+    };
+    emit(
+        cli,
+        &serde_json::json!({ "outcome": outcome, "entry": entry, "mod": name }),
+        || outln!("{message}"),
+    )
 }
 
 fn asset_remove_export(

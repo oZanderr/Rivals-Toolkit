@@ -2,6 +2,34 @@
 
 use std::path::{Path, PathBuf};
 
+/// Delete a mod and its companion `.ucas`/`.utoc` files, enabled or not.
+pub fn delete_mod(dir: &Path, full_name: &str) -> Result<(), String> {
+    let stem = if let Some(s) = full_name.strip_suffix(".pak.disabled") {
+        s
+    } else if let Some(s) = full_name.strip_suffix(".pak") {
+        s
+    } else {
+        return Err(format!("Unexpected mod filename: {full_name}"));
+    };
+
+    let candidates = [
+        full_name.to_string(),
+        format!("{stem}.ucas"),
+        format!("{stem}.utoc"),
+        format!("{stem}.ucas.disabled"),
+        format!("{stem}.utoc.disabled"),
+    ];
+
+    for name in &candidates {
+        let path = dir.join(name);
+        if path.exists() {
+            std::fs::remove_file(&path).map_err(|e| format!("Failed to delete {name}: {e}"))?;
+        }
+    }
+
+    Ok(())
+}
+
 /// Collect relative paths of mod-related files (.pak, .ucas, .utoc, and their
 /// `.disabled` variants) under the given root directory. When `recursive` is
 /// false, only direct children of `root` are scanned (matches UE's native

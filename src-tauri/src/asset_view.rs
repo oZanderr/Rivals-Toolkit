@@ -429,6 +429,27 @@ fn save_result(outcome: asset_edit::SaveOutcome) -> SaveResult {
     }
 }
 
+/// Takes one package back out of the mod `container` names, by its `.pak` or its `.utoc`, so the
+/// game's own copy loads again. A mod left holding nothing is deleted.
+#[tauri::command]
+pub(crate) async fn revert_mod_asset(
+    container: String,
+    entry: String,
+) -> Result<asset_edit::RevertOutcome, String> {
+    if crate::game_status::should_block_for_game() {
+        return Err(crate::game_status::game_running_error());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let pak = std::path::Path::new(&container).with_extension("pak");
+        let utoc = pak.with_extension("utoc");
+        let outcome = asset_edit::revert_asset(&pak, &entry, &Default::default())?;
+        crate::pak::invalidate_list_caches(&[&pak, &utoc]);
+        Ok(outcome)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// The mod's own edited copy of the inspected asset, when the mod already carries one, so the
 /// inspector can offer to open it and have edits build on it.
 #[tauri::command]

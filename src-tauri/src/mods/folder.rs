@@ -132,32 +132,7 @@ pub(crate) fn delete_mods(mods_folder: &str, names: &[String]) -> BulkOpResult {
 
 /// Delete a mod and its companion `.ucas`/`.utoc` files.
 pub(crate) fn delete_mod(mods_folder: &str, full_name: &str) -> Result<(), String> {
-    let dir = Path::new(mods_folder);
-
-    let stem = if let Some(s) = full_name.strip_suffix(".pak.disabled") {
-        s
-    } else if let Some(s) = full_name.strip_suffix(".pak") {
-        s
-    } else {
-        return Err(format!("Unexpected mod filename: {full_name}"));
-    };
-
-    let candidates = [
-        full_name.to_string(),
-        format!("{stem}.ucas"),
-        format!("{stem}.utoc"),
-        format!("{stem}.ucas.disabled"),
-        format!("{stem}.utoc.disabled"),
-    ];
-
-    for name in &candidates {
-        let path = dir.join(name);
-        if path.exists() {
-            std::fs::remove_file(&path).map_err(|e| format!("Failed to delete {name}: {e}"))?;
-        }
-    }
-
-    Ok(())
+    rivals_core::mods::delete_mod(Path::new(mods_folder), full_name)
 }
 
 /// Rename a mod and its companion `.ucas`/`.utoc` files.

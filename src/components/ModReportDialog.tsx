@@ -55,6 +55,8 @@ interface Props {
   /** The selected container's `.pak`; its `.utoc` is what gets read. */
   container: string;
   onClose: () => void;
+  /** Asks to take a package back out of the mod. */
+  onRevert?: (path: string) => void;
   /** Opens a search hit in the inspector, at its statement when it has one. */
   onOpenHit: (hit: SearchHit) => void;
 }
@@ -83,7 +85,7 @@ const SECTIONS: { key: keyof ModReport; title: string; hint: string }[] = [
 ];
 
 /** Mount with `key={container}` so each mod starts from an empty report. */
-export function ModReportDialog({ gamePath, container, onClose, onOpenHit }: Props) {
+export function ModReportDialog({ gamePath, container, onClose, onRevert, onOpenHit }: Props) {
   const modName = container.split(/[\\/]/).pop() ?? container;
   const [report, setReport] = useState<ModReport | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -168,8 +170,13 @@ export function ModReportDialog({ gamePath, container, onClose, onOpenHit }: Pro
               <PackageList
                 title={`Replaces game assets (${overrides.length})`}
                 packages={overrides}
+                action={onRevert && { label: "Revert", run: onRevert }}
               />
-              <PackageList title={`Adds (${added.length})`} packages={added} />
+              <PackageList
+                title={`Adds (${added.length})`}
+                packages={added}
+                action={onRevert && { label: "Remove", run: onRevert }}
+              />
               {SECTIONS.map(({ key, title, hint }) => {
                 const section = report[key] as ByPackage;
                 const entries = Object.entries(section);
@@ -255,7 +262,15 @@ function SearchResults({
   );
 }
 
-function PackageList({ title, packages }: { title: string; packages: PackageReport[] }) {
+function PackageList({
+  title,
+  packages,
+  action,
+}: {
+  title: string;
+  packages: PackageReport[];
+  action?: { label: string; run: (path: string) => void };
+}) {
   if (packages.length === 0) return null;
   return (
     <section>
@@ -274,6 +289,16 @@ function PackageList({ title, packages }: { title: string; packages: PackageRepo
           <span className="truncate font-mono text-[11px]" title={p.path}>
             {shortPath(p.path)}
           </span>
+          {action && (
+            <Button
+              size="sm"
+              variant="ghost"
+              className="ml-auto h-6 shrink-0 px-2 text-[11px]"
+              onClick={() => action.run(p.path)}
+            >
+              {action.label}
+            </Button>
+          )}
         </div>
       ))}
     </section>
