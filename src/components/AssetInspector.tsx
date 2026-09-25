@@ -83,6 +83,7 @@ import {
   type EditSession,
   type EditTarget,
   type Structural,
+  withWarnings,
 } from "@/hooks/useAssetEdits";
 import { useExportClipboard, type ExportClipboard } from "@/hooks/useExportClipboard";
 import { useSaveHotkeys } from "@/hooks/useSaveHotkeys";
@@ -6074,28 +6075,32 @@ export default function AssetInspector({
       const source = clipboard.held;
       if (!source) return;
       setAsk(null);
-      invoke<{ outcome: string; message?: string; pak: string }>("save_export_copy", {
-        gameRoot: gamePath,
-        container,
-        entry,
-        fromContainer: source.container,
-        fromEntry: source.entry,
-        export: source.export,
-        intoOuter: outer,
-        name,
-        modName: edits.modName.trim(),
-        replace: false,
-        target: edits.saveTarget,
-      })
+      invoke<{ outcome: string; message?: string; pak: string; warnings?: string[] }>(
+        "save_export_copy",
+        {
+          gameRoot: gamePath,
+          container,
+          entry,
+          fromContainer: source.container,
+          fromEntry: source.entry,
+          export: source.export,
+          intoOuter: outer,
+          name,
+          modName: edits.modName.trim(),
+          replace: false,
+          layer: edits.onModCopy,
+          target: edits.saveTarget,
+        }
+      )
         .then((result) => {
           if (result.outcome === "holds_copy") {
             edits.report(
-              `${result.pak} already holds an edited copy of this asset. Save an edit with Replace first.`,
+              `${result.pak} already holds an edited copy of this asset. Open that copy and paste there.`,
               "err"
             );
             return;
           }
-          edits.report(result.message ?? "Pasted", "ok");
+          edits.report(withWarnings(result.message ?? "Pasted", result.warnings), "ok");
         })
         .catch((e: unknown) => edits.report(String(e), "err"));
     },
@@ -6200,11 +6205,6 @@ export default function AssetInspector({
     : edits.dirty
       ? "Save or discard your edits first."
       : null;
-  // Whether the pending replace targets the pak the inspector is already reading from, in which
-  // case the copy is updated in place rather than rebuilt from the original.
-  const replacingOwnCopy =
-    edits.pendingReplace !== null &&
-    container.toLowerCase().endsWith(edits.pendingReplace.pak.toLowerCase());
 
   // A DataTable reads best as a grid, but the rows are still just properties, so the tree and
   // JSON views work on the same data rather than being a separate code path.
@@ -6369,6 +6369,24 @@ export default function AssetInspector({
 
         {/* Outside the loaded branch on purpose: a save re-reads the asset, and the notice has to
             outlive that. */}
+        {edits.modCopy && !edits.onModCopy && onOpenCopy && (
+          <div className="flex shrink-0 items-center gap-2 border-b border-border bg-warn/10 px-3 py-1.5 text-[11px]">
+            <AlertTriangle size={13} className="shrink-0 text-warn" />
+            <span className="min-w-0 truncate">
+              {previewContainerFilename(edits.modName, edits.saveTarget)} already holds an edited
+              copy of this asset. Edits made here would start over from this one.
+            </span>
+            <Button
+              size="sm"
+              variant="outline"
+              className="ml-auto h-6 shrink-0"
+              onClick={() => edits.modCopy && onOpenCopy(edits.modCopy)}
+            >
+              Open the edited copy
+            </Button>
+          </div>
+        )}
+
         {(edits.dirty || edits.notice) && (
           <EditBar
             edits={edits}
@@ -6657,28 +6675,36 @@ export default function AssetInspector({
           <AlertDialogContent>
             <AlertDialogHeader>
               <AlertDialogTitle>
-                {replacingOwnCopy ? "Update" : "Replace"} the edited copy in{" "}
-                {edits.pendingReplace?.pak}?
+                {edits.pendingReplace?.pak} already holds an edited copy
               </AlertDialogTitle>
               <AlertDialogDescription>
-                {replacingOwnCopy
-                  ? `${edits.pendingReplace?.pak} is the copy this inspector is reading. Saving updates it in place, keeping the edits it already holds.`
-                  : `${edits.pendingReplace?.pak} already contains ${fileName}. Saving replaces it with the original asset plus ${
-                      edits.pendingReplace?.structural
-                        ? "this change"
-                        : edits.count === 1
-                          ? "this change"
-                          : `these ${edits.count} changes`
-                    }; edits saved there earlier are not kept.`}
+                {`To build on the edits saved there, open that copy and make ${
+                  edits.count === 1 ? "this change" : "these changes"
+                } in it; unsaved changes here point into this copy's bytes and do not carry over. Starting over writes ${fileName} as it is here plus ${
+                  edits.pendingReplace?.structural || edits.count === 1
+                    ? "this change"
+                    : `these ${edits.count} changes`
+                }, and the edits saved there earlier are lost.`}
               </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>
               <AlertDialogCancel>Keep it</AlertDialogCancel>
+              {edits.modCopy && onOpenCopy && (
+                <AlertDialogAction
+                  onClick={() => {
+                    const copy = edits.modCopy;
+                    edits.cancelReplace();
+                    if (copy) onOpenCopy(copy);
+                  }}
+                >
+                  Open the edited copy
+                </AlertDialogAction>
+              )}
               <AlertDialogAction
                 onClick={() => void edits.save({ replace: true })}
                 className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
               >
-                {replacingOwnCopy ? "Update" : "Replace"}
+                Start over
               </AlertDialogAction>
             </AlertDialogFooter>
           </AlertDialogContent>

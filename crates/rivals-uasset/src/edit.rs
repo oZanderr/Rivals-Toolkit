@@ -187,6 +187,24 @@ pub struct PackageEdits {
 }
 
 impl PackageEdits {
+    /// Adds another list's edits to this one, for edits written against the same package that are
+    /// to land in one save.
+    pub fn merge(&mut self, other: PackageEdits) {
+        self.values.extend(other.values);
+        self.imports.extend(other.imports);
+        self.exports.extend(other.exports);
+        self.rows.extend(other.rows);
+        self.strings.extend(other.strings);
+        self.keys.extend(other.keys);
+        self.bulk.extend(other.bulk);
+        self.payloads.extend(other.payloads);
+        self.scripts.extend(other.scripts);
+        self.remove_exports.extend(other.remove_exports);
+        self.reset_exports.extend(other.reset_exports);
+        self.duplicate_exports.extend(other.duplicate_exports);
+        self.dependencies.extend(other.dependencies);
+    }
+
     /// Whether this asks for nothing at all, so a caller can refuse before reading the package.
     pub fn is_empty(&self) -> bool {
         self.values.is_empty()

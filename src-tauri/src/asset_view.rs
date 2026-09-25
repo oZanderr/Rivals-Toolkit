@@ -407,10 +407,59 @@ pub(crate) enum SaveResult {
     Written {
         message: String,
         pak: String,
+        warnings: Vec<String>,
     },
     HoldsCopy {
         pak: String,
     },
+}
+
+fn save_result(outcome: asset_edit::SaveOutcome) -> SaveResult {
+    match outcome {
+        asset_edit::SaveOutcome::Written {
+            message,
+            pak,
+            warnings,
+        } => SaveResult::Written {
+            message,
+            pak: pak.to_string_lossy().into_owned(),
+            warnings,
+        },
+        asset_edit::SaveOutcome::HoldsCopy { pak } => SaveResult::HoldsCopy { pak },
+    }
+}
+
+/// The mod's own edited copy of the inspected asset, when the mod already carries one, so the
+/// inspector can offer to open it and have edits build on it.
+#[tauri::command]
+pub(crate) async fn mod_copy_of(
+    state: State<'_, SettingsState>,
+    game_root: String,
+    container: String,
+    entry: String,
+    mod_name: String,
+    target: Option<asset_edit::SaveTarget>,
+) -> Result<Option<String>, String> {
+    let target = target.or_else(|| state.lock().ok().and_then(|s| s.asset_save_target));
+    tauri::async_runtime::spawn_blocking(move || {
+        if mod_name.trim().is_empty() {
+            return Ok(None);
+        }
+        let copy = asset_edit::mod_copy_of(
+            &AssetEditRequest {
+                game_root: &game_root,
+                container: &container,
+                entry: &entry,
+                kind: source_of(&container),
+                mod_name: &mod_name,
+                changes: Default::default(),
+            },
+            target.unwrap_or_default(),
+        )?;
+        Ok(copy.map(|path| path.to_string_lossy().into_owned()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Writes changed values into a mod pak that overrides the asset. Nothing is written unless the
@@ -424,6 +473,7 @@ pub(crate) async fn save_asset_edits(
     entry: String,
     mod_name: String,
     replace: Option<bool>,
+    layer: Option<bool>,
     target: Option<asset_edit::SaveTarget>,
     edits: asset_edit::json::EditList,
 ) -> Result<SaveResult, String> {
@@ -451,17 +501,12 @@ pub(crate) async fn save_asset_edits(
             schema.as_deref(),
             &asset_edit::SaveOptions {
                 replace: replace.unwrap_or(false),
+                layer: layer.unwrap_or(false),
                 target: target.unwrap_or_default(),
                 ..Default::default()
             },
         )?;
-        Ok(match outcome {
-            asset_edit::SaveOutcome::Written { message, pak } => SaveResult::Written {
-                message,
-                pak: pak.to_string_lossy().into_owned(),
-            },
-            asset_edit::SaveOutcome::HoldsCopy { pak } => SaveResult::HoldsCopy { pak },
-        })
+        Ok(save_result(outcome))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -672,6 +717,7 @@ pub(crate) async fn save_export_copy(
     into_level: Option<u32>,
     mod_name: String,
     replace: Option<bool>,
+    layer: Option<bool>,
     target: Option<asset_edit::SaveTarget>,
 ) -> Result<SaveResult, String> {
     if crate::game_status::should_block_for_game() {
@@ -706,17 +752,12 @@ pub(crate) async fn save_export_copy(
             schema.as_deref(),
             &asset_edit::SaveOptions {
                 replace: replace.unwrap_or(false),
+                layer: layer.unwrap_or(false),
                 target: target.unwrap_or_default(),
                 ..Default::default()
             },
         )?;
-        Ok(match outcome {
-            asset_edit::SaveOutcome::Written { message, pak } => SaveResult::Written {
-                message,
-                pak: pak.to_string_lossy().into_owned(),
-            },
-            asset_edit::SaveOutcome::HoldsCopy { pak } => SaveResult::HoldsCopy { pak },
-        })
+        Ok(save_result(outcome))
     })
     .await
     .map_err(|e| e.to_string())?

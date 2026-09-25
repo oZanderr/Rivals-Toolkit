@@ -136,6 +136,10 @@ pub struct EditFile {
     pub target: Option<super::SaveTarget>,
     #[serde(default)]
     pub replace: bool,
+    /// Build on the mod's own copy when it already holds one. The edits must then have been made
+    /// against that copy.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub layer: bool,
     /// What the tool that wrote this file could not express, kept beside the edits rather than
     /// lost. Nothing reads them back; they are for the person holding the file.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

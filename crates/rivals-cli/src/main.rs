@@ -70,6 +70,11 @@ struct Cli {
     #[arg(long, global = true, value_enum, value_name = "KIND")]
     target: Option<TargetArg>,
 
+    /// Build on the mod's own copy of an asset where it already has one, instead of reading the
+    /// source again. Edits must then be made against that copy, as `asset dump` of the mod shows it.
+    #[arg(long, global = true)]
+    layer: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -254,12 +259,6 @@ struct SweepArgs {
     /// `Name=Value`: every property with that name, at any depth, takes that value. Repeatable.
     #[arg(long = "set", value_name = "NAME=VALUE", required = true)]
     sets: Vec<String>,
-
-    /// Build on the mod's own copies where it already has them, instead of reading the source
-    /// container again. Without it a second sweep over the same packages replaces what the first
-    /// one wrote.
-    #[arg(long)]
-    layer: bool,
 
     /// Read and patch everything, write nothing.
     #[arg(long)]
@@ -1657,6 +1656,7 @@ fn asset_request<'a>(
             .map(Into::into)
             .or(app.asset_save_target)
             .unwrap_or_default(),
+        layer: cli.layer,
     }
 }
 
@@ -2241,6 +2241,7 @@ fn asset_apply(
         &asset::ApplyOverrides {
             mod_name: args.mod_name.as_deref().or(app.asset_mod_name.as_deref()),
             replace: args.replace,
+            layer: cli.layer,
             dry_run: args.dry_run,
             target: cli.target.map(Into::into).or(app.asset_save_target),
         },
@@ -2334,7 +2335,7 @@ fn asset_sweep(cli: &Cli, app: &settings::AppSettings, args: &SweepArgs) -> Resu
                 .unwrap_or(DEFAULT_MOD_NAME),
             sets,
             limit: args.limit,
-            layer: args.layer,
+            layer: cli.layer,
             dry_run: args.dry_run,
         },
     )?;

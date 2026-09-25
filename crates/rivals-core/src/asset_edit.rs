@@ -453,8 +453,15 @@ pub fn read_bulk(request: &AssetEditRequest<'_>, resource: u32) -> Result<Vec<u8
 /// has to ask for that explicitly.
 #[derive(Debug)]
 pub enum SaveOutcome {
-    Written { message: String, pak: PathBuf },
-    HoldsCopy { pak: String },
+    Written {
+        message: String,
+        pak: PathBuf,
+        /// Other installed mods that carry the same asset, and which copy the game loads.
+        warnings: Vec<String>,
+    },
+    HoldsCopy {
+        pak: String,
+    },
 }
 
 /// Which form a save takes. The game resolves packages through its IoStore store, so a mod holding
@@ -471,7 +478,10 @@ pub enum SaveTarget {
 
 #[derive(Default)]
 pub struct SaveOptions {
+    /// Start again from the source, dropping whatever the mod's copy already carries.
     pub replace: bool,
+    /// Build on the mod's copy when it already carries the asset: the edits were made against it.
+    pub layer: bool,
     pub target: SaveTarget,
     pub iostore: crate::pak::iostore_out::IoStoreOptions,
 }
@@ -493,10 +503,24 @@ pub fn save_copy(
         changes: PackageEdits::default(),
     };
     let entry = save_entry(&into)?;
-    if let Some(outcome) = destination_check(&into, &entry, options)? {
+    let held = destination_check(&into, &entry, options)?;
+    if let Some(outcome) = holds_copy(&into, held, options)? {
         return Ok(outcome);
     }
-    let (patched, loaded) = preview_copy(request, mappings)?;
+    let (patched, loaded) = match layered_source(&into, held, options)? {
+        Some((container, kind)) => preview_copy(
+            &CopyRequest {
+                container: &container,
+                entry: &entry,
+                kind,
+                sources: request.sources.clone(),
+                copies: request.copies.clone(),
+                ..*request
+            },
+            mappings,
+        )?,
+        None => preview_copy(request, mappings)?,
+    };
     write_patched(&into, &entry, &patched, &loaded, options)
 }
 
@@ -506,11 +530,216 @@ pub fn save_edits(
     options: &SaveOptions,
 ) -> Result<SaveOutcome, String> {
     let entry = save_entry(request)?;
-    if let Some(outcome) = destination_check(request, &entry, options)? {
+    let held = destination_check(request, &entry, options)?;
+    if let Some(outcome) = holds_copy(request, held, options)? {
         return Ok(outcome);
     }
-    let (patched, loaded) = preview_edits(request, mappings)?;
+    let (patched, loaded) = match layered_source(request, held, options)? {
+        Some((container, kind)) => preview_edits(
+            &AssetEditRequest {
+                container: &container,
+                entry: &entry,
+                kind,
+                changes: request.changes.clone(),
+                ..*request
+            },
+            mappings,
+        )?,
+        None => preview_edits(request, mappings)?,
+    };
     write_patched(request, &entry, &patched, &loaded, options)
+}
+
+/// Saves several packages into one mod with a single container rewrite, rather than one per
+/// package. Each request is patched and verified on its own and reports its own outcome, so one
+/// that fails does not stop the rest. Anything but an IoStore save into one mod is written one
+/// request at a time.
+pub fn save_batch(
+    requests: &[AssetEditRequest<'_>],
+    mappings: Option<&Mappings>,
+    options: &SaveOptions,
+) -> Vec<Result<SaveOutcome, String>> {
+    let one_mod = requests
+        .windows(2)
+        .all(|pair| pair[0].mod_name == pair[1].mod_name && pair[0].game_root == pair[1].game_root);
+    if options.target != SaveTarget::IoStore || !one_mod || requests.len() < 2 {
+        return requests
+            .iter()
+            .map(|request| save_edits(request, mappings, options))
+            .collect();
+    }
+    let mut outcomes: Vec<Option<Result<SaveOutcome, String>>> =
+        requests.iter().map(|_| None).collect();
+    let mut staged: Vec<(usize, String, usize, crate::pak::iostore_out::PackageBytes)> = Vec::new();
+    for (index, request) in requests.iter().enumerate() {
+        match stage_one(request, mappings, options) {
+            Ok(Staged::Held(outcome)) => outcomes[index] = Some(Ok(outcome)),
+            Ok(Staged::Ready {
+                entry,
+                changes,
+                bytes,
+            }) => staged.push((index, entry, changes, *bytes)),
+            Err(reason) => outcomes[index] = Some(Err(reason)),
+        }
+    }
+    if !staged.is_empty() {
+        let written = mod_pak_path(requests[0].game_root, requests[0].mod_name).and_then(|pak| {
+            let utoc = pak.with_extension("utoc");
+            let mut bytes: Vec<Option<crate::pak::iostore_out::PackageBytes>> = staged
+                .iter_mut()
+                .map(|(_, _, _, package)| Some(std::mem::replace(package, empty_package())))
+                .collect();
+            crate::pak::containers::drop_cached_store();
+            let report = crate::pak::iostore_out::write_batch_into_iostore(
+                &utoc,
+                bytes.len(),
+                |at| bytes.get_mut(at).and_then(Option::take),
+                &options.iostore,
+            )?;
+            Ok((utoc, report))
+        });
+        for (index, entry, changes, _) in &staged {
+            let request = &requests[*index];
+            outcomes[*index] = Some(match &written {
+                Ok((utoc, report)) => Ok(SaveOutcome::Written {
+                    message: format!(
+                        "Saved {changes} change(s) to {}{}",
+                        utoc.file_name().unwrap_or_default().to_string_lossy(),
+                        placed_as(request, entry)
+                    ),
+                    warnings: other_overrides(request.game_root, entry, utoc),
+                    pak: report.utoc.clone(),
+                }),
+                Err(reason) => Err(reason.clone()),
+            });
+        }
+    }
+    outcomes
+        .into_iter()
+        .map(|outcome| outcome.unwrap_or_else(|| Err("nothing was done".to_string())))
+        .collect()
+}
+
+/// One request of a batch, patched and verified but not yet written.
+enum Staged {
+    Held(SaveOutcome),
+    Ready {
+        entry: String,
+        changes: usize,
+        bytes: Box<crate::pak::iostore_out::PackageBytes>,
+    },
+}
+
+fn stage_one(
+    request: &AssetEditRequest<'_>,
+    mappings: Option<&Mappings>,
+    options: &SaveOptions,
+) -> Result<Staged, String> {
+    let entry = save_entry(request)?;
+    let held = destination_check(request, &entry, options)?;
+    if let Some(outcome) = holds_copy(request, held, options)? {
+        return Ok(Staged::Held(outcome));
+    }
+    let (patched, loaded) = match layered_source(request, held, options)? {
+        Some((container, kind)) => preview_edits(
+            &AssetEditRequest {
+                container: &container,
+                entry: &entry,
+                kind,
+                changes: request.changes.clone(),
+                ..*request
+            },
+            mappings,
+        )?,
+        None => preview_edits(request, mappings)?,
+    };
+    let shader_map_hashes = source_shader_maps(request, &patched.asset);
+    Ok(Staged::Ready {
+        changes: patched.applied.len(),
+        bytes: Box::new(crate::pak::iostore_out::PackageBytes {
+            entry: entry.clone(),
+            asset: patched.asset,
+            exports: patched.exports,
+            bulk: patched.bulk.or(loaded.bulk_data_buffer),
+            optional_bulk: patched.optional_bulk.or(loaded.optional_bulk_data_buffer),
+            memory_mapped_bulk: loaded.memory_mapped_bulk_data_buffer,
+            shader_map_hashes,
+        }),
+        entry,
+    })
+}
+
+fn empty_package() -> crate::pak::iostore_out::PackageBytes {
+    crate::pak::iostore_out::PackageBytes {
+        entry: String::new(),
+        asset: Vec::new(),
+        exports: Vec::new(),
+        bulk: None,
+        optional_bulk: None,
+        memory_mapped_bulk: None,
+        shader_map_hashes: Vec::new(),
+    }
+}
+
+/// The mod's own copy of the asset a request names, when the mod already carries one: the
+/// container to inspect so that edits are made on top of it.
+pub fn mod_copy_of(
+    request: &AssetEditRequest<'_>,
+    target: SaveTarget,
+) -> Result<Option<PathBuf>, String> {
+    let entry = save_entry(request)?;
+    let options = SaveOptions {
+        target,
+        ..Default::default()
+    };
+    if !destination_check(request, &entry, &options)? {
+        return Ok(None);
+    }
+    let pak = mod_pak_path(request.game_root, request.mod_name)?;
+    Ok(Some(match target {
+        SaveTarget::IoStore => pak.with_extension("utoc"),
+        SaveTarget::Pak => pak,
+    }))
+}
+
+/// Stops a save that would replace the mod's own copy with the original plus the new edits,
+/// unless the caller asked to replace it or to build on it.
+fn holds_copy(
+    request: &AssetEditRequest<'_>,
+    held: bool,
+    options: &SaveOptions,
+) -> Result<Option<SaveOutcome>, String> {
+    if !held || options.replace || options.layer {
+        return Ok(None);
+    }
+    let pak = mod_pak_path(request.game_root, request.mod_name)?;
+    Ok(Some(SaveOutcome::HoldsCopy {
+        pak: pak
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned(),
+    }))
+}
+
+/// Where a layered save reads from: the mod's own copy, when it holds one. The mod's container is
+/// opened like any other, so its copy wins over the game's.
+fn layered_source(
+    request: &AssetEditRequest<'_>,
+    held: bool,
+    options: &SaveOptions,
+) -> Result<Option<(String, AssetSource)>, String> {
+    if !held || !options.layer || options.replace {
+        return Ok(None);
+    }
+    let pak = mod_pak_path(request.game_root, request.mod_name)?;
+    Ok(Some(match options.target {
+        SaveTarget::IoStore => (
+            pak.with_extension("utoc").to_string_lossy().into_owned(),
+            AssetSource::Utoc,
+        ),
+        SaveTarget::Pak => (pak.to_string_lossy().into_owned(), AssetSource::Pak),
+    }))
 }
 
 /// The path a save writes under, which is the one the game resolves the package by. A loose file
@@ -541,7 +770,7 @@ fn destination_check(
     request: &AssetEditRequest<'_>,
     entry: &str,
     options: &SaveOptions,
-) -> Result<Option<SaveOutcome>, String> {
+) -> Result<bool, String> {
     let pak = mod_pak_path(request.game_root, request.mod_name)?;
     let utoc = pak.with_extension("utoc");
     let name = pak
@@ -562,19 +791,47 @@ fn destination_check(
         }
         _ => {}
     }
-    // Checked before the patch so a declined replace does not cost a parse and a verify.
-    if !options.replace {
-        let held = match options.target {
-            SaveTarget::Pak => pak.is_file() && holds_entry(&pak, entry)?,
-            SaveTarget::IoStore => {
-                utoc.is_file() && crate::pak::iostore_out::utoc_holds_entry(&utoc, entry)?
-            }
-        };
-        if held {
-            return Ok(Some(SaveOutcome::HoldsCopy { pak: name }));
+    Ok(match options.target {
+        SaveTarget::Pak => pak.is_file() && holds_entry(&pak, entry)?,
+        SaveTarget::IoStore => {
+            utoc.is_file() && crate::pak::iostore_out::utoc_holds_entry(&utoc, entry)?
         }
-    }
-    Ok(None)
+    })
+}
+
+/// Which other installed IoStore mods carry `entry`, each said with whether its copy or the one
+/// being written is what the game loads. A plain pak cannot deliver a package, so only containers
+/// count.
+pub fn other_overrides(game_root: &str, entry: &str, own: &Path) -> Vec<String> {
+    let own_name = own
+        .with_extension("utoc")
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut holders: Vec<String> = walkdir::WalkDir::new(mods_dir(game_root))
+        .into_iter()
+        .filter_map(Result::ok)
+        .map(walkdir::DirEntry::into_path)
+        .filter(|path| path.extension().is_some_and(|ext| ext == "utoc"))
+        .filter_map(|path| {
+            let name = path.file_name()?.to_string_lossy().into_owned();
+            let other = !name.eq_ignore_ascii_case(&own_name);
+            (other && crate::pak::iostore_out::utoc_holds_entry(&path, entry).unwrap_or(false))
+                .then_some(name)
+        })
+        .collect();
+    holders.sort_by(|a, b| crate::mods::winner_order(a, b));
+    holders
+        .into_iter()
+        .map(|other| {
+            let winner = if crate::mods::winner_order(&other, &own_name).is_lt() {
+                &other
+            } else {
+                &own_name
+            };
+            format!("{other} also overrides this asset, and the game loads the copy in {winner}")
+        })
+        .collect()
 }
 
 /// The patched bundle onto disk, in whichever form the target asks for.
@@ -624,6 +881,7 @@ fn write_patched(
             patched.applied.len(),
             placed_as(request, entry)
         ),
+        warnings: other_overrides(request.game_root, entry, &pak),
         pak,
     })
 }
@@ -676,6 +934,7 @@ fn save_into_iostore(
             patched.applied.len(),
             placed_as(request, entry)
         ),
+        warnings: other_overrides(request.game_root, entry, utoc),
         pak: report.utoc,
     })
 }
@@ -2447,6 +2706,214 @@ mod game_data_tests {
         let id = retoc::FPackageId(retoc::FIoContainerId::from_name(&package).0);
         let entry = written.package_store_entry(id).expect("the mod lists it");
         assert_eq!(entry.shader_map_hashes, base);
+    }
+
+    /// The first stored int in each of the first `count` rows of the hero table, for saves that
+    /// change one cell each.
+    fn row_ints(parsed: &rivals_uasset::ParsedPackage, count: usize) -> Vec<PropertyEntry> {
+        parsed.exports[0].data_table.as_ref().expect("table").rows[..count]
+            .iter()
+            .map(|row| {
+                row.fields
+                    .iter()
+                    .find(|field| matches!(field.value, PropertyValue::Int { .. }))
+                    .expect("an int cell")
+                    .clone()
+            })
+            .collect()
+    }
+
+    fn bump(cell: &PropertyEntry, by: i64) -> ValueEdit {
+        let PropertyValue::Int { value } = cell.value else {
+            unreachable!()
+        };
+        ValueEdit {
+            offset: cell.span.expect("a span").0,
+            expect_name: cell.name.clone(),
+            expect_element: cell.element,
+            expect_kind: "int".into(),
+            op: EditOp::Set {
+                text: (value + by).to_string(),
+            },
+        }
+    }
+
+    /// Reads the mod's copy of `entry` back out of its container.
+    fn read_back(fixture: &Fixture, utoc: &Path) -> rivals_uasset::ParsedPackage {
+        let container = utoc.to_string_lossy().into_owned();
+        let loaded =
+            asset::load_bundle(&fixture.root, &container, fixture.entry, AssetSource::Utoc)
+                .expect("read the saved copy back");
+        Fixture::parse_bundle(
+            &AssetBundle {
+                asset: &loaded.asset_file_buffer,
+                exports: &loaded.exports_file_buffer,
+            },
+            &fixture.schema,
+            &PackageSource {
+                game_root: &fixture.root,
+                container: &container,
+                entry: fixture.entry,
+                kind: AssetSource::Utoc,
+            },
+        )
+    }
+
+    /// A second save stops at the copy the first left, unless it builds on it: then both edits are
+    /// in the mod, rather than the second one alone on top of the original.
+    #[test]
+    fn a_layered_save_keeps_what_the_mod_already_carries() {
+        let Some(fixture) = Fixture::open(DEFAULTS) else {
+            return;
+        };
+        let scratch = ScratchMod {
+            root: fixture.root.clone(),
+            name: "RivalsToolkitLayerProbe",
+        };
+        drop(ScratchMod {
+            root: fixture.root.clone(),
+            name: "RivalsToolkitLayerProbe",
+        });
+        let before = fixture.parse();
+        let cells = row_ints(&before, 2);
+        let request = |edit: ValueEdit| AssetEditRequest {
+            game_root: &fixture.root,
+            container: &fixture.container,
+            entry: fixture.entry,
+            kind: AssetSource::Utoc,
+            mod_name: scratch.name,
+            changes: PackageEdits {
+                values: vec![edit],
+                ..Default::default()
+            },
+        };
+        save_edits(
+            &request(bump(&cells[0], 3)),
+            Some(&fixture.schema),
+            &SaveOptions::default(),
+        )
+        .expect("first save");
+        let second = request(bump(&cells[1], 5));
+        let stopped = save_edits(&second, Some(&fixture.schema), &SaveOptions::default())
+            .expect("second save");
+        assert!(
+            matches!(stopped, SaveOutcome::HoldsCopy { .. }),
+            "{stopped:?}"
+        );
+        save_edits(
+            &second,
+            Some(&fixture.schema),
+            &SaveOptions {
+                layer: true,
+                ..Default::default()
+            },
+        )
+        .expect("layered save");
+
+        let now = row_ints(&read_back(&fixture, &scratch.container()), 2);
+        for (was, (is, by)) in cells.iter().zip(now.iter().zip([3, 5])) {
+            let (PropertyValue::Int { value: was }, PropertyValue::Int { value: is }) =
+                (&was.value, &is.value)
+            else {
+                unreachable!()
+            };
+            assert_eq!(*is, was + by, "{}", was);
+        }
+    }
+
+    /// Several packages saved into one mod go in with a single container rewrite, and a second mod
+    /// carrying one of them is named, with which copy the game loads.
+    #[test]
+    fn a_batch_writes_every_package_and_names_other_mods_holding_them() {
+        let Some(fixture) = Fixture::open(DEFAULTS) else {
+            return;
+        };
+        let Some(strings) = Fixture::open(STRINGS) else {
+            return;
+        };
+        let first = ScratchMod {
+            root: fixture.root.clone(),
+            name: "RivalsToolkitBatchProbeA",
+        };
+        let second = ScratchMod {
+            root: fixture.root.clone(),
+            name: "RivalsToolkitBatchProbeB",
+        };
+        drop(ScratchMod {
+            root: fixture.root.clone(),
+            name: "RivalsToolkitBatchProbeA",
+        });
+        drop(ScratchMod {
+            root: fixture.root.clone(),
+            name: "RivalsToolkitBatchProbeB",
+        });
+        let cell = row_ints(&fixture.parse(), 1).remove(0);
+        let text = field_where(&strings.parse(), "is a stored string", |f| {
+            stored(f) && matches!(f.value, PropertyValue::Str { .. })
+        });
+        let requests = |mod_name: &'static str| {
+            vec![
+                AssetEditRequest {
+                    game_root: &fixture.root,
+                    container: &fixture.container,
+                    entry: fixture.entry,
+                    kind: AssetSource::Utoc,
+                    mod_name,
+                    changes: PackageEdits {
+                        values: vec![bump(&cell, 1)],
+                        ..Default::default()
+                    },
+                },
+                AssetEditRequest {
+                    game_root: &strings.root,
+                    container: &strings.container,
+                    entry: strings.entry,
+                    kind: AssetSource::Utoc,
+                    mod_name,
+                    changes: PackageEdits {
+                        values: vec![edit_of(
+                            &text,
+                            EditOp::Set {
+                                text: "Probe".into(),
+                            },
+                        )],
+                        ..Default::default()
+                    },
+                },
+            ]
+        };
+        for outcome in save_batch(
+            &requests(first.name),
+            Some(&fixture.schema),
+            &SaveOptions::default(),
+        ) {
+            assert!(
+                matches!(outcome, Ok(SaveOutcome::Written { .. })),
+                "{outcome:?}"
+            );
+        }
+        let held = crate::pak::iostore_out::utoc_entries(&first.container()).expect("list");
+        for entry in [fixture.entry, strings.entry] {
+            assert!(
+                held.contains(&entry.to_lowercase()),
+                "{entry} is in the mod"
+            );
+        }
+
+        let outcomes = save_batch(
+            &requests(second.name),
+            Some(&fixture.schema),
+            &SaveOptions::default(),
+        );
+        let Some(Ok(SaveOutcome::Written { warnings, .. })) = outcomes.first() else {
+            panic!("{outcomes:?}");
+        };
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("RivalsToolkitBatchProbeA")),
+            "{warnings:?}"
+        );
     }
 
     /// An extracted package opened from disk saves under the path the game ships it at, so the mod

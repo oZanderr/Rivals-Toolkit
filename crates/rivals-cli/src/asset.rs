@@ -23,6 +23,8 @@ pub struct Request<'a> {
     pub declared: bool,
     /// What a write leaves behind. Reading commands ignore it.
     pub target: asset_edit::SaveTarget,
+    /// Build a write on the mod's own copy when it already holds one.
+    pub layer: bool,
 }
 
 fn source_of(container: &str) -> AssetSource {
@@ -434,11 +436,14 @@ fn write_edits(
         schema.as_deref(),
         &asset_edit::SaveOptions {
             replace,
+            layer: request.layer,
             target: request.target,
             ..Default::default()
         },
     )? {
-        asset_edit::SaveOutcome::Written { message, .. } => Ok(message),
+        asset_edit::SaveOutcome::Written {
+            message, warnings, ..
+        } => Ok(with_warnings(message, &warnings)),
         asset_edit::SaveOutcome::HoldsCopy { pak } => Err(format!(
             "{pak} already holds an edited copy of {}; pass --replace to overwrite it",
             request.entry
@@ -554,14 +559,16 @@ pub struct ApplyReport {
 pub struct ApplyOverrides<'a> {
     pub mod_name: Option<&'a str>,
     pub replace: bool,
+    pub layer: bool,
     /// Patch and verify every item, then write nothing.
     pub dry_run: bool,
     /// What to write, when the command line said. An item's own target wins otherwise.
     pub target: Option<asset_edit::SaveTarget>,
 }
 
-/// Applies edit files, one package each, in the order given. Every item is read, patched, verified
-/// and written on its own, so the report says exactly which ones landed.
+/// Applies edit files. Items naming the same package for the same mod are merged into one patch,
+/// since they were written against the same source, and every mod is written with one container
+/// rewrite. Each item still reports whether its package landed.
 pub fn apply(
     game_root: &str,
     items: &[(std::path::PathBuf, asset_edit::json::EditFile)],
@@ -570,46 +577,145 @@ pub fn apply(
     configured_usmap: Option<&str>,
     default_mod: &str,
 ) -> ApplyReport {
-    let mut report = ApplyReport {
-        items: Vec::with_capacity(items.len()),
-        failed: 0,
-    };
-    for (base, file) in items {
-        let mod_name = overrides
-            .mod_name
-            .or(file.mod_name.as_deref())
-            .unwrap_or(default_mod)
-            .to_string();
-        let mut item = ApplyItemReport {
+    let mut reports: Vec<ApplyItemReport> = items
+        .iter()
+        .map(|(_, file)| ApplyItemReport {
             container: file.container.clone(),
             entry: file.entry.clone(),
-            mod_name: mod_name.clone(),
+            mod_name: overrides
+                .mod_name
+                .or(file.mod_name.as_deref())
+                .unwrap_or(default_mod)
+                .to_string(),
             outcome: "failed",
             applied: Vec::new(),
             message: None,
-        };
-        match apply_one(
-            game_root,
-            base,
-            file,
-            &mod_name,
-            overrides,
-            usmap,
-            configured_usmap,
-        ) {
-            Ok((outcome, applied, message)) => {
-                item.outcome = outcome;
-                item.applied = applied;
-                item.message = message;
+        })
+        .collect();
+    let schema = mappings::resolve(usmap, configured_usmap)
+        .and_then(|path| mappings::load(&path))
+        .ok();
+
+    let mut groups: Vec<ApplyGroup> = Vec::new();
+    for (index, (base, file)) in items.iter().enumerate() {
+        match resolve_item(game_root, base, file, overrides) {
+            Ok((key, changes)) => {
+                let key = ApplyKey {
+                    mod_name: reports[index].mod_name.clone(),
+                    ..key
+                };
+                match groups.iter_mut().find(|group| group.key == key) {
+                    Some(group) => {
+                        group.changes.merge(changes);
+                        group.items.push(index);
+                    }
+                    None => groups.push(ApplyGroup {
+                        key,
+                        changes,
+                        items: vec![index],
+                    }),
+                }
             }
-            Err(reason) => {
-                report.failed += 1;
-                item.message = Some(reason);
+            Err(reason) => reports[index].message = Some(reason),
+        }
+    }
+
+    let requests: Vec<AssetEditRequest<'_>> = groups
+        .iter()
+        .map(|group| AssetEditRequest {
+            game_root,
+            container: &group.key.container,
+            entry: &group.key.entry,
+            kind: if group.key.container.is_empty() {
+                AssetSource::Loose
+            } else {
+                source_of(&group.key.container)
+            },
+            mod_name: &group.key.mod_name,
+            changes: group.changes.clone(),
+        })
+        .collect();
+    let mut outcomes: Vec<Option<Result<ApplyOutcome, String>>> =
+        groups.iter().map(|_| None).collect();
+    if overrides.dry_run {
+        for (at, request) in requests.iter().enumerate() {
+            outcomes[at] = Some(
+                asset_edit::preview_edits(request, schema.as_deref())
+                    .map(|(patched, _)| ("verified", patched.applied, None)),
+            );
+        }
+    } else {
+        // One batch per mod and way of writing, so each container is rewritten once.
+        let mut done = vec![false; groups.len()];
+        for first in 0..groups.len() {
+            if done[first] {
+                continue;
+            }
+            let members: Vec<usize> = (first..groups.len())
+                .filter(|&at| !done[at] && groups[at].key.same_save(&groups[first].key))
+                .collect();
+            let options = asset_edit::SaveOptions {
+                replace: groups[first].key.replace,
+                layer: groups[first].key.layer,
+                target: groups[first].key.target,
+                ..Default::default()
+            };
+            let batch: Vec<AssetEditRequest<'_>> = members
+                .iter()
+                .map(|&at| AssetEditRequest {
+                    changes: requests[at].changes.clone(),
+                    ..requests[at]
+                })
+                .collect();
+            let results = asset_edit::save_batch(&batch, schema.as_deref(), &options);
+            for (&at, result) in members.iter().zip(results) {
+                done[at] = true;
+                outcomes[at] = Some(result.map(|outcome| match outcome {
+                    asset_edit::SaveOutcome::Written {
+                        message, warnings, ..
+                    } => ("written", Vec::new(), Some(with_warnings(message, &warnings))),
+                    asset_edit::SaveOutcome::HoldsCopy { pak } => (
+                        "holds_copy",
+                        Vec::new(),
+                        Some(format!(
+                            "{pak} already holds an edited copy of {}; pass --layer to build on it or --replace to start over",
+                            groups[at].key.entry
+                        )),
+                    ),
+                }));
             }
         }
-        report.items.push(item);
     }
-    report
+
+    for (group, outcome) in groups.iter().zip(outcomes) {
+        let merged = group.items.len() > 1;
+        for &index in &group.items {
+            let report = &mut reports[index];
+            match &outcome {
+                Some(Ok((kind, applied, message))) => {
+                    report.outcome = kind;
+                    report.applied.clone_from(applied);
+                    report.message = match (message, merged) {
+                        (Some(message), true) => Some(format!(
+                            "{message} (merged with {} other item(s) for this package)",
+                            group.items.len() - 1
+                        )),
+                        (message, _) => message.clone(),
+                    };
+                }
+                Some(Err(reason)) => report.message = Some(reason.clone()),
+                None => report.message = Some("not attempted".to_string()),
+            }
+        }
+    }
+    let failed = reports
+        .iter()
+        .filter(|item| item.outcome == "failed")
+        .count();
+    ApplyReport {
+        items: reports,
+        failed,
+    }
 }
 
 type ApplyOutcome = (
@@ -618,55 +724,56 @@ type ApplyOutcome = (
     Option<String>,
 );
 
-fn apply_one(
+/// What makes two items land in the same patch: the same package, read the same way, written into
+/// the same mod the same way.
+#[derive(PartialEq)]
+struct ApplyKey {
+    mod_name: String,
+    container: String,
+    entry: String,
+    target: asset_edit::SaveTarget,
+    replace: bool,
+    layer: bool,
+}
+
+impl ApplyKey {
+    /// Whether two packages can share one container rewrite.
+    fn same_save(&self, other: &ApplyKey) -> bool {
+        self.mod_name == other.mod_name
+            && self.target == other.target
+            && self.replace == other.replace
+            && self.layer == other.layer
+    }
+}
+
+struct ApplyGroup {
+    key: ApplyKey,
+    changes: PackageEdits,
+    items: Vec<usize>,
+}
+
+fn resolve_item(
     game_root: &str,
     base: &Path,
     file: &asset_edit::json::EditFile,
-    mod_name: &str,
     overrides: &ApplyOverrides<'_>,
-    usmap: Option<&str>,
-    configured_usmap: Option<&str>,
-) -> Result<ApplyOutcome, String> {
+) -> Result<(ApplyKey, PackageEdits), String> {
     if file.edits.is_empty() {
         return Err("this edit file changes nothing".to_string());
     }
     let container = asset_edit::json::resolve_container(&file.container, base, game_root)?;
     let changes = file.edits.clone().resolve(base)?;
-    let request = Request {
-        game_root,
-        container: &container,
-        entry: &file.entry,
-        usmap,
-        configured_usmap,
-        declared: true,
-        target: overrides.target.or(file.target).unwrap_or_default(),
-    };
-    let schema = mappings::resolve(request.usmap, request.configured_usmap)
-        .and_then(|path| mappings::load(&path))
-        .ok();
-    let edit = edit_request(&request, mod_name, changes);
-    if overrides.dry_run {
-        let (patched, _) = asset_edit::preview_edits(&edit, schema.as_deref())?;
-        return Ok(("verified", patched.applied, None));
-    }
-    let options = asset_edit::SaveOptions {
-        replace: overrides.replace || file.replace,
-        target: request.target,
-        ..Default::default()
-    };
-    match asset_edit::save_edits(&edit, schema.as_deref(), &options)? {
-        asset_edit::SaveOutcome::Written { message, .. } => {
-            Ok(("written", Vec::new(), Some(message)))
-        }
-        asset_edit::SaveOutcome::HoldsCopy { pak } => Ok((
-            "holds_copy",
-            Vec::new(),
-            Some(format!(
-                "{pak} already holds an edited copy of {}; pass --replace to overwrite it",
-                file.entry
-            )),
-        )),
-    }
+    Ok((
+        ApplyKey {
+            mod_name: String::new(),
+            container,
+            entry: file.entry.clone(),
+            target: overrides.target.or(file.target).unwrap_or_default(),
+            replace: overrides.replace || file.replace,
+            layer: overrides.layer || file.layer,
+        },
+        changes,
+    ))
 }
 
 pub fn print_apply(report: &ApplyReport, out: &mut impl FnMut(String)) {
@@ -689,6 +796,13 @@ pub fn print_apply(report: &ApplyReport, out: &mut impl FnMut(String)) {
         report.items.len(),
         report.failed
     ));
+}
+
+/// A save's message with the other mods overriding the same asset listed under it.
+fn with_warnings(message: String, warnings: &[String]) -> String {
+    warnings
+        .iter()
+        .fold(message, |out, warning| format!("{out}\nwarning: {warning}"))
 }
 
 pub fn list(game_root: &str, container: &str, filter: Option<&str>) -> Result<Vec<String>, String> {
@@ -1064,6 +1178,7 @@ pub fn diff(
         mod_name: mod_name.map(str::to_string),
         target: Some(target),
         replace: false,
+        layer: false,
         notes: outcome.notes,
         edits: outcome.edits,
     })
@@ -1321,11 +1436,14 @@ pub fn copy_export(
         schema.as_deref(),
         &asset_edit::SaveOptions {
             replace,
+            layer: request.layer,
             target: request.target,
             ..Default::default()
         },
     )? {
-        asset_edit::SaveOutcome::Written { message, .. } => Ok(message),
+        asset_edit::SaveOutcome::Written {
+            message, warnings, ..
+        } => Ok(with_warnings(message, &warnings)),
         asset_edit::SaveOutcome::HoldsCopy { pak } => Err(format!(
             "{pak} already holds an edited copy of {}; pass --replace to overwrite it",
             request.entry

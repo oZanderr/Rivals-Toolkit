@@ -464,6 +464,12 @@ export interface SaveOptions {
   structural?: Structural;
 }
 
+/** Whether two container paths name the same file, whichever separators and case they use. */
+export function sameContainer(a: string, b: string): boolean {
+  const norm = (path: string) => path.replace(/\\/g, "/").toLowerCase();
+  return norm(a) === norm(b);
+}
+
 /** A change to the import table: a retarget when `index` names an import, an add otherwise. */
 export interface ImportDraft {
   index?: number;
@@ -479,7 +485,7 @@ export type SaveTarget = "io_store" | "pak";
 /** What `save_asset_edits` reports. A mod that already holds this asset is not overwritten until
  *  the user has said so. */
 type SaveResult =
-  | { outcome: "written"; message: string; pak: string }
+  | { outcome: "written"; message: string; pak: string; warnings: string[] }
   | { outcome: "holds_copy"; pak: string };
 
 interface Args {
@@ -511,6 +517,10 @@ export interface AssetEdits {
    *  Carries the structural change that was being saved, so the go-ahead can repeat it. */
   pendingReplace: { pak: string; structural?: Structural } | null;
   cancelReplace: () => void;
+  /** The mod's own edited copy of this asset, when the chosen mod already holds one. */
+  modCopy: string | null;
+  /** Whether the inspector is reading that copy, so a save builds on it. */
+  onModCopy: boolean;
   /** Import table changes, keyed `retarget:<index>` or `add:<n>`. */
   importDrafts: Readonly<Record<string, ImportDraft>>;
   setImportDraft: (key: string, draft: ImportDraft) => void;
@@ -535,6 +545,11 @@ const EMPTY: Record<string, DraftRecord> = {};
 const NO_IMPORTS: Record<string, ImportDraft> = {};
 const DEFAULT_MOD_NAME = "AssetEdits";
 
+/** A save's message with the other mods that override the same asset named after it. */
+export function withWarnings(message: string, warnings: string[] | undefined): string {
+  return warnings && warnings.length > 0 ? `${message}. ${warnings.join(". ")}` : message;
+}
+
 /** Owns the drafts, the save and the notice for one open asset, whichever view is editing it. */
 export function useAssetEdits({
   gamePath,
@@ -555,6 +570,32 @@ export function useAssetEdits({
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [modName, setModName] = useState(DEFAULT_MOD_NAME);
   const [saveTarget, setSaveTarget] = useState<SaveTarget>("io_store");
+  const [modCopy, setModCopy] = useState<string | null>(null);
+  const onModCopy = modCopy !== null && sameContainer(modCopy, container);
+
+  // Asked again whenever the mod or what it writes changes, a little after typing stops.
+  useEffect(() => {
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      invoke<string | null>("mod_copy_of", {
+        gameRoot: gamePath,
+        container,
+        entry,
+        modName: modName.trim(),
+        target: saveTarget,
+      })
+        .then((copy) => {
+          if (!cancelled) setModCopy(copy);
+        })
+        .catch(() => {
+          if (!cancelled) setModCopy(null);
+        });
+    }, 400);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [gamePath, container, entry, modName, saveTarget, epoch]);
 
   const update = useCallback(
     (change: (prev: Held) => Partial<Held>) =>
@@ -700,6 +741,7 @@ export function useAssetEdits({
           entry,
           modName: name,
           replace: options?.replace ?? false,
+          layer: onModCopy,
           target: saveTarget,
           edits: list,
         });
@@ -707,7 +749,8 @@ export function useAssetEdits({
           update(() => ({ pendingReplace: { pak: result.pak, structural } }));
           return;
         }
-        showNotice(result.message, "ok", result.pak);
+        showNotice(withWarnings(result.message, result.warnings), "ok", result.pak);
+        setModCopy(result.pak);
         update(() => ({ drafts: EMPTY, imports: NO_IMPORTS, pendingReplace: null }));
         // Remembered only once it has actually been used, so a name typed and abandoned is not.
         invoke("set_asset_mod_name", { name }).catch(() => undefined);
@@ -733,6 +776,7 @@ export function useAssetEdits({
       gamePath,
       container,
       entry,
+      onModCopy,
       showNotice,
       update,
       onSaved,
@@ -760,6 +804,8 @@ export function useAssetEdits({
     discard,
     pendingReplace,
     cancelReplace,
+    modCopy,
+    onModCopy,
     importDrafts,
     setImportDraft,
     dropImportDraft,
