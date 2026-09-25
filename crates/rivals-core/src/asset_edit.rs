@@ -1014,9 +1014,25 @@ mod game_data_tests {
     const INSTANCED: &str =
         "Marvel/Content/Marvel/Data/DataTable/GameMode/2206/AIAutoAbilityTable_Zombie.uasset";
 
+    /// Fixtures other modules of this crate open. Their own pins are plain literals in test bodies
+    /// rather than constants this module can name, so the strings are repeated here and
+    /// `the_fixture_list_holds_every_pinned_path` is what keeps the two copies honest.
+    const PAK_ROUND_TRIP: &str =
+        "Marvel/Content/Marvel/Data/DataTable/UI/Friends/DT_FriendsRecommendTag.uasset";
+    const SYNTH_ROW_TABLE: &str =
+        "Marvel/Content/Marvel/Data/DataTable/GameMode/2206/2206_UIHeroInfoTable.uasset";
+    const BATCH_SHAKE_HIT: &str =
+        "Marvel/Content/Marvel/AbilitySystem/1011/101111/CameraShake_101111_Hit.uasset";
+    const BATCH_SHAKE_OTHER: &str =
+        "Marvel/Content/Marvel/AbilitySystem/1011/101112/CameraShake_101112_Hit.uasset";
+
     /// Every asset these tests pin, so one check can tell which pins a game patch broke. A path
     /// that is only ever used as an edit value, never opened, does not belong here.
     const ALL_FIXTURES: &[(&str, &str)] = &[
+        ("PAK_ROUND_TRIP", PAK_ROUND_TRIP),
+        ("SYNTH_ROW_TABLE", SYNTH_ROW_TABLE),
+        ("BATCH_SHAKE_HIT", BATCH_SHAKE_HIT),
+        ("BATCH_SHAKE_OTHER", BATCH_SHAKE_OTHER),
         ("STRINGS", STRINGS),
         ("DEFAULTS", DEFAULTS),
         ("MAPS", MAPS),
@@ -1066,8 +1082,26 @@ mod game_data_tests {
         ("NIAGARA", NIAGARA),
     ];
 
-    /// Pinned paths that are never opened as a fixture, so the audit must not demand them.
-    const NOT_FIXTURES: &[&str] = &[OTHER_MATERIAL];
+    /// Paths in the scanned files that no test opens, so the audit must not demand them: an edit
+    /// value, and the invented paths the unit tests above the gated ones use.
+    const NOT_FIXTURES: &[&str] = &[
+        OTHER_MATERIAL,
+        "Marvel/Content/Test/Thing.uasset",
+        "Marvel/Content/Test/Other.uasset",
+        "Marvel/Content/DT_Hero.uasset",
+        "Marvel/Content/Marvel/Data/DataTable/GameMode/2206/Row.uasset",
+    ];
+
+    /// The files that pin a real game asset. A source scan cannot tell a fixture from an example,
+    /// so only files whose paths are actually opened belong here: `mods/heroes.rs` names a dozen
+    /// real assets to classify them as strings and must stay out.
+    const FIXTURE_SOURCES: &[(&str, &str)] = &[
+        ("asset_edit.rs", include_str!("asset_edit.rs")),
+        ("asset.rs", include_str!("asset.rs")),
+        ("asset_edit/sweep.rs", include_str!("asset_edit/sweep.rs")),
+        ("pak/iostore_out.rs", include_str!("pak/iostore_out.rs")),
+        ("schema_synth.rs", include_str!("schema_synth.rs")),
+    ];
 
     /// Every path the shipped game holds, mount-relative, the way a fixture constant spells it.
     /// Enumeration only: no package bytes are read and no mappings are needed, so checking every
@@ -1140,31 +1174,30 @@ mod game_data_tests {
         );
     }
 
-    /// The audit is only as good as its list, and nothing makes a new constant join it. This reads
-    /// the test file back and fails if a pinned path escaped, which is cheaper than discovering it
-    /// a season later.
+    /// The audit is only as good as its list, and nothing makes a new pin join it. This reads the
+    /// pinning files back and fails if a path escaped, which is cheaper than discovering it a
+    /// season later.
     #[test]
     fn the_fixture_list_holds_every_pinned_path() {
-        // Only this module's own constants: the unit tests above it use invented paths.
-        let source = include_str!("asset_edit.rs");
-        let source = source
-            .split_once("mod game_data_tests {")
-            .map(|(_, rest)| rest)
-            .unwrap_or(source);
         let known: std::collections::HashSet<&str> = ALL_FIXTURES
             .iter()
             .map(|(_, path)| *path)
             .chain(NAMED_PAYLOADS.iter().map(|(path, _)| *path))
             .chain(NOT_FIXTURES.iter().copied())
             .collect();
-        let missing: Vec<&str> = source
-            .split('"')
-            .filter(|part| {
+        let mut missing: Vec<String> = Vec::new();
+        for (name, source) in FIXTURE_SOURCES {
+            for path in source.split('"').filter(|part| {
                 (part.starts_with("Marvel/") || part.starts_with("Engine/"))
                     && (part.ends_with(".uasset") || part.ends_with(".umap"))
-            })
-            .filter(|path| !known.contains(path))
-            .collect();
+            }) {
+                if !known.contains(path) {
+                    missing.push(format!("  {name}: {path}"));
+                }
+            }
+        }
+        missing.sort();
+        missing.dedup();
         assert!(
             missing.is_empty(),
             "these pinned paths are in no fixture list, so the audit would not notice them going \

@@ -747,6 +747,8 @@ mod game_data_tests {
             "{}/MarvelGame/Marvel/Content/Paks/pakchunk0-Windows.utoc",
             root.replace('\\', "/")
         );
+        // Mirrored as SYNTH_ROW_TABLE in rivals-core's fixture audit, which is what notices a game
+        // patch removing it. A rivals-core test cannot scan this crate, so change both together.
         let entry =
             "Marvel/Content/Marvel/Data/DataTable/GameMode/2206/2206_UIHeroInfoTable.uasset";
         let view = bytes_view(&root, &container, entry, 0, Some(usmap)).expect("bytes view");
