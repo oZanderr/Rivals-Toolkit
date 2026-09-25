@@ -529,10 +529,38 @@ pub fn save_edits(
     mappings: Option<&Mappings>,
     options: &SaveOptions,
 ) -> Result<SaveOutcome, String> {
+    match prepare(request, mappings, options)? {
+        Prepared::Held(pak) => Ok(SaveOutcome::HoldsCopy { pak }),
+        Prepared::Ready {
+            entry,
+            patched,
+            loaded,
+        } => write_patched(request, &entry, &patched, &loaded, options),
+    }
+}
+
+/// A save up to the point of writing: where it goes, and the package patched and checked, read
+/// from wherever the save would read it. Every way of saving goes through here, so a preview and
+/// the save it previews cannot disagree.
+enum Prepared {
+    /// The mod already holds a copy the save may neither replace nor build on.
+    Held(String),
+    Ready {
+        entry: String,
+        patched: Box<PatchedBundle>,
+        loaded: Box<FSerializedAssetBundle>,
+    },
+}
+
+fn prepare(
+    request: &AssetEditRequest<'_>,
+    mappings: Option<&Mappings>,
+    options: &SaveOptions,
+) -> Result<Prepared, String> {
     let entry = save_entry(request)?;
     let held = destination_check(request, &entry, options)?;
-    if let Some(outcome) = holds_copy(request, held, options)? {
-        return Ok(outcome);
+    if let Some(SaveOutcome::HoldsCopy { pak }) = holds_copy(request, held, options)? {
+        return Ok(Prepared::Held(pak));
     }
     let (patched, loaded) = match layered_source(request, held, options)? {
         Some((container, kind)) => preview_edits(
@@ -547,7 +575,39 @@ pub fn save_edits(
         )?,
         None => preview_edits(request, mappings)?,
     };
-    write_patched(request, &entry, &patched, &loaded, options)
+    Ok(Prepared::Ready {
+        entry,
+        patched: Box::new(patched),
+        loaded: Box::new(loaded),
+    })
+}
+
+/// What a save would do, without writing it.
+#[derive(Debug)]
+pub enum PreviewOutcome {
+    Verified {
+        entry: String,
+        applied: Vec<rivals_uasset::AppliedEdit>,
+    },
+    HoldsCopy {
+        pak: String,
+    },
+}
+
+/// Patches and checks exactly what [`save_edits`] would, reading from the same place and stopping
+/// where it would stop, and writes nothing.
+pub fn preview_save(
+    request: &AssetEditRequest<'_>,
+    mappings: Option<&Mappings>,
+    options: &SaveOptions,
+) -> Result<PreviewOutcome, String> {
+    Ok(match prepare(request, mappings, options)? {
+        Prepared::Held(pak) => PreviewOutcome::HoldsCopy { pak },
+        Prepared::Ready { entry, patched, .. } => PreviewOutcome::Verified {
+            entry,
+            applied: patched.applied,
+        },
+    })
 }
 
 /// Saves several packages into one mod with a single container rewrite, rather than one per
@@ -635,23 +695,13 @@ fn stage_one(
     mappings: Option<&Mappings>,
     options: &SaveOptions,
 ) -> Result<Staged, String> {
-    let entry = save_entry(request)?;
-    let held = destination_check(request, &entry, options)?;
-    if let Some(outcome) = holds_copy(request, held, options)? {
-        return Ok(Staged::Held(outcome));
-    }
-    let (patched, loaded) = match layered_source(request, held, options)? {
-        Some((container, kind)) => preview_edits(
-            &AssetEditRequest {
-                container: &container,
-                entry: &entry,
-                kind,
-                changes: request.changes.clone(),
-                ..*request
-            },
-            mappings,
-        )?,
-        None => preview_edits(request, mappings)?,
+    let (entry, patched, loaded) = match prepare(request, mappings, options)? {
+        Prepared::Held(pak) => return Ok(Staged::Held(SaveOutcome::HoldsCopy { pak })),
+        Prepared::Ready {
+            entry,
+            patched,
+            loaded,
+        } => (entry, *patched, *loaded),
     };
     let shader_map_hashes = source_shader_maps(request, &patched.asset);
     Ok(Staged::Ready {
@@ -2898,6 +2948,84 @@ mod game_data_tests {
                 kind: AssetSource::Utoc,
             },
         )
+    }
+
+    /// A preview stops where the save would, and a layered one reads the mod's copy: an edit
+    /// expecting the game's value is refused there, and one expecting the mod's passes.
+    #[test]
+    fn a_preview_reads_what_the_save_would() {
+        let Some(fixture) = Fixture::open(DEFAULTS) else {
+            return;
+        };
+        let scratch = ScratchMod {
+            root: fixture.root.clone(),
+            name: "RivalsToolkitPreviewProbe",
+        };
+        drop(ScratchMod {
+            root: fixture.root.clone(),
+            name: "RivalsToolkitPreviewProbe",
+        });
+        let cell = row_ints(&fixture.parse(), 1).remove(0);
+        let PropertyValue::Int { value: was } = cell.value else {
+            unreachable!()
+        };
+        let request = |changes: PackageEdits| AssetEditRequest {
+            game_root: &fixture.root,
+            container: &fixture.container,
+            entry: fixture.entry,
+            kind: AssetSource::Utoc,
+            mod_name: scratch.name,
+            changes,
+        };
+        save_edits(
+            &request(PackageEdits {
+                values: vec![bump(&cell, 3)],
+                ..Default::default()
+            }),
+            Some(&fixture.schema),
+            &SaveOptions::default(),
+        )
+        .expect("first save");
+
+        let expecting = |value: i64| {
+            let mut changes = PackageEdits {
+                values: vec![bump(&cell, 10)],
+                ..Default::default()
+            };
+            changes.expect.values.insert(
+                rivals_uasset::Expected::value_key(&changes.values[0]),
+                value.to_string(),
+            );
+            changes
+        };
+        let plain = preview_save(
+            &request(expecting(was)),
+            Some(&fixture.schema),
+            &SaveOptions::default(),
+        )
+        .expect("preview");
+        assert!(
+            matches!(plain, PreviewOutcome::HoldsCopy { .. }),
+            "{plain:?}"
+        );
+
+        let layered = SaveOptions {
+            layer: true,
+            ..Default::default()
+        };
+        let stale = preview_save(&request(expecting(was)), Some(&fixture.schema), &layered)
+            .expect_err("the mod's copy holds another value");
+        assert!(stale.starts_with(rivals_uasset::DRIFT), "{stale}");
+        let fresh = preview_save(
+            &request(expecting(was + 3)),
+            Some(&fixture.schema),
+            &layered,
+        )
+        .expect("the mod's value is the one expected");
+        assert!(
+            matches!(fresh, PreviewOutcome::Verified { .. }),
+            "{fresh:?}"
+        );
     }
 
     /// A second save stops at the copy the first left, unless it builds on it: then both edits are

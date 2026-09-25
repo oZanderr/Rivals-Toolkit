@@ -641,9 +641,29 @@ pub fn apply(
         groups.iter().map(|_| None).collect();
     if overrides.dry_run {
         for (at, request) in requests.iter().enumerate() {
+            let key = &groups[at].key;
+            let options = asset_edit::SaveOptions {
+                replace: key.replace,
+                layer: key.layer,
+                target: key.target,
+                ..Default::default()
+            };
             outcomes[at] = Some(
-                asset_edit::preview_edits(request, schema.as_deref())
-                    .map(|(patched, _)| ("verified", patched.applied, None)),
+                asset_edit::preview_save(request, schema.as_deref(), &options).map(|outcome| {
+                    match outcome {
+                        asset_edit::PreviewOutcome::Verified { applied, .. } => {
+                            ("verified", applied, None)
+                        }
+                        asset_edit::PreviewOutcome::HoldsCopy { pak } => (
+                            "holds_copy",
+                            Vec::new(),
+                            Some(format!(
+                                "{pak} already holds an edited copy of {}; pass --layer to build on it or --replace to start over",
+                                key.entry
+                            )),
+                        ),
+                    }
+                }),
             );
         }
     } else {
