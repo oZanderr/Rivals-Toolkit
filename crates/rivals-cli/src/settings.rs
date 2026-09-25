@@ -16,6 +16,9 @@ pub struct AppSettings {
     pub game_running_check_enabled: bool,
     #[serde(default)]
     pub usmap_path: Option<String>,
+    /// A list of native object paths to name imports by, on top of the bundled one.
+    #[serde(default)]
+    pub extra_script_objects_path: Option<String>,
     /// The mod pak the desktop app last saved asset edits into.
     #[serde(default)]
     pub asset_mod_name: Option<String>,

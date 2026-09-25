@@ -6,6 +6,7 @@
 //! render data) are not decoded at all; they are named and measured, which is enough to tell an
 //! expected remainder from a real parse failure.
 
+use crate::package::is_unresolved_import_name;
 use crate::props::{Ctx, Diagnostics, read_index};
 use crate::reader::Cursor;
 use crate::value::{PropertyEntry, PropertyValue};
@@ -234,18 +235,15 @@ pub(crate) fn opaque_kind(
     chain: &[String],
     missing_ancestor: Option<&str>,
 ) -> Option<&'static str> {
-    if is_unresolved(class_name) || missing_ancestor.is_some_and(is_unresolved) {
+    if is_unresolved_import_name(class_name)
+        || missing_ancestor.is_some_and(is_unresolved_import_name)
+    {
         return Some("instance of a class this build does not have");
     }
     OPAQUE
         .iter()
         .find(|payload| chain.iter().any(|step| step == payload.class))
         .map(|payload| payload.kind)
-}
-
-/// The two names retoc gives an import it could not resolve.
-fn is_unresolved(name: &str) -> bool {
-    name == "UnknownExport" || name.starts_with("__zenrawexporthash_")
 }
 
 /// An object reference a class writes after its properties, on record for renumbering and shown

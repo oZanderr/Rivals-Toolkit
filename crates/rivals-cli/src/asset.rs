@@ -769,8 +769,11 @@ pub fn print_info(report: &InfoReport, out: &mut impl FnMut(String)) {
         .max()
         .unwrap_or(5);
     for import in &report.imports {
+        let note = rivals_uasset::unresolved_import_note(&import.object_name)
+            .map(|note| format!("  [{note}]"))
+            .unwrap_or_default();
         out(format!(
-            "  import {:>4}  {:class_width$}  {}",
+            "  import {:>4}  {:class_width$}  {}{note}",
             import.index, import.class_name, import.path
         ));
     }
@@ -875,6 +878,9 @@ pub struct ImportRow {
     /// Present only when the import is named by nothing at all.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub removable: Option<bool>,
+    /// Present only when retoc could not resolve the import; says what it was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unresolved: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -918,6 +924,7 @@ pub fn imports(request: &Request<'_>, unused_only: bool) -> Result<ImportsReport
                 .usage
                 .unused()
                 .then(|| removable.get(&info.index).copied().unwrap_or(false)),
+            unresolved: rivals_uasset::unresolved_import_note(&info.object_name),
             usage: info.usage.clone(),
         })
         .collect();
@@ -952,6 +959,11 @@ pub fn print_imports(report: &ImportsReport, out: &mut impl FnMut(String)) {
             (true, Some(true)) => "unused, removable".to_string(),
             (true, Some(false)) => "unused, but something blocks removing it".to_string(),
             _ => used.join(", "),
+        };
+        let note = match (&row.unresolved, note.is_empty()) {
+            (Some(unresolved), true) => unresolved.clone(),
+            (Some(unresolved), false) => format!("{unresolved}, {note}"),
+            (None, _) => note,
         };
         out(format!(
             "  {:>4}  {:width$}  {}  [{note}]",

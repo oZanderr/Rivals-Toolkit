@@ -163,7 +163,8 @@ pub(crate) fn extract_vanilla_container(
         Some(engine_version.package_file_version()),
         &log,
         None,
-    );
+    )
+    .with_extra_script_objects(rivals_core::script_objects::current());
 
     let mut pak_entry_count = 0usize;
     let mut uncompressed_pak_entries: Vec<String> = Vec::new();

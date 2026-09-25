@@ -57,6 +57,11 @@ struct Cli {
     #[arg(long, global = true, value_name = "PATH")]
     usmap: Option<String>,
 
+    /// A text file of native object paths the game's script objects table leaves out, one per
+    /// line, added to the bundled list so their imports read by name.
+    #[arg(long, global = true, value_name = "PATH")]
+    script_objects: Option<String>,
+
     /// What an asset write leaves behind. The game reads packages only from an IoStore container;
     /// a plain pak is for tooling that converts it onward itself. Defaults to the app's setting.
     #[arg(long, global = true, value_enum, value_name = "KIND")]
@@ -804,6 +809,14 @@ fn run(cli: &Cli) -> Result<(), String> {
     // `--force` is the only way to skip the guard; otherwise the app's own setting decides, so the
     // two front ends agree about whether a running game blocks an edit.
     rivals_core::game_status::set_check_enabled(!cli.force && app.game_running_check_enabled);
+    let script_objects = rivals_core::script_objects::resolve(
+        cli.script_objects.as_deref(),
+        app.extra_script_objects_path.as_deref(),
+    )?;
+    if let Some(path) = &script_objects {
+        rivals_core::script_objects::load(path)?;
+    }
+    rivals_core::script_objects::set_user_list(script_objects);
 
     match &cli.command {
         Command::Tweaks(TweaksCmd::List) => tweaks_list(cli),

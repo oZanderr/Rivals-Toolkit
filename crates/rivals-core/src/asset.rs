@@ -309,7 +309,8 @@ impl<'a> PackageConverter<'a> {
                 Some(ENGINE_VERSION.package_file_version()),
                 &LOG,
                 None,
-            ),
+            )
+            .with_extra_script_objects(crate::script_objects::current()),
         }
     }
 

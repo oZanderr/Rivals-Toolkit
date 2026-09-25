@@ -127,6 +127,27 @@ pub struct PackageInfo {
     pub export_count: usize,
 }
 
+/// The names retoc leaves in place of an import it could not resolve when converting from zen.
+pub fn is_unresolved_import_name(name: &str) -> bool {
+    name == "UnknownExport"
+        || name.starts_with(retoc::asset_conversion::UNRESOLVED_EXPORT_HASH_PREFIX)
+        || name.starts_with(retoc::asset_conversion::UNRESOLVED_SCRIPT_HASH_PREFIX)
+}
+
+/// How to describe such an import: what kind of reference it was and the hash it carries, if any.
+pub fn unresolved_import_note(name: &str) -> Option<String> {
+    if let Some(index) = retoc::asset_conversion::decode_unresolved_script_import_name(name) {
+        return Some(format!(
+            "unresolved script import 0x{:016x}",
+            index.to_raw()
+        ));
+    }
+    if let Some(hex) = name.strip_prefix(retoc::asset_conversion::UNRESOLVED_EXPORT_HASH_PREFIX) {
+        return Some(format!("unresolved export hash 0x{hex}"));
+    }
+    (name == "UnknownExport").then(|| "unresolved".to_string())
+}
+
 /// One row of the import table, with its references resolved to a path.
 #[derive(Debug, Clone, Serialize)]
 pub struct ImportInfo {
@@ -474,7 +495,7 @@ fn parse_inner(
                 class_package: name(import.class_package),
                 class_name: name(import.class_name),
                 outer_index: import.outer_index.index,
-                unresolved: object_name.starts_with("__zenrawexporthash_"),
+                unresolved: is_unresolved_import_name(&object_name),
                 path: dotted_path(&header, index).unwrap_or_default(),
                 object_name,
                 usage: std::mem::take(&mut usage[at]),
@@ -1406,6 +1427,33 @@ mod tests {
         let bytes = vec![0u8; PREVIEW_ROWS * 16 + 10];
         let preview = hex_preview(&bytes, 0);
         assert!(preview.contains("10 more bytes"), "{preview}");
+    }
+
+    #[test]
+    fn every_name_retoc_leaves_for_an_unresolved_import_is_recognised() {
+        for name in [
+            "UnknownExport",
+            "__zenrawexporthash_00000000deadbeef",
+            "__zenrawscripthash_46a3791039776701",
+        ] {
+            assert!(is_unresolved_import_name(name), "{name}");
+        }
+        assert!(!is_unresolved_import_name("MountPak"));
+        assert!(!is_unresolved_import_name("/Engine/UnknownPackage"));
+
+        assert_eq!(
+            unresolved_import_note("__zenrawscripthash_46a3791039776701").as_deref(),
+            Some("unresolved script import 0x46a3791039776701")
+        );
+        assert_eq!(
+            unresolved_import_note("__zenrawexporthash_00000000deadbeef").as_deref(),
+            Some("unresolved export hash 0x00000000deadbeef")
+        );
+        assert_eq!(
+            unresolved_import_note("UnknownExport").as_deref(),
+            Some("unresolved")
+        );
+        assert_eq!(unresolved_import_note("MountPak"), None);
     }
 }
 

@@ -4825,7 +4825,18 @@ mod game_data_tests {
         };
         let parsed = fixture.parse();
         let component = export_at(&parsed, 30);
-        assert_eq!(component.class_name, "UnknownExport");
+        // The class is a script import the game's table cannot name, so retoc carries its raw
+        // index through the legacy form rather than a placeholder.
+        assert!(
+            rivals_uasset::is_unresolved_import_name(&component.class_name),
+            "{}",
+            component.class_name
+        );
+        assert!(
+            component.class_name.starts_with("__zenrawscripthash_"),
+            "{}",
+            component.class_name
+        );
         assert!(
             matches!(&component.status, ExportStatus::Payload { kind, consumed: 0, .. }
                 if *kind == "instance of a class this build does not have"),

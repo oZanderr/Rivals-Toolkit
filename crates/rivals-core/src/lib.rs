@@ -15,4 +15,5 @@ pub mod pak;
 pub mod pak_tweaks;
 pub mod paths;
 pub mod schema_synth;
+pub mod script_objects;
 pub mod tweaks;

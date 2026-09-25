@@ -622,7 +622,8 @@ pub(crate) fn extract_utoc_legacy(
         Some(engine_version.package_file_version()),
         &log,
         None,
-    );
+    )
+    .with_extra_script_objects(rivals_core::script_objects::current());
 
     let writer = FSFileWriter::new(output_dir);
 

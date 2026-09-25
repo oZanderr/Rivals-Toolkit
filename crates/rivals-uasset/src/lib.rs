@@ -41,7 +41,7 @@ pub use export_edit::{
     EDITABLE_FLAGS, ExportEdit, ExportEditPlan, flag_names, plan_export_edits,
     plan_export_edits_with,
 };
-pub use header_edit::ImportEdit;
+pub use header_edit::{ImportEdit, ObjectPath, parse_object_path};
 pub use hex::{HexRow, ROW_BYTES, render as render_hex, rows as hex_rows};
 pub use import_remove::{
     ImportRemovalPlan, ImportUsage, RemovedImport, UnusedImport, import_usage, plan_import_removal,
@@ -54,9 +54,10 @@ pub use kismet::{
 pub use mappings::{Mappings, Schema, SchemaFixups, SchemaSlot, kind_name};
 pub use package::{
     AppliedFixup, AssetBundle, ExportStatus, ImportInfo, PackageInfo, ParseOptions, ParsedExport,
-    ParsedPackage, TwinChoice, dotted_path, export_bytes, header_size, package_info, package_names,
-    parse_package, parse_package_checked, parse_package_opts, parse_package_probed,
-    parse_package_traced, parse_package_traced_with, parse_package_with, read_header,
+    ParsedPackage, TwinChoice, dotted_path, export_bytes, header_size, is_unresolved_import_name,
+    package_info, package_names, parse_package, parse_package_checked, parse_package_opts,
+    parse_package_probed, parse_package_traced, parse_package_traced_with, parse_package_with,
+    read_header, unresolved_import_note,
 };
 pub use props::{
     ContainerLayout, Diagnostics, IndexRef, InstancedLayout, MapKeys, MissingSchema, TraceEntry,

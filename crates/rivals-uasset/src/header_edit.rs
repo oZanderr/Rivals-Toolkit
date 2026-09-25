@@ -123,7 +123,7 @@ impl Tables {
 }
 
 /// A UE object path: the package, then the object and the subobjects inside it.
-pub(crate) struct ObjectPath {
+pub struct ObjectPath {
     pub package: String,
     /// Outermost first, never empty.
     pub chain: Vec<String>,
@@ -131,7 +131,7 @@ pub(crate) struct ObjectPath {
 
 /// Parses the dotted form `/Game/Path/Asset.Object` or `/Game/Path/Asset.Object:Sub`. The
 /// slash-separated form does not say where the package ends, so it is not accepted here.
-pub(crate) fn parse_object_path(text: &str) -> Result<ObjectPath, String> {
+pub fn parse_object_path(text: &str) -> Result<ObjectPath, String> {
     let text = text.trim();
     let malformed = || {
         format!(

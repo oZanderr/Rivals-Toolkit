@@ -146,6 +146,11 @@ Reading and editing packages needs a `.usmap` mappings file for the game's build
 Rivals ships unversioned properties. Point `--usmap` at the file or at a folder holding one, or set
 it once in the app's settings.
 
+Imports of native objects the game registers only at runtime (its `NePatchUtility` hot-patch plugin,
+which Blueprint mod loaders call) are not in the game's script objects table, so a bundled list names
+them; `--script-objects PATH` adds a text file of further object paths, one per line.
+
+
 ```bash
 rivals-cli asset list  --container pakchunk0-Windows.utoc --filter DataTable
 rivals-cli asset info  --container pakchunk0-Windows.utoc --entry Marvel/Content/.../DT_Thing.uasset
@@ -162,6 +167,7 @@ rivals-cli asset export-edit --container ... --entry ... --export 3 --class -32 
 rivals-cli asset imports --container ... --entry ... --unused                           # tidy the table
 rivals-cli asset deps    --container ... --entry ... --export 3                         # load order
 rivals-cli asset script  --container ... --entry ... --export 26                        # disassembly
+
 rivals-cli asset copy-export --container ... --entry ... --from-container ... --from-entry ... --export 274 --name MyLight
 
 rivals-cli asset audit --container pakchunk0-Windows.utoc --filter Data/DataTable

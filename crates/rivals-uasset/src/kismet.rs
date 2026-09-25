@@ -970,6 +970,62 @@ fn list(items: &[Expr]) -> String {
     items.iter().map(render).collect::<Vec<_>>().join(", ")
 }
 
+/// `CallFunc_<Function>_<Result>[_N]` is how a Blueprint names the local a call fills.
+fn called_function(local: &str) -> Option<&str> {
+    let leaf = local.rsplit(['.', ':']).next().unwrap_or(local);
+    let rest = leaf.strip_prefix("CallFunc_")?;
+    let rest = match rest.rsplit_once('_') {
+        Some((head, number)) if number.bytes().all(|b| b.is_ascii_digit()) => head,
+        _ => rest,
+    };
+    rest.rsplit_once('_').map(|(function, _)| function)
+}
+
+/// The function an unresolved call target probably was, read off the locals around it: the
+/// variable a `Let` fills, else the one distinct name the out-params carry.
+fn probable_function(variable: Option<&Expr>, params: &[Expr]) -> Option<String> {
+    if let Some(Expr::Variable { property, .. }) = variable
+        && let Some(function) = called_function(&property.path)
+    {
+        return Some(function.to_string());
+    }
+    let mut candidates: Vec<&str> = params
+        .iter()
+        .filter_map(|param| match param {
+            Expr::Variable { property, .. } => called_function(&property.path),
+            _ => None,
+        })
+        .collect();
+    candidates.sort_unstable();
+    candidates.dedup();
+    match candidates.as_slice() {
+        [only] => Some((*only).to_string()),
+        _ => None,
+    }
+}
+
+fn is_unresolved_target(function: &ObjectRef) -> bool {
+    function
+        .path
+        .as_deref()
+        .and_then(|path| path.rsplit(['.', ':']).next())
+        .is_some_and(crate::package::is_unresolved_import_name)
+}
+
+fn render_call(
+    name: &str,
+    function: &ObjectRef,
+    params: &[Expr],
+    variable: Option<&Expr>,
+) -> String {
+    let hint = is_unresolved_target(function)
+        .then(|| probable_function(variable, params))
+        .flatten()
+        .map(|function| format!(" /* probably {function} */"))
+        .unwrap_or_default();
+    format!("{name} {}({}){hint}", object_text(function), list(params))
+}
+
 fn render(expr: &Expr) -> String {
     match expr {
         Expr::Simple { name } => (*name).to_string(),
@@ -990,15 +1046,22 @@ fn render(expr: &Expr) -> String {
             property,
             variable,
             value,
-        } => match property {
-            Some(property) => format!(
-                "{name} {}<{}> = {}",
-                render(variable),
-                property.path,
-                render(value)
-            ),
-            None => format!("{name} {} = {}", render(variable), render(value)),
-        },
+        } => {
+            let value = match value.as_ref() {
+                Expr::FinalCall {
+                    name,
+                    function,
+                    params,
+                } => render_call(name, function, params, Some(variable)),
+                other => render(other),
+            };
+            match property {
+                Some(property) => {
+                    format!("{name} {}<{}> = {value}", render(variable), property.path)
+                }
+                None => format!("{name} {} = {value}", render(variable)),
+            }
+        }
         Expr::BitFieldConst { property, value } => format!("BitField({}) {value}", property.path),
         Expr::Context {
             name,
@@ -1029,7 +1092,7 @@ fn render(expr: &Expr) -> String {
             name,
             function,
             params,
-        } => format!("{name} {}({})", object_text(function), list(params)),
+        } => render_call(name, function, params, None),
         Expr::IntConst { value } => value.to_string(),
         Expr::Int64Const { value } => value.to_string(),
         Expr::UInt64Const { value } => value.to_string(),
@@ -1426,6 +1489,77 @@ mod tests {
                 script.stopped
             );
         }
+    }
+
+    /// A call whose target retoc could not name is labelled with the function the Blueprint's own
+    /// locals were named after, and only when that reading is unambiguous.
+    #[test]
+    fn an_unresolved_call_is_labelled_with_the_function_its_locals_name() {
+        let unresolved = ObjectRef {
+            index: -57,
+            path: Some("/Engine/UnknownPackage.UnknownExport".to_string()),
+        };
+        let local = |path: &str| Expr::Variable {
+            name: "LocalVariable",
+            property: PropertyRef {
+                path: path.to_string(),
+                owner: ObjectRef {
+                    index: 6,
+                    path: None,
+                },
+            },
+        };
+        let call = |params: Vec<Expr>| Expr::FinalCall {
+            name: "CallMath",
+            function: unresolved.clone(),
+            params,
+        };
+
+        let filled = Expr::Let {
+            name: "LetBool",
+            property: None,
+            variable: Box::new(local("CallFunc_MountPak_ReturnValue")),
+            value: Box::new(call(vec![
+                local("CallFunc_Array_Get_Item_1"),
+                local("CallFunc_Add_IntInt_ReturnValue_1"),
+            ])),
+        };
+        assert!(
+            render(&filled).ends_with("/* probably MountPak */"),
+            "{}",
+            render(&filled)
+        );
+
+        let out_param = call(vec![local("CallFunc_GetMountedPakNames_PakFilenames_1")]);
+        assert!(
+            render(&out_param).ends_with("/* probably GetMountedPakNames */"),
+            "{}",
+            render(&out_param)
+        );
+
+        let ambiguous = call(vec![
+            local("CallFunc_Array_Get_Item_1"),
+            local("CallFunc_Add_IntInt_ReturnValue_1"),
+        ]);
+        assert!(
+            !render(&ambiguous).contains("probably"),
+            "{}",
+            render(&ambiguous)
+        );
+
+        let resolved = Expr::FinalCall {
+            name: "CallMath",
+            function: ObjectRef {
+                index: -33,
+                path: Some("/Script/Engine.KismetMathLibrary:Add_IntInt".to_string()),
+            },
+            params: vec![local("CallFunc_Subtract_IntInt_ReturnValue_1")],
+        };
+        assert!(
+            !render(&resolved).contains("probably"),
+            "{}",
+            render(&resolved)
+        );
     }
 
     /// The disassembly is one statement per line, addressed the way a jump would name it.
