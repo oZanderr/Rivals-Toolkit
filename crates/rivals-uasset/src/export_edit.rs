@@ -55,10 +55,11 @@ pub enum ExportEdit {
         export: u32,
         name: String,
     },
-    /// Move the object under another export, or to the package root with `outer` of zero.
+    /// Move the object under another export, or to the package root with no `outer`.
     SetOuter {
         export: u32,
-        outer: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outer: Option<u32>,
     },
     /// Retype the object. Its values are written under the old class's schema, so they cannot be
     /// carried across: the export is emptied and takes its new class's defaults.
@@ -236,6 +237,11 @@ fn name_is_usable(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The table word for an outer: an export, or null for the package itself.
+pub(crate) fn outer_index(outer: Option<u32>) -> FPackageIndex {
+    outer.map_or_else(FPackageIndex::create_null, FPackageIndex::create_export)
+}
+
 /// Whether another object already sits under `outer` with this name, which the loader resolves by.
 fn name_taken(parsed: &ParsedPackage, outer: i32, name: &str, except: u32) -> bool {
     parsed.exports.iter().any(|export| {
@@ -322,22 +328,27 @@ pub fn plan_export_edits_with(
                 }
             }
             ExportEdit::SetOuter { outer, .. } => {
-                let wanted = FPackageIndex::create_export(*outer);
-                if *outer as usize >= parsed.exports.len() {
-                    plan.blockers
-                        .push(format!("this package has no export {outer} to sit under"));
-                    continue;
-                }
-                if descends_from(parsed, *outer, index) {
-                    plan.blockers.push(format!(
-                        "{} cannot sit inside itself or anything under it",
-                        export.path
-                    ));
-                    continue;
+                let wanted = outer_index(*outer);
+                if let Some(outer) = *outer {
+                    if outer as usize >= parsed.exports.len() {
+                        plan.blockers
+                            .push(format!("this package has no export {outer} to sit under"));
+                        continue;
+                    }
+                    if descends_from(parsed, outer, index) {
+                        plan.blockers.push(format!(
+                            "{} cannot sit inside itself or anything under it",
+                            export.path
+                        ));
+                        continue;
+                    }
                 }
                 if name_taken(parsed, wanted.index, &export.object_name, index) {
+                    let place = outer.map_or("at the package root".to_string(), |outer| {
+                        format!("under export {outer}")
+                    });
                     plan.blockers.push(format!(
-                        "something called {} already sits under export {outer}",
+                        "something called {} already sits {place}",
                         export.object_name
                     ));
                 }
@@ -347,14 +358,18 @@ pub fn plan_export_edits_with(
                         export.path, export.class_name
                     ));
                 }
-                let head = parsed
-                    .exports
-                    .get(*outer as usize)
-                    .map(|outer| outer.path.clone())
-                    .unwrap_or_default();
+                // A root object is named `Package.Name`; anything deeper `Outer:Name`.
+                let head = match *outer {
+                    Some(outer) => parsed
+                        .exports
+                        .get(outer as usize)
+                        .map(|outer| format!("{}:", outer.path))
+                        .unwrap_or_default(),
+                    None => format!("{}.", parsed.info.package_name),
+                };
                 note_repaths(parsed, &mut plan, index, move |path| {
                     let tail = path.rsplit([':', '.']).next().unwrap_or(path);
-                    format!("{head}:{tail}")
+                    format!("{head}{tail}")
                 });
             }
             ExportEdit::SetClass { class, .. } => {
@@ -799,7 +814,7 @@ pub(crate) fn apply_export_edits(
             }
             ExportEdit::SetOuter { outer, .. } => {
                 let before = export.outer_index.index.to_string();
-                export.outer_index = FPackageIndex::create_export(*outer);
+                export.outer_index = outer_index(*outer);
                 ("outer", before, export.outer_index.index.to_string())
             }
             ExportEdit::SetClass { class, .. } => {
@@ -983,6 +998,7 @@ mod tests {
             instanced: Vec::new(),
             tables: Vec::new(),
             channels: Vec::new(),
+            native_leaves: Vec::new(),
             script_tokens: Default::default(),
             text_histories: Default::default(),
             twins: Vec::new(),
@@ -1071,15 +1087,46 @@ mod tests {
     fn an_outer_cycle_is_refused() {
         let parsed = package();
         for outer in [0, 1] {
-            let plan =
-                plan_export_edits(&parsed, &[ExportEdit::SetOuter { export: 0, outer }], None)
-                    .expect("plan");
+            let plan = plan_export_edits(
+                &parsed,
+                &[ExportEdit::SetOuter {
+                    export: 0,
+                    outer: Some(outer),
+                }],
+                None,
+            )
+            .expect("plan");
             assert!(
                 plan.blockers.iter().any(|b| b.contains("inside itself")),
                 "outer {outer}: {:?}",
                 plan.blockers
             );
         }
+    }
+
+    /// No outer is the package root, which is where the package's own asset sits, not export 0.
+    #[test]
+    fn a_move_with_no_outer_goes_to_the_package_root() {
+        let parsed = package();
+        let plan = plan_export_edits(
+            &parsed,
+            &[ExportEdit::SetOuter {
+                export: 1,
+                outer: None,
+            }],
+            None,
+        )
+        .expect("plan");
+        assert!(plan.blockers.is_empty(), "{:?}", plan.blockers);
+        assert_eq!(
+            plan.repathed,
+            vec![(
+                "/Game/Test.Root:Mesh".to_string(),
+                "/Game/Test.Mesh".to_string()
+            )]
+        );
+        assert_eq!(outer_index(None).index, 0);
+        assert_eq!(outer_index(Some(0)).index, 1);
     }
 
     /// Only flags a cooked object actually keeps may be written, and the class default object flag

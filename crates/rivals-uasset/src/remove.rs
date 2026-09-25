@@ -318,6 +318,7 @@ pub(crate) struct Removal {
 pub(crate) fn remove_exports(
     parsed: &ParsedPackage,
     header: &FLegacyPackageHeader,
+    exports_bytes: &[u8],
     plan: &RemovalPlan,
 ) -> Result<Removal, String> {
     if !plan.blockers.is_empty() {
@@ -358,6 +359,7 @@ pub(crate) fn remove_exports(
     splices.extend(crate::renumber::reference_splices(
         parsed, header, &renumber, &removed,
     ));
+    splices.extend(resource_index_splices(header, exports_bytes, &renumber)?);
     for cleared in &plan.cleared {
         applied.push(AppliedEdit {
             name: format!("{}.{}", cleared.export_name, cleared.property),
@@ -402,6 +404,48 @@ pub(crate) fn remove_exports(
         data_resources,
         applied,
     })
+}
+
+/// The bulk data table loses the entries of removed exports, which moves every later entry down.
+/// A surviving export names its entry by an index word in its own data, so each one that moves is
+/// rewritten. That word is only found for a payload stored inline; one in a separate file is
+/// refused rather than left pointing at its neighbour's data.
+fn resource_index_splices(
+    header: &FLegacyPackageHeader,
+    exports_bytes: &[u8],
+    renumber: &crate::renumber::Renumber,
+) -> Result<Vec<Splice>, String> {
+    let total = i64::from(header.summary.versioning_info.total_header_size);
+    let mut dropped = 0usize;
+    let mut splices = Vec::new();
+    for (index, resource) in header.data_resources.iter().enumerate() {
+        if renumber.drops(resource.outer_index) {
+            dropped += 1;
+            continue;
+        }
+        if dropped == 0 {
+            continue;
+        }
+        if resource.legacy_bulk_data_flags & crate::write::SEPARATE_PAYLOAD_FLAGS != 0 {
+            return Err(format!(
+                "bulk data resource {index} sits in a separate file after one a removed export owns, and its index cannot be rewritten there. Remove the exports holding the later bulk data too, or keep the earlier one"
+            ));
+        }
+        let payload = crate::write::locate_inline_payload(header, exports_bytes, index)
+            .ok_or_else(|| {
+                format!(
+                    "bulk data resource {index} is inline, but no export holds its index word where the table points"
+                )
+            })?;
+        let at = u64::try_from(total + payload.start - 4)
+            .map_err(|_| format!("bulk data resource {index} has a negative offset"))?;
+        splices.push(Splice {
+            start: at,
+            end: at + 4,
+            bytes: ((index - dropped) as i32).to_le_bytes().to_vec(),
+        });
+    }
+    Ok(splices)
 }
 
 /// Replaces an export's stored values with the header UE writes for an object that inherits
@@ -699,6 +743,7 @@ mod tests {
             instanced: Vec::new(),
             tables: Vec::new(),
             channels: Vec::new(),
+            native_leaves: Vec::new(),
             script_tokens: Default::default(),
             text_histories: Default::default(),
             twins: Vec::new(),
@@ -957,6 +1002,23 @@ mod tests {
     /// A real header for the three-export package, with preload dependencies and a data resource
     /// pointing into it, serialized the way the writer expects to read it back.
     fn bundle() -> (Vec<u8>, Vec<u8>) {
+        // Separate-file resources: the writer places inline ones by the index word before their
+        // payload, which these synthetic exports do not carry.
+        bundle_with(vec![
+            FObjectDataResource {
+                outer_index: FPackageIndex::create_export(1),
+                legacy_bulk_data_flags: 0x100,
+                ..Default::default()
+            },
+            FObjectDataResource {
+                outer_index: FPackageIndex::create_export(2),
+                legacy_bulk_data_flags: 0x100,
+                ..Default::default()
+            },
+        ])
+    }
+
+    fn bundle_with(data_resources: Vec<FObjectDataResource>) -> (Vec<u8>, Vec<u8>) {
         let mut summary = FLegacyPackageFileSummary {
             package_name: "/Game/Test".to_string(),
             ..Default::default()
@@ -1007,20 +1069,7 @@ mod tests {
                 FPackageIndex::create_export(2),
                 FPackageIndex::create_export(1),
             ],
-            // Separate-file resources: the writer places inline ones by the index word before their
-            // payload, which these synthetic exports do not carry.
-            data_resources: vec![
-                FObjectDataResource {
-                    outer_index: FPackageIndex::create_export(1),
-                    legacy_bulk_data_flags: 0x100,
-                    ..Default::default()
-                },
-                FObjectDataResource {
-                    outer_index: FPackageIndex::create_export(2),
-                    legacy_bulk_data_flags: 0x100,
-                    ..Default::default()
-                },
-            ],
+            data_resources,
             data_resource_version: Some(Default::default()),
             ..Default::default()
         };
@@ -1038,7 +1087,89 @@ mod tests {
         }
         // Owner's second value points at Sub.
         exports[22..26].copy_from_slice(&3i32.to_le_bytes());
+        // Sub holds an inline payload at its byte 8, behind the index word naming resource 1.
+        exports[36..40].copy_from_slice(&1i32.to_le_bytes());
         (asset.into_inner(), exports)
+    }
+
+    /// Class owns resource 0 and Sub holds resource 1 inline. Removing Class drops the first
+    /// entry, so Sub's payload becomes entry 0 and its index word has to say so.
+    #[test]
+    fn a_removal_renumbers_the_bulk_data_the_survivors_hold() {
+        let (asset, exports) = bundle_with(vec![
+            FObjectDataResource {
+                outer_index: FPackageIndex::create_export(0),
+                legacy_bulk_data_flags: 0x100,
+                ..Default::default()
+            },
+            FObjectDataResource {
+                outer_index: FPackageIndex::create_export(2),
+                serial_offset: 8,
+                serial_size: 4,
+                raw_size: 4,
+                ..Default::default()
+            },
+        ]);
+        let bundle = AssetBundle {
+            asset: &asset,
+            exports: &exports,
+        };
+        let header = read_header(&bundle).expect("header");
+        assert!(crate::write::locate_inline_payload(&header, &exports, 1).is_some());
+        let parsed = three();
+        let plan = plan_removal(&parsed, &[0]).expect("plan");
+        let removal = remove_exports(&parsed, &header, &exports, &plan).expect("removal");
+        let rewritten = rewrite(
+            &bundle,
+            &removal.splices,
+            HeaderDraft {
+                exports: Some(removal.exports),
+                drop_exports: removal.drop,
+                preload_dependencies: Some(removal.preload_dependencies),
+                data_resources: Some(removal.data_resources),
+                ..Default::default()
+            },
+        )
+        .expect("rewrite");
+        let after = AssetBundle {
+            asset: &rewritten.asset,
+            exports: &rewritten.exports,
+        };
+        let header = read_header(&after).expect("header");
+        assert_eq!(header.data_resources.len(), 1);
+        let payload = crate::write::locate_inline_payload(&header, &rewritten.exports, 0)
+            .expect("the survivor's payload is found under its new index");
+        assert_eq!(payload.owner, 1, "Sub, renumbered");
+        crate::write::check_inline_bulk(&after).expect("every inline payload is placed");
+    }
+
+    /// A payload in a separate file has no index word this editor can find, so shifting it is
+    /// refused rather than left naming its neighbour's entry.
+    #[test]
+    fn a_removal_that_would_shift_separate_bulk_data_is_refused() {
+        let (asset, exports) = bundle_with(vec![
+            FObjectDataResource {
+                outer_index: FPackageIndex::create_export(0),
+                legacy_bulk_data_flags: 0x100,
+                ..Default::default()
+            },
+            FObjectDataResource {
+                outer_index: FPackageIndex::create_export(2),
+                legacy_bulk_data_flags: 0x100,
+                ..Default::default()
+            },
+        ]);
+        let header = read_header(&AssetBundle {
+            asset: &asset,
+            exports: &exports,
+        })
+        .expect("header");
+        let parsed = three();
+        let plan = plan_removal(&parsed, &[0]).expect("plan");
+        let err = remove_exports(&parsed, &header, &exports, &plan)
+            .err()
+            .expect("refused");
+        assert!(err.contains("separate file"), "{err}");
     }
 
     #[test]
@@ -1051,7 +1182,7 @@ mod tests {
         let header = read_header(&bundle).expect("header");
         let parsed = three();
         let plan = plan_removal(&parsed, &[2]).expect("plan");
-        let removal = remove_exports(&parsed, &header, &plan).expect("removal");
+        let removal = remove_exports(&parsed, &header, &exports, &plan).expect("removal");
         assert_eq!(
             removal.splices.len(),
             2,
@@ -1104,7 +1235,7 @@ mod tests {
         let parsed = three();
         let plan = plan_removal(&parsed, &[0]).expect("plan");
         assert!(plan.blockers.is_empty(), "{:?}", plan.blockers);
-        let removal = remove_exports(&parsed, &header, &plan).expect("removal");
+        let removal = remove_exports(&parsed, &header, &exports, &plan).expect("removal");
         let rewritten = rewrite(
             &bundle,
             &removal.splices,

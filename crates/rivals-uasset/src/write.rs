@@ -167,17 +167,11 @@ pub fn inline_payloads(
     Ok(placed)
 }
 
-/// [`inline_payloads`] that lets the resources of exports being removed dangle: their payload
-/// goes with the export, and nothing reads a table entry no export refers to.
-pub(crate) fn check_inline_bulk(
-    bundle: &AssetBundle<'_>,
-    tolerated: &[usize],
-) -> Result<(), String> {
+/// Whether every inline resource still sits where the table points, with its index word in front.
+pub(crate) fn check_inline_bulk(bundle: &AssetBundle<'_>) -> Result<(), String> {
     let header = read_header(bundle)?;
     for index in 0..header.data_resources.len() {
-        if !tolerated.contains(&index) {
-            require_inline_payload(&header, bundle.exports, index)?;
-        }
+        require_inline_payload(&header, bundle.exports, index)?;
     }
     Ok(())
 }
@@ -377,8 +371,8 @@ pub fn rewrite(
 
         // An inline payload is addressed from its export's start, so only an edit inside that
         // export and ahead of the index word moves it. An edit over the payload is refused unless
-        // it replaces exactly the payload (the drafted table then carries its new size) or deletes
-        // the whole export, whose table entries then dangle harmlessly.
+        // it replaces exactly the payload (the drafted table then carries its new size), rewrites
+        // just its index word, or deletes the whole export, whose table entries go with it.
         let relative_end =
             i64::try_from(splice.end).map_err(|_| "edit offset does not fit")? - total as i64;
         let (first, last) = ranges[owner];
@@ -386,12 +380,13 @@ pub fn rewrite(
             let word = payload.start - 4;
             let replaces =
                 relative == payload.start && relative_end == payload.start + payload.size;
+            // A removal renumbers the table, and the index word follows it.
+            let renumbers = relative == word && relative_end == payload.start && delta == 0;
+            let deletes = relative <= first && relative_end >= last;
+            let allowed = replaces || renumbers || deletes;
             if relative_end <= word {
                 resource_shift[payload.resource] += delta;
-            } else if !replaces
-                && relative < payload.start + payload.size
-                && !(relative <= first && relative_end >= last)
-            {
+            } else if relative < payload.start + payload.size && !allowed {
                 return Err(format!(
                     "the edit at {:#X} overlaps inline bulk data of export {owner}; that payload is replaced through the bulk data editor",
                     splice.start

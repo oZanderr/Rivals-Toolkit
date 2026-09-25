@@ -29,9 +29,9 @@ pub struct CopyExport {
     /// source key means, since this crate knows nothing about containers or files.
     pub from: String,
     pub export: u32,
-    /// The destination export the copy sits under, or the package root at zero.
-    #[serde(default)]
-    pub into_outer: u32,
+    /// The destination export the copy sits under, or the package root when there is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub into_outer: Option<u32>,
     /// The copy's object name. Empty keeps the source's.
     #[serde(default)]
     pub name: String,
@@ -125,17 +125,16 @@ pub fn plan_copy(
             plan.blockers
                 .push(format!("{name} is not a plain object name"));
         }
-        let outer = FPackageIndex::create_export(request.into_outer);
-        if request.into_outer > 0 || !dest.exports.is_empty() {
-            match dest.exports.get(request.into_outer as usize) {
+        let outer = crate::export_edit::outer_index(request.into_outer);
+        if let Some(into) = request.into_outer {
+            match dest.exports.get(into as usize) {
                 Some(held) if is_type_like(&held.class_name) => plan.blockers.push(format!(
                     "{} is a {}, which does not own objects",
                     held.path, held.class_name
                 )),
                 Some(_) => {}
                 None => plan.blockers.push(format!(
-                    "the destination has no export {} to put the copy under",
-                    request.into_outer
+                    "the destination has no export {into} to put the copy under"
                 )),
             }
         }
@@ -148,7 +147,7 @@ pub fn plan_copy(
         }
         if let Some(level) = request.into_level {
             // The copy has to sit in the level it is listed in, so the outer decides it.
-            if level != request.into_outer {
+            if Some(level) != request.into_outer {
                 plan.blockers.push(format!(
                     "a level lists only its own actors, so the copy has to sit in export {level} to be listed there"
                 ));
@@ -468,7 +467,7 @@ pub(crate) fn copy_exports(
                 row.object_name = tables.names.store(&text);
             }
             row.outer_index = if member == request.export {
-                FPackageIndex::create_export(request.into_outer)
+                crate::export_edit::outer_index(request.into_outer)
             } else {
                 FPackageIndex {
                     index: remap(held.outer_index, &mut tables)?,
@@ -698,13 +697,10 @@ pub(crate) fn patch_copy(
             ..Default::default()
         },
     )?;
-    crate::write::check_inline_bulk(
-        &crate::package::AssetBundle {
-            asset: &rewritten.asset,
-            exports: &rewritten.exports,
-        },
-        &[],
-    )?;
+    crate::write::check_inline_bulk(&crate::package::AssetBundle {
+        asset: &rewritten.asset,
+        exports: &rewritten.exports,
+    })?;
     Ok(crate::edit::PatchedBundle {
         asset: rewritten.asset,
         exports: rewritten.exports,
@@ -838,6 +834,7 @@ mod tests {
             instanced: Vec::new(),
             tables: Vec::new(),
             channels: Vec::new(),
+            native_leaves: Vec::new(),
             script_tokens: Default::default(),
             text_histories: Default::default(),
             twins: Default::default(),

@@ -450,6 +450,7 @@ mod tests {
             instanced: Vec::new(),
             tables: Vec::new(),
             channels: Vec::new(),
+            native_leaves: Vec::new(),
             script_tokens: Default::default(),
             text_histories: Default::default(),
             twins: Vec::new(),

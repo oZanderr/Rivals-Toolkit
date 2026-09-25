@@ -6,8 +6,8 @@
 //! USTRUCT such as FGameplayTag serializes through the property schema like anything else.
 
 use crate::props::{
-    ContainerLayout, Ctx, DefaultPart, Diagnostics, native_list, read_index, read_property_block,
-    record_container, record_container_width,
+    ContainerLayout, Ctx, DefaultPart, Diagnostics, NativeLeaf, native_list, read_index,
+    read_property_block, record_container, record_container_width,
 };
 use crate::reader::Cursor;
 use crate::value::{PropertyEntry, PropertyValue};
@@ -70,7 +70,12 @@ pub(crate) fn read_native(
         "ClothTetherData" => cloth_tether_data(cursor, ctx, diagnostics, depth),
         "ClothLODDataCommon" => cloth_lod_data(cursor, ctx, diagnostics, depth),
         "MaterialOverrideNanite" => material_override_nanite(cursor, ctx, diagnostics, depth),
-        "Guid" => guid(cursor),
+        "Guid" => {
+            diagnostics
+                .native_leaves
+                .push((cursor.file_offset(), NativeLeaf::Guid));
+            guid(cursor)
+        }
         "Color" => bytes(cursor, name, &["B", "G", "R", "A"]),
         "LinearColor" => floats(cursor, name, &["R", "G", "B", "A"]),
         "DateTime" => ticks(cursor, name, "Ticks"),
@@ -80,11 +85,21 @@ pub(crate) fn read_native(
         "Box2f" => bounds_f32(cursor, name, &["X", "Y"]),
         "MovieSceneEventParameters" => event_parameters(cursor, ctx, diagnostics),
         "Sphere" => sphere(cursor, name),
-        "TopLevelAssetPath" => top_level_asset_path(cursor, ctx),
+        "TopLevelAssetPath" => {
+            diagnostics
+                .native_leaves
+                .push((cursor.file_offset(), NativeLeaf::TopLevelAssetPath));
+            top_level_asset_path(cursor, ctx)
+        }
         "SoftObjectPath" | "SoftClassPath" => soft_object_path(cursor, ctx),
         // The game's own wrapper around FSoftObjectPath. Its serializer writes the path string
         // alone, so neither of the two fields the mappings declare appears in cooked data.
-        "MarvelSoftObjectPath" => marvel_soft_object_path(cursor),
+        "MarvelSoftObjectPath" => {
+            diagnostics
+                .native_leaves
+                .push((cursor.file_offset(), NativeLeaf::MarvelSoftObjectPath));
+            marvel_soft_object_path(cursor)
+        }
         // Another of the game's own serializers, and again nothing the mappings declare for it
         // reaches the disk.
         "SerializablePropertySoftPath" => serializable_property_soft_path(cursor, ctx, diagnostics),
@@ -362,7 +377,14 @@ fn sphere(cursor: &mut Cursor<'_>, name: &str) -> Result<PropertyValue, String> 
 }
 
 /// A guid a class writes after its properties, kept editable like one inside them.
-pub(crate) fn guid_entry(cursor: &mut Cursor<'_>, name: &str) -> Result<PropertyEntry, String> {
+pub(crate) fn guid_entry(
+    cursor: &mut Cursor<'_>,
+    diagnostics: &mut Diagnostics,
+    name: &str,
+) -> Result<PropertyEntry, String> {
+    diagnostics
+        .native_leaves
+        .push((cursor.file_offset(), NativeLeaf::Guid));
     scalar(cursor, name, guid)
 }
 

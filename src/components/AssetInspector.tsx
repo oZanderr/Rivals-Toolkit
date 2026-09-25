@@ -253,7 +253,8 @@ type StructuralAsk =
   | {
       kind: "paste";
       held: ExportClipboard;
-      outer: number;
+      /** The export the copy goes under, or null for the package root. */
+      outer: number | null;
       name: string;
       plan: CopyPlan | null;
       error: string | null;
@@ -3133,7 +3134,9 @@ function ExportActions({
   const replaceLock = payloadLock ?? lock;
   const replaceHint =
     exp.status.state === "payload" && exp.status.kind === "bytecode"
-      ? "Swap the bytecode for a file of exactly the same length. The storage word before it and the indices inside the script are not rewritten, so the bytes have to come from this package's own layout."
+      ? exp.object_name.startsWith("ExecuteUbergraph_")
+        ? "Swap the event graph for a file of exactly the same length. The events call into it at fixed offsets that are not rewritten, and the indices inside have to come from this package's own layout."
+        : "Swap the bytecode for a file's bytes. Bytecode that disassembles may take any length, and the size words before it follow; bytes that do not must keep the length they replace. The indices inside have to come from this package's own layout."
       : "Swap the payload for a file's bytes. Nothing inside is decoded, so the file has to be laid out the way this class expects.";
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -3324,8 +3327,8 @@ function StructuralDialog({
   onRenamePlan: (index: number, name: string) => void;
   onRetypePlan: (index: number, target: number) => void;
   onDependencyPlan: (index: number, runs: DependencyRuns) => void;
-  onPastePlan: (outer: number, name: string) => void;
-  onPaste: (outer: number, name: string) => void;
+  onPastePlan: (outer: number | null, name: string) => void;
+  onPaste: (outer: number | null, name: string) => void;
   onClose: () => void;
   onConfirm: (structural: Structural) => void;
 }) {
@@ -3836,10 +3839,10 @@ function PasteForm({
   saving: boolean;
   plan: CopyPlan | null;
   error: string | null;
-  onDraft: (outer: number, name: string) => void;
-  onConfirm: (outer: number, name: string) => void;
+  onDraft: (outer: number | null, name: string) => void;
+  onConfirm: (outer: number | null, name: string) => void;
 }) {
-  const [outer, setOuter] = useState(0);
+  const [outer, setOuter] = useState<number | null>(null);
   const [name, setName] = useState(held.name);
   const trimmed = name.trim();
   useEffect(() => {
@@ -3864,11 +3867,11 @@ function PasteForm({
       <div className="flex flex-col gap-2">
         <span className="text-[11px] text-muted-foreground">Put it under</span>
         <select
-          value={outer}
-          onChange={(e) => setOuter(Number(e.target.value))}
+          value={outer ?? ""}
+          onChange={(e) => setOuter(e.target.value === "" ? null : Number(e.target.value))}
           className="h-8 rounded-md border border-input bg-transparent px-2 font-mono text-xs"
         >
-          <option value={0}>(the package root)</option>
+          <option value="">(the package root)</option>
           {pkg.exports.map((exp) => (
             <option key={exp.index} value={exp.index}>
               [{exp.index}] {exp.object_name} ({exp.class_name})
@@ -6033,7 +6036,7 @@ export default function AssetInspector({
   );
   const clipboard = useExportClipboard();
   const askPastePlan = useCallback(
-    (outer: number, name: string) => {
+    (outer: number | null, name: string) => {
       setAsk((held) =>
         held?.kind === "paste" ? { ...held, outer, name, plan: null, error: null } : held
       );
@@ -6067,7 +6070,7 @@ export default function AssetInspector({
     [clipboard.held, gamePath, container, entry]
   );
   const paste = useCallback(
-    (outer: number, name: string) => {
+    (outer: number | null, name: string) => {
       const source = clipboard.held;
       if (!source) return;
       setAsk(null);
@@ -6552,7 +6555,7 @@ export default function AssetInspector({
                     setAsk({
                       kind: "paste",
                       held: clipboard.held,
-                      outer: 0,
+                      outer: null,
                       name: clipboard.held.name,
                       plan: null,
                       error: null,

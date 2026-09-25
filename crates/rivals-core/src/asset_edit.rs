@@ -2929,7 +2929,7 @@ mod game_data_tests {
             copies: vec![rivals_uasset::CopyExport {
                 from: source.key(),
                 export: actor,
-                into_outer: level,
+                into_outer: Some(level),
                 name: "ProbeLightActor".to_string(),
                 into_level: None,
             }],
@@ -2973,6 +2973,31 @@ mod game_data_tests {
             child.path.ends_with("ProbeLightActor:LightComponent0"),
             "{}",
             child.path
+        );
+
+        // With no outer named, the copy sits at the package root rather than under export 0.
+        let to_root = CopyRequest {
+            copies: vec![rivals_uasset::CopyExport {
+                into_outer: None,
+                ..request.copies[0].clone()
+            }],
+            sources: vec![source.clone()],
+            ..request
+        };
+        let (rooted, _) = preview_copy(&to_root, Some(&schema)).expect("copy to the root");
+        let rooted = Fixture::parse_bundle(
+            &AssetBundle {
+                asset: &rooted.asset,
+                exports: &rooted.exports,
+            },
+            &schema,
+            &fixture.source(),
+        );
+        let at_root = &rooted.exports[before.exports.len()];
+        assert_eq!(at_root.outer_index, 0, "it lands at the root");
+        assert_eq!(
+            at_root.path,
+            format!("{}.ProbeLightActor", before.info.package_name)
         );
 
         // Every property reads the same, and the references inside point at the copies.
@@ -3044,7 +3069,7 @@ mod game_data_tests {
             copies: vec![rivals_uasset::CopyExport {
                 from: source.key(),
                 export: 0,
-                into_outer: level,
+                into_outer: Some(level),
                 name: taken.clone(),
                 into_level: None,
             }],
@@ -5666,8 +5691,6 @@ mod game_data_tests {
         assert_eq!(script.statements.len(), 3);
     }
 
-    /// A script that disassembles can be replaced at another length, because its loaded size can
-    /// be worked out and the two words in front of it rewritten to match.
     /// A constant inside a function is changed where it sits: the script keeps its length, its
     /// size words and its statements, and reads the new value back.
     #[test]
@@ -5739,6 +5762,8 @@ mod game_data_tests {
         assert!(err.contains("holds no literal constant"), "{err}");
     }
 
+    /// A script that disassembles can be replaced at another length, because its loaded size can
+    /// be worked out and the two words in front of it rewritten to match.
     #[test]
     fn a_script_is_replaced_at_another_length_and_its_size_words_follow() {
         let Some(fixture) = Fixture::open(LEVEL) else {
@@ -5837,9 +5862,53 @@ mod game_data_tests {
         assert!(patched.applied[0].name.ends_with("payload"));
     }
 
+    /// The event graph's entry points and latent resume offsets point into it and are not
+    /// rewritten, so unlike any other function it may not change size.
+    #[test]
+    fn a_resized_event_graph_is_refused() {
+        let Some(fixture) = Fixture::open(LEVEL) else {
+            return;
+        };
+        let before = fixture.parse();
+        let graph = before
+            .exports
+            .iter()
+            .find(|e| e.object_name.starts_with("ExecuteUbergraph_") && e.script.is_some())
+            .expect("the level's event graph");
+        let ExportStatus::Payload {
+            consumed,
+            payload_bytes,
+            ..
+        } = &graph.status
+        else {
+            unreachable!("a function with bytecode is a payload")
+        };
+        let bundle = fixture.bundle();
+        let header = rivals_uasset::read_header(&bundle).expect("header");
+        let (slice, _) = rivals_uasset::export_bytes(&bundle, &header, graph.index).expect("bytes");
+        let mut bytes = slice[*consumed as usize..(*consumed + *payload_bytes) as usize].to_vec();
+        let last = bytes.len() - 1;
+        bytes.insert(last, 0x0B);
+        let err = rivals_uasset::patch_package(
+            &bundle,
+            &before,
+            &PackageEdits {
+                payloads: vec![PayloadEdit {
+                    export: graph.index,
+                    bytes,
+                }],
+                ..Default::default()
+            },
+            None,
+        )
+        .err()
+        .expect("a longer event graph is refused");
+        assert!(err.contains("event graph"), "{err}");
+    }
+
     /// A function's bytecode is measured to its start and end, so it can be swapped for bytes of
-    /// the same length: here itself with one byte changed. A longer script is refused, since the
-    /// storage word and the indices inside are not rewritten.
+    /// the same length: here itself with one byte changed. A replacement that does not disassemble
+    /// has no loaded size to write, so it is held to the length it replaces.
     #[test]
     fn a_functions_bytecode_is_replaced_at_its_own_length() {
         let Some(fixture) = Fixture::open(WIDGET_CLASS) else {
@@ -5917,7 +5986,7 @@ mod game_data_tests {
             None,
         )
         .err()
-        .expect("a longer script is refused");
+        .expect("a script that does not decode is held to its length");
         assert!(err.contains("own length"), "{err}");
     }
 

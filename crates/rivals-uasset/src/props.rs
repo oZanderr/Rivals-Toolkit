@@ -296,6 +296,19 @@ pub enum DefaultPart {
     Struct(&'static str),
 }
 
+/// A native struct whose single value is written differently from what its decoded kind suggests:
+/// a guid reads as a string and the two asset paths as soft references. An edit has to know which
+/// one it is holding to write it back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeLeaf {
+    /// Sixteen raw bytes.
+    Guid,
+    /// A package name and an asset name, with no sub-path.
+    TopLevelAssetPath,
+    /// One string holding the whole path.
+    MarvelSoftObjectPath,
+}
+
 #[derive(Default, Debug)]
 pub struct Diagnostics {
     /// Structs that had neither a native layout nor a schema, which is the actionable signal for
@@ -331,6 +344,8 @@ pub struct Diagnostics {
     pub tables: Vec<crate::datatable::DataTableLayout>,
     /// Where each MovieScene channel's key arrays sit, for edits that add or drop a key.
     pub channels: Vec<ChannelLayout>,
+    /// Where each [`NativeLeaf`] value starts.
+    pub native_leaves: Vec<(u64, NativeLeaf)>,
     /// How many texts of each `ETextHistoryType` were read, which says which text layouts the
     /// data exercises at all.
     pub text_histories: BTreeMap<i8, usize>,
@@ -352,6 +367,7 @@ pub(crate) struct Marks {
     instanced: usize,
     unset: usize,
     channels: usize,
+    native_leaves: usize,
 }
 
 impl Diagnostics {
@@ -362,6 +378,7 @@ impl Diagnostics {
             instanced: self.instanced.len(),
             unset: self.unset.len(),
             channels: self.channels.len(),
+            native_leaves: self.native_leaves.len(),
         }
     }
 
@@ -374,6 +391,7 @@ impl Diagnostics {
         self.instanced.truncate(marks.instanced);
         self.unset.truncate(marks.unset);
         self.channels.truncate(marks.channels);
+        self.native_leaves.truncate(marks.native_leaves);
     }
 }
 

@@ -620,7 +620,7 @@ pub(crate) async fn plan_export_copy(
     from_container: String,
     from_entry: String,
     export: u32,
-    into_outer: u32,
+    into_outer: Option<u32>,
     name: String,
     into_level: Option<u32>,
 ) -> Result<rivals_uasset::CopyPlan, String> {
@@ -667,7 +667,7 @@ pub(crate) async fn save_export_copy(
     from_container: String,
     from_entry: String,
     export: u32,
-    into_outer: u32,
+    into_outer: Option<u32>,
     name: String,
     into_level: Option<u32>,
     mod_name: String,

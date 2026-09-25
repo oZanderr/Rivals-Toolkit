@@ -1240,7 +1240,7 @@ pub struct CopyArgs<'a> {
     pub from_container: &'a str,
     pub from_entry: &'a str,
     pub export: u32,
-    pub into_outer: u32,
+    pub into_outer: Option<u32>,
     pub name: &'a str,
     /// A level to list the copy in, so a copied actor actually spawns.
     pub into_level: Option<u32>,

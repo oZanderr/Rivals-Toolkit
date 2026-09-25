@@ -40,6 +40,14 @@ const NAMES: &[&str] = &[
     "EMode::A",
     "EMode::B",
     "Foo",
+    "Id",
+    "Guid",
+    "Asset",
+    "TopLevelAssetPath",
+    "Path",
+    "MarvelSoftObjectPath",
+    "/Game/A",
+    "B",
 ];
 
 fn index_of(value: &str) -> i32 {
@@ -143,6 +151,24 @@ fn tagged_package() -> (Vec<u8>, Vec<u8>) {
     name(&mut e, "EMode");
     e.push(0);
     name(&mut e, "EMode::A");
+
+    // Three native structs whose one value is not written the way it reads.
+    let native = |e: &mut Vec<u8>, property: &str, kind: &str, value: &[u8]| {
+        head(e, property, "StructProperty", value.len());
+        name(e, kind);
+        e.extend_from_slice(&[0; 16]);
+        e.push(0);
+        e.extend_from_slice(value);
+    };
+    let id: Vec<u8> = (1u32..=4).flat_map(u32::to_le_bytes).collect();
+    native(&mut e, "Id", "Guid", &id);
+    let mut asset_path = Vec::new();
+    name(&mut asset_path, "/Game/A");
+    name(&mut asset_path, "B");
+    native(&mut e, "Asset", "TopLevelAssetPath", &asset_path);
+    let mut path = Vec::new();
+    string(&mut path, "/Game/A.B");
+    native(&mut e, "Path", "MarvelSoftObjectPath", &path);
 
     name(&mut e, "None");
     e.extend_from_slice(&0i32.to_le_bytes());
@@ -268,7 +294,8 @@ fn the_fixture_reads_every_property() {
     assert_eq!(
         names,
         [
-            "Damage", "Label", "Enabled", "Tag", "Title", "Pos", "Values", "Points", "Mode"
+            "Damage", "Label", "Enabled", "Tag", "Title", "Pos", "Values", "Points", "Mode", "Id",
+            "Asset", "Path"
         ]
     );
 }
@@ -442,4 +469,44 @@ fn an_emptied_array_of_structs_grows_by_an_empty_struct() {
     let items = items_of(find(top(&grown), "Points"));
     assert_eq!(items.len(), 1);
     assert!(matches!(items[0], PropertyValue::Struct { fields, .. } if fields.is_empty()));
+}
+
+/// A guid is sixteen raw bytes, though it reads as its hex digits, and any spelling of it is taken.
+#[test]
+fn a_guid_is_written_as_its_bytes() {
+    let wanted = "0000000A-0000000B-0000000C-0000000D".to_lowercase();
+    let after = apply(|p| vec![edit_of(find(top(p), "Id"), set(&wanted))]);
+    match &find(top(&after), "Id").value {
+        PropertyValue::Str { value } => assert_eq!(value, "0000000A0000000B0000000C0000000D"),
+        other => panic!("{other:?}"),
+    }
+    let err = refused(|p| vec![edit_of(find(top(p), "Id"), set("not a guid"))]);
+    assert!(err.contains("32 hex digits"), "{err}");
+}
+
+/// A top level asset path is two names and nothing after them.
+#[test]
+fn a_top_level_asset_path_is_written_as_two_names() {
+    let after = apply(|p| vec![edit_of(find(top(p), "Asset"), set("/Game/Other.Thing"))]);
+    match &find(top(&after), "Asset").value {
+        PropertyValue::SoftObject { path } => assert_eq!(path, "/Game/Other.Thing"),
+        other => panic!("{other:?}"),
+    }
+    let err = refused(|p| vec![edit_of(find(top(p), "Asset"), set("/Game/A.B:Sub"))]);
+    assert!(err.contains("subobject"), "{err}");
+}
+
+/// The game's soft path wrapper writes the whole path as one string.
+#[test]
+fn a_marvel_soft_path_is_written_as_one_string() {
+    let after = apply(|p| {
+        vec![edit_of(
+            find(top(p), "Path"),
+            set("/Game/Longer/Path/Here.Here"),
+        )]
+    });
+    match &find(top(&after), "Path").value {
+        PropertyValue::SoftObject { path } => assert_eq!(path, "/Game/Longer/Path/Here.Here"),
+        other => panic!("{other:?}"),
+    }
 }

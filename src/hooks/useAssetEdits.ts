@@ -377,7 +377,7 @@ export interface DependencyEdit {
 /** A change to an export's row in the table. None of these touch its bytes. */
 export type ExportEdit = { export: number } & (
   | { op: "rename"; name: string }
-  | { op: "set_outer"; outer: number }
+  | { op: "set_outer"; outer: number | null }
   | { op: "set_class"; class: number }
   | { op: "set_super"; super_index: number }
   | { op: "set_template"; template: number }

@@ -381,7 +381,11 @@ pub(crate) fn read_class_tail(
             // `UAnimationAsset::Serialize` closes with the guid of the skeleton the asset was
             // built for, ahead of whatever compressed data a subclass adds.
             "AnimationAsset" => {
-                fields.push(crate::structs::guid_entry(cursor, "SkeletonGuid")?);
+                fields.push(crate::structs::guid_entry(
+                    cursor,
+                    diagnostics,
+                    "SkeletonGuid",
+                )?);
                 TailOutcome::Consumed
             }
             // `FStripDataFlags`, the two bytes that open a sound node's or a cue's cooked data.

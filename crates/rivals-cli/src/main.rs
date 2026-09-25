@@ -1748,8 +1748,12 @@ struct ExportEditArgs {
     rename: Option<String>,
 
     /// Move the object under this export, as `asset info` prints it.
-    #[arg(long, value_name = "N")]
+    #[arg(long, value_name = "N", conflicts_with = "outer_root")]
     outer: Option<u32>,
+
+    /// Move the object to the package root, where the package's own asset sits.
+    #[arg(long)]
+    outer_root: bool,
 
     /// Point the object at this archetype, which its unset values inherit from.
     #[arg(long, value_name = "N")]
@@ -1824,8 +1828,11 @@ fn asset_export_edit(
             name: name.clone(),
         });
     }
-    if let Some(outer) = args.outer {
-        edits.push(rivals_uasset::ExportEdit::SetOuter { export, outer });
+    if args.outer.is_some() || args.outer_root {
+        edits.push(rivals_uasset::ExportEdit::SetOuter {
+            export,
+            outer: args.outer,
+        });
     }
     if let Some(template) = args.template {
         edits.push(rivals_uasset::ExportEdit::SetTemplate { export, template });
@@ -2000,8 +2007,8 @@ struct CopyExportArgs {
     export: u32,
 
     /// Destination export the copy sits under. Omit for the package root.
-    #[arg(long, value_name = "N", default_value_t = 0)]
-    into_outer: u32,
+    #[arg(long, value_name = "N")]
+    into_outer: Option<u32>,
 
     /// List the copy in this Level export's actors, so the game spawns it. A copied actor the
     /// level does not name loads with the package and never appears.

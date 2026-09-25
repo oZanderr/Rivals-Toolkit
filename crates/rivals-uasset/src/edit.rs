@@ -414,7 +414,7 @@ pub fn patch_package_copy(
     requests: &[crate::copy::CopyExport],
 ) -> Result<PatchedBundle, String> {
     header_round_trips(bundle)?;
-    check_inline_bulk(bundle, &[])?;
+    check_inline_bulk(bundle)?;
     let package = read_header(bundle)?;
     crate::copy::patch_copy(bundle, parsed, &package, sources, requests)
 }
@@ -513,7 +513,7 @@ pub fn patch_package_with(
     mappings: Option<&Mappings>,
 ) -> Result<PatchedBundle, String> {
     header_round_trips(bundle)?;
-    check_inline_bulk(bundle, &[])?;
+    check_inline_bulk(bundle)?;
     let base = header_size(bundle)?;
     let package = read_header(bundle)?;
     let dropping_imports: Vec<u32> = edits
@@ -691,6 +691,7 @@ pub fn patch_package_with(
                     text,
                     Target {
                         declared: entry.slot.map_or("", |slot| slot.declared),
+                        native: native_leaf_at(parsed, start),
                         width: stored.then_some(end - start),
                         was,
                         tables: &mut tables,
@@ -804,6 +805,7 @@ pub fn patch_package_with(
                     text,
                     Target {
                         declared: layout.element_kind,
+                        native: native_leaf_at(parsed, from),
                         width: Some(to - from),
                         was: bytes_at(bundle, base, from, to)?,
                         tables: &mut tables,
@@ -1158,13 +1160,10 @@ pub fn patch_package_with(
     applied.extend(key_out.applied);
     applied.extend(applied_imports);
 
-    check_inline_bulk(
-        &AssetBundle {
-            asset: &rewritten.asset,
-            exports: &rewritten.exports,
-        },
-        &[],
-    )?;
+    check_inline_bulk(&AssetBundle {
+        asset: &rewritten.asset,
+        exports: &rewritten.exports,
+    })?;
     Ok(PatchedBundle {
         asset: rewritten.asset,
         exports: rewritten.exports,
@@ -1199,6 +1198,14 @@ fn export_target(bytes: &[u8]) -> Option<u32> {
 /// or soft reference resolves later and asks for no such promise.
 fn is_object_kind(kind: &str) -> bool {
     matches!(kind, "Object" | "Interface")
+}
+
+/// Which native struct starts at `at`, when a value edit lands on one written unlike its kind.
+fn native_leaf_at(parsed: &ParsedPackage, at: u64) -> Option<crate::props::NativeLeaf> {
+    parsed
+        .native_leaves
+        .iter()
+        .find_map(|(start, leaf)| (*start == at).then_some(*leaf))
 }
 
 /// The channel and key slot whose frame word starts at `at`, when a value edit lands on one.
@@ -1665,13 +1672,10 @@ fn patch_dependencies(
             ..Default::default()
         },
     )?;
-    check_inline_bulk(
-        &AssetBundle {
-            asset: &rewritten.asset,
-            exports: &rewritten.exports,
-        },
-        &[],
-    )?;
+    check_inline_bulk(&AssetBundle {
+        asset: &rewritten.asset,
+        exports: &rewritten.exports,
+    })?;
     Ok(PatchedBundle {
         asset: rewritten.asset,
         exports: rewritten.exports,
@@ -1731,13 +1735,10 @@ fn patch_export_edits(
             ..Default::default()
         },
     )?;
-    check_inline_bulk(
-        &AssetBundle {
-            asset: &rewritten.asset,
-            exports: &rewritten.exports,
-        },
-        &[],
-    )?;
+    check_inline_bulk(&AssetBundle {
+        asset: &rewritten.asset,
+        exports: &rewritten.exports,
+    })?;
     Ok(PatchedBundle {
         asset: rewritten.asset,
         exports: rewritten.exports,
@@ -1769,13 +1770,10 @@ fn patch_import_removal(
             ..Default::default()
         },
     )?;
-    check_inline_bulk(
-        &AssetBundle {
-            asset: &rewritten.asset,
-            exports: &rewritten.exports,
-        },
-        &[],
-    )?;
+    check_inline_bulk(&AssetBundle {
+        asset: &rewritten.asset,
+        exports: &rewritten.exports,
+    })?;
     Ok(PatchedBundle {
         asset: rewritten.asset,
         exports: rewritten.exports,
@@ -1826,13 +1824,10 @@ fn patch_structure(
                 ..Default::default()
             },
         )?;
-        check_inline_bulk(
-            &AssetBundle {
-                asset: &rewritten.asset,
-                exports: &rewritten.exports,
-            },
-            &[],
-        )?;
+        check_inline_bulk(&AssetBundle {
+            asset: &rewritten.asset,
+            exports: &rewritten.exports,
+        })?;
         return Ok(PatchedBundle {
             asset: rewritten.asset,
             exports: rewritten.exports,
@@ -1851,17 +1846,9 @@ fn patch_structure(
     }
     let mut splices = Vec::new();
     let mut draft = HeaderDraft::default();
-    // The inline payloads of a removed export go with it; their table entries stay and dangle.
-    let mut dangling = Vec::new();
     if !edits.remove_exports.is_empty() {
         let plan = plan_removal(parsed, &edits.remove_exports)?;
-        let removed = plan.indices();
-        dangling = crate::write::inline_payloads(package, bundle.exports)?
-            .into_iter()
-            .filter(|payload| removed.contains(&(payload.owner as u32)))
-            .map(|payload| payload.resource)
-            .collect();
-        let removal = remove_exports(parsed, package, &plan)?;
+        let removal = remove_exports(parsed, package, bundle.exports, &plan)?;
         splices.extend(removal.splices.into_iter().filter(|splice| {
             !resets
                 .iter()
@@ -1876,13 +1863,10 @@ fn patch_structure(
     splices.extend(resets);
     splices.sort_by_key(|splice| (splice.start, splice.end));
     let rewritten = rewrite(bundle, &splices, draft)?;
-    check_inline_bulk(
-        &AssetBundle {
-            asset: &rewritten.asset,
-            exports: &rewritten.exports,
-        },
-        &dangling,
-    )?;
+    check_inline_bulk(&AssetBundle {
+        asset: &rewritten.asset,
+        exports: &rewritten.exports,
+    })?;
     Ok(PatchedBundle {
         asset: rewritten.asset,
         exports: rewritten.exports,
@@ -2100,6 +2084,19 @@ fn payload_splices(
             let sized = export.script.as_ref().and_then(|script| {
                 bytecode_size_words(&edit.bytes, package).map(|words| (script.sizes_at, words))
             });
+            // The event stubs call into the event graph at fixed offsets, and latent actions resume
+            // at them. Nothing rewrites those, so the graph keeps its size in both measures.
+            if export.object_name.starts_with("ExecuteUbergraph_") {
+                let loaded = sized
+                    .map(|(_, words)| u32::from_le_bytes([words[0], words[1], words[2], words[3]]));
+                let was = export.script.as_ref().map(|script| script.buffer_size);
+                if edit.bytes.len() as u64 != end - start || (loaded.is_some() && loaded != was) {
+                    return Err(format!(
+                        "{}: this is the event graph, which the event stubs and latent actions point into at fixed offsets that are not rewritten, so its replacement has to keep its size",
+                        export.object_name
+                    ));
+                }
+            }
             match sized {
                 Some(sized) => words = Some(sized),
                 None if edit.bytes.len() as u64 == end - start => {}
@@ -4699,6 +4696,8 @@ fn declared_width(declared: &str) -> Option<u64> {
 /// today, which is the only source for the parts of an FText the decoded value throws away.
 struct Target<'a> {
     declared: &'a str,
+    /// Set when the value is a native struct written unlike the kind it decodes as.
+    native: Option<crate::props::NativeLeaf>,
     /// `None` when the value holds its default and so has no bytes to measure.
     width: Option<u64>,
     was: &'a [u8],
@@ -4714,6 +4713,9 @@ struct Target<'a> {
 /// Produces the bytes for a value. Kinds that reach into the package's own tables are handled
 /// here; everything with a self-contained encoding goes through [`encode_scalar`].
 fn encode(value: &PropertyValue, text: &str, target: Target<'_>) -> Result<Vec<u8>, String> {
+    if let Some(leaf) = target.native {
+        return encode_native_leaf(leaf, text.trim(), &mut target.tables.names);
+    }
     if let PropertyValue::Unset {
         declared,
         enum_type,
@@ -4912,6 +4914,50 @@ fn encode_name(text: &str, names: &mut FPackageNameMap) -> Vec<u8> {
 
 /// A cooked soft object path is the package name, the asset name and a sub-path, rendered as
 /// `/Game/Thing.Thing:Sub`. An empty part is written as `None`, which is how the reader sees it.
+/// The bytes of a native struct that serializes itself, from the text its decoded value shows.
+fn encode_native_leaf(
+    leaf: crate::props::NativeLeaf,
+    text: &str,
+    names: &mut FPackageNameMap,
+) -> Result<Vec<u8>, String> {
+    use crate::props::NativeLeaf;
+    match leaf {
+        NativeLeaf::Guid => {
+            let digits: String = text
+                .chars()
+                .filter(|c| !matches!(c, '-' | '{' | '}'))
+                .collect();
+            if digits.len() != 32 || !digits.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err(format!("{text} is not a guid: it takes 32 hex digits"));
+            }
+            let mut out = Vec::with_capacity(16);
+            for part in 0..4 {
+                let word = u32::from_str_radix(&digits[part * 8..part * 8 + 8], 16)
+                    .map_err(|e| format!("{text} is not a guid: {e}"))?;
+                out.extend_from_slice(&word.to_le_bytes());
+            }
+            Ok(out)
+        }
+        NativeLeaf::TopLevelAssetPath => {
+            if text.contains(':') {
+                return Err(format!(
+                    "{text} names a subobject, and an asset path reaches only as far as the asset"
+                ));
+            }
+            let (package, asset) = text.rsplit_once('.').unwrap_or((text, ""));
+            let mut out = Vec::with_capacity(16);
+            for part in [package, asset] {
+                out.extend_from_slice(&encode_name(
+                    if part.is_empty() { "None" } else { part },
+                    names,
+                ));
+            }
+            Ok(out)
+        }
+        NativeLeaf::MarvelSoftObjectPath => Ok(encode_string(text)),
+    }
+}
+
 fn encode_soft_object(text: &str, names: &mut FPackageNameMap) -> Vec<u8> {
     let (head, sub_path) = match text.split_once(':') {
         Some((head, sub)) => (head, sub),
@@ -5174,7 +5220,17 @@ fn parse<T: std::str::FromStr>(text: &str) -> Result<T, String> {
 /// come from parsing text (`1.5` against `1.50`, `true` against `1`).
 fn reads_back_as(value: &PropertyValue, text: &str) -> bool {
     match value {
-        PropertyValue::Str { value } => value == text,
+        // A guid reads back as its 32 hex digits, whatever case or dashes it was typed with.
+        PropertyValue::Str { value } => {
+            value == text
+                || (value.len() == 32
+                    && text
+                        .trim()
+                        .chars()
+                        .filter(|c| !matches!(c, '-' | '{' | '}'))
+                        .collect::<String>()
+                        .eq_ignore_ascii_case(value))
+        }
         PropertyValue::Name { value } => value == text.trim(),
         PropertyValue::SoftObject { path } => path == text.trim(),
         PropertyValue::Text { value, .. } => value
@@ -5486,6 +5542,7 @@ mod tests {
             instanced: Vec::new(),
             tables: Vec::new(),
             channels: Vec::new(),
+            native_leaves: Vec::new(),
             script_tokens: Default::default(),
             text_histories: Default::default(),
             twins: Vec::new(),
