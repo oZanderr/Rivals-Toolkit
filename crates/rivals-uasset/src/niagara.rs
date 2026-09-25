@@ -223,6 +223,7 @@ fn var_data(
         count_at: start,
         count_width: 4,
         elements_at: None,
+        absent: None,
         elements,
         element_kind: "Byte",
         default_element: Some(vec![0]),

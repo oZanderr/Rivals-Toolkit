@@ -4707,6 +4707,53 @@ mod game_data_tests {
         matches!(field.value, PropertyValue::Unset { .. })
     }
 
+    /// An array nothing stores takes its first elements in the same save: the count and the
+    /// elements go in together and the header learns the slot is stored.
+    #[test]
+    fn an_unset_array_takes_elements_in_one_save() {
+        let Some(fixture) = Fixture::open(SHAKE) else {
+            return;
+        };
+        let before = fixture.parse();
+        let timelines = nested(&before.exports[0].properties, &["Timelines"]).clone();
+        assert!(unset(&timelines), "{:?}", timelines.value);
+
+        let insert = |index| edit_of(&timelines, EditOp::Insert { index, key: None });
+        let (_, after) = fixture.apply(vec![insert(0), insert(1)]);
+        let now = nested(&after.exports[0].properties, &["Timelines"]);
+        assert!(
+            matches!(&now.value, PropertyValue::Array { items } if items.len() == 2),
+            "{}",
+            now.value.summary()
+        );
+        assert!(stored(now));
+    }
+
+    /// A value the header flags as zero has no bytes either, and stores the same way an unset one
+    /// does, without first being unset.
+    #[test]
+    fn a_zero_struct_stores_in_one_save() {
+        let Some(fixture) = Fixture::open(CURVE_ANIM_BP) else {
+            return;
+        };
+        let before = fixture.parse();
+        let path = [
+            "__CustomProperty_WeaponIKParam_F3A3F408442214696AD2C6B08E4E7AAB",
+            "LeftHandEffectorLocation",
+        ];
+        let field = nested(&before.exports[0].properties, &path).clone();
+        assert!(
+            matches!(field.value, PropertyValue::Default),
+            "{:?}",
+            field.value
+        );
+
+        let (_, after) = fixture.apply(vec![edit_of(&field, EditOp::Store)]);
+        let now = nested(&after.exports[0].properties, &path);
+        assert!(stored(now), "{}", now.value.summary());
+        assert!(matches!(now.value, PropertyValue::Struct { .. }));
+    }
+
     /// A slot the header skips has no bytes and no header item. Giving it a value inserts both,
     /// and everything the export already stored must still read the same.
     #[test]

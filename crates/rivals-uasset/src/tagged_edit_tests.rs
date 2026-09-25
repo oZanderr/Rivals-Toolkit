@@ -48,6 +48,13 @@ const NAMES: &[&str] = &[
     "MarvelSoftObjectPath",
     "/Game/A",
     "B",
+    "Words",
+    "Names",
+    "SetProperty",
+    "Scores",
+    "MapProperty",
+    "Flags",
+    "Modes",
 ];
 
 fn index_of(value: &str) -> i32 {
@@ -151,6 +158,48 @@ fn tagged_package() -> (Vec<u8>, Vec<u8>) {
     name(&mut e, "EMode");
     e.push(0);
     name(&mut e, "EMode::A");
+
+    let mut words = 2i32.to_le_bytes().to_vec();
+    string(&mut words, "a");
+    string(&mut words, "bb");
+    head(&mut e, "Words", "ArrayProperty", words.len());
+    name(&mut e, "StrProperty");
+    e.push(0);
+    e.extend_from_slice(&words);
+
+    // A set of names, a map from name to int, and arrays of bools and of enums: each element is
+    // written the way the property writes it inside a container.
+    let mut names = 0i32.to_le_bytes().to_vec();
+    names.extend_from_slice(&2i32.to_le_bytes());
+    name(&mut names, "Foo");
+    name(&mut names, "Label");
+    head(&mut e, "Names", "SetProperty", names.len());
+    name(&mut e, "NameProperty");
+    e.push(0);
+    e.extend_from_slice(&names);
+
+    let mut scores = 0i32.to_le_bytes().to_vec();
+    scores.extend_from_slice(&1i32.to_le_bytes());
+    name(&mut scores, "Foo");
+    scores.extend_from_slice(&5i32.to_le_bytes());
+    head(&mut e, "Scores", "MapProperty", scores.len());
+    name(&mut e, "NameProperty");
+    name(&mut e, "IntProperty");
+    e.push(0);
+    e.extend_from_slice(&scores);
+
+    let flags = [2, 0, 0, 0, 1, 0];
+    head(&mut e, "Flags", "ArrayProperty", flags.len());
+    name(&mut e, "BoolProperty");
+    e.push(0);
+    e.extend_from_slice(&flags);
+
+    let mut modes = 1i32.to_le_bytes().to_vec();
+    name(&mut modes, "EMode::A");
+    head(&mut e, "Modes", "ArrayProperty", modes.len());
+    name(&mut e, "EnumProperty");
+    e.push(0);
+    e.extend_from_slice(&modes);
 
     // Three native structs whose one value is not written the way it reads.
     let native = |e: &mut Vec<u8>, property: &str, kind: &str, value: &[u8]| {
@@ -294,8 +343,8 @@ fn the_fixture_reads_every_property() {
     assert_eq!(
         names,
         [
-            "Damage", "Label", "Enabled", "Tag", "Title", "Pos", "Values", "Points", "Mode", "Id",
-            "Asset", "Path"
+            "Damage", "Label", "Enabled", "Tag", "Title", "Pos", "Values", "Points", "Mode",
+            "Words", "Names", "Scores", "Flags", "Modes", "Id", "Asset", "Path"
         ]
     );
 }
@@ -378,8 +427,8 @@ fn a_field_inside_a_struct_moves_both_tag_sizes() {
 
 fn items_of(entry: &PropertyEntry) -> Vec<&PropertyValue> {
     match &entry.value {
-        PropertyValue::Array { items, .. } => items.iter().collect(),
-        other => panic!("not an array: {other:?}"),
+        PropertyValue::Array { items, .. } | PropertyValue::Set { items } => items.iter().collect(),
+        other => panic!("not an array or a set: {other:?}"),
     }
 }
 
@@ -559,4 +608,203 @@ fn edits_on_a_changed_package_are_refused_as_drift() {
         None,
     )
     .expect("applied anyway");
+}
+
+/// Several elements go in and out of one container in a single save, each addressed by its index
+/// as read, and the count moves once by the net change.
+#[test]
+fn a_container_takes_several_inserts_and_removals_in_one_save() {
+    let after = apply(|p| {
+        let values = find(top(p), "Values");
+        vec![
+            edit_of(
+                values,
+                EditOp::Insert {
+                    index: 0,
+                    key: None,
+                },
+            ),
+            edit_of(
+                values,
+                EditOp::Insert {
+                    index: 2,
+                    key: None,
+                },
+            ),
+            edit_of(values, EditOp::Remove { index: 1 }),
+        ]
+    });
+    let items: Vec<i64> = items_of(find(top(&after), "Values"))
+        .iter()
+        .map(|item| match item {
+            PropertyValue::Int { value } => *value,
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    // [1, 7]: a copy of 1 before it, 7 dropped, a copy of 7 appended.
+    assert_eq!(items, vec![1, 1, 7]);
+}
+
+/// Two elements of one container change width in the same save; each is found where it ends up.
+#[test]
+fn two_elements_of_one_container_change_width_together() {
+    let after = apply(|p| {
+        let words = find(top(p), "Words");
+        vec![
+            edit_of(
+                words,
+                EditOp::SetElement {
+                    index: 0,
+                    text: "a good deal longer".into(),
+                },
+            ),
+            edit_of(
+                words,
+                EditOp::SetElement {
+                    index: 1,
+                    text: "x".into(),
+                },
+            ),
+        ]
+    });
+    let items = items_of(find(top(&after), "Words"));
+    assert!(
+        matches!(&items[..], [PropertyValue::Str { value: a }, PropertyValue::Str { value: b }]
+            if a == "a good deal longer" && b == "x"),
+        "{items:?}"
+    );
+}
+
+/// An element is removed once, and one being removed takes no new value.
+#[test]
+fn a_removal_twice_or_a_value_for_a_removed_element_is_refused() {
+    let err = refused(|p| {
+        let values = find(top(p), "Values");
+        vec![
+            edit_of(values, EditOp::Remove { index: 0 }),
+            edit_of(values, EditOp::Remove { index: 0 }),
+        ]
+    });
+    assert!(err.contains("removed twice"), "{err}");
+    let err = refused(|p| {
+        let values = find(top(p), "Values");
+        vec![
+            edit_of(values, EditOp::Remove { index: 1 }),
+            edit_of(
+                values,
+                EditOp::SetElement {
+                    index: 1,
+                    text: "3".into(),
+                },
+            ),
+        ]
+    });
+    assert!(err.contains("both removed and given a value"), "{err}");
+}
+
+/// A tagged set takes a new key, loses one and changes another, all in one save.
+#[test]
+fn a_tagged_set_takes_keys_and_loses_them() {
+    let after = apply(|p| {
+        let names = find(top(p), "Names");
+        vec![
+            edit_of(
+                names,
+                EditOp::Insert {
+                    index: 2,
+                    key: Some("Tag".into()),
+                },
+            ),
+            edit_of(names, EditOp::Remove { index: 0 }),
+            edit_of(
+                names,
+                EditOp::SetElement {
+                    index: 1,
+                    text: "Title".into(),
+                },
+            ),
+        ]
+    });
+    let items: Vec<String> = items_of(find(top(&after), "Names"))
+        .iter()
+        .map(|item| item.summary())
+        .collect();
+    assert_eq!(items, vec!["Title", "Tag"]);
+}
+
+/// A tagged map's value changes in place, and a pair goes in under a new key.
+#[test]
+fn a_tagged_map_changes_a_value_and_takes_a_pair() {
+    let after = apply(|p| {
+        let scores = find(top(p), "Scores");
+        vec![
+            edit_of(
+                scores,
+                EditOp::SetElement {
+                    index: 0,
+                    text: "9".into(),
+                },
+            ),
+            edit_of(
+                scores,
+                EditOp::Insert {
+                    index: 1,
+                    key: Some("Tag".into()),
+                },
+            ),
+        ]
+    });
+    match &find(top(&after), "Scores").value {
+        PropertyValue::Map { entries } => {
+            let pairs: Vec<(String, String)> = entries
+                .iter()
+                .map(|pair| (pair.key.summary(), pair.value.summary()))
+                .collect();
+            assert_eq!(
+                pairs,
+                vec![("Foo".into(), "9".into()), ("Tag".into(), "0".into())]
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Bool and enum elements are a byte and a name each, and edit as such.
+#[test]
+fn tagged_bool_and_enum_arrays_edit_their_elements() {
+    let after = apply(|p| {
+        vec![
+            edit_of(
+                find(top(p), "Flags"),
+                EditOp::SetElement {
+                    index: 1,
+                    text: "true".into(),
+                },
+            ),
+            edit_of(
+                find(top(p), "Modes"),
+                EditOp::SetElement {
+                    index: 0,
+                    text: "EMode::B".into(),
+                },
+            ),
+            edit_of(
+                find(top(p), "Modes"),
+                EditOp::Insert {
+                    index: 1,
+                    key: None,
+                },
+            ),
+        ]
+    });
+    let flags: Vec<String> = items_of(find(top(&after), "Flags"))
+        .iter()
+        .map(|item| item.summary())
+        .collect();
+    assert_eq!(flags, vec!["true", "true"]);
+    let modes: Vec<String> = items_of(find(top(&after), "Modes"))
+        .iter()
+        .map(|item| item.summary())
+        .collect();
+    assert_eq!(modes, vec!["EMode::B", "EMode::A"]);
 }

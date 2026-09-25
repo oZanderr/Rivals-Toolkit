@@ -201,6 +201,9 @@ pub struct ContainerLayout {
     pub default_recipe: Option<Vec<DefaultPart>>,
     /// For a map, where each pair's key sits and how a fresh key is written.
     pub keys: Option<MapKeys>,
+    /// Set for a container the header does not store, by its header block and schema slot: it has
+    /// no count yet, so the first element added writes one ahead of itself.
+    pub absent: Option<(u64, u32)>,
 }
 
 /// The key side of a map's pairs. A value edit addresses the bytes after the key, and a fresh pair
@@ -453,6 +456,16 @@ pub(crate) fn read_property_block(
         };
         let start = cursor.file_offset();
         let value = if item.is_zero {
+            // A zero value occupies no bytes, so storing it or giving it one takes what an unset
+            // slot's does.
+            record_unset(
+                diagnostics,
+                ctx,
+                start,
+                header_at,
+                item.schema_index as usize,
+                &slot.property.inner,
+            );
             zero_value(&slot.property.inner, ctx)
         } else {
             read_value(&slot.property.inner, cursor, ctx, diagnostics, depth).map_err(|e| {
@@ -518,20 +531,7 @@ fn emit_unset(
             continue;
         };
         let declared = storage_kind(&slot.property.inner);
-        let (default_bytes, default_recipe) =
-            split_default(unset_default(&slot.property.inner, ctx));
-        diagnostics.unset.push(UnsetSlot {
-            at,
-            header_at,
-            schema_index: index as u32,
-            declared,
-            struct_name: match &slot.property.inner {
-                PropertyInner::Struct { name } => Some(name.clone()),
-                _ => None,
-            },
-            default_bytes,
-            default_recipe,
-        });
+        record_unset(diagnostics, ctx, at, header_at, index, &slot.property.inner);
         entries.push(PropertyEntry {
             name: slot.property.name.clone(),
             element: (slot.property.array_dim > 1).then_some(slot.element),
@@ -549,6 +549,53 @@ fn emit_unset(
                 declared,
             }),
         });
+    }
+}
+
+/// What storing a slot that holds no bytes takes: its minimal form, and for a container, how an
+/// element is written into it.
+fn record_unset(
+    diagnostics: &mut Diagnostics,
+    ctx: &Ctx<'_>,
+    at: u64,
+    header_at: u64,
+    index: usize,
+    inner: &PropertyInner,
+) {
+    let (default_bytes, default_recipe) = split_default(unset_default(inner, ctx));
+    diagnostics.unset.push(UnsetSlot {
+        at,
+        header_at,
+        schema_index: index as u32,
+        declared: storage_kind(inner),
+        struct_name: match inner {
+            PropertyInner::Struct { name } => Some(name.clone()),
+            _ => None,
+        },
+        default_bytes,
+        default_recipe,
+    });
+    match inner {
+        PropertyInner::Array { inner } => {
+            record_container(diagnostics, ctx, at, at, Vec::new(), inner, None)
+        }
+        PropertyInner::Set { key } => {
+            record_container(diagnostics, ctx, at, at, Vec::new(), key, None)
+        }
+        PropertyInner::Map { key, value } => record_container(
+            diagnostics,
+            ctx,
+            at,
+            at,
+            Vec::new(),
+            value,
+            Some((Vec::new(), key)),
+        ),
+        _ => return,
+    }
+    if let Some(layout) = diagnostics.containers.last_mut() {
+        layout.absent = Some((header_at, index as u32));
+        layout.elements_at = Some(at);
     }
 }
 
@@ -1334,6 +1381,7 @@ pub(crate) fn record_container_width(
         count_at,
         count_width,
         elements_at: None,
+        absent: None,
         elements,
         element_kind: kind_name(element),
         default_element,
@@ -1382,6 +1430,7 @@ pub(crate) fn native_list(
         count_at: at,
         count_width: 4,
         elements_at: None,
+        absent: None,
         elements,
         element_kind: "Struct",
         default_element: bytes_only.then(|| {

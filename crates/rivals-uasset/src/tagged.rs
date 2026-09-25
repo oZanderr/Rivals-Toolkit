@@ -186,32 +186,66 @@ fn read_tagged_value(
         }
         "ArrayProperty" => read_tagged_array(tag, cursor, ctx, diagnostics, depth),
         "SetProperty" => {
-            let inner = container_inner(tag.inner_name.as_deref(), cursor)?;
+            let element = Element::of(tag.inner_name.as_deref(), cursor)?;
+            let at = cursor.file_offset();
             // The keys removed from the inherited defaults come first, each a full key.
             for _ in 0..read_count(cursor)? {
-                read_value(&inner, cursor, ctx, diagnostics, depth + 1)?;
+                element.read(cursor, ctx, diagnostics, depth + 1)?;
             }
+            let count_at = cursor.file_offset();
             let count = read_count(cursor)?;
             let mut items = Vec::with_capacity(count);
+            let mut spans = Vec::with_capacity(count);
             for _ in 0..count {
-                items.push(read_value(&inner, cursor, ctx, diagnostics, depth + 1)?);
+                let from = cursor.file_offset();
+                items.push(element.read(cursor, ctx, diagnostics, depth + 1)?);
+                spans.push((from, cursor.file_offset()));
             }
+            record_container(
+                diagnostics,
+                ctx,
+                at,
+                count_at,
+                spans,
+                &element.inner(),
+                None,
+            );
+            element.settle(diagnostics, false);
             Ok(PropertyValue::Set { items })
         }
         "MapProperty" => {
-            let key_type = container_inner(tag.inner_name.as_deref(), cursor)?;
-            let value_type = container_inner(tag.value_type_name.as_deref(), cursor)?;
+            let key_type = Element::of(tag.inner_name.as_deref(), cursor)?;
+            let value_type = Element::of(tag.value_type_name.as_deref(), cursor)?;
+            let at = cursor.file_offset();
             for _ in 0..read_count(cursor)? {
-                read_value(&key_type, cursor, ctx, diagnostics, depth + 1)?;
+                key_type.read(cursor, ctx, diagnostics, depth + 1)?;
             }
+            let count_at = cursor.file_offset();
             let count = read_count(cursor)?;
             let mut pairs = Vec::with_capacity(count);
+            let mut spans = Vec::with_capacity(count);
+            let mut keys = Vec::with_capacity(count);
             for _ in 0..count {
+                let from = cursor.file_offset();
+                let key = key_type.read(cursor, ctx, diagnostics, depth + 1)?;
+                keys.push((from, cursor.file_offset()));
                 pairs.push(crate::value::MapEntry {
-                    key: read_value(&key_type, cursor, ctx, diagnostics, depth + 1)?,
-                    value: read_value(&value_type, cursor, ctx, diagnostics, depth + 1)?,
+                    key,
+                    value: value_type.read(cursor, ctx, diagnostics, depth + 1)?,
                 });
+                spans.push((from, cursor.file_offset()));
             }
+            record_container(
+                diagnostics,
+                ctx,
+                at,
+                count_at,
+                spans,
+                &value_type.inner(),
+                Some((keys, &key_type.inner())),
+            );
+            value_type.settle(diagnostics, false);
+            key_type.settle(diagnostics, true);
             Ok(PropertyValue::Map { entries: pairs })
         }
         other => {
@@ -302,31 +336,91 @@ fn read_tagged_array(
         return Ok(PropertyValue::Array { items });
     }
 
-    let inner = simple_inner(inner_type).ok_or_else(|| {
-        cursor.err(format!(
-            "arrays of {inner_type} are not decoded in tagged mode"
-        ))
-    })?;
+    let element = Element::of(Some(inner_type), cursor)?;
     let mut items = Vec::with_capacity(count as usize);
     let mut spans = Vec::with_capacity(count as usize);
     for _ in 0..count {
         let from = cursor.file_offset();
-        items.push(read_value(&inner, cursor, ctx, diagnostics, depth + 1)?);
+        items.push(element.read(cursor, ctx, diagnostics, depth + 1)?);
         spans.push((from, cursor.file_offset()));
     }
-    record_container(diagnostics, ctx, at, at, spans, &inner, None);
+    record_container(diagnostics, ctx, at, at, spans, &element.inner(), None);
+    element.settle(diagnostics, false);
     Ok(PropertyValue::Array { items })
 }
 
-/// Container element types come from the tag as a bare name. A struct element carries no struct
-/// name there, so those are left undecoded rather than guessed at.
-fn container_inner(type_name: Option<&str>, cursor: &Cursor<'_>) -> Result<PropertyInner, String> {
-    let type_name = type_name.unwrap_or_default();
-    simple_inner(type_name).ok_or_else(|| {
-        cursor.err(format!(
-            "container elements of type {type_name} are not decoded in tagged mode"
-        ))
-    })
+/// A container element as its tag names its type. Inside a container a bool is a byte of its own
+/// and an enum its enumerator's name, where a lone property keeps the one in its tag and the other
+/// behind its enum's name. A struct element carries no struct name there, so those are left
+/// undecoded rather than guessed at.
+enum Element {
+    Simple(PropertyInner),
+    Bool,
+    Enum,
+}
+
+impl Element {
+    fn of(type_name: Option<&str>, cursor: &Cursor<'_>) -> Result<Self, String> {
+        let type_name = type_name.unwrap_or_default();
+        match type_name {
+            "BoolProperty" => Ok(Self::Bool),
+            "EnumProperty" => Ok(Self::Enum),
+            _ => simple_inner(type_name).map(Self::Simple).ok_or_else(|| {
+                cursor.err(format!(
+                    "container elements of type {type_name} are not decoded in tagged mode"
+                ))
+            }),
+        }
+    }
+
+    fn read(
+        &self,
+        cursor: &mut Cursor<'_>,
+        ctx: &Ctx<'_>,
+        diagnostics: &mut Diagnostics,
+        depth: u32,
+    ) -> Result<PropertyValue, String> {
+        match self {
+            Self::Simple(inner) => read_value(inner, cursor, ctx, diagnostics, depth),
+            Self::Bool => Ok(PropertyValue::Bool {
+                value: cursor.read_u8()? != 0,
+            }),
+            Self::Enum => Ok(PropertyValue::Enum {
+                value: -1,
+                name: Some(cursor.read_name(ctx.names())?),
+                enum_type: None,
+            }),
+        }
+    }
+
+    /// The schema type an edit writes an element as.
+    fn inner(&self) -> PropertyInner {
+        match self {
+            Self::Simple(inner) => inner.clone(),
+            Self::Bool => PropertyInner::Bool,
+            Self::Enum => PropertyInner::Enum {
+                inner: Box::new(PropertyInner::Name),
+                name: String::new(),
+            },
+        }
+    }
+
+    /// A tag does not say which enum an element belongs to, so the layout just recorded names
+    /// none rather than an empty one.
+    fn settle(&self, diagnostics: &mut Diagnostics, key: bool) {
+        if !matches!(self, Self::Enum) {
+            return;
+        }
+        if let Some(layout) = diagnostics.containers.last_mut() {
+            if key {
+                if let Some(keys) = layout.keys.as_mut() {
+                    keys.enum_type = None;
+                }
+            } else {
+                layout.element_enum = None;
+            }
+        }
+    }
 }
 
 fn read_count(cursor: &mut Cursor<'_>) -> Result<usize, String> {

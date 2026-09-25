@@ -548,6 +548,7 @@ fn gameplay_tag_container(
         count_at,
         count_width: 4,
         elements_at: None,
+        absent: None,
         elements,
         element_kind: "Name",
         // A tag is a name; the empty one is spelt None and encoded when the edit is made.

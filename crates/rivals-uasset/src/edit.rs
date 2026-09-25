@@ -6,8 +6,8 @@
 //! after an edit attributable to the edit.
 
 use std::cmp::Reverse;
-use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -940,8 +940,19 @@ pub fn patch_package_with(
 
     let mut applied: Vec<AppliedEdit> = Vec::with_capacity(edits.values.len());
     let mut pending: Vec<Pending> = Vec::new();
-    // Which splice holds each edit's value, so its final offset can be read off the sorted order.
-    let mut owns: Vec<usize> = Vec::with_capacity(edits.values.len());
+    // Where each value edit's entry starts and how it sorts among splices at that offset, so its
+    // final offset is whatever lands ahead of it, whichever of its own splices moved.
+    let mut anchors: Vec<(u64, (u64, u32))> = Vec::with_capacity(edits.values.len());
+    // Elements removed from each container this save, by the offset the container is edited at.
+    // Indices are the container's own as read, however many other edits it takes.
+    let removing = removals(edits)?;
+    // Every container whose element count changes, with its count's width and the net change.
+    let mut counts: BTreeMap<u64, (u8, i32, usize)> = BTreeMap::new();
+    // Which applied edits act on which container, so each can be told its final element count.
+    let mut counted: Vec<(usize, u64)> = Vec::new();
+    // Containers with no bytes yet that this save has begun writing, and the count each will hold.
+    let mut absent_started: BTreeSet<u64> = BTreeSet::new();
+    let mut absent_counts: Vec<(usize, usize)> = Vec::new();
     // Exports newly pointed at from a value, which the pointing export has to be able to create
     // before it serializes.
     let mut object_links: Vec<(u64, u32)> = Vec::new();
@@ -1044,7 +1055,10 @@ pub fn patch_package_with(
                 )
             }
             EditOp::Store => {
-                if !matches!(entry.value, PropertyValue::Unset { .. }) {
+                if !matches!(
+                    entry.value,
+                    PropertyValue::Unset { .. } | PropertyValue::Default
+                ) {
                     return Err(format!("{} is already stored", entry.label()));
                 }
                 let bytes = stored_default(parsed, entry, &mut tables.names)?;
@@ -1091,6 +1105,15 @@ pub fn patch_package_with(
                 )
             }
             EditOp::SetElement { index, text } => {
+                if removing
+                    .get(&start)
+                    .is_some_and(|gone| gone.contains(index))
+                {
+                    return Err(format!(
+                        "{}[{index}] is both removed and given a value in one save",
+                        entry.label()
+                    ));
+                }
                 let layout = container_at(parsed, start, entry)?;
                 let (from, to) = value_span(layout, *index, entry)?;
                 let element = element_value(&entry.value, *index)
@@ -1135,6 +1158,7 @@ pub fn patch_package_with(
                     layout,
                     *index,
                     key.as_deref(),
+                    removing.get(&start),
                     bundle,
                     base,
                     entry,
@@ -1173,48 +1197,88 @@ pub fn patch_package_with(
                     }
                     inserted_keys.push((start, key_bytes));
                 }
-                let now = layout.elements.len() + 1;
+                let mut bytes = bytes;
+                if layout.absent.is_some() {
+                    // Nothing is stored yet: the first element brings the count, and a set or map
+                    // the removal list in front of it, and the header learns the slot is stored.
+                    let total = edits
+                        .values
+                        .iter()
+                        .filter(|other| {
+                            other.offset == edit.offset
+                                && other.expect_name == edit.expect_name
+                                && matches!(other.op, EditOp::Insert { .. })
+                        })
+                        .count();
+                    if absent_started.insert(start) {
+                        let mut head = Vec::with_capacity(8);
+                        if matches!(
+                            entry.value,
+                            PropertyValue::Set { .. }
+                                | PropertyValue::Map { .. }
+                                | PropertyValue::Unset {
+                                    declared: "Set" | "Map",
+                                    ..
+                                }
+                        ) {
+                            head.extend_from_slice(&0i32.to_le_bytes());
+                        }
+                        head.extend_from_slice(&(total as i32).to_le_bytes());
+                        head.extend(bytes);
+                        bytes = head;
+                        mark(&mut blocks, bundle, base, entry, true)?;
+                    }
+                    absent_counts.push((applied.len(), total));
+                } else {
+                    let held = counts.entry(layout.count_at).or_insert((
+                        layout.count_width,
+                        0,
+                        layout.elements.len(),
+                    ));
+                    held.1 += 1;
+                    counted.push((applied.len(), layout.count_at));
+                }
                 (
-                    vec![
-                        Splice {
-                            start: at,
-                            end: at,
-                            bytes,
-                        },
-                        adjust_count_width(bundle, base, layout.count_at, layout.count_width, 1)?,
-                    ],
+                    vec![Splice {
+                        start: at,
+                        end: at,
+                        bytes,
+                    }],
                     AppliedEdit {
                         name: entry.label(),
                         offset: start,
                         offset_after: start,
                         element: Some(*index),
-                        elements_after: Some(now),
+                        elements_after: None,
                         before: entry.value.summary(),
-                        after: format!("{now} items"),
+                        after: String::new(),
                     },
                 )
             }
             EditOp::Remove { index } => {
                 let layout = container_at(parsed, start, entry)?;
                 let (from, to) = element_span(layout, *index, entry)?;
-                let now = layout.elements.len().saturating_sub(1);
+                let held = counts.entry(layout.count_at).or_insert((
+                    layout.count_width,
+                    0,
+                    layout.elements.len(),
+                ));
+                held.1 -= 1;
+                counted.push((applied.len(), layout.count_at));
                 (
-                    vec![
-                        Splice {
-                            start: from,
-                            end: to,
-                            bytes: Vec::new(),
-                        },
-                        adjust_count_width(bundle, base, layout.count_at, layout.count_width, -1)?,
-                    ],
+                    vec![Splice {
+                        start: from,
+                        end: to,
+                        bytes: Vec::new(),
+                    }],
                     AppliedEdit {
                         name: format!("{}[{index}]", entry.label()),
                         offset: start,
                         offset_after: start,
                         element: Some(*index),
-                        elements_after: Some(now),
+                        elements_after: None,
                         before: entry.value.summary(),
-                        after: format!("{now} items"),
+                        after: String::new(),
                     },
                 )
             }
@@ -1223,9 +1287,28 @@ pub fn patch_package_with(
         let order = entry
             .slot
             .map_or((0, 0), |slot| (slot.header_at, slot.schema_index));
-        owns.push(pending.len());
+        anchors.push((start, order));
         pending.extend(splices.into_iter().map(|splice| Pending { splice, order }));
         applied.push(done);
+    }
+    // One count change per container, however many elements it gains and loses.
+    for (&count_at, &(width, delta, _)) in &counts {
+        if delta != 0 {
+            pending.push(Pending {
+                splice: adjust_count_width(bundle, base, count_at, width, delta)?,
+                order: (count_at, 0),
+            });
+        }
+    }
+    for (at, count_at) in counted {
+        let (_, delta, was) = counts[&count_at];
+        let now = (was as i64 + i64::from(delta)).max(0) as usize;
+        applied[at].elements_after = Some(now);
+        applied[at].after = format!("{now} items");
+    }
+    for (at, now) in absent_counts {
+        applied[at].elements_after = Some(now);
+        applied[at].after = format!("{now} items");
     }
 
     // A row inserted at a row boundary goes behind anything a value edit put there: whatever the
@@ -1442,11 +1525,19 @@ pub fn patch_package_with(
     for (rank, splice) in splices.iter().enumerate() {
         shift_before[rank + 1] = shift_before[rank] + splice.delta();
     }
-    for (entry, own) in applied
-        .iter_mut()
-        .zip(&owns)
-        .chain(row_applied.iter_mut().zip(&row_owns))
-    {
+    let sort_key =
+        |start: u64, end: u64, order: (u64, u32)| (start, end, Reverse(order.0), order.1);
+    for (entry, (start, order)) in applied.iter_mut().zip(&anchors) {
+        let ahead = ranked.partition_point(|&index| {
+            let held = &pending[index];
+            sort_key(held.splice.start, held.splice.end, held.order)
+                < sort_key(*start, *start, *order)
+        });
+        entry.offset_after = entry
+            .offset
+            .saturating_add_signed(shift_before[ahead] + header_delta);
+    }
+    for (entry, own) in row_applied.iter_mut().zip(&row_owns) {
         entry.offset_after = entry
             .offset
             .saturating_add_signed(shift_before[rank_of[*own]] + header_delta);
@@ -2651,10 +2742,17 @@ fn container_at<'a>(
     at: u64,
     entry: &PropertyEntry,
 ) -> Result<&'a crate::props::ContainerLayout, String> {
+    // A container with no bytes shares its offset with whatever is stored next, so it is found
+    // by its header slot instead.
+    let absent = entry.span.is_some_and(|(start, end)| start == end);
+    let slot = entry.slot.map(|slot| (slot.header_at, slot.schema_index));
     parsed
         .containers
         .iter()
-        .find(|layout| layout.at == at)
+        .find(|layout| match layout.absent {
+            Some(held) => absent && Some(held) == slot,
+            None => !absent && layout.at == at,
+        })
         .ok_or_else(|| {
             format!(
                 "{} is not a container this reader recorded the shape of",
@@ -2752,6 +2850,7 @@ fn insertion(
     layout: &crate::props::ContainerLayout,
     index: u32,
     key: Option<&str>,
+    removed: Option<&BTreeSet<u32>>,
     bundle: &AssetBundle<'_>,
     base: u64,
     entry: &PropertyEntry,
@@ -2762,6 +2861,12 @@ fn insertion(
     let keyed = matches!(
         entry.value,
         PropertyValue::Set { .. } | PropertyValue::Map { .. }
+    ) || matches!(
+        entry.value,
+        PropertyValue::Unset {
+            declared: "Set" | "Map",
+            ..
+        }
     );
     if layout.elements.is_empty() || keyed {
         let value = |names: &mut FPackageNameMap| {
@@ -2819,6 +2924,10 @@ fn insertion(
         if keyed {
             key_len = bytes.len();
             for (position, (start, end)) in layout.elements.iter().enumerate() {
+                // A key the same save removes is free to be added again.
+                if removed.is_some_and(|gone| gone.contains(&(position as u32))) {
+                    continue;
+                }
                 let key_end = layout
                     .keys
                     .as_ref()
@@ -2943,6 +3052,39 @@ fn adjust_count_width(
         end: count_at + u64::from(width),
         bytes,
     })
+}
+
+/// The elements each container loses this save, keyed by the offset its edits address it at. The
+/// same element removed twice is refused: indices are the container's own as read, so it would be
+/// one removal written twice.
+fn removals(edits: &PackageEdits) -> Result<BTreeMap<u64, BTreeSet<u32>>, String> {
+    let mut out: BTreeMap<u64, BTreeSet<u32>> = BTreeMap::new();
+    for edit in &edits.values {
+        if let EditOp::Remove { index } = edit.op
+            && !out.entry(edit.offset).or_default().insert(index)
+        {
+            return Err(format!(
+                "{}[{index}] is removed twice in one save",
+                edit.expect_name
+            ));
+        }
+    }
+    Ok(out)
+}
+
+/// Where an element read at `index` ends up once a save's inserts and removals in the same
+/// container have landed. A set or map adds at its end; an array inserts before the element at
+/// the index it was given.
+fn index_after(edits: &PackageEdits, offset: u64, index: u32, keyed: bool) -> usize {
+    let mut at = index as i64;
+    for edit in edits.values.iter().filter(|edit| edit.offset == offset) {
+        match edit.op {
+            EditOp::Remove { index: gone } if gone < index => at -= 1,
+            EditOp::Insert { index: added, .. } if !keyed && added <= index => at += 1,
+            _ => {}
+        }
+    }
+    at.max(0) as usize
 }
 
 /// The layout and decoded entries of the StringTable at `export`, for a string edit.
@@ -4452,7 +4594,12 @@ pub fn verify_patch(
                 }
             }
             EditOp::SetElement { index, text } => {
-                let element = element_value(&entry.value, *index).ok_or_else(|| {
+                let keyed = matches!(
+                    entry.value,
+                    PropertyValue::Set { .. } | PropertyValue::Map { .. }
+                );
+                let now = index_after(edits, edit.offset, *index, keyed) as u32;
+                let element = element_value(&entry.value, now).ok_or_else(|| {
                     format!("{} lost element {index} after patching", edit.expect_name)
                 })?;
                 if !reads_back_as(element, text) {
@@ -5018,6 +5165,11 @@ struct Target<'a> {
 fn encode(value: &PropertyValue, text: &str, target: Target<'_>) -> Result<Vec<u8>, String> {
     if let Some(leaf) = target.native {
         return encode_native_leaf(leaf, text.trim(), &mut target.tables.names);
+    }
+    // A zero value has no bytes to rebuild from, so it is written from nothing like an unset one.
+    if matches!(value, PropertyValue::Default) && !target.declared.is_empty() {
+        let declared = target.declared;
+        return encode_declared(declared, text, target);
     }
     if let PropertyValue::Unset {
         declared,
@@ -6496,6 +6648,7 @@ mod tests {
             count_at: 0x100,
             count_width: 4,
             elements_at: None,
+            absent: None,
             elements,
             element_kind: kind,
             default_element,
@@ -6550,7 +6703,7 @@ mod tests {
         };
         let package = retoc::legacy_asset::FLegacyPackageHeader::default();
         insertion(
-            layout, index, key, &bundle, 0x100, entry, tables, &package, None,
+            layout, index, key, None, &bundle, 0x100, entry, tables, &package, None,
         )
         .map(|(at, bytes, _)| (at, bytes))
     }
