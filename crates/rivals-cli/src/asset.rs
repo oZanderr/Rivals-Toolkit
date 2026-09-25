@@ -698,7 +698,7 @@ pub fn list(game_root: &str, container: &str, filter: Option<&str>) -> Result<Ve
             .into_iter()
             .map(|(_, path)| path)
             .collect(),
-        AssetSource::Pak | AssetSource::Loose => asset::list_pak_entries(container)?,
+        AssetSource::Pak | AssetSource::Loose => asset::list_package_entries(container)?,
     };
     let needle = filter.map(str::to_lowercase);
     let mut paths: Vec<String> = entries
@@ -3122,13 +3122,38 @@ pub fn diagnose(
         .iter()
         .map(|(_, asset, exports)| AssetBundle { asset, exports })
         .collect();
+    // The Blueprint layouts recovered from the game's own packages, which `audit` and every other
+    // command read with. Without them each instance of a class the mappings lack would count here
+    // as a failure no schema slot can explain.
+    let synths: Vec<Option<std::sync::Arc<rivals_uasset::Mappings>>> = cached
+        .iter()
+        .zip(&bundles)
+        .enumerate()
+        .map(|(index, ((entry, _, _), bundle))| {
+            progress("synthesising", index + 1, bundles.len());
+            let source = PackageSource {
+                game_root,
+                container: if dir.is_some() { "" } else { container },
+                entry,
+                kind: if dir.is_some() {
+                    AssetSource::Loose
+                } else {
+                    AssetSource::Utoc
+                },
+            };
+            schema_synth::synthesised(bundle, Some(&schema), &source)
+                .ok()
+                .flatten()
+        })
+        .collect();
 
     let mut baseline = Vec::with_capacity(bundles.len());
     let mut attributed: BTreeMap<String, usize> = BTreeMap::new();
     let mut examples: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (index, bundle) in bundles.iter().enumerate() {
         progress("baseline", index + 1, bundles.len());
-        let result = rivals_uasset::parse_package(bundle, Some(&schema))
+        let synth = synths.get(index).cloned().flatten();
+        let result = rivals_uasset::parse_package_with(bundle, Some(&schema), synth.as_deref())
             .map(|parsed| tally(&parsed))
             .unwrap_or_else(|_| Tally::empty());
         for name in &result.structs {
@@ -3188,6 +3213,7 @@ pub fn diagnose(
                 let Ok(parsed) = rivals_uasset::parse_package_probed(
                     bundle,
                     Some(&schema),
+                    synths.get(*index).and_then(Option::as_deref),
                     &fixups_of(&target, elided),
                 ) else {
                     continue;
@@ -3276,10 +3302,11 @@ pub fn diagnose(
         // exports it breaks.
         if !elided.is_empty() {
             let (mut failed_delta, mut exact_delta) = (0i64, 0i64);
-            for (bundle, before) in bundles.iter().zip(&baseline) {
+            for ((bundle, before), synth) in bundles.iter().zip(&baseline).zip(&synths) {
                 let Ok(parsed) = rivals_uasset::parse_package_probed(
                     bundle,
                     Some(&schema),
+                    synth.as_deref(),
                     &fixups_of(&target, &elided),
                 ) else {
                     continue;

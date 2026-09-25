@@ -51,7 +51,7 @@ impl MemFileWriter {
         let mut seen_header = false;
         for (path, data) in files {
             let lowered = path.to_ascii_lowercase();
-            if lowered.ends_with(".uasset") || lowered.ends_with(".umap") {
+            if is_package_path(&lowered) {
                 bundle.asset_file_buffer = data;
                 seen_header = true;
             } else if lowered.ends_with(".uexp") {
@@ -123,12 +123,33 @@ pub fn list_loose_packages(root: &Path) -> Result<Vec<std::path::PathBuf>, Strin
         .into_iter()
         .filter_map(Result::ok)
         .map(walkdir::DirEntry::into_path)
-        .filter(|p| {
-            matches!(
-                p.extension().and_then(|e| e.to_str()),
-                Some("uasset") | Some("umap")
-            )
-        })
+        .filter(|p| is_package_path(&p.to_string_lossy()))
+        .collect())
+}
+
+/// Whether a path names a package's header file, rather than one of its sidecars or a file that
+/// is no package at all.
+pub fn is_package_path(path: &str) -> bool {
+    let lowered = path.to_ascii_lowercase();
+    lowered.ends_with(".uasset") || lowered.ends_with(".umap")
+}
+
+/// The packages a `.pak`, a folder of extracted files or a single loose file holds: a pak's by
+/// their mount-relative path, anything on disk by its own path.
+pub fn list_package_entries(source: &str) -> Result<Vec<String>, String> {
+    let path = Path::new(source);
+    if path.is_dir() {
+        return Ok(list_loose_packages(path)?
+            .into_iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect());
+    }
+    if is_package_path(source) {
+        return Ok(vec![source.to_string()]);
+    }
+    Ok(list_pak_entries(source)?
+        .into_iter()
+        .filter(|entry| is_package_path(entry))
         .collect())
 }
 
@@ -443,6 +464,50 @@ mod tests {
             "Marvel/Content/NoExtension"
         );
         assert_eq!(strip_extension("Some.Folder/File.umap"), "Some.Folder/File");
+    }
+
+    /// A package's sidecars and a loose INI sit beside it, and none of them is a package to open.
+    #[test]
+    fn only_package_headers_are_listed_from_a_folder_or_a_pak() {
+        let dir = std::env::temp_dir().join(format!("rivals-list-{}", std::process::id()));
+        let files = [
+            "Marvel/Content/A.uasset",
+            "Marvel/Content/A.uexp",
+            "Marvel/Content/A.ubulk",
+            "Marvel/Config/Mod.ini",
+        ];
+        for file in files {
+            let path = dir.join(file);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("dirs");
+            std::fs::write(path, b"x").expect("write");
+        }
+        let listed = list_package_entries(&dir.to_string_lossy()).expect("listed");
+        assert_eq!(listed.len(), 1, "{listed:?}");
+        assert!(
+            listed[0]
+                .replace('\\', "/")
+                .ends_with("Marvel/Content/A.uasset")
+        );
+
+        if std::env::var_os("OODLE_LIB_PATH").is_some() {
+            let pak = dir.join("Test.pak");
+            crate::pak_tweaks::io::create_empty_pak(&pak).expect("pak");
+            crate::pak_tweaks::io::with_unpacked_pak(&pak, |unpacked| {
+                for file in files {
+                    let path = unpacked.join(file);
+                    std::fs::create_dir_all(path.parent().expect("parent"))
+                        .map_err(|e| e.to_string())?;
+                    std::fs::write(path, b"x").map_err(|e| e.to_string())?;
+                }
+                Ok(())
+            })
+            .expect("fill the pak");
+            assert_eq!(
+                list_package_entries(&pak.to_string_lossy()).expect("listed"),
+                vec!["Marvel/Content/A.uasset"]
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

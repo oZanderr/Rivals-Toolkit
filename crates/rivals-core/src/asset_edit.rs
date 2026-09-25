@@ -1212,6 +1212,7 @@ mod game_data_tests {
         "Marvel/Content/Test/Other.uasset",
         "Marvel/Content/DT_Hero.uasset",
         "Marvel/Content/Marvel/Data/DataTable/GameMode/2206/Row.uasset",
+        "Marvel/Content/A.uasset",
     ];
 
     /// The files that pin a real game asset. A source scan cannot tell a fixture from an example,

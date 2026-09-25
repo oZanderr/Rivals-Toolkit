@@ -549,7 +549,18 @@ fn diff_items(
         return;
     };
     let kind = kind_of(&entry.value);
-    for position in items.len()..now.len() {
+    let is_set = matches!(entry.value, PropertyValue::Set { .. });
+    for (position, added) in now.iter().enumerate().skip(items.len()) {
+        // A set's element is its own key, so the new value goes in with the insert. One with no
+        // text form, such as a struct, can only come in as the default.
+        let key = if is_set { text_of(added) } else { None };
+        if is_set && key.is_none() && !items.is_empty() && added.get("fields").is_none() {
+            out.notes.push(format!(
+                "{label}[{position}]: this set element has no text form to key it by; add it in \
+                 the editor instead"
+            ));
+            continue;
+        }
         out.edits.values.push(ValueEdit {
             offset,
             expect_name: entry.name.clone(),
@@ -557,13 +568,20 @@ fn diff_items(
             expect_kind: kind.clone(),
             op: EditOp::Insert {
                 index: position as u32,
-                key: None,
+                key: key.clone(),
             },
         });
-        out.notes.push(format!(
-            "{label}[{position}]: a new element copies the one before it; dump the saved copy and \
-             diff again to give it a value"
-        ));
+        if key.is_none() {
+            let starts = if is_set {
+                "takes the element type's default"
+            } else {
+                "copies the one before it"
+            };
+            out.notes.push(format!(
+                "{label}[{position}]: a new element {starts}; dump the saved copy and diff again \
+                 to give it a value"
+            ));
+        }
     }
     for position in (now.len()..items.len()).rev() {
         out.edits.values.push(ValueEdit {
@@ -924,6 +942,36 @@ mod tests {
             })
             .collect();
         assert_eq!(indices, vec![2, 1], "removed from the end down");
+    }
+
+    /// A set keys on its elements, so a new one goes in by its value in one pass. Without a key a
+    /// set that already holds elements refuses the insert, so none is emitted for it.
+    #[test]
+    fn a_set_grows_by_keyed_inserts() {
+        let set = |items| entry("Names", PropertyValue::Set { items }, 0x40);
+        let out = one(
+            set(vec![PropertyValue::Name { value: "A".into() }]),
+            json!({"kind": "set", "items": [
+                {"kind": "name", "value": "A"},
+                {"kind": "name", "value": "B"},
+            ]}),
+        );
+        assert!(
+            matches!(&out.edits.values[0].op, EditOp::Insert { index: 1, key: Some(key) } if key == "B"),
+            "{:?}",
+            out.edits.values
+        );
+        assert!(out.notes.is_empty(), "{:?}", out.notes);
+
+        let out = one(
+            set(vec![PropertyValue::Name { value: "A".into() }]),
+            json!({"kind": "set", "items": [
+                {"kind": "name", "value": "A"},
+                {"kind": "delegate", "object": null, "function": "F"},
+            ]}),
+        );
+        assert!(out.edits.values.is_empty(), "{:?}", out.edits.values);
+        assert_eq!(out.notes.len(), 1);
     }
 
     /// A delegate is bound by the loader rather than stored as text, so a changed one is reported

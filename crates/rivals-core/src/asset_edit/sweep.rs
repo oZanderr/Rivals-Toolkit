@@ -458,7 +458,8 @@ fn stage(
         .map(|applied| format!("{} = {} -> {}", applied.name, applied.before, applied.after))
         .collect();
     Ok(Prepared::Ready(Box::new(Staged {
-        entry: entry.to_string(),
+        // A loose file is read from disk, and the mod has to name it by the game's path.
+        entry: super::save_entry(&edit)?,
         patched,
         loaded,
         changes,
@@ -494,7 +495,7 @@ fn matching(request: &SweepRequest<'_>, utoc: &std::path::Path) -> Result<Listin
         }
         AssetSource::Pak | AssetSource::Loose => (
             None,
-            asset::list_pak_entries(request.container)?
+            asset::list_package_entries(request.container)?
                 .into_iter()
                 .map(|path| (None, path))
                 .collect(),

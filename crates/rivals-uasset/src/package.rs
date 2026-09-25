@@ -374,12 +374,13 @@ pub fn parse_package_traced_with(
 pub fn parse_package_probed(
     bundle: &AssetBundle<'_>,
     mappings: Option<&Mappings>,
+    synth: Option<&Mappings>,
     fixups: &SchemaFixups,
 ) -> Result<ParsedPackage, String> {
     parse_inner(
         bundle,
         mappings,
-        None,
+        synth,
         Some(fixups),
         ParseOptions::default(),
     )

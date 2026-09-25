@@ -161,6 +161,17 @@ pub fn parse_package_traced(
     mappings: Option<&Mappings>,
     source: &PackageSource<'_>,
 ) -> Result<(ParsedPackage, Vec<TraceEntry>), String> {
+    let synth = synthesised(bundle, mappings, source)?;
+    rivals_uasset::parse_package_traced_with(bundle, mappings, synth.as_deref())
+}
+
+/// The layouts recovered from the game's packages that a parse of this package would carry, for
+/// a caller that parses it many times and should read it the way every other command does.
+pub fn synthesised(
+    bundle: &AssetBundle<'_>,
+    mappings: Option<&Mappings>,
+    source: &PackageSource<'_>,
+) -> Result<Option<Arc<Mappings>>, String> {
     let first = rivals_uasset::parse_package_opts(
         bundle,
         mappings,
@@ -170,8 +181,7 @@ pub fn parse_package_traced(
             ..Default::default()
         },
     )?;
-    let synth = synth_for(&first, mappings, source);
-    rivals_uasset::parse_package_traced_with(bundle, mappings, synth.as_deref())
+    Ok(synth_for(&first, mappings, source))
 }
 
 /// `own` are definitions the package being parsed carries itself, which need no loading but do
