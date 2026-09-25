@@ -28,11 +28,9 @@ import {
   X,
   Users,
   Search,
-  ListTree,
 } from "lucide-react";
 
 import { HeroIcon } from "@/components/HeroIcon";
-import { ModReportDialog } from "@/components/ModReportDialog";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -189,7 +187,6 @@ export function Mods({
   const [renamingMod, setRenamingMod] = useState<string | null>(null);
   const [conflictReport, setConflictReport] = useState<ConflictReport | null>(null);
   const [conflictDetailOpen, setConflictDetailOpen] = useState(false);
-  const [reportMod, setReportMod] = useState<string | null>(null);
   const [profiles, setProfiles] = useState<ModProfile[]>([]);
   const [profilesOpen, setProfilesOpen] = useState(false);
   const [knownHeroes, setKnownHeroes] = useState<CharacterSummary[]>([]);
@@ -1046,7 +1043,7 @@ export function Mods({
           <AlertTriangle size={15} className="shrink-0 text-warn" />
           <span className="flex-1 text-[12px] text-warn">
             {conflictCount} mod{conflictCount !== 1 ? "s" : ""} ha
-            {conflictCount !== 1 ? "ve" : "s"} asset conflicts, the highest _N_P patch number wins
+            {conflictCount !== 1 ? "ve" : "s"} asset conflicts, the alphabetically first pak wins
           </span>
           <Button
             variant="ghost"
@@ -1697,13 +1694,6 @@ export function Mods({
                             <PackageOpen />
                             View in Asset Manager
                           </ContextMenuItem>
-                          <ContextMenuItem
-                            disabled={!entry.enabled || entry.kind !== "IoStore"}
-                            onSelect={() => setReportMod(entry.full_name)}
-                          >
-                            <ListTree />
-                            Show contents
-                          </ContextMenuItem>
                           <ContextMenuItem onSelect={() => revealMod(entry)}>
                             <FolderOpen />
                             Show in folder
@@ -1772,7 +1762,7 @@ export function Mods({
             <AlertDialogDescription>
               {conflictReport?.asset_conflicts.length ?? 0} asset
               {conflictReport?.asset_conflicts.length !== 1 ? "s" : ""} modified by multiple mods.
-              The pak with the highest _N_P patch number wins, then the alphabetically first.
+              The alphabetically first pak wins, unless another carries a higher _N_P patch number.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <ConflictList conflicts={conflictReport?.asset_conflicts ?? []} />
@@ -1781,15 +1771,6 @@ export function Mods({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-
-      {reportMod !== null && (
-        <ModReportDialog
-          key={reportMod}
-          gamePath={gamePath}
-          modName={reportMod}
-          onClose={() => setReportMod(null)}
-        />
-      )}
     </div>
   );
 }
@@ -1880,6 +1861,12 @@ function Code({ children }: { children: React.ReactNode }) {
   );
 }
 
+/** The number in a `Name_<N>_P` file name, which the engine mounts by before the name. */
+function pakPriority(file: string): number | null {
+  const match = /_(\d+)_P(?:\.[a-z]+)+$/i.exec(file.split(/[\\/]/).pop() ?? file);
+  return match ? Number(match[1]) : null;
+}
+
 function ConflictList({ conflicts }: { conflicts: AssetConflict[] }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   // TanStack Virtual returns unstable functions by design; this hook is safe here.
@@ -1897,6 +1884,8 @@ function ConflictList({ conflicts }: { conflicts: AssetConflict[] }) {
       <div style={{ height: `${virtualizer.getTotalSize()}px`, position: "relative" }}>
         {virtualizer.getVirtualItems().map((vRow) => {
           const c = conflicts[vRow.index];
+          // Nearly every mod is `_9999999_P`, so the number only matters when these differ.
+          const byPriority = new Set(c.mods.map(pakPriority)).size > 1;
           return (
             <div
               key={vRow.index}
@@ -1934,6 +1923,13 @@ function ConflictList({ conflicts }: { conflicts: AssetConflict[] }) {
                         <span className="shrink-0 rounded bg-ok/15 px-1 py-0.5 text-[9px] font-semibold uppercase leading-none text-ok">
                           Active
                         </span>
+                      )}
+                      {i === 0 && byPriority && (
+                        <Tip content="Wins on its higher _N_P patch number rather than its name.">
+                          <span className="shrink-0 text-[10px] text-muted-foreground">
+                            patch {pakPriority(mod)}
+                          </span>
+                        </Tip>
                       )}
                       {i > 0 && (
                         <span className="shrink-0 rounded bg-muted px-1 py-0.5 text-[9px] font-semibold uppercase leading-none text-muted-foreground">

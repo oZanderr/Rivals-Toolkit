@@ -9,7 +9,7 @@
 
 use usmap::PropertyInner;
 
-use crate::props::{Ctx, Diagnostics, InstancedLayout, read_value};
+use crate::props::{Ctx, Diagnostics, InstancedLayout, read_value, record_container};
 use crate::reader::Cursor;
 use crate::structs;
 use crate::value::{PropertyEntry, PropertyValue};
@@ -30,6 +30,8 @@ struct Tag {
     value_type_name: Option<String>,
     /// A bool stores its value in the tag itself and occupies no value bytes.
     bool_value: bool,
+    /// Where that byte sits, which is the only place a bool can be rewritten.
+    bool_at: Option<usize>,
 }
 
 pub(crate) fn read_tagged_block(
@@ -85,7 +87,12 @@ pub(crate) fn read_tagged_block(
             name: tag.name,
             element: (tag.array_index > 0).then_some(tag.array_index as u32),
             value,
-            span: Some((base + start as u64, base + end as u64)),
+            // A bool keeps its value in the tag and stores nothing after it, so its one byte there
+            // is where an edit writes.
+            span: Some(match tag.bool_at {
+                Some(at) => (base + at as u64, base + at as u64 + 1),
+                None => (base + start as u64, base + end as u64),
+            }),
             slot: None,
         });
     }
@@ -116,12 +123,16 @@ fn read_tag(name: String, cursor: &mut Cursor<'_>, ctx: &Ctx<'_>) -> Result<Tag,
     let mut inner_name = None;
     let mut value_type_name = None;
     let mut bool_value = false;
+    let mut bool_at = None;
     match type_name.as_str() {
         "StructProperty" => {
             inner_name = Some(cursor.read_name(ctx.names())?);
             cursor.skip(16)?;
         }
-        "BoolProperty" => bool_value = cursor.read_u8()? != 0,
+        "BoolProperty" => {
+            bool_at = Some(cursor.position());
+            bool_value = cursor.read_u8()? != 0;
+        }
         "ByteProperty" | "EnumProperty" => inner_name = Some(cursor.read_name(ctx.names())?),
         "ArrayProperty" | "SetProperty" => inner_name = Some(cursor.read_name(ctx.names())?),
         "MapProperty" => {
@@ -144,6 +155,7 @@ fn read_tag(name: String, cursor: &mut Cursor<'_>, ctx: &Ctx<'_>) -> Result<Tag,
         inner_name,
         value_type_name,
         bool_value,
+        bool_at,
     })
 }
 
@@ -238,6 +250,7 @@ fn read_tagged_array(
     diagnostics: &mut Diagnostics,
     depth: u32,
 ) -> Result<PropertyValue, String> {
+    let at = cursor.file_offset();
     let count = cursor.read_i32()?;
     if count < 0 || count as usize > cursor.remaining() {
         return Err(cursor.err(format!("implausible tagged array count {count}")));
@@ -257,7 +270,9 @@ fn read_tagged_array(
         });
         let struct_name = element_tag.inner_name.unwrap_or_default();
         let mut items = Vec::with_capacity(count as usize);
+        let mut spans = Vec::with_capacity(count as usize);
         for _ in 0..count {
+            let from = cursor.file_offset();
             items.push(read_tagged_struct(
                 &struct_name,
                 cursor,
@@ -265,6 +280,24 @@ fn read_tagged_array(
                 diagnostics,
                 depth,
             )?);
+            spans.push((from, cursor.file_offset()));
+        }
+        record_container(
+            diagnostics,
+            ctx,
+            at,
+            at,
+            spans,
+            &PropertyInner::Struct { name: struct_name },
+            None,
+        );
+        // A tagged struct with nothing stored is its terminating `None` alone; the schema-built
+        // default is an unversioned header, which would not read here.
+        if let Some(layout) = diagnostics.containers.last_mut() {
+            layout.default_element = None;
+            layout.default_recipe = None;
+            layout.default_name = Some("None".into());
+            layout.elements_at = Some(elements_start);
         }
         return Ok(PropertyValue::Array { items });
     }
@@ -275,9 +308,13 @@ fn read_tagged_array(
         ))
     })?;
     let mut items = Vec::with_capacity(count as usize);
+    let mut spans = Vec::with_capacity(count as usize);
     for _ in 0..count {
+        let from = cursor.file_offset();
         items.push(read_value(&inner, cursor, ctx, diagnostics, depth + 1)?);
+        spans.push((from, cursor.file_offset()));
     }
+    record_container(diagnostics, ctx, at, at, spans, &inner, None);
     Ok(PropertyValue::Array { items })
 }
 

@@ -37,54 +37,6 @@ pub(crate) async fn check_mod_conflicts(
         .map_err(|e| e.to_string())?
 }
 
-/// What an enabled IoStore mod ships and reaches for: see `rivals_core::mod_report`.
-#[tauri::command]
-pub(crate) async fn get_mod_report(
-    state: State<'_, SettingsState>,
-    game_root: String,
-    mod_name: String,
-) -> Result<rivals_core::mod_report::ModReport, String> {
-    let usmap = crate::asset_view::configured_usmap(&state);
-    tauri::async_runtime::spawn_blocking(move || {
-        let utoc = crate::paths::mods_dir(&game_root)
-            .join(&mod_name)
-            .with_extension("utoc");
-        if !utoc.is_file() {
-            return Err(format!(
-                "{mod_name} has no enabled .utoc, so there is no IoStore content to report on"
-            ));
-        }
-        let schema = rivals_core::mappings::resolve(None, usmap.as_deref())
-            .and_then(|path| rivals_core::mappings::load(&path))
-            .ok();
-        rivals_core::mod_report::mod_report(&game_root, &utoc, schema.as_deref())
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-/// Where an enabled IoStore mod's scripts and values name `query`: see `rivals_core::mod_search`.
-#[tauri::command]
-pub(crate) async fn search_mod(
-    state: State<'_, SettingsState>,
-    game_root: String,
-    mod_name: String,
-    query: String,
-) -> Result<rivals_core::mod_search::SearchResult, String> {
-    let usmap = crate::asset_view::configured_usmap(&state);
-    tauri::async_runtime::spawn_blocking(move || {
-        let utoc = crate::paths::mods_dir(&game_root)
-            .join(&mod_name)
-            .with_extension("utoc");
-        let schema = rivals_core::mappings::resolve(None, usmap.as_deref())
-            .and_then(|path| rivals_core::mappings::load(&path))
-            .ok();
-        rivals_core::mod_search::mod_search(&game_root, &utoc, schema.as_deref(), &query)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
 #[tauri::command]
 pub(crate) fn install_signature_bypass(game_root: String) -> Result<String, String> {
     if crate::game_status::should_block_for_game() {

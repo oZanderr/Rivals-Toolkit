@@ -974,6 +974,60 @@ pub struct ScriptLine {
     /// The functions this statement calls, by name, so a viewer can open the ones it holds.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub calls: Vec<String>,
+    /// The constants in this statement that can take a new value in place.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub literals: Vec<LiteralSlot>,
+}
+
+/// A constant a viewer can offer for editing, addressed the way a script edit names it.
+#[derive(Debug, Clone, Serialize)]
+pub struct LiteralSlot {
+    /// Which literal in the statement, counted from 0 in bytecode order across every literal.
+    pub index: u32,
+    pub kind: &'static str,
+    /// The value as an edit would type it.
+    pub value: String,
+    /// For a string, the length a replacement has to keep, since the bytes cannot grow.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub length: Option<usize>,
+}
+
+/// The literals of `expr` a script edit can rewrite, with their index among all its literals.
+pub fn literal_slots(expr: &Expr) -> Vec<LiteralSlot> {
+    literals(expr)
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, literal)| {
+            let (value, length) = match literal {
+                Expr::IntConst { value, .. } => (value.to_string(), None),
+                Expr::Int64Const { value, .. } => (value.to_string(), None),
+                Expr::UInt64Const { value, .. } => (value.to_string(), None),
+                Expr::FloatConst { value, .. } => (value.to_string(), None),
+                Expr::DoubleConst { value, .. } => (value.to_string(), None),
+                Expr::ByteConst { value, .. } => (value.to_string(), None),
+                Expr::StringConst { value, .. } => (value.clone(), Some(value.chars().count())),
+                Expr::UnicodeStringConst { value, .. } => {
+                    (value.clone(), Some(value.encode_utf16().count()))
+                }
+                Expr::NameConst { value, .. } => (value.clone(), None),
+                Expr::Numbers { values, .. } => (
+                    values
+                        .iter()
+                        .map(f64::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    None,
+                ),
+                _ => return None,
+            };
+            Some(LiteralSlot {
+                index: index as u32,
+                kind: literal_kind(literal),
+                value,
+                length,
+            })
+        })
+        .collect()
 }
 
 /// Every statement rendered on its own, alongside the offsets it links to.
@@ -996,6 +1050,7 @@ pub fn script_lines(script: &Script) -> Vec<ScriptLine> {
                 text: render(&statement.expr),
                 targets,
                 calls,
+                literals: literal_slots(&statement.expr),
             }
         })
         .collect()
@@ -2415,6 +2470,29 @@ mod tests {
                 (TermKind::String, "Keys.txt"),
             ]
         );
+    }
+
+    /// Only constants with value bytes of their own are offered, but each keeps its index among
+    /// all of them, which is how an edit addresses it.
+    #[test]
+    fn a_line_offers_its_editable_constants_by_their_literal_index() {
+        let expr = call(
+            "/Script/Marvel.MarvelFileUtil:SaveToFile",
+            vec![
+                Expr::Simple { name: "True" },
+                Expr::StringConst {
+                    value: "Keys.txt".into(),
+                    at: 0,
+                },
+                Expr::IntConst { value: 7, at: 0 },
+            ],
+        );
+        let slots = literal_slots(&expr);
+        let seen: Vec<(u32, &str, Option<usize>)> = slots
+            .iter()
+            .map(|s| (s.index, s.value.as_str(), s.length))
+            .collect();
+        assert_eq!(seen, [(1, "Keys.txt", Some(8)), (2, "7", None)]);
     }
 
     #[test]

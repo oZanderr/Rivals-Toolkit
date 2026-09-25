@@ -655,11 +655,21 @@ pub fn patch_package_with(
     // Several edits can land in one property block, and its header may only be re-emitted once.
     let mut blocks: BTreeMap<u64, (UnversionedHeader, usize)> = BTreeMap::new();
 
+    let tagged = !parsed.info.unversioned_properties;
     for edit in &edits.values {
         let entry = locate(parsed, edit)?;
         let (start, end) = entry
             .span
             .ok_or_else(|| format!("{} has no recorded position in this package", entry.label()))?;
+        // These change which properties the header says are stored, and a tagged package has no
+        // such header: each property is a tag of its own.
+        if tagged && matches!(edit.op, EditOp::Clear | EditOp::Unset | EditOp::Store) {
+            return Err(format!(
+                "{} is a tagged property; clearing, unsetting or storing one is not supported, \
+                 so set it to a value instead",
+                entry.label()
+            ));
+        }
         let kind = kind_of(&entry.value);
         if kind != edit.expect_kind {
             return Err(format!(
@@ -685,7 +695,11 @@ pub fn patch_package_with(
                         was,
                         tables: &mut tables,
                         package: &package,
-                        element: false,
+                        // A tagged enum is written as its enumerator's name, the way a
+                        // container element is.
+                        element: tagged
+                            && matches!(entry.value, PropertyValue::Enum { .. })
+                            && end - start == 8,
                         enums: mappings,
                     },
                 )?;
@@ -2427,7 +2441,8 @@ fn fresh_element(
         return realise_default(parts, names);
     }
     match (kind, name) {
-        ("Name" | "Enum", Some(name)) => Ok(encode_name(name, names)),
+        // A struct only names its default when it is tagged: the empty block is its `None`.
+        ("Name" | "Enum" | "Struct", Some(name)) => Ok(encode_name(name, names)),
         ("SoftObject" | "AssetObject", Some(path)) => Ok(encode_soft_object(path, names)),
         _ => Err(format!(
             "{}: a {kind} element has no default this editor can write from nothing",
@@ -2533,7 +2548,9 @@ fn insertion(
             }
         }
         let at = layout.elements.last().map_or(
-            layout.count_at + u64::from(layout.count_width),
+            layout
+                .elements_at
+                .unwrap_or(layout.count_at + u64::from(layout.count_width)),
             |(_, end)| *end,
         );
         return Ok((at, bytes, key_len));
@@ -6118,6 +6135,7 @@ mod tests {
             at: 0x100,
             count_at: 0x100,
             count_width: 4,
+            elements_at: None,
             elements,
             element_kind: kind,
             default_element,

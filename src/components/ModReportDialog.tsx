@@ -15,7 +15,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 
-interface SearchHit {
+export interface SearchHit {
   package: string;
   export: string;
   export_index: number;
@@ -52,9 +52,15 @@ interface ModReport {
 
 interface Props {
   gamePath: string;
-  modName: string;
+  /** The selected container's `.pak`; its `.utoc` is what gets read. */
+  container: string;
   onClose: () => void;
+  /** Opens a search hit in the inspector, at its statement when it has one. */
+  onOpenHit: (hit: SearchHit) => void;
 }
+
+/** The patch number nearly every mod ships with, which says nothing about this one. */
+const USUAL_PRIORITY = 9999999;
 
 const SECTIONS: { key: keyof ModReport; title: string; hint: string }[] = [
   {
@@ -76,14 +82,15 @@ const SECTIONS: { key: keyof ModReport; title: string; hint: string }[] = [
   { key: "urls", title: "Links", hint: "Web addresses a script opens." },
 ];
 
-/** Mount with `key={modName}` so each mod starts from an empty report. */
-export function ModReportDialog({ gamePath, modName, onClose }: Props) {
+/** Mount with `key={container}` so each mod starts from an empty report. */
+export function ModReportDialog({ gamePath, container, onClose, onOpenHit }: Props) {
+  const modName = container.split(/[\\/]/).pop() ?? container;
   const [report, setReport] = useState<ModReport | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    invoke<ModReport>("get_mod_report", { gameRoot: gamePath, modName })
+    invoke<ModReport>("get_mod_report", { gameRoot: gamePath, container })
       .then((r) => {
         if (!cancelled) setReport(r);
       })
@@ -93,7 +100,7 @@ export function ModReportDialog({ gamePath, modName, onClose }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [gamePath, modName]);
+  }, [gamePath, container]);
 
   const [query, setQuery] = useState("");
   const [search, setSearch] = useState<{ query: string; result: SearchResult } | null>(null);
@@ -104,7 +111,7 @@ export function ModReportDialog({ gamePath, modName, onClose }: Props) {
     if (!text || searching) return;
     setSearching(true);
     setSearchError(null);
-    invoke<SearchResult>("search_mod", { gameRoot: gamePath, modName, query: text })
+    invoke<SearchResult>("search_mod", { gameRoot: gamePath, container, query: text })
       .then((result) => setSearch({ query: text, result }))
       .catch((e: unknown) => setSearchError(String(e)))
       .finally(() => setSearching(false));
@@ -120,7 +127,9 @@ export function ModReportDialog({ gamePath, modName, onClose }: Props) {
           <AlertDialogTitle>Mod contents</AlertDialogTitle>
           <AlertDialogDescription className="truncate">
             {modName}
-            {report?.patch_priority != null && ` · patch priority ${report.patch_priority}`}
+            {report?.patch_priority != null &&
+              report.patch_priority !== USUAL_PRIORITY &&
+              ` · patch priority ${report.patch_priority}`}
           </AlertDialogDescription>
         </AlertDialogHeader>
         <div className="flex items-center gap-2">
@@ -149,7 +158,9 @@ export function ModReportDialog({ gamePath, modName, onClose }: Props) {
         </div>
         <div className="flex-1 overflow-y-auto -mx-6 px-6 text-[12px]">
           {searchError && <p className="text-err">{searchError}</p>}
-          {search && <SearchResults query={search.query} result={search.result} />}
+          {search && (
+            <SearchResults query={search.query} result={search.result} onOpen={onOpenHit} />
+          )}
           {error && <p className="text-err">{error}</p>}
           {!error && !report && <p className="text-muted-foreground">Reading the mod…</p>}
           {report && !search && (
@@ -193,7 +204,15 @@ export function ModReportDialog({ gamePath, modName, onClose }: Props) {
   );
 }
 
-function SearchResults({ query, result }: { query: string; result: SearchResult }) {
+function SearchResults({
+  query,
+  result,
+  onOpen,
+}: {
+  query: string;
+  result: SearchResult;
+  onOpen: (hit: SearchHit) => void;
+}) {
   const byPackage = new Map<string, SearchHit[]>();
   for (const hit of result.hits)
     byPackage.set(hit.package, [...(byPackage.get(hit.package) ?? []), hit]);
@@ -206,7 +225,11 @@ function SearchResults({ query, result }: { query: string; result: SearchResult 
         <div key={pkg}>
           <p className="truncate font-mono text-[11px] text-muted-foreground">{shortPath(pkg)}</p>
           {hits.map((hit, i) => (
-            <div key={i} className="flex items-baseline gap-2 pl-3 font-mono text-[11px]">
+            <button
+              key={i}
+              className="flex w-full items-baseline gap-2 rounded-sm pl-3 text-left font-mono text-[11px] hover:bg-muted/50"
+              onClick={() => onOpen(hit)}
+            >
               <span className="w-14 shrink-0 font-sans text-[10px] uppercase text-muted-foreground">
                 {hit.kind}
               </span>
@@ -218,7 +241,7 @@ function SearchResults({ query, result }: { query: string; result: SearchResult 
               <span className="truncate" title={hit.line}>
                 {hit.line}
               </span>
-            </div>
+            </button>
           ))}
         </div>
       ))}

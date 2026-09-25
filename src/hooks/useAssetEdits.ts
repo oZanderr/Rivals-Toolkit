@@ -33,6 +33,7 @@ export type Draft =
   | { op: "key_remove"; index: number }
   | { op: "payload_replace"; file: string }
   | { op: "bulk_replace"; file: string }
+  | { op: "script_set"; text: string }
   | { op: "row_add"; at: number }
   | { op: "row_duplicate"; source: string; at: number }
   | { op: "row_remove" }
@@ -70,6 +71,9 @@ export interface EditTarget {
   payload?: { export: number };
   /** One bulk data resource's bytes rather than a value. */
   bulk?: { resource: number };
+  /** A constant inside a function's bytecode: the export, the statement's offset, and which
+   *  literal in that statement. */
+  script?: { export: number; statement: number; constant: number };
 }
 
 export interface DraftRecord {
@@ -86,6 +90,10 @@ const SEP = String.fromCharCode(0);
 export function draftKey(target: EditTarget): string {
   if (target.payload) return ["payload", target.payload.export].join(SEP);
   if (target.bulk) return ["bulk", target.bulk.resource].join(SEP);
+  if (target.script) {
+    const { export: exportIndex, statement, constant } = target.script;
+    return ["script", exportIndex, statement, constant].join(SEP);
+  }
   if (target.row) return ["row", target.row.export, target.row.name].join(SEP);
   if (target.string) {
     const { export: exportIndex, index, key, field } = target.string;
@@ -124,6 +132,16 @@ export function payloadTarget(exportIndex: number): EditTarget {
 /** Bulk data resource `resource` of the package. */
 export function bulkTarget(resource: number): EditTarget {
   return { offset: 0, name: "bulk", kind: "bulk", bulk: { resource } };
+}
+
+/** Literal `constant` of the statement at `statement` in the bytecode of export `exportIndex`. */
+export function scriptTarget(exportIndex: number, statement: number, constant: number): EditTarget {
+  return {
+    offset: 0,
+    name: "script",
+    kind: "script",
+    script: { export: exportIndex, statement, constant },
+  };
 }
 
 /** The row `name` of the DataTable at `exportIndex`, whether it exists yet or is being added. */
@@ -377,6 +395,7 @@ interface EditList {
   keys?: KeyEdit[];
   payloads?: PayloadEdit[];
   bulk?: BulkEdit[];
+  scripts?: ScriptEdit[];
   remove_exports?: number[];
   reset_exports?: number[];
   duplicate_exports?: { export: number; name: string; into_level?: number }[];
@@ -401,6 +420,19 @@ function toImportEdit(draft: ImportDraft): ImportEdit {
 function toPayloadEdit({ target, draft }: DraftRecord): PayloadEdit | null {
   if (!target.payload || draft.op !== "payload_replace") return null;
   return { export: target.payload.export, file: draft.file };
+}
+
+/** A bytecode constant given a new value at its own width. */
+interface ScriptEdit {
+  export: number;
+  statement: number;
+  constant: number;
+  value: string;
+}
+
+function toScriptEdit({ target, draft }: DraftRecord): ScriptEdit | null {
+  if (!target.script || draft.op !== "script_set") return null;
+  return { ...target.script, value: draft.text };
 }
 
 function toBulkEdit({ target, draft }: DraftRecord): BulkEdit | null {
@@ -629,6 +661,7 @@ export function useAssetEdits({
           !record.target.string &&
           !record.target.payload &&
           !record.target.bulk &&
+          !record.target.script &&
           !isKeyDraft(record.draft)
       );
       const rows = records.flatMap((record) => toRowEdit(record) ?? []);
@@ -636,6 +669,7 @@ export function useAssetEdits({
       const keys = records.flatMap((record) => toKeyEdit(record) ?? []);
       const payloads = records.flatMap((record) => toPayloadEdit(record) ?? []);
       const bulk = records.flatMap((record) => toBulkEdit(record) ?? []);
+      const scripts = records.flatMap((record) => toScriptEdit(record) ?? []);
       const imports = structural ? [] : Object.values(importDrafts);
       if (!structural && records.length === 0 && imports.length === 0) return;
       const dropped = structural?.removeImports ?? [];
@@ -653,6 +687,7 @@ export function useAssetEdits({
           keys,
           payloads,
           bulk,
+          scripts,
           remove_exports: structural?.remove ?? [],
           reset_exports: structural?.reset ?? [],
           duplicate_exports: structural?.duplicate ?? [],

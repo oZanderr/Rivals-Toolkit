@@ -21,7 +21,7 @@ pub(crate) struct MappingsStatus {
     pub error: Option<String>,
 }
 
-pub(crate) fn configured_usmap(state: &State<'_, SettingsState>) -> Option<String> {
+fn configured_usmap(state: &State<'_, SettingsState>) -> Option<String> {
     state.lock().ok().and_then(|s| s.usmap_path.clone())
 }
 
@@ -281,6 +281,58 @@ pub(crate) async fn export_script_view(
             storage_size: script.storage_size,
             statements: script.statements.len(),
         })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// The `.utoc` behind a container the Asset Manager has selected, which is named by its `.pak`.
+fn mod_utoc(container: &str) -> Result<std::path::PathBuf, String> {
+    let utoc = std::path::Path::new(container).with_extension("utoc");
+    if utoc.is_file() {
+        Ok(utoc)
+    } else {
+        Err(format!(
+            "{} has no .utoc, so there is no IoStore content to read",
+            utoc.display()
+        ))
+    }
+}
+
+/// What an IoStore mod ships and reaches for: see `rivals_core::mod_report`.
+#[tauri::command]
+pub(crate) async fn get_mod_report(
+    state: State<'_, SettingsState>,
+    game_root: String,
+    container: String,
+) -> Result<rivals_core::mod_report::ModReport, String> {
+    let usmap = configured_usmap(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let utoc = mod_utoc(&container)?;
+        let schema = mappings::resolve(None, usmap.as_deref())
+            .and_then(|path| mappings::load(&path))
+            .ok();
+        rivals_core::mod_report::mod_report(&game_root, &utoc, schema.as_deref())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Where an IoStore mod's scripts and values name `query`: see `rivals_core::mod_search`.
+#[tauri::command]
+pub(crate) async fn search_mod(
+    state: State<'_, SettingsState>,
+    game_root: String,
+    container: String,
+    query: String,
+) -> Result<rivals_core::mod_search::SearchResult, String> {
+    let usmap = configured_usmap(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let utoc = mod_utoc(&container)?;
+        let schema = mappings::resolve(None, usmap.as_deref())
+            .and_then(|path| mappings::load(&path))
+            .ok();
+        rivals_core::mod_search::mod_search(&game_root, &utoc, schema.as_deref(), &query)
     })
     .await
     .map_err(|e| e.to_string())?

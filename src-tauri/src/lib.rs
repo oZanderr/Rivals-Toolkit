@@ -134,8 +134,6 @@ pub fn run() {
             // mods
             mods::commands::get_mods_status,
             mods::commands::check_mod_conflicts,
-            mods::commands::get_mod_report,
-            mods::commands::search_mod,
             mods::commands::install_signature_bypass,
             mods::commands::remove_signature_bypass,
             mods::commands::is_signature_bypass_installed,
@@ -168,6 +166,8 @@ pub fn run() {
             mods::profiles::apply_mod_profile,
             // asset_view
             asset_view::inspect_asset,
+            asset_view::get_mod_report,
+            asset_view::search_mod,
             asset_view::get_mappings_status,
             asset_view::set_mappings_path,
             mappings_remote::list_remote_mappings,

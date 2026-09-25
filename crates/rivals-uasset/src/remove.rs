@@ -869,6 +869,7 @@ mod tests {
             at: HEADER as u64 + 16,
             count_at: HEADER as u64 + 16,
             count_width: 4,
+            elements_at: None,
             elements: vec![
                 (HEADER as u64 + 20, HEADER as u64 + 24),
                 (HEADER as u64 + 24, HEADER as u64 + 28),

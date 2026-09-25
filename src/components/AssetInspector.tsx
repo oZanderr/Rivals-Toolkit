@@ -65,6 +65,7 @@ import { Tip } from "@/components/ui/tooltip";
 import {
   bulkTarget,
   draftKey,
+  scriptTarget,
   EditSessionContext,
   elementTarget,
   entryTarget,
@@ -410,6 +411,8 @@ interface Props {
   onOpenSettings: () => void;
   /** Opens the same entry from the mod pak a save wrote, so later edits layer on the saved copy. */
   onOpenCopy?: (container: string) => void;
+  /** An export to open on arrival, by its index, and the statement in its script to land on. */
+  initialTarget?: { exportIndex: number; offset?: number };
 }
 
 /** Containers hold aggregates; everything else reads on one line. */
@@ -1726,6 +1729,7 @@ function ScriptPane({
         </div>
       )}
       <ScriptLines
+        exportIndex={exportIndex}
         lines={view.lines}
         entries={view.entries}
         exportNames={exportNames}
@@ -1741,12 +1745,14 @@ const hex = (offset: number) => `0x${offset.toString(16).toUpperCase().padStart(
 /** Statements with their jump, pushed-flow and resume targets as links, and the events that
  *  enter an Ubergraph named where their code starts. */
 function ScriptLines({
+  exportIndex,
   lines,
   entries,
   exportNames,
   focus,
   onOpen,
 }: {
+  exportIndex: number;
   lines: ScriptLine[];
   entries: [number, string][];
   exportNames: Set<string>;
@@ -1827,6 +1833,14 @@ function ScriptLines({
                 )}
               </span>
               <span>{line.text}</span>
+              {(line.literals ?? []).map((slot) => (
+                <LiteralChip
+                  key={slot.index}
+                  exportIndex={exportIndex}
+                  statement={line.offset}
+                  slot={slot}
+                />
+              ))}
               {(line.targets ?? []).map((target) => (
                 <button
                   key={target}
@@ -1856,11 +1870,110 @@ function ScriptLines({
   );
 }
 
+/** A constant in a statement that can take a new value in place. */
+interface LiteralSlot {
+  /** Which literal in the statement, counting every literal, which is how an edit names it. */
+  index: number;
+  kind: string;
+  value: string;
+  /** A string's length, which a replacement has to keep. */
+  length?: number;
+}
+
+/** How long a string constant's replacement is, in the units its width is counted in. */
+function literalLength(kind: string, text: string): number {
+  return kind === "UnicodeStringConst" ? text.length : [...text].length;
+}
+
+/** One editable constant: its value, or the draft replacing it, and an inline field to change it.
+ *  The bytes cannot grow in place, so a string keeps its length and a number its type. */
+function LiteralChip({
+  exportIndex,
+  statement,
+  slot,
+}: {
+  exportIndex: number;
+  statement: number;
+  slot: LiteralSlot;
+}) {
+  const session = useEditSession();
+  const target = scriptTarget(exportIndex, statement, slot.index);
+  const key = draftKey(target);
+  const draft = session.drafts[key]?.draft;
+  const current = draft?.op === "script_set" ? draft.text : slot.value;
+  const [editing, setEditing] = useState<string | null>(null);
+
+  const problem =
+    editing !== null &&
+    slot.length !== undefined &&
+    literalLength(slot.kind, editing) !== slot.length
+      ? `Must stay ${slot.length} characters long; this is ${literalLength(slot.kind, editing)}.`
+      : null;
+  const commit = () => {
+    if (editing === null || problem) return;
+    if (editing === slot.value) session.dropDraft(key);
+    else session.setDraft(target, { op: "script_set", text: editing }, []);
+    setEditing(null);
+  };
+
+  if (editing !== null) {
+    return (
+      <Tip content={problem ?? `${slot.kind}. Enter to keep, Esc to cancel.`}>
+        <input
+          autoFocus
+          value={editing}
+          onChange={(e) => setEditing(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") commit();
+            if (e.key === "Escape") setEditing(null);
+          }}
+          onBlur={() => (problem ? setEditing(null) : commit())}
+          size={Math.max(editing.length, 4)}
+          className={cn(
+            "shrink-0 rounded-sm border bg-background px-1 font-mono text-[11px] outline-none",
+            problem ? "border-err" : "border-primary"
+          )}
+        />
+      </Tip>
+    );
+  }
+  const hint =
+    session.locked ??
+    `${slot.kind}${slot.length !== undefined ? `, ${slot.length} characters` : ""}. Click to change it.`;
+  return (
+    <span className="flex shrink-0 items-center">
+      <Tip content={hint}>
+        <button
+          disabled={!!session.locked}
+          onClick={() => setEditing(current)}
+          className={cn(
+            "max-w-64 truncate rounded-sm border px-1 font-mono",
+            draft
+              ? "border-blue-accent-border bg-blue-accent/15 text-blue-accent-foreground"
+              : "border-border/60 text-muted-foreground hover:text-foreground"
+          )}
+        >
+          {current === "" ? "\u2205" : current}
+        </button>
+      </Tip>
+      {draft && (
+        <button
+          className="px-0.5 text-muted-foreground hover:text-foreground"
+          onClick={() => session.dropDraft(key)}
+        >
+          <X size={10} />
+        </button>
+      )}
+    </span>
+  );
+}
+
 interface ScriptLine {
   offset: number;
   text: string;
   targets?: number[];
   calls?: string[];
+  literals?: LiteralSlot[];
 }
 
 interface FunctionField {
@@ -5693,6 +5806,7 @@ export default function AssetInspector({
   onClose,
   onOpenSettings,
   onOpenCopy,
+  initialTarget,
 }: Props) {
   const [pkg, setPkg] = useState<ParsedPackage | null>(null);
   /// A removal or reset the user has asked about but not yet confirmed.
@@ -5723,6 +5837,8 @@ export default function AssetInspector({
   // The default export is picked when an asset is opened, not again when a save re-reads it:
   // that would pull the user off the export they were editing.
   const pickDefault = useRef(true);
+  // Read once, on the first load: the inspector is remounted for every new target.
+  const target = useRef(initialTarget);
   useEffect(() => {
     pickDefault.current = true;
   }, [container, entry]);
@@ -5741,7 +5857,21 @@ export default function AssetInspector({
         });
         if (cancelled) return;
         setPkg(result);
-        if (pickDefault.current) {
+        const wanted = target.current
+          ? result.exports.findIndex((e) => e.index === target.current?.exportIndex)
+          : -1;
+        if (pickDefault.current && wanted >= 0) {
+          pickDefault.current = false;
+          const offset = target.current?.offset;
+          setSelected(wanted);
+          setShowPackage(false);
+          if (result.exports[wanted].script) {
+            setView("script");
+            if (offset !== undefined) setScriptFocus({ index: wanted, offset });
+          } else {
+            setView("tree");
+          }
+        } else if (pickDefault.current) {
           pickDefault.current = false;
           // A lone export is what the user came for, so open it. Anything with subobjects starts
           // from the package overview, with the table (or the first export) ready behind it.
@@ -6095,35 +6225,33 @@ export default function AssetInspector({
     ? active.properties.filter((p) => p.value.kind === "unset").length
     : 0;
 
-  const views: { id: ViewMode; label: string; enabled: boolean }[] = [
-    { id: "table", label: "Table", enabled: Boolean(active?.data_table) },
-    { id: "strings", label: "Strings", enabled: Boolean(active?.string_table) },
-    { id: "tree", label: "Tree", enabled: true },
-    { id: "json", label: "JSON", enabled: true },
+  // A function stores no property values, so a tree of it could only ever be empty.
+  const codeOnly = Boolean(active?.script) && (active?.properties.length ?? 0) === 0;
+  // Only the views that can show something for this export are offered at all.
+  const views: { id: ViewMode; label: string }[] = [
+    { id: "table" as const, label: "Table", shown: Boolean(active?.data_table) },
+    { id: "strings" as const, label: "Strings", shown: Boolean(active?.string_table) },
+    { id: "script" as const, label: "Script", shown: Boolean(active?.script) },
+    { id: "tree" as const, label: "Tree", shown: !codeOnly },
+    { id: "json" as const, label: "JSON", shown: true },
     // The shaded bytes are for finding where a read went wrong, so only an export that did not
     // decode offers them; `asset hex` and `asset trace` cover the rest from the CLI.
     {
-      id: "bytes",
+      id: "bytes" as const,
       label: "Bytes",
-      enabled: active?.status.state === "failed" || active?.status.state === "partial",
+      shown: active?.status.state === "failed" || active?.status.state === "partial",
     },
-    { id: "script", label: "Script", enabled: Boolean(active?.script) },
-  ];
-  // "table" is the resting choice: it stands for whatever grid the export offers.
+  ].filter((option) => option.shown);
+  // "table" is the resting choice: it stands for whatever the export is best read as.
+  const restingView: ViewMode = active?.data_table
+    ? "table"
+    : active?.string_table
+      ? "strings"
+      : codeOnly
+        ? "script"
+        : "tree";
   const effectiveView: ViewMode =
-    view === "table" && !active?.data_table
-      ? active?.string_table
-        ? "strings"
-        : "tree"
-      : view === "strings" && !active?.string_table
-        ? "tree"
-        : view === "script" && !active?.script
-          ? "tree"
-          : view === "bytes" &&
-              active?.status.state !== "failed" &&
-              active?.status.state !== "partial"
-            ? "tree"
-            : view;
+    view !== "table" && views.some((option) => option.id === view) ? view : restingView;
 
   return (
     <EditSessionContext.Provider value={edits.session}>
@@ -6220,14 +6348,12 @@ export default function AssetInspector({
                 {views.map((option) => (
                   <button
                     key={option.id}
-                    disabled={!option.enabled}
                     onClick={() => setView(option.id)}
                     className={cn(
                       "rounded px-2 py-0.5 text-[10px] font-semibold uppercase transition-colors",
                       effectiveView === option.id
                         ? "bg-background text-foreground"
-                        : "text-muted-foreground hover:text-foreground",
-                      !option.enabled && "cursor-not-allowed opacity-30 hover:text-muted-foreground"
+                        : "text-muted-foreground hover:text-foreground"
                     )}
                   >
                     {option.label}
@@ -6478,18 +6604,7 @@ export default function AssetInspector({
               ) : (
                 <div className="min-h-0 min-w-0 flex-1 overflow-auto">
                   <p className="p-6 text-center text-sm text-muted-foreground">
-                    {active?.script && active.properties.length === 0 ? (
-                      <>
-                        Functions store their parameters, locals and code rather than property
-                        values.{" "}
-                        <button
-                          className="underline hover:text-foreground"
-                          onClick={() => setView("script")}
-                        >
-                          Open the Script view
-                        </button>
-                      </>
-                    ) : active && inheritedCount > 0 ? (
+                    {active && inheritedCount > 0 ? (
                       <>
                         Stores no properties. {inheritedCount} declared{" "}
                         {inheritedCount === 1

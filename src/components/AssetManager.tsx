@@ -19,6 +19,7 @@ import {
   FolderOpen,
   Hammer,
   Layers,
+  ListTree,
   Loader2,
   Lock,
   MinusSquare,
@@ -34,6 +35,7 @@ import {
 
 import AssetInspector from "@/components/AssetInspector";
 import { HeroIcon } from "@/components/HeroIcon";
+import { ModReportDialog, type SearchHit } from "@/components/ModReportDialog";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -201,6 +203,12 @@ export function AssetManager({
   onOpenSettings,
 }: Props) {
   const [inspecting, setInspecting] = useState<ContentEntry | null>(null);
+  /// Where in the inspected package to land, when it was opened from a mod search hit.
+  const [inspectTarget, setInspectTarget] = useState<{
+    exportIndex: number;
+    offset?: number;
+  } | null>(null);
+  const [overviewOpen, setOverviewOpen] = useState(false);
   /// A mod pak to read the inspected entry from instead of the selected container: the copy a
   /// save just wrote.
   const [inspectFrom, setInspectFrom] = useState<string | null>(null);
@@ -1801,6 +1809,18 @@ export function AssetManager({
                 ) : (
                   <>
                     {selectedIsIoStore && !selectedIsVanilla && (
+                      <Tip content="Mod overview: what it replaces and adds, what it calls, and a search of its scripts">
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          onClick={() => setOverviewOpen(true)}
+                          disabled={busy || !selectedPak || !gamePath}
+                        >
+                          <ListTree size={15} />
+                        </Button>
+                      </Tip>
+                    )}
+                    {selectedIsIoStore && !selectedIsVanilla && (
                       <Tip content="Convert this mod's IoStore assets to editable .uasset/.uexp/.ubulk legacy">
                         <Button
                           variant="ghost"
@@ -2008,6 +2028,7 @@ export function AssetManager({
                           <ContextMenuItem
                             onSelect={() => {
                               setInspectFrom(null);
+                              setInspectTarget(null);
                               setInspecting(entry);
                             }}
                           >
@@ -2313,9 +2334,25 @@ export function AssetManager({
         />
       )}
 
+      {overviewOpen && selectedPak && (
+        <ModReportDialog
+          key={selectedPak}
+          gamePath={gamePath}
+          container={selectedPak}
+          onClose={() => setOverviewOpen(false)}
+          onOpenHit={(hit: SearchHit) => {
+            setOverviewOpen(false);
+            setInspectFrom(null);
+            setInspectTarget({ exportIndex: hit.export_index, offset: hit.offset });
+            setInspecting({ path: hit.package, source: "utoc" });
+          }}
+        />
+      )}
+
       {inspecting && (
         <AssetInspector
-          key={`${inspectFrom ?? selectedPak}\u0000${inspecting.path}`}
+          key={`${inspectFrom ?? selectedPak}\u0000${inspecting.path}\u0000${inspectTarget?.exportIndex ?? ""}:${inspectTarget?.offset ?? ""}`}
+          initialTarget={inspectTarget ?? undefined}
           gamePath={gamePath}
           gameRunning={gameRunning}
           isActive={isActive}
@@ -2326,10 +2363,12 @@ export function AssetManager({
           entry={inspecting.path}
           onClose={() => {
             setInspectFrom(null);
+            setInspectTarget(null);
             setInspecting(null);
           }}
           onOpenSettings={() => {
             setInspectFrom(null);
+            setInspectTarget(null);
             setInspecting(null);
             onOpenSettings?.();
           }}

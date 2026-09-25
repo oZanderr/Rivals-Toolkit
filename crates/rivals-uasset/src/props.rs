@@ -178,6 +178,9 @@ pub struct ContainerLayout {
     /// How many bytes that count occupies: four for a `TArray`, one for a list a native struct
     /// writes behind a byte count.
     pub count_width: u8,
+    /// Where the first element goes when there is none to follow, if not straight after the
+    /// count: a tagged array of structs writes its element tag in between.
+    pub elements_at: Option<u64>,
     /// Byte range of each element. A map pair counts as one, spanning its key and its value.
     pub elements: Vec<(u64, u64)>,
     /// The type an element is stored as, for sizing a number that has no bytes yet.
@@ -1312,6 +1315,7 @@ pub(crate) fn record_container_width(
         at,
         count_at,
         count_width,
+        elements_at: None,
         elements,
         element_kind: kind_name(element),
         default_element,
@@ -1359,6 +1363,7 @@ pub(crate) fn native_list(
         at,
         count_at: at,
         count_width: 4,
+        elements_at: None,
         elements,
         element_kind: "Struct",
         default_element: bytes_only.then(|| {

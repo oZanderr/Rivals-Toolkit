@@ -22,6 +22,8 @@ mod renumber;
 mod stringtable;
 mod structs;
 mod tagged;
+#[cfg(test)]
+mod tagged_edit_tests;
 mod tails;
 mod unversioned;
 mod ustruct;
@@ -49,9 +51,9 @@ pub use import_remove::{
     unused_imports,
 };
 pub use kismet::{
-    Expr, ObjectRef, PropertyRef, Script, ScriptLine, ScriptStop, Statement, SwitchCase, Term,
-    TermKind, TextLiteral, call_sites, callee_name, literals, render_script, script_lines,
-    statement_terms, token_name, ubergraph_entries,
+    Expr, LiteralSlot, ObjectRef, PropertyRef, Script, ScriptLine, ScriptStop, Statement,
+    SwitchCase, Term, TermKind, TextLiteral, call_sites, callee_name, literals, render_script,
+    script_lines, statement_terms, token_name, ubergraph_entries,
 };
 pub use mappings::{Mappings, Schema, SchemaFixups, SchemaSlot, kind_name};
 pub use package::{
