@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use rivals_core::tweaks::TweakSetting;
 use serde::Deserialize;
 
 /// Only the fields the CLI honours. Unknown keys are ignored, so the app is free to add settings
@@ -24,6 +25,18 @@ pub struct AppSettings {
     pub asset_mod_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub asset_save_target: Option<rivals_core::asset_edit::SaveTarget>,
+    /// Tweak presets saved from the desktop app, so `--preset` applies the same thing the GUI
+    /// would.
+    #[serde(default)]
+    pub tweak_profiles: Vec<TweakProfile>,
+}
+
+/// One saved preset. The app stores timestamps alongside these; the CLI only needs what to write.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TweakProfile {
+    pub name: String,
+    #[serde(default)]
+    pub settings: Vec<TweakSetting>,
 }
 
 fn yes() -> bool {

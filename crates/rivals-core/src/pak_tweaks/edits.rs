@@ -123,6 +123,23 @@ pub fn edits_for_tweak(
     }
 }
 
+/// Whether a tweak can only be written into an engine section.
+///
+/// Engine-section settings are not console variables, so a device profiles file cannot hold them.
+/// A pak shipping no engine INI has nowhere to put one, and the write is a silent no-op, so a
+/// caller applying a whole preset drops these rather than reporting them as applied.
+pub fn needs_engine_ini(def: &TweakDefinition) -> bool {
+    match &def.kind {
+        TweakKind::Toggle { engine_section, .. } | TweakKind::Slider { engine_section, .. } => {
+            engine_section.is_some()
+        }
+        TweakKind::BatchToggle { entries, .. } => {
+            entries.iter().any(|e| e.engine_section.is_some())
+        }
+        TweakKind::RemoveLines { lines, .. } => lines.iter().any(|l| l.engine_section.is_some()),
+    }
+}
+
 /// Edits realizing every requested tweak state, resolved against the pak tweak catalogue.
 ///
 /// Both front ends go through here, so the desktop app and the CLI cannot disagree about what a

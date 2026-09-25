@@ -9,7 +9,7 @@ pub(crate) mod scan;
 use serde::{Deserialize, Serialize};
 
 pub use apply::{apply_pak_tweaks, save_pak_ini};
-pub use edits::{edits_for_settings, edits_for_tweak};
+pub use edits::{edits_for_settings, edits_for_tweak, needs_engine_ini};
 pub use scan::{
     create_new_mod_pak, detect_pak_tweaks, extract_game_default_ini, extract_pak_ini,
     inspect_single_pak, inspect_single_pak_any_ini, read_pak_cvars, scan_mod_paks,

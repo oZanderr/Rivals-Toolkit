@@ -728,6 +728,8 @@ enum TweaksCmd {
     Status(PakArgs),
     /// Turn tweaks on or off in a pak.
     Apply(ApplyArgs),
+    /// List the tweak presets saved by the desktop app.
+    Presets,
 }
 
 #[derive(Subcommand)]
@@ -765,6 +767,11 @@ struct ApplyArgs {
     /// Turn a slider tweak on at a specific value, as `id=value`. Repeatable.
     #[arg(long = "set", value_name = "ID=VALUE")]
     set: Vec<String>,
+
+    /// Apply a preset saved by the desktop app, by name. `--on`, `--off` and `--set` still apply
+    /// on top of it.
+    #[arg(long, value_name = "NAME")]
+    preset: Option<String>,
 
     /// Report the edits without writing to the pak.
     #[arg(long)]
@@ -892,6 +899,7 @@ fn run(cli: &Cli) -> Result<(), String> {
         Command::Tweaks(TweaksCmd::List) => tweaks_list(cli),
         Command::Tweaks(TweaksCmd::Status(a)) => tweaks_status(cli, &app, a),
         Command::Tweaks(TweaksCmd::Apply(a)) => tweaks_apply(cli, &app, a),
+        Command::Tweaks(TweaksCmd::Presets) => tweaks_presets(cli, &app),
         Command::Ini(IniCmd::List(a)) => ini_list(cli, &app, a),
         Command::Ini(IniCmd::Get(a)) => ini_get(cli, &app, a),
         Command::Ini(IniCmd::Set(a)) => ini_set(cli, &app, a),
@@ -1082,11 +1090,109 @@ struct ApplyResult {
     message: Option<String>,
 }
 
+/// What a preset asks for, minus what cannot be asked for, and a note of what was dropped.
+///
+/// The desktop app resolves a preset against the catalogue and quietly ignores anything it cannot
+/// place, so a preset saved by a different build still applies everything this one understands.
+/// This has to match, or the same preset would work there and fail here. Two things get dropped:
+///
+/// - an id this build has no tweak for, which is a preset written against another catalogue;
+/// - a remove-only tweak held as off, which asks to put back lines it can only delete;
+/// - an engine-section tweak when the pak ships no engine INI, which has nowhere to be written.
+fn preset_settings(
+    app: &settings::AppSettings,
+    name: &str,
+    has_engine_ini: bool,
+) -> Result<(Vec<TweakSetting>, Vec<String>), String> {
+    let profile = app
+        .tweak_profiles
+        .iter()
+        .find(|p| p.name.eq_ignore_ascii_case(name))
+        .ok_or_else(|| {
+            let known: Vec<&str> = app.tweak_profiles.iter().map(|p| p.name.as_str()).collect();
+            if known.is_empty() {
+                format!("no preset named '{name}'; the desktop app has none saved")
+            } else {
+                format!(
+                    "no preset named '{name}'; saved presets: {}",
+                    known.join(", ")
+                )
+            }
+        })?;
+
+    let catalogue = rivals_core::tweaks::catalogue::tweak_catalogue();
+    let mut kept = Vec::new();
+    let mut dropped = Vec::new();
+    for setting in &profile.settings {
+        let Some(def) = catalogue.iter().find(|d| d.id == setting.id) else {
+            dropped.push(format!("{} (no such tweak in this build)", setting.id));
+            continue;
+        };
+        let remove_only = matches!(
+            def.kind,
+            rivals_core::tweaks::catalogue::TweakKind::RemoveLines {
+                remove_only: true,
+                ..
+            }
+        );
+        if !setting.enabled && remove_only {
+            dropped.push(format!(
+                "{} (only removes lines, cannot be turned off)",
+                def.id
+            ));
+            continue;
+        }
+        if !has_engine_ini && pak_tweaks::needs_engine_ini(def) {
+            dropped.push(format!(
+                "{} (needs an Engine.ini this pak does not ship)",
+                def.id
+            ));
+            continue;
+        }
+        kept.push(setting.clone());
+    }
+    Ok((kept, dropped))
+}
+
+fn tweaks_presets(cli: &Cli, app: &settings::AppSettings) -> Result<(), String> {
+    let rows: Vec<serde_json::Value> = app
+        .tweak_profiles
+        .iter()
+        .map(|p| {
+            let on = p.settings.iter().filter(|s| s.enabled).count();
+            serde_json::json!({ "name": p.name, "settings": p.settings.len(), "on": on })
+        })
+        .collect();
+    emit(cli, &rows, || {
+        if app.tweak_profiles.is_empty() {
+            outln!("no presets saved");
+            return;
+        }
+        for p in &app.tweak_profiles {
+            let on = p.settings.iter().filter(|s| s.enabled).count();
+            outln!("{:<24} {on} on of {}", p.name, p.settings.len());
+        }
+    })
+}
+
 fn tweaks_apply(cli: &Cli, app: &settings::AppSettings, args: &ApplyArgs) -> Result<(), String> {
     let path = resolve::pak(&args.pak.pak, cli.game_root.as_deref(), app)?;
 
     let mut settings: Vec<TweakSetting> = Vec::new();
+    let mut dropped: Vec<String> = Vec::new();
+    if let Some(name) = &args.preset {
+        // What the pak can hold decides what a preset can ask for, so this reads the pak before
+        // resolving rather than letting the write land nowhere.
+        let has_engine_ini = pak_tweaks::inspect_single_pak(&path)?.is_some_and(|info| {
+            info.has_engine_ini || info.has_base_engine || info.has_windows_engine
+        });
+        let (kept, skipped) = preset_settings(app, name, has_engine_ini)?;
+        settings.extend(kept);
+        dropped = skipped;
+    }
     let mut push = |id: &str, enabled: bool, value: Option<String>| {
+        // A later entry for the same tweak replaces the preset's, so the flags act as overrides.
+        settings.retain(|s| s.id != id);
         settings.push(TweakSetting {
             id: id.to_string(),
             enabled,
@@ -1105,7 +1211,13 @@ fn tweaks_apply(cli: &Cli, app: &settings::AppSettings, args: &ApplyArgs) -> Res
     }
 
     if settings.is_empty() {
-        return Err("nothing to do: pass --on, --off, or --set".to_string());
+        return Err("nothing to do: pass --preset, --on, --off, or --set".to_string());
+    }
+
+    // Said out loud rather than swallowed: a preset that silently shrinks is how a tweak goes
+    // missing without anyone noticing.
+    for entry in &dropped {
+        eprintln!("skipped {entry}");
     }
 
     // Unknown ids and repeats are rejected by core, which the desktop app shares. The error can
@@ -2729,4 +2841,240 @@ fn asset_audit(cli: &Cli, app: &settings::AppSettings, args: &AuditArgs) -> Resu
     emit(cli, &report, || {
         asset::print_audit(&report, &mut |line| outln!("{line}"));
     })
+}
+
+/// Resolving a preset against the catalogue. The desktop app does the same thing in TypeScript,
+/// so the two have to agree about what a preset asks for or the CLI cannot be used to reproduce
+/// what a user saw.
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod preset_tests {
+    use super::*;
+    use rivals_core::tweaks::catalogue::{TweakKind, tweak_catalogue};
+
+    fn setting(id: &str, enabled: bool, value: Option<&str>) -> TweakSetting {
+        TweakSetting {
+            id: id.to_string(),
+            enabled,
+            value: value.map(str::to_string),
+        }
+    }
+
+    fn app_with(settings: Vec<TweakSetting>) -> settings::AppSettings {
+        settings::AppSettings {
+            tweak_profiles: vec![settings::TweakProfile {
+                name: "QOL".into(),
+                settings,
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// Any id the catalogue happens to have, so the tests do not pin a tweak that may be renamed.
+    fn some_toggle() -> String {
+        tweak_catalogue()
+            .into_iter()
+            .find(|d| matches!(d.kind, TweakKind::Toggle { .. }))
+            .expect("the catalogue has a toggle")
+            .id
+    }
+
+    fn a_remove_only() -> Option<String> {
+        tweak_catalogue()
+            .into_iter()
+            .find(|d| {
+                matches!(
+                    d.kind,
+                    TweakKind::RemoveLines {
+                        remove_only: true,
+                        ..
+                    }
+                )
+            })
+            .map(|d| d.id)
+    }
+
+    #[test]
+    fn a_preset_is_found_whatever_case_it_is_asked_for_in() {
+        let app = app_with(vec![setting(&some_toggle(), true, None)]);
+        for name in ["QOL", "qol", "QoL"] {
+            let (kept, _) = preset_settings(&app, name, true).expect(name);
+            assert_eq!(kept.len(), 1);
+        }
+    }
+
+    #[test]
+    fn an_unknown_preset_name_lists_what_is_saved() {
+        let app = app_with(vec![setting(&some_toggle(), true, None)]);
+        let err = preset_settings(&app, "nope", true).expect_err("should fail");
+        assert!(err.contains("QOL"), "{err}");
+    }
+
+    #[test]
+    fn an_empty_settings_file_says_so_rather_than_listing_nothing() {
+        let app = settings::AppSettings::default();
+        let err = preset_settings(&app, "QOL", true).expect_err("should fail");
+        assert!(err.contains("none saved"), "{err}");
+    }
+
+    /// The failure this exists for: a preset naming a tweak this build does not have used to fail
+    /// the whole apply here while the desktop app applied everything else.
+    #[test]
+    fn an_id_this_build_does_not_know_is_dropped_not_fatal() {
+        let known = some_toggle();
+        let app = app_with(vec![
+            setting("a_tweak_from_the_future", true, None),
+            setting(&known, true, None),
+        ]);
+        let (kept, dropped) = preset_settings(&app, "QOL", true).expect("should resolve");
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].id, known);
+        assert_eq!(dropped.len(), 1);
+        assert!(
+            dropped[0].contains("a_tweak_from_the_future"),
+            "{dropped:?}"
+        );
+        // What survives has to translate, or dropping it bought nothing.
+        rivals_core::pak_tweaks::edits_for_settings(&kept).expect("kept settings translate");
+    }
+
+    #[test]
+    fn a_remove_only_tweak_held_off_is_dropped_not_fatal() {
+        let Some(id) = a_remove_only() else {
+            return;
+        };
+        let app = app_with(vec![
+            setting(&id, false, None),
+            setting(&some_toggle(), true, None),
+        ]);
+        let (kept, dropped) = preset_settings(&app, "QOL", true).expect("should resolve");
+        assert!(!kept.iter().any(|s| s.id == id), "{kept:?}");
+        assert!(dropped.iter().any(|d| d.contains(&id)), "{dropped:?}");
+        rivals_core::pak_tweaks::edits_for_settings(&kept).expect("kept settings translate");
+    }
+
+    /// The same tweak held on is asked for, not dropped: only the off direction is impossible.
+    #[test]
+    fn a_remove_only_tweak_held_on_survives() {
+        let Some(id) = a_remove_only() else {
+            return;
+        };
+        let app = app_with(vec![setting(&id, true, None)]);
+        let (kept, dropped) = preset_settings(&app, "QOL", true).expect("should resolve");
+        assert_eq!(kept.len(), 1);
+        assert!(dropped.is_empty(), "{dropped:?}");
+    }
+
+    /// A pak shipping only device profile files cannot hold an engine-section setting, so asking
+    /// for one writes nothing. The desktop app drops these and says how many; without the same
+    /// rule here the CLI reported them as applied.
+    #[test]
+    fn an_engine_section_tweak_is_dropped_when_the_pak_ships_no_engine_ini() {
+        let engine_only = tweak_catalogue()
+            .into_iter()
+            .find(rivals_core::pak_tweaks::needs_engine_ini)
+            .expect("the catalogue has an engine-section tweak");
+        let plain = tweak_catalogue()
+            .into_iter()
+            .find(|d| !rivals_core::pak_tweaks::needs_engine_ini(d))
+            .expect("and one that is not");
+
+        let app = app_with(vec![
+            setting(&engine_only.id, true, slider_value(&engine_only)),
+            setting(&plain.id, true, slider_value(&plain)),
+        ]);
+
+        let (with_engine, dropped) = preset_settings(&app, "QOL", true).expect("resolves");
+        assert_eq!(with_engine.len(), 2, "both apply to a pak that has one");
+        assert!(dropped.is_empty(), "{dropped:?}");
+
+        let (without, dropped) = preset_settings(&app, "QOL", false).expect("resolves");
+        assert_eq!(without.len(), 1);
+        assert_eq!(without[0].id, plain.id);
+        assert!(
+            dropped.iter().any(|d| d.contains(&engine_only.id)),
+            "{dropped:?}"
+        );
+    }
+
+    /// A value the catalogue will not take fails the whole preset rather than part of it.
+    ///
+    /// Detection reports what a pak actually says, unclamped, so a preset saved off a pak whose
+    /// slider sits outside the catalogue range captures that value and can never be applied. No
+    /// pak seen so far does this, and a partial apply would be worse than a loud refusal, so the
+    /// behaviour is pinned rather than changed: the error has to name the entry to be fixable.
+    #[test]
+    fn an_out_of_range_slider_fails_the_preset_and_names_it() {
+        let slider = tweak_catalogue()
+            .into_iter()
+            .find_map(|d| match d.kind {
+                TweakKind::Slider { max, .. } => Some((d.id, max)),
+                _ => None,
+            })
+            .expect("the catalogue has a slider");
+        let (id, max) = slider;
+
+        let app = app_with(vec![
+            setting(&id, true, Some(&format!("{}", max + 1.0))),
+            setting(&some_toggle(), true, None),
+        ]);
+        let (kept, dropped) = preset_settings(&app, "QOL", true).expect("resolves");
+        assert!(
+            dropped.is_empty(),
+            "the value is in range as far as this knows"
+        );
+
+        let err = rivals_core::pak_tweaks::edits_for_settings(&kept).expect_err("should fail");
+        assert!(err.contains("Nothing was applied"), "{err}");
+        assert!(
+            err.contains(&format!("{}", max)),
+            "the range is named: {err}"
+        );
+    }
+
+    /// Sliders take their value from the preset; everything else ignores it.
+    fn slider_value(def: &rivals_core::tweaks::TweakDefinition) -> Option<&'static str> {
+        match def.kind {
+            TweakKind::Slider { .. } => Some("1"),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_preset_with_no_settings_resolves_to_nothing() {
+        let app = app_with(vec![]);
+        let (kept, dropped) = preset_settings(&app, "QOL", true).expect("should resolve");
+        assert!(kept.is_empty() && dropped.is_empty());
+    }
+
+    /// Every tweak in the catalogue, both directions, is what a saved preset actually holds: the
+    /// app writes an entry per definition rather than only the ones that are on.
+    #[test]
+    fn a_preset_covering_the_whole_catalogue_resolves_and_translates() {
+        for enabled in [true, false] {
+            let all: Vec<TweakSetting> = tweak_catalogue()
+                .into_iter()
+                .map(|d| {
+                    // A slider only takes a value inside its range; the app stores what it read.
+                    let value = match &d.kind {
+                        TweakKind::Slider { default_value, .. } => Some(format!("{default_value}")),
+                        _ => None,
+                    };
+                    TweakSetting {
+                        id: d.id,
+                        enabled,
+                        value,
+                    }
+                })
+                .collect();
+            let app = app_with(all);
+            let (kept, dropped) = preset_settings(&app, "QOL", true).expect("should resolve");
+            assert!(
+                dropped.iter().all(|d| d.contains("only removes lines")),
+                "nothing should drop for being unknown: {dropped:?}"
+            );
+            rivals_core::pak_tweaks::edits_for_settings(&kept)
+                .unwrap_or_else(|e| panic!("enabled={enabled}: {e}"));
+        }
+    }
 }

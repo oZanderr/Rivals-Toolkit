@@ -98,6 +98,7 @@ pub fn apply_pak_tweaks(pak_path: &str, edits: &[PakTweakEdit]) -> Result<String
 
     // One file at a time. A config mod can ship hundreds of megabytes of INI, and holding every
     // file plus a copy of each to compare against cost well over a gigabyte for a single tweak.
+    let mut files_changed = 0usize;
     with_unpacked_pak(pak, |temp_dir| {
         for (target, entry) in &layers {
             let path = temp_dir.join(strip_mount_prefix(entry));
@@ -111,13 +112,23 @@ pub fn apply_pak_tweaks(pak_path: &str, edits: &[PakTweakEdit]) -> Result<String
                 fs::write(&path, &file.content).map_err(|e| {
                     format!("Failed to write modified INI {}: {}", path.display(), e)
                 })?;
+                files_changed += 1;
             }
         }
         Ok(())
     })?;
 
+    // What was asked for and what it did are different numbers. A preset names every tweak in the
+    // catalogue whether or not the pak needs it, so re-applying one used to report the full count
+    // and read as though none of it had ever been applied.
+    if files_changed == 0 {
+        return Ok(format!("{pak_name} already matches: nothing to change"));
+    }
     let label = if edit_count == 1 { "change" } else { "changes" };
-    Ok(format!("Applied {edit_count} {label} to {pak_name}"))
+    let files = if files_changed == 1 { "file" } else { "files" };
+    Ok(format!(
+        "Applied {edit_count} {label} to {pak_name} ({files_changed} {files} rewritten)"
+    ))
 }
 
 /// Replace raw INI file contents in a pak and repack in place. `files` writes are
