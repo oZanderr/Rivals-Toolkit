@@ -895,10 +895,10 @@ function KeysForm({ ask, session }: { ask: KeysAsk; session: EditSession }) {
                 {key.value}
               </span>
               {copy?.op === "key_duplicate" && (
-                <span className="font-mono text-blue-accent">copy at {copy.time}</span>
+                <span className="font-mono text-blue-accent-foreground">copy at {copy.time}</span>
               )}
               {move?.op === "key_move" && (
-                <span className="font-mono text-blue-accent">to frame {move.time}</span>
+                <span className="font-mono text-blue-accent-foreground">to frame {move.time}</span>
               )}
               {queued ? (
                 <Button
@@ -966,7 +966,7 @@ function KeysForm({ ask, session }: { ask: KeysAsk; session: EditSession }) {
             record.draft.op === "key_add" ? (
               <div
                 key={draftKey(record.target)}
-                className="flex items-center gap-2 text-blue-accent"
+                className="flex items-center gap-2 text-blue-accent-foreground"
               >
                 <span className="w-8 shrink-0 font-mono">
                   <Plus size={11} />
@@ -1450,7 +1450,8 @@ const PropertyRow = memo(function PropertyRow({ row, depth }: { row: TreeRow; de
               className={cn(
                 "min-w-0 flex-1 break-all font-mono",
                 muted ? "text-muted-foreground/60 italic" : "text-foreground",
-                draft !== undefined && "rounded-sm bg-blue-accent/15 px-1 text-blue-accent",
+                draft !== undefined &&
+                  "rounded-sm bg-blue-accent/15 px-1 text-blue-accent-foreground",
                 !locked && "cursor-text hover:ring-1 hover:ring-inset hover:ring-primary/40"
               )}
               tabIndex={locked ? undefined : 0}
@@ -2475,7 +2476,7 @@ function ImportPathCell({ info, edits }: { info: ImportInfo; edits: AssetEdits }
         className={cn(
           "block min-w-0 truncate font-mono",
           info.unresolved && "text-muted-foreground italic",
-          draft !== undefined && "rounded-sm bg-blue-accent/15 px-1 text-blue-accent",
+          draft !== undefined && "rounded-sm bg-blue-accent/15 px-1 text-blue-accent-foreground",
           !locked && "cursor-text hover:ring-1 hover:ring-inset hover:ring-primary/40"
         )}
         onClick={() => {
@@ -2488,53 +2489,75 @@ function ImportPathCell({ info, edits }: { info: ImportInfo; edits: AssetEdits }
   );
 }
 
-/** A form for an import the package never had: the object's path and its class. */
-function AddImportRow({ edits, serial }: { edits: AssetEdits; serial: number }) {
+/** A form for an import the package never had, laid out in the import table's own columns and
+ *  pinned to the bottom of it so it stays in reach however long the table is. The class is typed
+ *  the way the class column's tooltip shows it: `/Script/Package.Class`. */
+function AddImportRow({
+  edits,
+  serial,
+  cell,
+}: {
+  edits: AssetEdits;
+  serial: number;
+  cell: string;
+}) {
   const [path, setPath] = useState("");
-  const [classPackage, setClassPackage] = useState("/Script/CoreUObject");
-  const [className, setClassName] = useState("Object");
+  const [classPath, setClassPath] = useState("/Script/CoreUObject.Object");
   const valid = /^\/[^.]+\.[^.:]+(:[^.:]+)*$/.test(path.trim());
+  const add = () => {
+    const text = classPath.trim();
+    const dot = text.lastIndexOf(".");
+    edits.setImportDraft(`add:${serial}`, {
+      path: path.trim(),
+      classPackage: dot > 0 ? text.slice(0, dot) : undefined,
+      className: (dot > 0 ? text.slice(dot + 1) : text) || undefined,
+    });
+    setPath("");
+  };
+  const disabled = !valid || !!edits.session.locked;
   return (
-    <div className="flex flex-wrap items-center gap-2 border-t border-border px-3 py-2 text-[11px]">
-      <Input
-        value={path}
-        onChange={(e) => setPath(e.target.value)}
-        placeholder="/Game/Path/Asset.Object"
-        className="h-7 w-72 font-mono text-[11px]"
-      />
-      <Tip content="The package the object's class lives in">
-        <Input
-          value={classPackage}
-          onChange={(e) => setClassPackage(e.target.value)}
-          placeholder="/Script/Engine"
-          className="h-7 w-40 font-mono text-[11px]"
-        />
-      </Tip>
-      <Tip content="The object's class. Object is accepted for anything, but a real class reads better.">
-        <Input
-          value={className}
-          onChange={(e) => setClassName(e.target.value)}
-          placeholder="StaticMesh"
-          className="h-7 w-36 font-mono text-[11px]"
-        />
-      </Tip>
-      <Button
-        size="sm"
-        variant="outline"
-        className="h-7"
-        disabled={!valid || !!edits.session.locked}
-        onClick={() => {
-          edits.setImportDraft(`add:${serial}`, {
-            path: path.trim(),
-            classPackage: classPackage.trim() || undefined,
-            className: className.trim() || undefined,
-          });
-          setPath("");
-        }}
-      >
-        <Plus size={13} /> Add import
-      </Button>
-    </div>
+    // A collapsed border stays with the table rather than the sticky row, so the rule is a shadow.
+    <tfoot className="sticky bottom-0 z-10 bg-background [&_td]:shadow-[inset_0_1px_0_var(--color-border)]">
+      <tr>
+        <td className={cn(cell, "text-muted-foreground")}>
+          <Plus size={12} />
+        </td>
+        <td className="px-1 py-1">
+          <Tip content="The object's class, as /Script/Package.Class. Object is accepted for anything, but a real class reads better.">
+            <Input
+              value={classPath}
+              onChange={(e) => setClassPath(e.target.value)}
+              placeholder="/Script/Engine.StaticMesh"
+              className="h-7 w-full font-mono text-[11px]"
+            />
+          </Tip>
+        </td>
+        <td className="px-1 py-1" colSpan={2}>
+          <Input
+            value={path}
+            onChange={(e) => setPath(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !disabled) add();
+            }}
+            placeholder="/Game/Path/Asset.Object"
+            className="h-7 w-full font-mono text-[11px]"
+          />
+        </td>
+        <td className="px-1 py-1">
+          <Tip content={edits.session.locked ?? "Add import"}>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7 px-1.5"
+              disabled={disabled}
+              onClick={add}
+            >
+              <Plus size={13} />
+            </Button>
+          </Tip>
+        </td>
+      </tr>
+    </tfoot>
   );
 }
 
@@ -2613,12 +2636,13 @@ function PackageView({
 
       <div className="border-b border-border">
         <div className="px-3 pt-3 pb-1 text-xs font-semibold text-foreground">Imports</div>
-        <table className="w-full border-collapse">
+        <table className="w-full table-fixed border-collapse">
           <thead>
             <tr className="text-left">
               <th className={cn(head, "w-14")}>#</th>
-              <th className={cn(head, "w-56")}>Class</th>
+              <th className={cn(head, "w-64")}>Class</th>
               <th className={head}>Path</th>
+              <th className={cn(head, "w-72")}>Used by</th>
               <th className={cn(head, "w-10")} />
             </tr>
           </thead>
@@ -2632,16 +2656,16 @@ function PackageView({
                     <td className={cn(cell, "truncate")}>{info.class_name}</td>
                   </Tip>
                   <td className={cn(cell, "max-w-0")}>
-                    <div className="flex items-center gap-2">
-                      <ImportPathCell info={info} edits={edits} />
-                      {unused && (
-                        <Tip content="Nothing in this package names it, so the table can lose it.">
-                          <span className="shrink-0 rounded bg-muted px-1 text-[10px] uppercase text-muted-foreground">
-                            unused
-                          </span>
-                        </Tip>
-                      )}
-                    </div>
+                    <ImportPathCell info={info} edits={edits} />
+                  </td>
+                  <td className={cn(cell, "truncate font-sans text-muted-foreground")}>
+                    {unused ? (
+                      <Tip content="Nothing in this package names it, so the table can lose it.">
+                        <span className="rounded bg-muted px-1 text-[10px] uppercase">unused</span>
+                      </Tip>
+                    ) : (
+                      importUsageText(info.usage)
+                    )}
                   </td>
                   <td className="px-1 py-0.5">
                     <Tip
@@ -2668,10 +2692,10 @@ function PackageView({
             })}
             {adds.map(([key, draft]) => (
               <tr key={key} className="border-t border-border/30">
-                <td className={cn(cell, "text-blue-accent")}>new</td>
+                <td className={cn(cell, "text-blue-accent-foreground")}>new</td>
                 <td className={cn(cell, "truncate")}>{draft.className ?? "Object"}</td>
                 <td className={cn(cell, "flex items-center gap-2")}>
-                  <span className="min-w-0 truncate rounded-sm bg-blue-accent/15 px-1 text-blue-accent">
+                  <span className="min-w-0 truncate rounded-sm bg-blue-accent/15 px-1 text-blue-accent-foreground">
                     {draft.path}
                   </span>
                   <Button
@@ -2683,12 +2707,13 @@ function PackageView({
                     <X size={12} />
                   </Button>
                 </td>
+                <td className={cn(cell, "font-sans text-muted-foreground")}>added</td>
                 <td />
               </tr>
             ))}
           </tbody>
+          <AddImportRow edits={edits} serial={adds.length} cell={cell} />
         </table>
-        <AddImportRow edits={edits} serial={adds.length} />
       </div>
 
       <div className="border-b border-border">
@@ -2884,7 +2909,10 @@ function PackageView({
                           <Button
                             size="sm"
                             variant="ghost"
-                            className={cn("h-6 px-1.5 text-[11px]", drafted && "text-blue-accent")}
+                            className={cn(
+                              "h-6 px-1.5 text-[11px]",
+                              drafted && "text-blue-accent-foreground"
+                            )}
                             disabled={!!replaceLock}
                             onClick={() =>
                               drafted
@@ -4388,7 +4416,7 @@ function RowNameCell({
       className={cn(
         "shrink-0 truncate px-2 py-1 font-mono text-foreground/80",
         removed && "line-through",
-        renamed !== null && "bg-blue-accent/15 text-blue-accent"
+        renamed !== null && "bg-blue-accent/15 text-blue-accent-foreground"
       )}
       style={{ width }}
     >
@@ -4463,7 +4491,7 @@ function GhostRow({
           style={style}
         >
           <div
-            className="flex shrink-0 items-center gap-1 truncate px-2 py-1 font-mono text-blue-accent"
+            className="flex shrink-0 items-center gap-1 truncate px-2 py-1 font-mono text-blue-accent-foreground"
             style={{ width: nameWidth }}
           >
             <Plus size={11} className="shrink-0" />
@@ -4611,7 +4639,7 @@ function MetaDataForm({
                 className={cn(
                   "w-32 shrink-0 truncate font-mono",
                   removed && "line-through opacity-60",
-                  row.held === null && "text-blue-accent"
+                  row.held === null && "text-blue-accent-foreground"
                 )}
               >
                 {row.id}
@@ -4833,16 +4861,16 @@ function StringTableView({ table, exportIndex }: { table: StringTable; exportInd
                       className="absolute left-0 right-0 flex border-b border-dashed border-blue-accent/40 bg-blue-accent/5 text-[11px]"
                       style={style}
                     >
-                      <div className="flex w-12 shrink-0 items-center px-2 py-1 text-blue-accent">
+                      <div className="flex w-12 shrink-0 items-center px-2 py-1 text-blue-accent-foreground">
                         <Plus size={11} />
                       </div>
                       <div
-                        className="shrink-0 truncate px-2 py-1 font-mono text-blue-accent"
+                        className="shrink-0 truncate px-2 py-1 font-mono text-blue-accent-foreground"
                         style={{ width: keyWidth }}
                       >
                         {row.key}
                       </div>
-                      <div className="min-w-0 flex-1 truncate px-2 py-1 font-mono text-blue-accent">
+                      <div className="min-w-0 flex-1 truncate px-2 py-1 font-mono text-blue-accent-foreground">
                         {row.source}
                       </div>
                       {hasTags && <div className="w-24 shrink-0" />}
@@ -4939,7 +4967,7 @@ function StringTableView({ table, exportIndex }: { table: StringTable; exportInd
                     classOfField(field),
                     field === "tag" && !changed && "text-muted-foreground",
                     removed && "line-through",
-                    changed && "bg-blue-accent/15 text-blue-accent",
+                    changed && "bg-blue-accent/15 text-blue-accent-foreground",
                     !locked && "cursor-text hover:ring-1 hover:ring-inset hover:ring-primary/40"
                   )}
                   style={widthOfField(field)}
@@ -5495,7 +5523,7 @@ function DataTableGrid({ table, exportIndex }: { table: DataTable; exportIndex: 
                           className={cn(
                             "shrink-0 truncate px-2 py-1 font-mono",
                             !stored && draft === undefined && "text-muted-foreground/50 italic",
-                            draft !== undefined && "bg-blue-accent/15 text-blue-accent",
+                            draft !== undefined && "bg-blue-accent/15 text-blue-accent-foreground",
                             !locked &&
                               "cursor-text hover:ring-1 hover:ring-inset hover:ring-primary/40"
                           )}
@@ -6072,7 +6100,13 @@ export default function AssetInspector({
     { id: "strings", label: "Strings", enabled: Boolean(active?.string_table) },
     { id: "tree", label: "Tree", enabled: true },
     { id: "json", label: "JSON", enabled: true },
-    { id: "bytes", label: "Bytes", enabled: true },
+    // The shaded bytes are for finding where a read went wrong, so only an export that did not
+    // decode offers them; `asset hex` and `asset trace` cover the rest from the CLI.
+    {
+      id: "bytes",
+      label: "Bytes",
+      enabled: active?.status.state === "failed" || active?.status.state === "partial",
+    },
     { id: "script", label: "Script", enabled: Boolean(active?.script) },
   ];
   // "table" is the resting choice: it stands for whatever grid the export offers.
@@ -6085,7 +6119,11 @@ export default function AssetInspector({
         ? "tree"
         : view === "script" && !active?.script
           ? "tree"
-          : view;
+          : view === "bytes" &&
+              active?.status.state !== "failed" &&
+              active?.status.state !== "partial"
+            ? "tree"
+            : view;
 
   return (
     <EditSessionContext.Provider value={edits.session}>
