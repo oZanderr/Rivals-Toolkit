@@ -250,6 +250,12 @@ pub struct ParsedPackage {
     /// Where each native struct written unlike its decoded kind starts, for edits that set one.
     #[serde(skip)]
     pub native_leaves: Vec<(u64, crate::props::NativeLeaf)>,
+    /// Where each tagged property's tag sits, for edits that remove one.
+    #[serde(skip)]
+    pub tag_bounds: Vec<crate::props::TagBounds>,
+    /// Properties tagged blocks do not hold, for edits that add one.
+    #[serde(skip)]
+    pub tagged_absent: Vec<crate::props::TaggedAbsent>,
     /// How many of each bytecode token the package's scripts hold, named where the reader knows
     /// the name. A token with no name is one this build adds.
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -564,6 +570,8 @@ fn parse_inner(
             tables: diagnostics.tables,
             channels: diagnostics.channels,
             native_leaves: diagnostics.native_leaves,
+            tag_bounds: diagnostics.tag_bounds,
+            tagged_absent: diagnostics.tagged_absent,
             script_tokens: diagnostics
                 .script_tokens
                 .iter()

@@ -44,12 +44,23 @@ pub(crate) fn read_tagged_block(
     entries: &mut Vec<PropertyEntry>,
     owner: Option<&str>,
 ) -> Result<(), String> {
+    // What the block holds, by name and array index, so the owner's other properties can be
+    // listed as absent.
+    let mut held: Vec<(String, i32)> = Vec::new();
+    // This block's own tags among the recorded bounds, which learn where the block ends last.
+    let mut bounds: Vec<usize> = Vec::new();
     for _ in 0..MAX_PROPERTIES {
+        let name_at = cursor.file_offset();
         let name = cursor.read_name(ctx.names())?;
         if name == "None" {
+            for at in bounds {
+                diagnostics.tag_bounds[at].none_at = name_at;
+            }
+            list_absent(ctx, diagnostics, owner, &held, name_at, entries);
             return Ok(());
         }
         let tag = read_tag(name, cursor, ctx)?;
+        held.push((tag.name.clone(), tag.array_index));
         let start = cursor.position();
         let end = start
             .checked_add(tag.size.max(0) as usize)
@@ -85,6 +96,13 @@ pub(crate) fn read_tagged_block(
 
         // The tag's own size is the anchor: resynchronise whatever the value reader did.
         cursor.seek_to(end)?;
+        bounds.push(diagnostics.tag_bounds.len());
+        diagnostics.tag_bounds.push(crate::props::TagBounds {
+            key: base + tag.bool_at.unwrap_or(start) as u64,
+            tag_at: name_at,
+            tag_end: base + end as u64,
+            none_at: 0,
+        });
         // A tagged property declares its own size, so the span is exact without tracking reads.
         entries.push(PropertyEntry {
             name: tag.name,
@@ -100,6 +118,59 @@ pub(crate) fn read_tagged_block(
         });
     }
     Err(cursor.err("tagged property list has no terminating None"))
+}
+
+/// The properties the owner's schema declares that the block does not hold, listed as not stored at
+/// its terminating `None`. Only the editor's reading lists them, and only with a schema to ask.
+fn list_absent(
+    ctx: &Ctx<'_>,
+    diagnostics: &mut Diagnostics,
+    owner: Option<&str>,
+    held: &[(String, i32)],
+    none_at: u64,
+    entries: &mut Vec<PropertyEntry>,
+) {
+    if !diagnostics.declared_slots {
+        return;
+    }
+    let Some(schema) = owner.and_then(|owner| ctx.schema(owner)) else {
+        return;
+    };
+    for slot in (0..schema.len()).filter_map(|index| schema.slot(index)) {
+        let index = slot.element as i32;
+        if held
+            .iter()
+            .any(|(name, at)| *name == slot.property.name && *at == index)
+        {
+            continue;
+        }
+        let inner = &slot.property.inner;
+        entries.push(PropertyEntry {
+            name: slot.property.name.clone(),
+            element: (index > 0).then_some(slot.element),
+            value: PropertyValue::Unset {
+                declared: crate::props::typed_as(inner),
+                enum_type: match inner {
+                    PropertyInner::Enum { name, .. } => Some(name.clone()),
+                    _ => None,
+                },
+                fields: crate::props::unset_fields(inner, ctx, 0),
+            },
+            span: Some((none_at, none_at)),
+            slot: None,
+        });
+        let native_default = match inner {
+            PropertyInner::Struct { name } => crate::props::native_parts(name, ctx).flatten(),
+            _ => None,
+        };
+        diagnostics.tagged_absent.push(crate::props::TaggedAbsent {
+            none_at,
+            name: slot.property.name.clone(),
+            array_index: slot.element,
+            inner: inner.clone(),
+            native_default,
+        });
+    }
 }
 
 fn undecoded(tag: &Tag, reason: &str) -> PropertyValue {

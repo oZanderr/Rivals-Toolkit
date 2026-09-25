@@ -24,6 +24,8 @@ mod structs;
 mod tagged;
 #[cfg(test)]
 mod tagged_edit_tests;
+#[cfg(any(test, feature = "test-support"))]
+pub mod tagged_fixture;
 mod tails;
 mod unversioned;
 mod ustruct;

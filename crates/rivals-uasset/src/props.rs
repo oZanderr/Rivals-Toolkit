@@ -315,6 +315,30 @@ pub enum NativeLeaf {
     MarvelSoftObjectPath,
 }
 
+/// A tagged property's tag from its name to the end of its value, keyed by where its entry's span
+/// starts: for a bool, the value byte inside the tag.
+#[derive(Debug, Clone)]
+pub struct TagBounds {
+    pub key: u64,
+    pub tag_at: u64,
+    pub tag_end: u64,
+    /// The terminating `None` of the block holding it, where it reads as absent once removed.
+    pub none_at: u64,
+}
+
+/// A property a tagged block does not hold, listed at the block's terminating `None`, which is
+/// where a tag for it goes in.
+#[derive(Debug, Clone)]
+pub struct TaggedAbsent {
+    pub none_at: u64,
+    pub name: String,
+    /// The slot of a fixed-size array, as the tag's array index names it.
+    pub array_index: u32,
+    pub inner: PropertyInner,
+    /// For a native struct, its value with every field default, which an empty one is written as.
+    pub native_default: Option<Vec<DefaultPart>>,
+}
+
 #[derive(Default, Debug)]
 pub struct Diagnostics {
     /// Structs that had neither a native layout nor a schema, which is the actionable signal for
@@ -352,6 +376,10 @@ pub struct Diagnostics {
     pub channels: Vec<ChannelLayout>,
     /// Where each [`NativeLeaf`] value starts.
     pub native_leaves: Vec<(u64, NativeLeaf)>,
+    /// Where each tagged property's whole tag sits, for removing one.
+    pub tag_bounds: Vec<TagBounds>,
+    /// Properties a tagged block's owner declares that the block does not hold.
+    pub tagged_absent: Vec<TaggedAbsent>,
     /// How many texts of each `ETextHistoryType` were read, which says which text layouts the
     /// data exercises at all.
     pub text_histories: BTreeMap<i8, usize>,
@@ -374,6 +402,8 @@ pub(crate) struct Marks {
     unset: usize,
     channels: usize,
     native_leaves: usize,
+    tag_bounds: usize,
+    tagged_absent: usize,
 }
 
 impl Diagnostics {
@@ -385,6 +415,8 @@ impl Diagnostics {
             unset: self.unset.len(),
             channels: self.channels.len(),
             native_leaves: self.native_leaves.len(),
+            tag_bounds: self.tag_bounds.len(),
+            tagged_absent: self.tagged_absent.len(),
         }
     }
 
@@ -398,6 +430,8 @@ impl Diagnostics {
         self.unset.truncate(marks.unset);
         self.channels.truncate(marks.channels);
         self.native_leaves.truncate(marks.native_leaves);
+        self.tag_bounds.truncate(marks.tag_bounds);
+        self.tagged_absent.truncate(marks.tagged_absent);
     }
 }
 
@@ -578,7 +612,7 @@ const PREVIEW_DEPTH: u32 = 2;
 
 /// The fields a reflected struct declares, each unset, for showing what storing it would hold.
 /// A native struct lays itself out and names no fields a schema would, so it has none here.
-fn unset_fields(inner: &PropertyInner, ctx: &Ctx<'_>, depth: u32) -> Vec<PropertyEntry> {
+pub(crate) fn unset_fields(inner: &PropertyInner, ctx: &Ctx<'_>, depth: u32) -> Vec<PropertyEntry> {
     let PropertyInner::Struct { name } = inner else {
         return Vec::new();
     };
@@ -841,7 +875,7 @@ fn unset_default(inner: &PropertyInner, ctx: &Ctx<'_>) -> Option<Vec<DefaultPart
 
 /// A native struct's default with the reflected blocks it embeds resolved through the schemas at
 /// hand. `None` for a struct that is not native; `Some(None)` when a schema it needs is missing.
-fn native_parts(name: &str, ctx: &Ctx<'_>) -> Option<Option<Vec<DefaultPart>>> {
+pub(crate) fn native_parts(name: &str, ctx: &Ctx<'_>) -> Option<Option<Vec<DefaultPart>>> {
     let parts = match structs::native_default(name) {
         structs::NativeDefault::NotNative => return None,
         structs::NativeDefault::Fixed(bytes) => vec![DefaultPart::Bytes(bytes)],

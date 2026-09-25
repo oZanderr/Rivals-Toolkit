@@ -2,105 +2,13 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use retoc::legacy_asset::{
-    EPackageFlags, FLegacyPackageFileSummary, FLegacyPackageHeader, FObjectExport, FPackageNameMap,
-};
-
 use crate::edit::{EditOp, PackageEdits, ValueEdit, kind_of, patch_package, verify_patch};
 use crate::mappings::Mappings;
-use crate::package::{
-    AssetBundle, ExportStatus, FALLBACK_ENGINE_VERSION, ParsedPackage, parse_package,
+use crate::package::{AssetBundle, ExportStatus, ParsedPackage, parse_package};
+use crate::tagged_fixture::{
+    head, int, my_struct, name, package_of, sparse_mappings, sparse_package, string,
 };
 use crate::value::{PropertyEntry, PropertyValue};
-
-const HEADER_SIZE: usize = 1024;
-const NAMES: &[&str] = &[
-    "None",
-    "TestPackage",
-    "TestObject",
-    "IntProperty",
-    "StrProperty",
-    "BoolProperty",
-    "NameProperty",
-    "TextProperty",
-    "StructProperty",
-    "ArrayProperty",
-    "EnumProperty",
-    "Damage",
-    "Label",
-    "Enabled",
-    "Tag",
-    "Title",
-    "Pos",
-    "MyStruct",
-    "X",
-    "Values",
-    "Points",
-    "Mode",
-    "EMode",
-    "EMode::A",
-    "EMode::B",
-    "Foo",
-    "Id",
-    "Guid",
-    "Asset",
-    "TopLevelAssetPath",
-    "Path",
-    "MarvelSoftObjectPath",
-    "/Game/A",
-    "B",
-    "Words",
-    "Names",
-    "SetProperty",
-    "Scores",
-    "MapProperty",
-    "Flags",
-    "Modes",
-    "Holder",
-    "MyHolder",
-    "Pairs",
-    "Structs",
-];
-
-fn index_of(value: &str) -> i32 {
-    NAMES
-        .iter()
-        .position(|n| *n == value)
-        .expect("name is in the test name map") as i32
-}
-
-fn name(out: &mut Vec<u8>, value: &str) {
-    out.extend_from_slice(&index_of(value).to_le_bytes());
-    out.extend_from_slice(&0i32.to_le_bytes());
-}
-
-fn string(out: &mut Vec<u8>, value: &str) {
-    out.extend_from_slice(&(value.len() as i32 + 1).to_le_bytes());
-    out.extend_from_slice(value.as_bytes());
-    out.push(0);
-}
-
-/// A tag's common head: the property's name, its type, its value's size and an array index of 0.
-fn head(out: &mut Vec<u8>, property: &str, kind: &str, size: usize) {
-    name(out, property);
-    name(out, kind);
-    out.extend_from_slice(&(size as i32).to_le_bytes());
-    out.extend_from_slice(&0i32.to_le_bytes());
-}
-
-fn int(out: &mut Vec<u8>, property: &str, value: i32) {
-    head(out, property, "IntProperty", 4);
-    out.push(0);
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
-/// `MyStruct { X }` as a tagged block of its own.
-fn my_struct(x: i32) -> Vec<u8> {
-    let mut out = Vec::new();
-    int(&mut out, "X", x);
-    name(&mut out, "None");
-    out
-}
 
 /// One export holding one property of every shape an edit treats differently.
 fn tagged_package() -> (Vec<u8>, Vec<u8>) {
@@ -227,42 +135,6 @@ fn tagged_package() -> (Vec<u8>, Vec<u8>) {
     name(&mut e, "None");
     e.extend_from_slice(&0i32.to_le_bytes());
     package_of(e)
-}
-
-/// A package whose one export holds the tagged properties in `e`.
-fn package_of(e: Vec<u8>) -> (Vec<u8>, Vec<u8>) {
-    let mut summary = FLegacyPackageFileSummary {
-        package_name: "/Game/TestPackage".to_string(),
-        ..Default::default()
-    };
-    summary.versioning_info.package_file_version = FALLBACK_ENGINE_VERSION.package_file_version();
-    summary.versioning_info.total_header_size = HEADER_SIZE as i32;
-    summary.package_flags = EPackageFlags::Cooked as u32;
-    let header = FLegacyPackageHeader {
-        summary,
-        name_map: FPackageNameMap::create_from_names(
-            NAMES.iter().map(|n| (*n).to_string()).collect(),
-        ),
-        exports: vec![FObjectExport {
-            object_name: retoc::legacy_asset::FMinimalName {
-                index: index_of("TestObject"),
-                number: 0,
-            },
-            serial_offset: 0,
-            serial_size: e.len() as i64,
-            ..Default::default()
-        }],
-        ..Default::default()
-    };
-    let mut asset = std::io::Cursor::new(Vec::new());
-    header
-        .serialize(
-            &mut asset,
-            Some(HEADER_SIZE),
-            &retoc::logging::Log::no_log(),
-        )
-        .expect("serialize the test package header");
-    (asset.into_inner(), e)
 }
 
 fn parse(asset: &[u8], exports: &[u8]) -> ParsedPackage {
@@ -503,12 +375,14 @@ fn an_enum_takes_another_enumerator() {
     }
 }
 
+/// Storing a tagged property that is already there is refused plainly; so is clearing one, which
+/// has no zero flag to set.
 #[test]
-fn clearing_or_unsetting_a_tagged_property_is_refused_plainly() {
-    for op in [EditOp::Clear, EditOp::Unset] {
-        let err = refused(|p| vec![edit_of(find(top(p), "Damage"), op.clone())]);
-        assert!(err.contains("tagged"), "{err}");
-    }
+fn storing_a_held_tagged_property_or_clearing_one_is_refused_plainly() {
+    let err = refused(|p| vec![edit_of(find(top(p), "Damage"), EditOp::Store)]);
+    assert!(err.contains("already stored"), "{err}");
+    let err = refused(|p| vec![edit_of(find(top(p), "Damage"), EditOp::Clear)]);
+    assert!(err.contains("tagged"), "{err}");
 }
 
 /// An emptied struct array has no element to copy, so a new one is the empty tagged block.
@@ -975,4 +849,184 @@ fn tagged_containers_of_structs_stay_undecoded_without_a_schema() {
         "{:?}",
         pairs.value
     );
+}
+
+/// The editor's reading: with the schema, what a block lacks is listed as not stored.
+fn parse_declared(asset: &[u8], exports: &[u8], mappings: Option<&Mappings>) -> ParsedPackage {
+    let parsed = crate::package::parse_package_opts(
+        &AssetBundle { asset, exports },
+        mappings,
+        None,
+        crate::package::ParseOptions {
+            declared_slots: true,
+            ..Default::default()
+        },
+    )
+    .expect("parses");
+    assert!(
+        matches!(parsed.exports[0].status, ExportStatus::Complete),
+        "every byte accounted for, got {:?}",
+        parsed.exports[0].status
+    );
+    parsed
+}
+
+/// Patches, reads back the way a save does, and checks the result.
+fn apply_declared(
+    asset: &[u8],
+    exports: &[u8],
+    mappings: Option<&Mappings>,
+    edits: impl FnOnce(&ParsedPackage) -> Vec<ValueEdit>,
+) -> Result<(ParsedPackage, Vec<u8>, Vec<u8>), String> {
+    let before = parse_declared(asset, exports, mappings);
+    let changes = PackageEdits {
+        values: edits(&before),
+        ..Default::default()
+    };
+    let patched = patch_package(&AssetBundle { asset, exports }, &before, &changes, mappings)?;
+    let after = parse_declared(&patched.asset, &patched.exports, mappings);
+    verify_patch(&before, &after, &changes, &patched.applied)?;
+    Ok((after, patched.asset, patched.exports))
+}
+
+fn holder(parsed: &ParsedPackage) -> &[PropertyEntry] {
+    match &find(top(parsed), "Holder").value {
+        PropertyValue::Struct { fields, .. } => fields,
+        other => panic!("{other:?}"),
+    }
+}
+
+fn is_absent(entry: &PropertyEntry) -> bool {
+    matches!(entry.value, PropertyValue::Unset { .. })
+}
+
+/// What the schema declares and the block lacks is listed at the block's `None`, nested blocks
+/// included; without a schema nothing is listed.
+#[test]
+fn a_tagged_block_lists_what_its_schema_declares_and_it_lacks() {
+    let (asset, exports) = sparse_package();
+    let mappings = sparse_mappings();
+    let parsed = parse_declared(&asset, &exports, Some(&mappings));
+    let absent: Vec<&str> = holder(&parsed)
+        .iter()
+        .filter(|entry| is_absent(entry))
+        .map(|entry| entry.name.as_str())
+        .collect();
+    assert_eq!(
+        absent,
+        [
+            "Extra", "Label", "On", "Mode", "Nested", "Items", "Scores", "Counts"
+        ]
+    );
+    let inner = find(holder(&parsed), "Inner");
+    assert!(is_absent(find(fields_of(inner), "Y")));
+
+    let bare = parse_declared(&asset, &exports, None);
+    assert!(!holder(&bare).iter().any(is_absent));
+}
+
+/// A value typed for an absent property adds its tag, in its block and in a nested one, in one
+/// save; the blocks and the tags around them grow to hold them.
+#[test]
+fn values_typed_for_absent_tagged_properties_add_their_tags() {
+    let (asset, exports) = sparse_package();
+    let mappings = sparse_mappings();
+    let (after, ..) = apply_declared(&asset, &exports, Some(&mappings), |p| {
+        let inner = find(holder(p), "Inner");
+        vec![
+            edit_of(find(holder(p), "Extra"), set("7")),
+            edit_of(find(holder(p), "Label"), set("hello")),
+            edit_of(find(holder(p), "On"), set("true")),
+            edit_of(find(holder(p), "Mode"), set("EMode::B")),
+            edit_of(find(fields_of(inner), "Y"), set("4")),
+        ]
+    })
+    .expect("added");
+    let got = |name: &str| find(holder(&after), name).value.summary();
+    assert_eq!(got("Extra"), "7");
+    assert_eq!(got("Label"), "hello");
+    assert_eq!(got("On"), "true");
+    assert_eq!(got("Mode"), "EMode::B");
+    assert_eq!(
+        find(fields_of(find(holder(&after), "Inner")), "Y")
+            .value
+            .summary(),
+        "4"
+    );
+    assert_eq!(got("Count"), "3", "what was there reads as it did");
+}
+
+/// Storing an absent struct, array or map adds its tag holding the empty form, which reads back
+/// empty.
+#[test]
+fn absent_tagged_structs_and_containers_store_empty() {
+    let (asset, exports) = sparse_package();
+    let mappings = sparse_mappings();
+    let (after, ..) = apply_declared(&asset, &exports, Some(&mappings), |p| {
+        ["Nested", "Items", "Scores"]
+            .iter()
+            .map(|name| edit_of(find(holder(p), name), EditOp::Store))
+            .collect()
+    })
+    .expect("stored");
+    let nested = find(holder(&after), "Nested");
+    assert!(
+        fields_of(nested).iter().all(is_absent),
+        "{:?}",
+        nested.value
+    );
+    assert!(items_of(find(holder(&after), "Items")).is_empty());
+    assert!(matches!(
+        &find(holder(&after), "Scores").value,
+        PropertyValue::Map { entries } if entries.is_empty()
+    ));
+}
+
+/// Unsetting a stored tagged property takes its tag out, a bool and a struct included, with or
+/// without a schema to list it afterwards.
+#[test]
+fn unsetting_a_tagged_property_takes_its_tag_out() {
+    let (asset, exports) = sparse_package();
+    let mappings = sparse_mappings();
+    let take_out = |p: &ParsedPackage| -> Vec<ValueEdit> {
+        ["Count", "Flag", "Inner"]
+            .iter()
+            .map(|name| edit_of(find(holder(p), name), EditOp::Unset))
+            .collect()
+    };
+    let (after, ..) = apply_declared(&asset, &exports, Some(&mappings), take_out).expect("out");
+    for name in ["Count", "Flag", "Inner"] {
+        assert!(is_absent(find(holder(&after), name)), "{name}");
+    }
+    let (bare, ..) = apply_declared(&asset, &exports, None, take_out).expect("out");
+    assert!(holder(&bare).is_empty(), "{:?}", holder(&bare));
+}
+
+/// A tag can go in and another come out of the same block in one save.
+#[test]
+fn a_tagged_block_takes_an_addition_and_a_removal_together() {
+    let (asset, exports) = sparse_package();
+    let mappings = sparse_mappings();
+    let (after, ..) = apply_declared(&asset, &exports, Some(&mappings), |p| {
+        vec![
+            edit_of(find(holder(p), "Extra"), set("1")),
+            edit_of(find(holder(p), "Count"), EditOp::Unset),
+        ]
+    })
+    .expect("both");
+    assert_eq!(find(holder(&after), "Extra").value.summary(), "1");
+    assert!(is_absent(find(holder(&after), "Count")));
+}
+
+/// A tagged value has no zero flag, so clearing one is refused in words that say what to do.
+#[test]
+fn clearing_a_tagged_property_says_what_to_do_instead() {
+    let (asset, exports) = sparse_package();
+    let mappings = sparse_mappings();
+    let Err(err) = apply_declared(&asset, &exports, Some(&mappings), |p| {
+        vec![edit_of(find(holder(p), "Count"), EditOp::Clear)]
+    }) else {
+        panic!("refused");
+    };
+    assert!(err.contains("unset it"), "{err}");
 }

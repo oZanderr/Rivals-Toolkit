@@ -20,3 +20,6 @@ dirs.workspace = true
 cityhasher.workspace = true
 blake3.workspace = true
 sysinfo.workspace = true
+
+[dev-dependencies]
+rivals-uasset = { path = "../rivals-uasset", features = ["test-support"] }

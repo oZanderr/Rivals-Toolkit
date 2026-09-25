@@ -999,6 +999,8 @@ mod tests {
             tables: Vec::new(),
             channels: Vec::new(),
             native_leaves: Vec::new(),
+            tag_bounds: Vec::new(),
+            tagged_absent: Vec::new(),
             script_tokens: Default::default(),
             text_histories: Default::default(),
             twins: Vec::new(),

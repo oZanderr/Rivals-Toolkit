@@ -10,5 +10,9 @@ retoc.workspace = true
 serde.workspace = true
 usmap.workspace = true
 
+[features]
+# Builders for synthetic packages, for other crates' tests.
+test-support = []
+
 [dev-dependencies]
 serde_json.workspace = true

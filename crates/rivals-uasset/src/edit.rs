@@ -1013,6 +1013,11 @@ pub fn patch_package_with(
     let mut counted: Vec<(usize, u64)> = Vec::new();
     // Containers with no bytes yet that this save has begun writing, and the count each will hold.
     let mut absent_started: BTreeSet<u64> = BTreeSet::new();
+    // Tags added to each tagged block, keyed by where its `None` sits: the applied edit, the tag,
+    // and where its value lands within everything added to that block.
+    let mut tag_inserts: BTreeMap<u64, Vec<(usize, Vec<u8>, u64)>> = BTreeMap::new();
+    // Tags taken out, with the `None` of the block they now read as absent at.
+    let mut removed_tags: Vec<(usize, u64)> = Vec::new();
     let mut absent_counts: Vec<(usize, usize)> = Vec::new();
     // Exports newly pointed at from a value, which the pointing export has to be able to create
     // before it serializes.
@@ -1030,13 +1035,6 @@ pub fn patch_package_with(
             .ok_or_else(|| format!("{} has no recorded position in this package", entry.label()))?;
         // These change which properties the header says are stored, and a tagged package has no
         // such header: each property is a tag of its own.
-        if tagged && matches!(edit.op, EditOp::Clear | EditOp::Unset | EditOp::Store) {
-            return Err(format!(
-                "{} is a tagged property; clearing, unsetting or storing one is not supported, \
-                 so set it to a value instead",
-                entry.label()
-            ));
-        }
         let kind = kind_of(&entry.value);
         if kind != edit.expect_kind {
             return Err(format!(
@@ -1046,6 +1044,106 @@ pub fn patch_package_with(
             ));
         }
         let stored = end > start;
+
+        // A tagged property is a tag of its own: adding one writes the tag in front of its block's
+        // `None`, and removing one cuts the tag out. There is no header to mark.
+        if tagged {
+            let absent = if stored {
+                None
+            } else {
+                parsed.tagged_absent.iter().find(|held| {
+                    held.none_at == start
+                        && held.name == entry.name
+                        && (held.array_index > 0).then_some(held.array_index) == entry.element
+                })
+            };
+            match (&edit.op, absent) {
+                (EditOp::Clear, _) => {
+                    return Err(format!(
+                        "{} is a tagged property, which has no zero flag; set it to a value, or \
+                         unset it to take it out",
+                        entry.label()
+                    ));
+                }
+                (EditOp::Set { .. } | EditOp::Store, Some(absent)) => {
+                    let text = match &edit.op {
+                        EditOp::Set { text } => Some(text.as_str()),
+                        _ => None,
+                    };
+                    let (value, flag) =
+                        tagged_value(absent, text, &mut tables, &package, mappings)?;
+                    let (bytes, value_at) = tag_bytes(
+                        &absent.name,
+                        absent.array_index,
+                        &absent.inner,
+                        &value,
+                        flag,
+                        &mut tables.names,
+                    )?;
+                    let group = tag_inserts.entry(absent.none_at).or_default();
+                    let intra = group
+                        .iter()
+                        .map(|(_, held, _)| held.len() as u64)
+                        .sum::<u64>()
+                        + value_at;
+                    group.push((applied.len(), bytes, intra));
+                    anchors.push((start, (0, 0)));
+                    applied.push(AppliedEdit {
+                        name: entry.label(),
+                        offset: start,
+                        offset_after: start,
+                        element: None,
+                        elements_after: None,
+                        before: entry.value.summary(),
+                        after: text.map_or_else(|| "(stored)".to_string(), str::to_string),
+                    });
+                    continue;
+                }
+                (EditOp::Unset, None) if stored => {
+                    let bounds = parsed
+                        .tag_bounds
+                        .iter()
+                        .find(|bounds| bounds.key == start)
+                        .ok_or_else(|| {
+                            format!("{} has no recorded tag to take out", entry.label())
+                        })?;
+                    pending.push(Pending {
+                        splice: Splice {
+                            start: bounds.tag_at,
+                            end: bounds.tag_end,
+                            bytes: Vec::new(),
+                        },
+                        order: (0, 0),
+                    });
+                    // Taken out, it reads as absent at its block's end, if the block lists it.
+                    removed_tags.push((applied.len(), bounds.none_at));
+                    anchors.push((bounds.none_at, (0, 0)));
+                    applied.push(AppliedEdit {
+                        name: entry.label(),
+                        offset: start,
+                        offset_after: start,
+                        element: None,
+                        elements_after: None,
+                        before: entry.value.summary(),
+                        after: "(not stored)".to_string(),
+                    });
+                    continue;
+                }
+                (EditOp::Store, None) => {
+                    return Err(format!("{} is already stored", entry.label()));
+                }
+                (EditOp::Unset, _) => {
+                    return Err(format!("{} is not stored", entry.label()));
+                }
+                (_, Some(_)) => {
+                    return Err(format!(
+                        "{} is not stored yet; store it first, or set it through a field set",
+                        entry.label()
+                    ));
+                }
+                _ => {}
+            }
+        }
 
         // Every operation comes out the same shape: the bytes it splices, and the record of what
         // it did. Container edits produce two splices because the element count is written apart
@@ -1354,6 +1452,23 @@ pub fn patch_package_with(
         pending.extend(splices.into_iter().map(|splice| Pending { splice, order }));
         applied.push(done);
     }
+    // Everything added to a block replaces its `None` along with it, so the splice sits inside the
+    // block and grows every tag enclosing it rather than the tag before.
+    for (&none_at, group) in &tag_inserts {
+        let mut bytes: Vec<u8> = group
+            .iter()
+            .flat_map(|(_, held, _)| held.iter().copied())
+            .collect();
+        bytes.extend_from_slice(bytes_at(bundle, base, none_at, none_at + 8)?);
+        pending.push(Pending {
+            splice: Splice {
+                start: none_at,
+                end: none_at + 8,
+                bytes,
+            },
+            order: (0, 0),
+        });
+    }
     // One count change per container, however many elements it gains and loses.
     for (&count_at, &(width, delta, _)) in &counts {
         if delta != 0 {
@@ -1599,6 +1714,21 @@ pub fn patch_package_with(
         entry.offset_after = entry
             .offset
             .saturating_add_signed(shift_before[ahead] + header_delta);
+    }
+    // An added tag's value sits past whatever went into its block ahead of it; a removed one reads
+    // as absent at its block's end, which is past everything added there.
+    for group in tag_inserts.values() {
+        for (at, _, intra) in group {
+            applied[*at].offset_after += intra;
+        }
+    }
+    for (at, none_at) in removed_tags {
+        if let Some(group) = tag_inserts.get(&none_at) {
+            applied[at].offset_after += group
+                .iter()
+                .map(|(_, held, _)| held.len() as u64)
+                .sum::<u64>();
+        }
     }
     for (entry, own) in row_applied.iter_mut().zip(&row_owns) {
         entry.offset_after = entry
@@ -3150,6 +3280,168 @@ fn index_after(edits: &PackageEdits, offset: u64, index: u32, keyed: bool) -> us
     at.max(0) as usize
 }
 
+/// The type a tag names for a property of this kind.
+fn tag_type(inner: &usmap::PropertyInner) -> Result<&'static str, String> {
+    use usmap::PropertyInner as P;
+    Ok(match inner {
+        P::Byte => "ByteProperty",
+        P::Bool => "BoolProperty",
+        P::Int => "IntProperty",
+        P::Int8 => "Int8Property",
+        P::Int16 => "Int16Property",
+        P::Int64 => "Int64Property",
+        P::UInt16 => "UInt16Property",
+        P::UInt32 => "UInt32Property",
+        P::UInt64 => "UInt64Property",
+        P::Float => "FloatProperty",
+        P::Double => "DoubleProperty",
+        P::Str => "StrProperty",
+        P::Name => "NameProperty",
+        P::Text => "TextProperty",
+        P::Object => "ObjectProperty",
+        P::WeakObject => "WeakObjectProperty",
+        P::LazyObject => "LazyObjectProperty",
+        P::SoftObject | P::AssetObject => "SoftObjectProperty",
+        P::Interface => "InterfaceProperty",
+        P::Struct { .. } => "StructProperty",
+        P::Array { .. } => "ArrayProperty",
+        P::Set { .. } => "SetProperty",
+        P::Map { .. } => "MapProperty",
+        P::Enum { .. } => "EnumProperty",
+        other => {
+            return Err(format!(
+                "a {} property cannot be written from nothing",
+                crate::mappings::kind_name(other)
+            ));
+        }
+    })
+}
+
+/// A whole tag for a property: its name, type, size and array index, the part its type adds, no
+/// property guid, then the value. Returns where the value lands within it, or for a bool, where
+/// its value byte does, since a bool keeps it in the tag.
+fn tag_bytes(
+    name: &str,
+    array_index: u32,
+    inner: &usmap::PropertyInner,
+    value: &[u8],
+    flag: bool,
+    names: &mut FPackageNameMap,
+) -> Result<(Vec<u8>, u64), String> {
+    use usmap::PropertyInner as P;
+    let mut out = encode_name(name, names);
+    out.extend(encode_name(tag_type(inner)?, names));
+    let size = i32::try_from(value.len()).map_err(|_| "the value is too large for a tag")?;
+    out.extend_from_slice(&size.to_le_bytes());
+    out.extend_from_slice(&(array_index as i32).to_le_bytes());
+    let mut flag_at = None;
+    match inner {
+        P::Struct { name } => {
+            out.extend(encode_name(name, names));
+            out.extend_from_slice(&[0u8; 16]);
+        }
+        P::Bool => {
+            flag_at = Some(out.len());
+            out.push(u8::from(flag));
+        }
+        P::Byte => out.extend(encode_name("None", names)),
+        P::Enum { name, .. } => out.extend(encode_name(name, names)),
+        P::Array { inner } | P::Set { key: inner } => {
+            out.extend(encode_name(tag_type(inner)?, names))
+        }
+        P::Map { key, value } => {
+            out.extend(encode_name(tag_type(key)?, names));
+            out.extend(encode_name(tag_type(value)?, names));
+        }
+        _ => {}
+    }
+    out.push(0);
+    let value_at = flag_at.unwrap_or(out.len()) as u64;
+    out.extend_from_slice(value);
+    Ok((out, value_at))
+}
+
+/// The value a new tag carries: what `text` says, or with none, the type's empty form. A bool has
+/// no value bytes; its value comes back beside them, for the tag.
+fn tagged_value(
+    absent: &crate::props::TaggedAbsent,
+    text: Option<&str>,
+    tables: &mut Tables,
+    package: &retoc::legacy_asset::FLegacyPackageHeader,
+    mappings: Option<&Mappings>,
+) -> Result<(Vec<u8>, bool), String> {
+    use usmap::PropertyInner as P;
+    let inner = &absent.inner;
+    let Some(text) = text else {
+        let empty = match inner {
+            P::Struct { name } => match &absent.native_default {
+                Some(parts) => realise_default(parts, &mut tables.names)?,
+                None if !matches!(
+                    crate::structs::native_default(name),
+                    crate::structs::NativeDefault::NotNative
+                ) =>
+                {
+                    return Err(format!(
+                        "{} is a {name}, whose empty form needs a layout the mappings file does not describe",
+                        absent.name
+                    ));
+                }
+                // An empty reflected struct is its terminating `None` alone.
+                None => encode_name("None", &mut tables.names),
+            },
+            P::Array { inner: element } => {
+                let mut out = 0i32.to_le_bytes().to_vec();
+                // An array of structs names its element type in a tag of its own, even when empty.
+                if matches!(element.as_ref(), P::Struct { .. }) {
+                    out.extend(
+                        tag_bytes(&absent.name, 0, element, &[], false, &mut tables.names)?.0,
+                    );
+                }
+                out
+            }
+            P::Set { .. } | P::Map { .. } => vec![0u8; 8],
+            _ => {
+                return Err(format!(
+                    "{} holds a value; type one for it rather than storing it empty",
+                    absent.name
+                ));
+            }
+        };
+        return Ok((empty, false));
+    };
+    match inner {
+        P::Bool => match text.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" | "yes" | "on" => Ok((Vec::new(), true)),
+            "false" | "0" | "no" | "off" => Ok((Vec::new(), false)),
+            other => Err(format!("{other} is not true or false")),
+        },
+        // A tagged enum is its enumerator's name, whatever integer it is stored as untagged.
+        P::Enum { name, .. } => {
+            let text = text.trim();
+            let enumerator = match text.parse::<i64>() {
+                Ok(number) => enumerator_name(mappings, Some(name), number)?,
+                Err(_) => text.to_string(),
+            };
+            Ok((encode_name(&enumerator, &mut tables.names), false))
+        }
+        _ => encode_declared(
+            crate::props::typed_as(inner),
+            text,
+            Target {
+                declared: crate::props::typed_as(inner),
+                native: None,
+                width: None,
+                was: &[],
+                tables,
+                package,
+                element: false,
+                enums: mappings,
+            },
+        )
+        .map(|bytes| (bytes, false)),
+    }
+}
+
 /// The layout and decoded entries of the StringTable at `export`, for a string edit.
 fn string_table_of(
     parsed: &ParsedPackage,
@@ -4475,6 +4767,7 @@ pub fn verify_patch(
             .map(|export| export.path.clone())
             .collect(),
         repathed: Vec::new(),
+        by_name: !before.info.unversioned_properties,
     };
     for edit in &edits.imports {
         let (index, path) = match edit {
@@ -4613,18 +4906,21 @@ pub fn verify_patch(
     }
 
     for (edit, done) in edits.values.iter().zip(applied) {
-        let entry = find_at(
+        let Some(entry) = find_at(
             after,
             done.offset_after,
             &edit.expect_name,
             edit.expect_element,
-        )
-        .ok_or_else(|| {
-            format!(
+        ) else {
+            // A tag taken out of a block with no schema to list it simply is not there any more.
+            if !before.info.unversioned_properties && matches!(edit.op, EditOp::Unset) {
+                continue;
+            }
+            return Err(format!(
                 "{} is no longer at {:#X} after patching",
                 edit.expect_name, done.offset_after
-            )
-        })?;
+            ));
+        };
         match &edit.op {
             EditOp::Set { text } => {
                 if !reads_back_as(&entry.value, text) {
@@ -4721,6 +5017,9 @@ struct Excuses {
     removed_paths: Vec<String>,
     /// Objects that kept their index but read at a new path, from a rename or a reparent.
     repathed: Vec<(String, String)>,
+    /// A tagged block lists what it holds in the order it holds it and what it lacks after, so
+    /// adding or taking out a tag moves entries: they are paired by name rather than by place.
+    by_name: bool,
 }
 
 impl Excuses {
@@ -4919,6 +5218,9 @@ fn same_entries(
     excuses: &Excuses,
     export: u32,
 ) -> Result<(), String> {
+    if excuses.by_name {
+        return same_entries_by_name(before, after, edits, excuses, export);
+    }
     if before.len() != after.len() {
         return Err(format!(
             "export {export} decoded {} values before the edit and {} after",
@@ -4946,6 +5248,57 @@ fn same_entries(
             return Err(format!(
                 "{} changed from {from} to {to}, and nothing asked it to",
                 old.label()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// [`same_entries`] for a tagged block, pairing entries by name and array slot. An entry an edit
+/// addressed may come and go; every other one must still be there and read the same.
+fn same_entries_by_name(
+    before: &[PropertyEntry],
+    after: &[PropertyEntry],
+    edits: &[ValueEdit],
+    excuses: &Excuses,
+    export: u32,
+) -> Result<(), String> {
+    let edited = |old: &PropertyEntry| {
+        edits.iter().any(|edit| {
+            edit.expect_name == old.name
+                && edit.expect_element == old.element
+                && old.span.is_some_and(|(start, _)| start == edit.offset)
+        })
+    };
+    for old in before {
+        let new = after
+            .iter()
+            .find(|new| new.name == old.name && new.element == old.element);
+        if edited(old) {
+            continue;
+        }
+        let Some(new) = new else {
+            return Err(format!(
+                "export {export} no longer reads {}, and nothing took it out",
+                old.label()
+            ));
+        };
+        if let Some((from, to)) = first_difference(&old.value, &new.value, edits, excuses, export)?
+        {
+            return Err(format!(
+                "{} changed from {from} to {to}, and nothing asked it to",
+                old.label()
+            ));
+        }
+    }
+    for new in after {
+        if !before
+            .iter()
+            .any(|old| old.name == new.name && old.element == new.element)
+        {
+            return Err(format!(
+                "export {export} now reads {}, which nothing added",
+                new.label()
             ));
         }
     }
@@ -6094,6 +6447,8 @@ mod tests {
             tables: Vec::new(),
             channels: Vec::new(),
             native_leaves: Vec::new(),
+            tag_bounds: Vec::new(),
+            tagged_absent: Vec::new(),
             script_tokens: Default::default(),
             text_histories: Default::default(),
             twins: Vec::new(),

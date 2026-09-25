@@ -60,7 +60,12 @@ pub fn preview_read_edits(
     if changes.is_empty() {
         return Err("No changes to save".into());
     }
-    if !changes.field_sets.is_empty() {
+    if !changes.field_sets.is_empty()
+        || changes
+            .values
+            .iter()
+            .any(|edit| inserts_into_absent(parsed, edit))
+    {
         return field_passes(request, mappings, loaded, parsed);
     }
     let sidecars = rivals_uasset::Sidecars {
@@ -103,24 +108,39 @@ fn patch_pass(
 /// inside it, one level of nesting each.
 const FIELD_ROUNDS: usize = 5;
 
-/// A field set on its way down: the struct it has reached, and the names left to walk.
+/// An edit on its way down: the value it has reached, the field names left to walk, and what it
+/// does once there.
 struct FieldWalk {
     offset: u64,
     name: String,
     element: Option<u32>,
     path: Vec<String>,
-    text: String,
+    op: EditOp,
 }
 
 /// Where a walk stands in the package as it now reads.
 enum FieldStep {
-    /// The struct it has reached stores nothing yet; this stores it.
+    /// The value it has reached stores nothing yet; this stores it.
     Store(ValueEdit),
-    /// The field itself, and the edit that sets it.
-    Set(ValueEdit),
+    /// The value the walk ends at, and the edit it makes there.
+    Edit(ValueEdit),
 }
 
-/// Follows a walk through stored structs until it reaches its field or a struct not stored yet.
+/// An insert into a tagged container the package does not hold yet, which is stored in one round
+/// and takes the element in the next.
+fn inserts_into_absent(parsed: &rivals_uasset::ParsedPackage, edit: &ValueEdit) -> bool {
+    !parsed.info.unversioned_properties
+        && matches!(edit.op, EditOp::Insert { .. })
+        && rivals_uasset::entry_named_at(
+            parsed,
+            edit.offset,
+            &edit.expect_name,
+            edit.expect_element,
+        )
+        .is_some_and(|entry| matches!(entry.value, PropertyValue::Unset { .. }))
+}
+
+/// Follows a walk through stored structs until it reaches its value or one not stored yet.
 fn field_step(
     parsed: &rivals_uasset::ParsedPackage,
     walk: &mut FieldWalk,
@@ -143,6 +163,15 @@ fn field_step(
                     op: EditOp::Store,
                 }));
             }
+            value if walk.path.is_empty() => {
+                return Ok(FieldStep::Edit(ValueEdit {
+                    offset: walk.offset,
+                    expect_name: walk.name.clone(),
+                    expect_element: walk.element,
+                    expect_kind: rivals_uasset::kind_of(value),
+                    op: walk.op.clone(),
+                }));
+            }
             PropertyValue::Struct { fields, .. } => fields,
             other => {
                 return Err(format!(
@@ -153,7 +182,7 @@ fn field_step(
                 ));
             }
         };
-        let segment = walk.path.first().ok_or("a field set names no field")?;
+        let segment = &walk.path[0];
         let (name, element) = match segment.strip_suffix(']').and_then(|s| s.split_once('[')) {
             Some((name, at)) => (
                 name,
@@ -172,14 +201,12 @@ fn field_step(
             .span
             .ok_or_else(|| format!("{} has no recorded position", field.label()))?;
         if walk.path.len() == 1 {
-            return Ok(FieldStep::Set(ValueEdit {
+            return Ok(FieldStep::Edit(ValueEdit {
                 offset: start,
                 expect_name: field.name.clone(),
                 expect_element: field.element,
                 expect_kind: rivals_uasset::kind_of(&field.value),
-                op: EditOp::Set {
-                    text: walk.text.clone(),
-                },
+                op: walk.op.clone(),
             }));
         }
         walk.offset = start;
@@ -189,10 +216,11 @@ fn field_step(
     }
 }
 
-/// Applies edits that set fields inside structs not stored yet. Each round stores the structs the
-/// walks have reached, reads the package again so their fields have places, and follows the walks
-/// on; a field whose struct is stored is set in the same round. Every other edit goes in the first
-/// round, and each round is checked on its own.
+/// Applies edits that set fields inside structs not stored yet, or insert into tagged containers
+/// not stored yet. Each round stores the values the walks have reached, reads the package again so
+/// what is inside has places, and follows the walks on; a walk whose value is stored makes its edit
+/// in the same round. Every other edit goes in the first round, and each round is checked on its
+/// own.
 fn field_passes(
     request: &AssetEditRequest<'_>,
     mappings: Option<&Mappings>,
@@ -201,16 +229,30 @@ fn field_passes(
 ) -> Result<(PatchedBundle, FSerializedAssetBundle), String> {
     rivals_uasset::check_expectations(parsed, &request.changes)?;
     let mut edits = request.changes.clone();
-    let mut walks: Vec<FieldWalk> = std::mem::take(&mut edits.field_sets)
-        .into_iter()
-        .map(|set| FieldWalk {
+    let mut walks = Vec::new();
+    for set in std::mem::take(&mut edits.field_sets) {
+        if set.path.is_empty() {
+            return Err("a field set names no field".into());
+        }
+        walks.push(FieldWalk {
             offset: set.offset,
             name: set.expect_name,
             element: set.expect_element,
             path: set.path,
-            text: set.text,
-        })
-        .collect();
+            op: EditOp::Set { text: set.text },
+        });
+    }
+    let (inserts, values): (Vec<ValueEdit>, Vec<ValueEdit>) = std::mem::take(&mut edits.values)
+        .into_iter()
+        .partition(|edit| inserts_into_absent(parsed, edit));
+    edits.values = values;
+    walks.extend(inserts.into_iter().map(|edit| FieldWalk {
+        offset: edit.offset,
+        name: edit.expect_name,
+        element: edit.expect_element,
+        path: Vec::new(),
+        op: edit.op,
+    }));
     let mut current: Option<(PatchedBundle, rivals_uasset::ParsedPackage)> = None;
     let mut applied = Vec::new();
     let mut bulk = None;
@@ -221,7 +263,7 @@ fn field_passes(
         let mut waiting: Vec<(FieldWalk, usize)> = Vec::new();
         for mut walk in std::mem::take(&mut walks) {
             match field_step(now, &mut walk)? {
-                FieldStep::Set(edit) => edits.values.push(edit),
+                FieldStep::Edit(edit) => edits.values.push(edit),
                 FieldStep::Store(store) => {
                     let at = edits
                         .values
@@ -1635,6 +1677,166 @@ mod tests {
         let error = save_edits(&request(&root, "Plain"), None, &SaveOptions::default())
             .expect_err("refused");
         assert!(error.contains("Repack it in place"), "{error}");
+    }
+
+    fn sparse_bundle(asset: Vec<u8>, exports: Vec<u8>) -> FSerializedAssetBundle {
+        FSerializedAssetBundle {
+            asset_file_buffer: asset,
+            exports_file_buffer: exports,
+            bulk_data_buffer: None,
+            optional_bulk_data_buffer: None,
+            memory_mapped_bulk_data_buffer: None,
+        }
+    }
+
+    fn holder_of(parsed: &rivals_uasset::ParsedPackage) -> &[rivals_uasset::PropertyEntry] {
+        let holder = parsed.exports[0]
+            .properties
+            .iter()
+            .find(|entry| entry.name == "Holder")
+            .expect("Holder");
+        match &holder.value {
+            PropertyValue::Struct { fields, .. } => fields,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn field<'a>(
+        fields: &'a [rivals_uasset::PropertyEntry],
+        name: &str,
+    ) -> &'a rivals_uasset::PropertyEntry {
+        fields
+            .iter()
+            .find(|entry| entry.name == name)
+            .unwrap_or_else(|| panic!("no field called {name}"))
+    }
+
+    /// Previews edits on the synthetic tagged package, whose `Holder` holds less than its schema
+    /// declares, and reads the result back the way the editor does.
+    fn preview_sparse(
+        edits: impl FnOnce(&rivals_uasset::ParsedPackage) -> PackageEdits,
+    ) -> Result<rivals_uasset::ParsedPackage, String> {
+        use rivals_uasset::tagged_fixture::{sparse_mappings, sparse_package};
+        let mappings = sparse_mappings();
+        let (asset, exports) = sparse_package();
+        let loaded = sparse_bundle(asset, exports);
+        let mut request = request("", "unused, preview writes nothing");
+        let parsed = parse_loaded(&request, Some(&mappings), &loaded)?;
+        request.changes = edits(&parsed);
+        let (patched, _) = preview_read_edits(&request, Some(&mappings), loaded, &parsed)?;
+        parse_loaded(
+            &request,
+            Some(&mappings),
+            &sparse_bundle(patched.asset, patched.exports),
+        )
+    }
+
+    /// A field set reaches into a tagged struct the package does not hold: the struct's tag goes
+    /// in, then the field's inside it, in one save.
+    #[test]
+    fn a_field_set_adds_an_absent_tagged_struct_and_its_field() {
+        let after = preview_sparse(|parsed| {
+            let nested = field(holder_of(parsed), "Nested");
+            PackageEdits {
+                field_sets: vec![rivals_uasset::FieldSet {
+                    offset: nested.span.expect("a span").0,
+                    expect_name: "Nested".into(),
+                    expect_element: None,
+                    path: vec!["Y".into()],
+                    text: "4".into(),
+                }],
+                ..Default::default()
+            }
+        })
+        .expect("saved");
+        let PropertyValue::Struct { fields, .. } = &field(holder_of(&after), "Nested").value else {
+            panic!("Nested is stored");
+        };
+        assert_eq!(field(fields, "Y").value.summary(), "4");
+        assert!(matches!(
+            field(fields, "X").value,
+            PropertyValue::Unset { .. }
+        ));
+    }
+
+    /// An insert into a tagged array the package does not hold stores the array first, and the
+    /// element goes in after, in the same save as an ordinary edit.
+    #[test]
+    fn an_insert_adds_an_absent_tagged_array_with_its_element() {
+        let after = preview_sparse(|parsed| {
+            let holder = holder_of(parsed);
+            let edit = |name: &str, op: EditOp| {
+                let entry = field(holder, name);
+                ValueEdit {
+                    offset: entry.span.expect("a span").0,
+                    expect_name: entry.name.clone(),
+                    expect_element: entry.element,
+                    expect_kind: rivals_uasset::kind_of(&entry.value),
+                    op,
+                }
+            };
+            PackageEdits {
+                values: vec![
+                    edit(
+                        "Counts",
+                        EditOp::Insert {
+                            index: 0,
+                            key: None,
+                        },
+                    ),
+                    edit("Extra", EditOp::Set { text: "7".into() }),
+                ],
+                ..Default::default()
+            }
+        })
+        .expect("saved");
+        let holder = holder_of(&after);
+        assert!(
+            matches!(&field(holder, "Counts").value, PropertyValue::Array { items, .. } if items.len() == 1),
+            "{:?}",
+            field(holder, "Counts").value
+        );
+        assert_eq!(field(holder, "Extra").value.summary(), "7");
+    }
+
+    /// A tagged package's dump, with an absent property given a value and a stored one unset,
+    /// diffs to edits that add the one tag and take out the other, drift checks included.
+    #[test]
+    fn a_tagged_dump_diffs_to_additions_and_removals() {
+        let after = preview_sparse(|parsed| {
+            let mut dump = serde_json::to_value(parsed).expect("dump");
+            let holder = dump["exports"][0]["properties"]
+                .as_array_mut()
+                .expect("properties")
+                .iter_mut()
+                .find(|entry| entry["name"] == "Holder")
+                .expect("Holder");
+            for field in holder["value"]["fields"].as_array_mut().expect("fields") {
+                match field["name"].as_str() {
+                    Some("Extra") => {
+                        field["value"] = serde_json::json!({"kind": "int", "value": 7});
+                    }
+                    Some("Count") => {
+                        field["value"] = serde_json::json!({"kind": "unset", "declared": "Int"});
+                    }
+                    _ => {}
+                }
+            }
+            let outcome = diff::diff_dump(parsed, &dump).expect("diff");
+            assert!(outcome.notes.is_empty(), "{:?}", outcome.notes);
+            assert_eq!(outcome.edits.values.len(), 2, "{:?}", outcome.edits.values);
+            outcome
+                .edits
+                .resolve(std::path::Path::new("."))
+                .expect("resolve")
+        })
+        .expect("saved");
+        let holder = holder_of(&after);
+        assert_eq!(field(holder, "Extra").value.summary(), "7");
+        assert!(matches!(
+            field(holder, "Count").value,
+            PropertyValue::Unset { .. }
+        ));
     }
 }
 
