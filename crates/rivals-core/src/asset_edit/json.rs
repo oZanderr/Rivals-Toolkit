@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use rivals_uasset::{
     BulkEdit, DependencyEdit, DuplicateExport, ExportEdit, ImportEdit, KeyEdit, PackageEdits,
-    PayloadEdit, RowEdit, StringEdit, ValueEdit,
+    PayloadEdit, RowEdit, ScriptConstEdit, StringEdit, ValueEdit,
 };
 
 use crate::paths::{mods_dir, paks_dir};
@@ -30,6 +30,9 @@ pub struct EditList {
     pub bulk: Vec<BulkFile>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub payloads: Vec<PayloadFile>,
+    /// Literal constants changed in place inside a function's bytecode.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scripts: Vec<ScriptConstEdit>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub remove_exports: Vec<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -68,6 +71,7 @@ impl EditList {
             && self.keys.is_empty()
             && self.bulk.is_empty()
             && self.payloads.is_empty()
+            && self.scripts.is_empty()
             && self.remove_exports.is_empty()
             && self.reset_exports.is_empty()
             && self.duplicate_exports.is_empty()
@@ -109,6 +113,7 @@ impl EditList {
             keys: self.keys,
             bulk,
             payloads,
+            scripts: self.scripts,
             remove_exports: self.remove_exports,
             reset_exports: self.reset_exports,
             duplicate_exports: self.duplicate_exports,
@@ -244,6 +249,7 @@ mod tests {
                 "values": [{"offset": 16, "name": "Damage", "kind": "float", "op": "set", "text": "42.5"}],
                 "rows": [{"export": 0, "op": "remove", "name": "Row_D"}],
                 "imports": [{"op": "add", "path": "/Game/X.X"}],
+                "scripts": [{"export": 5, "statement": 1636, "value": "1000"}],
                 "reset_exports": [3]
             }
         }"#;
@@ -253,6 +259,9 @@ mod tests {
         assert_eq!(file.edits.values.len(), 1);
         assert_eq!(file.edits.rows.len(), 1);
         assert_eq!(file.edits.imports.len(), 1);
+        assert_eq!(file.edits.scripts.len(), 1);
+        assert_eq!(file.edits.scripts[0].statement, 0x0664);
+        assert_eq!(file.edits.scripts[0].constant, 0);
         assert_eq!(file.edits.reset_exports, vec![3]);
         assert!(file.edits.keys.is_empty());
     }

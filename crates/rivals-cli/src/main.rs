@@ -108,6 +108,9 @@ enum AssetCmd {
     Fields(FieldsArgs),
     /// Disassemble the bytecode a function or class export stores.
     Script(FieldsArgs),
+    /// Change a literal constant inside a function's bytecode, at its own width, and write the
+    /// result into a mod pak.
+    ScriptSet(ScriptSetArgs),
     /// Change a stored value and write the result into a mod pak.
     Set(AssetSetArgs),
     /// Set the same properties by name across every package a filter matches, in one mod.
@@ -565,6 +568,44 @@ struct DuplicateExportArgs {
 }
 
 #[derive(Args)]
+#[command(allow_negative_numbers = true)]
+struct ScriptSetArgs {
+    #[command(flatten)]
+    asset: AssetArgs,
+
+    /// Export index of the function, as `asset info` prints it.
+    #[arg(long, value_name = "N")]
+    export: u32,
+
+    /// The statement holding the constant, by the offset `asset script` prints at the start of
+    /// its line.
+    #[arg(long, value_name = "OFFSET", value_parser = parse_offset)]
+    statement: u64,
+
+    /// Which literal in that statement, counted from 0 left to right. A wrong index lists them.
+    #[arg(long = "const", value_name = "K", default_value_t = 0)]
+    constant: u32,
+
+    /// The new value in the constant's own kind: an integer, a number, a string, a name, or
+    /// `x,y,z` for a vector. It must fit the bytes the old value took.
+    #[arg(long, value_name = "TEXT")]
+    value: String,
+
+    /// Mod pak to write into, created in `~mods` if it does not exist. Defaults to the name the
+    /// desktop app last saved into, then to `AssetEdits`.
+    #[arg(long, value_name = "NAME")]
+    mod_name: Option<String>,
+
+    /// Overwrite an edited copy of this asset that the mod pak already holds.
+    #[arg(long)]
+    replace: bool,
+
+    /// Patch and verify, report what would change, and write nothing.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Args)]
 struct PayloadArgs {
     #[command(flatten)]
     asset: AssetArgs,
@@ -835,6 +876,7 @@ fn run(cli: &Cli) -> Result<(), String> {
         Command::Asset(AssetCmd::Hex(a)) => asset_hex(cli, &app, a),
         Command::Asset(AssetCmd::Fields(a)) => asset_fields(cli, &app, a),
         Command::Asset(AssetCmd::Script(a)) => asset_script(cli, &app, a),
+        Command::Asset(AssetCmd::ScriptSet(a)) => asset_script_set(cli, &app, a),
         Command::Asset(AssetCmd::Set(a)) => asset_set(cli, &app, a),
         Command::Asset(AssetCmd::Sweep(a)) => asset_sweep(cli, &app, a),
         Command::Asset(AssetCmd::Import(a)) => asset_import(cli, &app, a),
@@ -1541,6 +1583,51 @@ fn asset_script(cli: &Cli, app: &settings::AppSettings, args: &FieldsArgs) -> Re
     emit(cli, &report, || {
         asset::print_script(&report, &mut |line| outln!("{line}"))
     })
+}
+
+fn asset_script_set(
+    cli: &Cli,
+    app: &settings::AppSettings,
+    args: &ScriptSetArgs,
+) -> Result<(), String> {
+    let root = resolve::game_root(cli.game_root.as_deref(), app)?;
+    let request = asset_request(cli, app, &args.asset, &root);
+    let statement = u32::try_from(args.statement).map_err(|_| {
+        format!(
+            "{:#X} is not a statement offset a script can hold",
+            args.statement
+        )
+    })?;
+    let edit = rivals_uasset::ScriptConstEdit {
+        export: args.export,
+        statement,
+        constant: args.constant,
+        value: args.value.clone(),
+    };
+    if args.dry_run {
+        let applied = asset::preview_script_set(&request, edit)?;
+        return emit(cli, &applied, || {
+            for done in &applied {
+                outln!(
+                    "would set {} (file {:#X}): {} -> {}",
+                    done.name,
+                    done.offset,
+                    done.before,
+                    done.after
+                );
+            }
+        });
+    }
+    if !cli.force && rivals_core::game_status::should_block_for_game() {
+        return Err(rivals_core::game_status::game_running_error());
+    }
+    let message = asset::script_set(
+        &request,
+        edit,
+        mod_name_of(app, args.mod_name.as_deref()),
+        args.replace,
+    )?;
+    emit(cli, &message, || outln!("{message}"))
 }
 
 /// Where asset edits go when neither the flag nor the desktop app has chosen a mod.

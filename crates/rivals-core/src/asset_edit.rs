@@ -861,7 +861,8 @@ mod game_data_tests {
     use crate::mappings;
     use rivals_uasset::{
         BulkEdit, DuplicateExport, EditOp, ExportEdit, ExportStatus, ImportEdit, KeyEdit, KeyOp,
-        PayloadEdit, PropertyEntry, PropertyValue, RowEdit, RowOp, StringEdit, StringOp, ValueEdit,
+        PayloadEdit, PropertyEntry, PropertyValue, RowEdit, RowOp, ScriptConstEdit, StringEdit,
+        StringOp, ValueEdit,
     };
 
     /// Every cell in this table is stored, and a third of them are strings.
@@ -5091,6 +5092,77 @@ mod game_data_tests {
 
     /// A script that disassembles can be replaced at another length, because its loaded size can
     /// be worked out and the two words in front of it rewritten to match.
+    /// A constant inside a function is changed where it sits: the script keeps its length, its
+    /// size words and its statements, and reads the new value back.
+    #[test]
+    fn a_script_constant_is_changed_in_place() {
+        let Some(fixture) = Fixture::open(LEVEL) else {
+            return;
+        };
+        let before = fixture.parse();
+        let event = before
+            .exports
+            .iter()
+            .find(|e| e.object_name == "ReceiveBeginPlay")
+            .expect("the level's begin play event");
+        let script = event.script.as_ref().expect("a script");
+        let first = rivals_uasset::literals(&script.statements[0].expr);
+        assert!(
+            matches!(
+                first.as_slice(),
+                [rivals_uasset::Expr::IntConst { value: 411, .. }]
+            ),
+            "{first:?}"
+        );
+
+        let (patched, after) = fixture.apply_changes(PackageEdits {
+            scripts: vec![ScriptConstEdit {
+                export: event.index,
+                statement: 0,
+                constant: 0,
+                value: "1000".to_string(),
+            }],
+            ..Default::default()
+        });
+        let now = export_at(&after, event.index);
+        let script = now.script.as_ref().expect("still disassembles");
+        assert!(script.complete(), "{:?}", script.stopped);
+        assert_eq!((script.storage_size, script.buffer_size), (14, 18));
+        assert_eq!(script.statements.len(), 3);
+        assert_eq!(now.serial_size, event.serial_size);
+        let first = rivals_uasset::literals(&script.statements[0].expr);
+        assert!(
+            matches!(
+                first.as_slice(),
+                [rivals_uasset::Expr::IntConst { value: 1000, .. }]
+            ),
+            "{first:?}"
+        );
+        assert_eq!(patched.applied.len(), 1);
+        assert_eq!(
+            (
+                patched.applied[0].before.as_str(),
+                patched.applied[0].after.as_str()
+            ),
+            ("411", "1000")
+        );
+
+        let request = fixture.request_changes(PackageEdits {
+            scripts: vec![ScriptConstEdit {
+                export: event.index,
+                statement: 15,
+                constant: 0,
+                value: "1".to_string(),
+            }],
+            ..Default::default()
+        });
+        let err = match preview_edits(&request, Some(&fixture.schema)) {
+            Ok(_) => panic!("Return holds no literal, so the preview should refuse"),
+            Err(err) => err,
+        };
+        assert!(err.contains("holds no literal constant"), "{err}");
+    }
+
     #[test]
     fn a_script_is_replaced_at_another_length_and_its_size_words_follow() {
         let Some(fixture) = Fixture::open(LEVEL) else {

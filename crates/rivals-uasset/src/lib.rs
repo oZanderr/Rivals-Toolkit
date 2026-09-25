@@ -34,8 +34,9 @@ pub use dependency::{DependencyEdit, DependencyPlan, Runs, plan_dependency_edits
 pub use duplicate::{DuplicatePlan, LevelSlot, plan_duplication};
 pub use edit::{
     AppliedEdit, BulkEdit, DuplicateExport, EditOp, KeyEdit, KeyOp, PackageEdits, PatchedBundle,
-    PayloadEdit, RowEdit, RowOp, Sidecars, StringEdit, StringOp, ValueEdit, kind_of, patch_package,
-    patch_package_copy, patch_package_with, patch_values, payload_lock, verify_copy, verify_patch,
+    PayloadEdit, RowEdit, RowOp, ScriptConstEdit, Sidecars, StringEdit, StringOp, ValueEdit,
+    kind_of, patch_package, patch_package_copy, patch_package_with, patch_values, payload_lock,
+    verify_copy, verify_patch,
 };
 pub use export_edit::{
     EDITABLE_FLAGS, ExportEdit, ExportEditPlan, flag_names, plan_export_edits,
@@ -48,7 +49,7 @@ pub use import_remove::{
     unused_imports,
 };
 pub use kismet::{
-    Expr, ObjectRef, PropertyRef, Script, ScriptStop, Statement, SwitchCase, TextLiteral,
+    Expr, ObjectRef, PropertyRef, Script, ScriptStop, Statement, SwitchCase, TextLiteral, literals,
     render_script, token_name,
 };
 pub use mappings::{Mappings, Schema, SchemaFixups, SchemaSlot, kind_name};

@@ -150,6 +150,12 @@ Imports of native objects the game registers only at runtime (its `NePatchUtilit
 which Blueprint mod loaders call) are not in the game's script objects table, so a bundled list names
 them; `--script-objects PATH` adds a text file of further object paths, one per line.
 
+`asset script-set` changes one literal constant inside a function's bytecode, addressed by the
+statement offset `asset script` prints and which literal in that statement, and only at the width
+the old value took: an `IntConst` can become another integer, a string another string of the same
+length, but a one-byte `IntZero` cannot grow into a four-byte constant without moving every jump
+after it, so that is refused. `--dry-run` shows the change without writing.
+
 
 ```bash
 rivals-cli asset list  --container pakchunk0-Windows.utoc --filter DataTable
@@ -167,7 +173,7 @@ rivals-cli asset export-edit --container ... --entry ... --export 3 --class -32 
 rivals-cli asset imports --container ... --entry ... --unused                           # tidy the table
 rivals-cli asset deps    --container ... --entry ... --export 3                         # load order
 rivals-cli asset script  --container ... --entry ... --export 26                        # disassembly
-
+rivals-cli asset script-set --container ... --entry ... --export 26 --statement 0x0664 --const 0 --value 1000 --mod-name MyMod
 rivals-cli asset copy-export --container ... --entry ... --from-container ... --from-entry ... --export 274 --name MyLight
 
 rivals-cli asset audit --container pakchunk0-Windows.utoc --filter Data/DataTable

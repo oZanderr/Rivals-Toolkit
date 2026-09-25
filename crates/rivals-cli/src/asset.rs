@@ -267,6 +267,41 @@ pub fn payload_bytes(request: &Request<'_>, export: u32) -> Result<Vec<u8>, Stri
     )
 }
 
+/// Sets one literal constant inside a function's bytecode and writes the result into a mod.
+pub fn script_set(
+    request: &Request<'_>,
+    edit: rivals_uasset::ScriptConstEdit,
+    mod_name: &str,
+    replace: bool,
+) -> Result<String, String> {
+    write_edits(
+        request,
+        mod_name,
+        replace,
+        PackageEdits {
+            scripts: vec![edit],
+            ..Default::default()
+        },
+    )
+}
+
+/// What `script_set` would change, patched and verified in memory without writing anything.
+pub fn preview_script_set(
+    request: &Request<'_>,
+    edit: rivals_uasset::ScriptConstEdit,
+) -> Result<Vec<rivals_uasset::AppliedEdit>, String> {
+    let schema = mappings::resolve(request.usmap, request.configured_usmap)
+        .and_then(|path| mappings::load(&path))
+        .ok();
+    let changes = PackageEdits {
+        scripts: vec![edit],
+        ..Default::default()
+    };
+    let (patched, _) =
+        asset_edit::preview_edits(&edit_request(request, "", changes), schema.as_deref())?;
+    Ok(patched.applied)
+}
+
 /// The bytes of one bulk data resource, wherever its payload sits.
 pub fn bulk_bytes(request: &Request<'_>, resource: u32) -> Result<Vec<u8>, String> {
     asset_edit::read_bulk(

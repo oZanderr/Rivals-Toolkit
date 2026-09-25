@@ -16,6 +16,7 @@ use retoc::zen::FPackageIndex;
 
 use crate::datatable::{DataTable, DataTableLayout, DataTableRow, RowSpan};
 use crate::header_edit::{ImportEdit, Tables, add_import, apply_import_edit};
+use crate::kismet::{self, Expr};
 use crate::mappings::Mappings;
 use crate::package::ExportStatus;
 use crate::package::{
@@ -140,6 +141,19 @@ pub struct PayloadEdit {
     pub bytes: Vec<u8>,
 }
 
+/// A literal constant inside a function's bytecode given a new value at its own width, addressed
+/// the way the disassembly prints it: the statement's loaded offset and which literal in it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScriptConstEdit {
+    pub export: u32,
+    /// The statement's loaded offset, as the disassembly prints at the start of its line.
+    pub statement: u32,
+    /// Which literal in that statement, counted from 0 in bytecode order.
+    #[serde(default)]
+    pub constant: u32,
+    pub value: String,
+}
+
 /// Everything one save changes: values inside exports, the import table they point into, or the
 /// export table itself. Removing or resetting exports is a save of its own: the value edits
 /// address bytes those operations move or delete.
@@ -159,6 +173,8 @@ pub struct PackageEdits {
     pub bulk: Vec<BulkEdit>,
     /// Export payloads given new bytes. See [`PayloadEdit`].
     pub payloads: Vec<PayloadEdit>,
+    /// Literal constants changed in place inside bytecode. See [`ScriptConstEdit`].
+    pub scripts: Vec<ScriptConstEdit>,
     /// Exports to remove, with their subobjects. See [`crate::plan_removal`].
     pub remove_exports: Vec<u32>,
     /// Exports whose stored values are dropped so they inherit everything.
@@ -180,6 +196,7 @@ impl PackageEdits {
             && self.keys.is_empty()
             && self.bulk.is_empty()
             && self.payloads.is_empty()
+            && self.scripts.is_empty()
             && self.remove_exports.is_empty()
             && self.reset_exports.is_empty()
             && self.duplicate_exports.is_empty()
@@ -517,6 +534,7 @@ pub fn patch_package_with(
             || !edits.keys.is_empty()
             || !edits.bulk.is_empty()
             || !edits.payloads.is_empty()
+            || !edits.scripts.is_empty()
             || !edits.remove_exports.is_empty()
             || !edits.reset_exports.is_empty()
             || !edits.duplicate_exports.is_empty()
@@ -540,6 +558,7 @@ pub fn patch_package_with(
             || !edits.keys.is_empty()
             || !edits.bulk.is_empty()
             || !edits.payloads.is_empty()
+            || !edits.scripts.is_empty()
             || !edits.remove_exports.is_empty()
             || !edits.duplicate_exports.is_empty()
         {
@@ -579,6 +598,7 @@ pub fn patch_package_with(
             || !edits.keys.is_empty()
             || !edits.bulk.is_empty()
             || !edits.payloads.is_empty()
+            || !edits.scripts.is_empty()
             || !edits.remove_exports.is_empty()
             || !edits.reset_exports.is_empty()
             || !edits.duplicate_exports.is_empty()
@@ -601,6 +621,7 @@ pub fn patch_package_with(
             || !edits.keys.is_empty()
             || !edits.bulk.is_empty()
             || !edits.payloads.is_empty()
+            || !edits.scripts.is_empty()
         {
             return Err(
                 "removing, resetting or duplicating an export is a save of its own; save or discard the other edits first"
@@ -969,6 +990,13 @@ pub fn patch_package_with(
     // Payloads and bulk data are replaced whole; the bulk table follows their new sizes.
     let payload_out = payload_splices(parsed, edits, &package)?;
     for (splice, done) in payload_out {
+        pending.push(Pending {
+            splice,
+            order: (0, 0),
+        });
+        applied_imports.push(done);
+    }
+    for (splice, done) in script_splices(parsed, edits, &mut tables.names)? {
         pending.push(Pending {
             splice,
             order: (0, 0),
@@ -1924,6 +1952,100 @@ fn bytecode_size_words(
     words[..4].copy_from_slice(&script.decoded_size.to_le_bytes());
     words[4..].copy_from_slice(&(bytes.len() as u32).to_le_bytes());
     Some(words)
+}
+
+/// One narrow splice per script constant: the value bytes after the token, nothing else, so a
+/// script keeps its length, its size words and every jump in it. A name that is new to the
+/// package goes into `names`, which is how the header learns to grow.
+fn script_splices(
+    parsed: &ParsedPackage,
+    edits: &PackageEdits,
+    names: &mut FPackageNameMap,
+) -> Result<Vec<(Splice, AppliedEdit)>, String> {
+    let mut out = Vec::with_capacity(edits.scripts.len());
+    let mut seen: Vec<(u32, u64)> = Vec::new();
+    for edit in &edits.scripts {
+        let export = parsed
+            .exports
+            .iter()
+            .find(|e| e.index == edit.export)
+            .ok_or_else(|| format!("no export {}", edit.export))?;
+        if edits.payloads.iter().any(|p| p.export == edit.export) {
+            return Err(format!(
+                "{} is given a whole new payload in this save, so a constant inside it cannot also be set",
+                export.object_name
+            ));
+        }
+        let script = export.script.as_ref().ok_or_else(|| {
+            format!(
+                "export {} ({}) carries no bytecode this reader measured",
+                edit.export, export.class_name
+            )
+        })?;
+        if let Some(stop) = &script.stopped {
+            return Err(format!(
+                "{}'s bytecode did not disassemble whole ({}), so no constant in it can be trusted to sit where the walk says",
+                export.object_name, stop.reason
+            ));
+        }
+        let old = kismet::literal_at(script, edit.statement, edit.constant)?;
+        let new = kismet::with_value(old, &edit.value)?;
+        let bytes = kismet::literal_bytes(&new, names)?;
+        let width = kismet::stored_width(old);
+        if bytes.len() as u64 != width {
+            return Err(format!(
+                "{} takes {width} byte(s) and the new value {} would take {}; a script constant can only be replaced at its own width",
+                kismet::literal_kind(old),
+                kismet::render(&new),
+                bytes.len()
+            ));
+        }
+        let at = match old {
+            Expr::IntConst { at, .. }
+            | Expr::Int64Const { at, .. }
+            | Expr::UInt64Const { at, .. }
+            | Expr::FloatConst { at, .. }
+            | Expr::DoubleConst { at, .. }
+            | Expr::ByteConst { at, .. }
+            | Expr::StringConst { at, .. }
+            | Expr::UnicodeStringConst { at, .. }
+            | Expr::NameConst { at, .. }
+            | Expr::Numbers { at, .. } => *at,
+            other => {
+                return Err(format!(
+                    "{} has no value bytes to write",
+                    kismet::literal_kind(other)
+                ));
+            }
+        };
+        if seen.contains(&(edit.export, at)) {
+            return Err(format!(
+                "{} constant {} at 0x{:04X} is set twice in one save",
+                export.object_name, edit.constant, edit.statement
+            ));
+        }
+        seen.push((edit.export, at));
+        out.push((
+            Splice {
+                start: at + 1,
+                end: at + 1 + width,
+                bytes,
+            },
+            AppliedEdit {
+                name: format!(
+                    "{} script constant {} at 0x{:04X}",
+                    export.object_name, edit.constant, edit.statement
+                ),
+                offset: at,
+                offset_after: at,
+                element: None,
+                elements_after: None,
+                before: kismet::render(old),
+                after: kismet::render(&new),
+            },
+        ));
+    }
+    Ok(out)
 }
 
 fn payload_splices(
@@ -3110,6 +3232,68 @@ fn channel_at<'a>(
 /// result: the frames in order with the added ones in, the removed ones out and the moved and
 /// retimed ones where they were sent, an added key reading the value it was given, and a copied
 /// or moved key reading the value it came with.
+/// A script constant reads back as the value asked for, and the script around it is untouched:
+/// same length, same size words, same statements, disassembled whole.
+fn verify_script_edits(
+    before: &ParsedPackage,
+    after: &ParsedPackage,
+    edits: &PackageEdits,
+) -> Result<(), String> {
+    for edit in &edits.scripts {
+        let was = before.exports.iter().find(|e| e.index == edit.export);
+        let is = after.exports.iter().find(|e| e.index == edit.export);
+        let (was, is) = match (was, is) {
+            (Some(was), Some(is)) => (was, is),
+            _ => return Err(format!("export {} did not read back", edit.export)),
+        };
+        let (was_script, is_script) = match (&was.script, &is.script) {
+            (Some(was_script), Some(is_script)) => (was_script, is_script),
+            _ => {
+                return Err(format!(
+                    "{} no longer carries bytecode after patching",
+                    is.object_name
+                ));
+            }
+        };
+        if let Some(stop) = &is_script.stopped {
+            return Err(format!(
+                "{}'s script stopped after patching: {}",
+                is.object_name, stop.reason
+            ));
+        }
+        if (
+            is_script.buffer_size,
+            is_script.storage_size,
+            is_script.statements.len(),
+        ) != (
+            was_script.buffer_size,
+            was_script.storage_size,
+            was_script.statements.len(),
+        ) {
+            return Err(format!(
+                "{}'s script changed shape after patching a constant in it",
+                is.object_name
+            ));
+        }
+        let wanted = kismet::with_value(
+            kismet::literal_at(was_script, edit.statement, edit.constant)?,
+            &edit.value,
+        )?;
+        let got = kismet::literal_at(is_script, edit.statement, edit.constant)?;
+        if kismet::render(got) != kismet::render(&wanted) {
+            return Err(format!(
+                "{} constant {} at 0x{:04X} reads back as {} rather than {}",
+                is.object_name,
+                edit.constant,
+                edit.statement,
+                kismet::render(got),
+                kismet::render(&wanted)
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn verify_keys(
     before: &ParsedPackage,
     after: &ParsedPackage,
@@ -3782,6 +3966,7 @@ pub fn verify_patch(
         }
     }
     verify_keys(before, after, edits)?;
+    verify_script_edits(before, after, edits)?;
     for edit in &edits.bulk {
         let index = edit.resource as usize;
         let (was, is) = match (before.resources.get(index), after.resources.get(index)) {
@@ -6760,6 +6945,91 @@ mod tests {
 
     /// A replacement that disassembles knows the space it will take once loaded, so it may be any
     /// length and the two words in front of the script are rewritten to match.
+    /// A script constant becomes one splice over its value bytes and nothing else; the wrong
+    /// index, a form with no value bytes, and a payload for the same export are all refused.
+    #[test]
+    fn a_script_constant_is_spliced_at_its_own_width() {
+        let mut names = FPackageNameMap::create();
+        let mut parsed = two_export_package();
+        parsed.exports[1].status = ExportStatus::Payload {
+            consumed: 4,
+            payload_bytes: 14,
+            kind: "bytecode",
+        };
+        let start = parsed.exports[1].serial_offset as u64 + 4;
+        let call = |literal: Expr| Expr::FinalCall {
+            name: "LocalFinalFunction",
+            function: crate::kismet::ObjectRef {
+                index: -1,
+                path: None,
+            },
+            params: vec![literal],
+        };
+        let script = |literal: Expr| crate::kismet::Script {
+            buffer_size: 18,
+            storage_size: 14,
+            decoded_size: 18,
+            sizes_at: start - 8,
+            start,
+            end: start + 14,
+            statements: vec![crate::kismet::Statement {
+                offset: 0,
+                at: start,
+                expr: call(literal),
+            }],
+            stopped: None,
+        };
+        parsed.exports[1].script = Some(script(Expr::IntConst {
+            value: 411,
+            at: start + 5,
+        }));
+
+        let edits = PackageEdits {
+            scripts: vec![ScriptConstEdit {
+                export: 1,
+                statement: 0,
+                constant: 0,
+                value: "1000".to_string(),
+            }],
+            ..Default::default()
+        };
+        let out = script_splices(&parsed, &edits, &mut names).expect("one splice");
+        assert_eq!(out.len(), 1);
+        assert_eq!((out[0].0.start, out[0].0.end), (start + 6, start + 10));
+        assert_eq!(out[0].0.bytes, 1000i32.to_le_bytes().to_vec());
+        assert_eq!(
+            (out[0].1.before.as_str(), out[0].1.after.as_str()),
+            ("411", "1000")
+        );
+        assert_eq!(out[0].1.offset, start + 5);
+
+        let wrong = PackageEdits {
+            scripts: vec![ScriptConstEdit {
+                export: 1,
+                statement: 0,
+                constant: 1,
+                value: "1".to_string(),
+            }],
+            ..Default::default()
+        };
+        let err = script_splices(&parsed, &wrong, &mut names).expect_err("no second literal");
+        assert!(err.contains("[0] IntConst 411"), "{err}");
+
+        let with_payload = PackageEdits {
+            payloads: vec![PayloadEdit {
+                export: 1,
+                bytes: vec![0x53],
+            }],
+            ..edits.clone()
+        };
+        let err = script_splices(&parsed, &with_payload, &mut names).expect_err("payload too");
+        assert!(err.contains("whole new payload"), "{err}");
+
+        parsed.exports[1].script = Some(script(Expr::Simple { name: "IntZero" }));
+        let err = script_splices(&parsed, &edits, &mut names).expect_err("no value bytes");
+        assert!(err.contains("one-byte form"), "{err}");
+    }
+
     #[test]
     fn bytecode_that_disassembles_is_replaced_at_any_length() {
         let header = retoc::legacy_asset::FLegacyPackageHeader::default();

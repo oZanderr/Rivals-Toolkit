@@ -8,6 +8,8 @@
 
 use serde::Serialize;
 
+use retoc::legacy_asset::FPackageNameMap;
+
 use crate::props::{Ctx, Diagnostics, read_field_path, read_index};
 use crate::reader::Cursor;
 
@@ -183,30 +185,40 @@ pub enum Expr {
         function: ObjectRef,
         params: Vec<Expr>,
     },
+    /// Literal constants carry `at`, the file offset of their token byte in the same space
+    /// `Statement::at` uses, so one can be located and replaced at its own width.
     IntConst {
         value: i32,
+        at: u64,
     },
     Int64Const {
         value: i64,
+        at: u64,
     },
     UInt64Const {
         value: u64,
+        at: u64,
     },
     FloatConst {
         value: f32,
+        at: u64,
     },
     DoubleConst {
         value: f64,
+        at: u64,
     },
     ByteConst {
         name: &'static str,
         value: u8,
+        at: u64,
     },
     StringConst {
         value: String,
+        at: u64,
     },
     UnicodeStringConst {
         value: String,
+        at: u64,
     },
     ObjectConst {
         object: ObjectRef,
@@ -214,11 +226,13 @@ pub enum Expr {
     NameConst {
         name: &'static str,
         value: String,
+        at: u64,
     },
     /// Rotations, vectors and transforms: a fixed run of floating point numbers.
     Numbers {
         name: &'static str,
         values: Vec<f64>,
+        at: u64,
     },
     TextConst {
         text: TextLiteral,
@@ -602,12 +616,12 @@ impl<'a, 'b> Reader<'a, 'b> {
         self.last_token_at = at;
         self.count_token(token);
         self.depth += 1;
-        let value = self.body(token);
+        let value = self.body(token, at);
         self.depth -= 1;
         value
     }
 
-    fn body(&mut self, token: u8) -> Result<Expr, String> {
+    fn body(&mut self, token: u8, at: u64) -> Result<Expr, String> {
         let named = |token: u8| token_name(token).unwrap_or("Unknown");
         Ok(match token {
             0x00 | 0x01 | 0x02 | 0x48 | 0x6C => Expr::Variable {
@@ -681,12 +695,15 @@ impl<'a, 'b> Reader<'a, 'b> {
             },
             0x1D => Expr::IntConst {
                 value: self.i32v()?,
+                at,
             },
             0x1E => Expr::FloatConst {
                 value: self.f32v()?,
+                at,
             },
             0x1F => Expr::StringConst {
                 value: self.ansi()?,
+                at,
             },
             0x20 => Expr::ObjectConst {
                 object: self.object()?,
@@ -694,22 +711,27 @@ impl<'a, 'b> Reader<'a, 'b> {
             0x21 | 0x4B => Expr::NameConst {
                 name: named(token),
                 value: self.name()?,
+                at,
             },
             0x22 | 0x23 => Expr::Numbers {
                 name: named(token),
                 values: self.doubles(3)?,
+                at,
             },
             0x2B => Expr::Numbers {
                 name: named(token),
                 values: self.doubles(10)?,
+                at,
             },
             0x41 => Expr::Numbers {
                 name: named(token),
                 values: self.floats(3)?,
+                at,
             },
             0x24 | 0x2C => Expr::ByteConst {
                 name: named(token),
                 value: self.u8v()?,
+                at,
             },
             0x29 => Expr::TextConst { text: self.text()? },
             0x2F => Expr::StructConst {
@@ -726,15 +748,19 @@ impl<'a, 'b> Reader<'a, 'b> {
             },
             0x34 => Expr::UnicodeStringConst {
                 value: self.utf16()?,
+                at,
             },
             0x35 => Expr::Int64Const {
                 value: self.i64v()?,
+                at,
             },
             0x36 => Expr::UInt64Const {
                 value: self.u64v()?,
+                at,
             },
             0x37 => Expr::DoubleConst {
                 value: self.f64v()?,
+                at,
             },
             0x38 => Expr::Conversion {
                 conversion: self.u8v()?,
@@ -970,6 +996,392 @@ fn list(items: &[Expr]) -> String {
     items.iter().map(render).collect::<Vec<_>>().join(", ")
 }
 
+/// Every literal in `expr` in bytecode order: the constants a value can be written into, plus
+/// the forms that cannot take one, so a count taken from the disassembly lands on the same node.
+pub fn literals(expr: &Expr) -> Vec<&Expr> {
+    let mut out = Vec::new();
+    collect_literals(expr, &mut out);
+    out
+}
+
+fn is_literal(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::IntConst { .. }
+            | Expr::Int64Const { .. }
+            | Expr::UInt64Const { .. }
+            | Expr::FloatConst { .. }
+            | Expr::DoubleConst { .. }
+            | Expr::ByteConst { .. }
+            | Expr::StringConst { .. }
+            | Expr::UnicodeStringConst { .. }
+            | Expr::NameConst { .. }
+            | Expr::Numbers { .. }
+            | Expr::ObjectConst { .. }
+            | Expr::Simple {
+                name: "IntZero" | "IntOne" | "True" | "False"
+            }
+    )
+}
+
+/// Mirrors the field order `Reader::body` parses in, which is the order the bytes sit in.
+fn collect_literals<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
+    if is_literal(expr) {
+        out.push(expr);
+        return;
+    }
+    match expr {
+        Expr::Return { value }
+        | Expr::Skip { value, .. }
+        | Expr::Conversion { value, .. }
+        | Expr::Unary { value, .. }
+        | Expr::Member { value, .. }
+        | Expr::Cast { value, .. } => collect_literals(value, out),
+        Expr::JumpIfNot { condition, .. } | Expr::Assert { condition, .. } => {
+            collect_literals(condition, out)
+        }
+        Expr::Let {
+            variable, value, ..
+        } => {
+            collect_literals(variable, out);
+            collect_literals(value, out);
+        }
+        Expr::Context { object, member, .. } => {
+            collect_literals(object, out);
+            collect_literals(member, out);
+        }
+        Expr::VirtualCall { params, .. } | Expr::FinalCall { params, .. } => {
+            collect_each(params, out)
+        }
+        Expr::StructConst { fields, .. } => collect_each(fields, out),
+        Expr::SetArray { array, items } => {
+            collect_literals(array, out);
+            collect_each(items, out);
+        }
+        Expr::SetContainer { target, items, .. } => {
+            collect_literals(target, out);
+            collect_each(items, out);
+        }
+        Expr::ContainerConst { items, .. } | Expr::MapConst { items, .. } => {
+            collect_each(items, out)
+        }
+        Expr::ComputedJump { target } => collect_literals(target, out),
+        Expr::DelegateOp {
+            delegate, value, ..
+        } => {
+            collect_literals(delegate, out);
+            collect_literals(value, out);
+        }
+        Expr::BindDelegate {
+            delegate, object, ..
+        } => {
+            collect_literals(delegate, out);
+            collect_literals(object, out);
+        }
+        Expr::CallMulticastDelegate {
+            delegate, params, ..
+        } => {
+            collect_literals(delegate, out);
+            collect_each(params, out);
+        }
+        Expr::SwitchValue {
+            index,
+            cases,
+            default,
+            ..
+        } => {
+            collect_literals(index, out);
+            for case in cases {
+                collect_literals(&case.value, out);
+                collect_literals(&case.result, out);
+            }
+            collect_literals(default, out);
+        }
+        Expr::ArrayGetByRef { array, index } => {
+            collect_literals(array, out);
+            collect_literals(index, out);
+        }
+        Expr::TextConst { text } => match text {
+            TextLiteral::Empty => {}
+            TextLiteral::Localized {
+                source,
+                key,
+                namespace,
+            } => {
+                collect_literals(source, out);
+                collect_literals(key, out);
+                collect_literals(namespace, out);
+            }
+            TextLiteral::Invariant { source } | TextLiteral::Literal { source } => {
+                collect_literals(source, out)
+            }
+            TextLiteral::StringTable { table_id, key, .. } => {
+                collect_literals(table_id, out);
+                collect_literals(key, out);
+            }
+        },
+        _ => {}
+    }
+}
+
+fn collect_each<'a>(items: &'a [Expr], out: &mut Vec<&'a Expr>) {
+    for item in items {
+        collect_literals(item, out);
+    }
+}
+
+/// The token name of a literal, as the disassembly and the refusals call it.
+pub(crate) fn literal_kind(literal: &Expr) -> &'static str {
+    match literal {
+        Expr::IntConst { .. } => "IntConst",
+        Expr::Int64Const { .. } => "Int64Const",
+        Expr::UInt64Const { .. } => "UInt64Const",
+        Expr::FloatConst { .. } => "FloatConst",
+        Expr::DoubleConst { .. } => "DoubleConst",
+        Expr::StringConst { .. } => "StringConst",
+        Expr::UnicodeStringConst { .. } => "UnicodeStringConst",
+        Expr::ObjectConst { .. } => "ObjectConst",
+        Expr::ByteConst { name, .. }
+        | Expr::NameConst { name, .. }
+        | Expr::Numbers { name, .. }
+        | Expr::Simple { name } => name,
+        _ => "expression",
+    }
+}
+
+/// The `nth` literal of the statement whose loaded offset is `statement`, the way the disassembly
+/// addresses them. A miss lists what the statement does hold.
+pub(crate) fn literal_at(script: &Script, statement: u32, nth: u32) -> Result<&Expr, String> {
+    let found = script
+        .statements
+        .iter()
+        .find(|s| s.offset == statement)
+        .ok_or_else(|| {
+            format!(
+                "no statement starts at 0x{statement:04X}; the disassembly names each one by the offset at the start of its line"
+            )
+        })?;
+    let all = literals(&found.expr);
+    all.get(nth as usize).copied().ok_or_else(|| {
+        if all.is_empty() {
+            return format!("the statement at 0x{statement:04X} holds no literal constant");
+        }
+        let listing: Vec<String> = all
+            .iter()
+            .enumerate()
+            .map(|(i, literal)| format!("  [{i}] {} {}", literal_kind(literal), render(literal)))
+            .collect();
+        format!(
+            "the statement at 0x{statement:04X} holds {} literal constant(s), so there is no constant {nth}:\n{}",
+            all.len(),
+            listing.join("\n")
+        )
+    })
+}
+
+/// How many bytes the literal's value takes on disk, after its token byte.
+pub(crate) fn stored_width(literal: &Expr) -> u64 {
+    match literal {
+        Expr::IntConst { .. } | Expr::FloatConst { .. } | Expr::ObjectConst { .. } => 4,
+        Expr::Int64Const { .. }
+        | Expr::UInt64Const { .. }
+        | Expr::DoubleConst { .. }
+        | Expr::NameConst { .. } => 8,
+        Expr::ByteConst { .. } => 1,
+        Expr::StringConst { value, .. } => value.chars().count() as u64 + 1,
+        Expr::UnicodeStringConst { value, .. } => (value.encode_utf16().count() as u64 + 1) * 2,
+        Expr::Numbers { name, values, .. } => numbers_width(name) * values.len() as u64,
+        _ => 0,
+    }
+}
+
+fn numbers_width(name: &str) -> u64 {
+    if name == "Vector3fConst" { 4 } else { 8 }
+}
+
+/// The same literal with `text` as its value, refused when the value would not fit the bytes
+/// the old one took: a script constant can only be replaced at its own width.
+pub(crate) fn with_value(literal: &Expr, text: &str) -> Result<Expr, String> {
+    // Numbers forgive surrounding whitespace; a string or a name is taken exactly as given.
+    let number = text.trim();
+    let parse_error =
+        |kind: &str, what: &str| format!("{text:?} is not {what}, which is what a {kind} holds");
+    Ok(match literal {
+        Expr::IntConst { at, .. } => Expr::IntConst {
+            value: number
+                .parse()
+                .map_err(|_| parse_error("IntConst", "a 32-bit integer"))?,
+            at: *at,
+        },
+        Expr::Int64Const { at, .. } => Expr::Int64Const {
+            value: number
+                .parse()
+                .map_err(|_| parse_error("Int64Const", "a 64-bit integer"))?,
+            at: *at,
+        },
+        Expr::UInt64Const { at, .. } => Expr::UInt64Const {
+            value: number
+                .parse()
+                .map_err(|_| parse_error("UInt64Const", "an unsigned 64-bit integer"))?,
+            at: *at,
+        },
+        Expr::FloatConst { at, .. } => Expr::FloatConst {
+            value: number
+                .trim_end_matches(['f', 'F'])
+                .parse()
+                .map_err(|_| parse_error("FloatConst", "a number"))?,
+            at: *at,
+        },
+        Expr::DoubleConst { at, .. } => Expr::DoubleConst {
+            value: number
+                .parse()
+                .map_err(|_| parse_error("DoubleConst", "a number"))?,
+            at: *at,
+        },
+        Expr::ByteConst { name, at, .. } => Expr::ByteConst {
+            name,
+            value: number
+                .parse()
+                .map_err(|_| parse_error(name, "a byte from 0 to 255"))?,
+            at: *at,
+        },
+        Expr::StringConst { value, at } => {
+            if let Some(wide) = text.chars().find(|c| u32::from(*c) > 0xFF) {
+                return Err(format!(
+                    "{wide:?} does not fit a StringConst, which holds one byte per character; only a UnicodeStringConst can carry it"
+                ));
+            }
+            let (was, now) = (value.chars().count(), text.chars().count());
+            if was != now {
+                return Err(format!(
+                    "{value:?} is {was} character(s) stored as {} bytes; the replacement {text:?} is {now}. A script constant can only be replaced at its own width",
+                    was + 1
+                ));
+            }
+            Expr::StringConst {
+                value: text.to_string(),
+                at: *at,
+            }
+        }
+        Expr::UnicodeStringConst { value, at } => {
+            let (was, now) = (value.encode_utf16().count(), text.encode_utf16().count());
+            if was != now {
+                return Err(format!(
+                    "{value:?} is {was} UTF-16 unit(s) stored as {} bytes; the replacement {text:?} is {now}. A script constant can only be replaced at its own width",
+                    (was + 1) * 2
+                ));
+            }
+            Expr::UnicodeStringConst {
+                value: text.to_string(),
+                at: *at,
+            }
+        }
+        Expr::NameConst { name, at, .. } => {
+            if text.is_empty() {
+                return Err(format!("a {name} needs a name; an empty one is not a name"));
+            }
+            Expr::NameConst {
+                name,
+                value: text.to_string(),
+                at: *at,
+            }
+        }
+        Expr::Numbers { name, values, at } => {
+            let parsed: Result<Vec<f64>, String> = number
+                .split(',')
+                .map(|part| {
+                    part.trim()
+                        .parse::<f64>()
+                        .map_err(|_| parse_error(name, "a comma-separated run of numbers"))
+                })
+                .collect();
+            let mut parsed = parsed?;
+            if parsed.len() != values.len() {
+                return Err(format!(
+                    "{name} takes {} numbers, not {}",
+                    values.len(),
+                    parsed.len()
+                ));
+            }
+            if numbers_width(name) == 4 {
+                for value in &mut parsed {
+                    *value = f64::from(*value as f32);
+                }
+            }
+            Expr::Numbers {
+                name,
+                values: parsed,
+                at: *at,
+            }
+        }
+        Expr::Simple { name } => {
+            return Err(format!(
+                "{name} is a one-byte form with no value bytes. It cannot take a value in place: a full constant would be longer and move every jump after it"
+            ));
+        }
+        Expr::ObjectConst { .. } => {
+            return Err(
+                "an ObjectConst is an object reference, not a literal; only literal values can be set this way"
+                    .to_string(),
+            );
+        }
+        other => return Err(format!("{} is not a literal constant", literal_kind(other))),
+    })
+}
+
+/// The value bytes a literal writes after its token, in the package's byte order. A name not in
+/// the table is appended to it, which is how the header learns it grew.
+pub(crate) fn literal_bytes(
+    literal: &Expr,
+    names: &mut FPackageNameMap,
+) -> Result<Vec<u8>, String> {
+    Ok(match literal {
+        Expr::IntConst { value, .. } => value.to_le_bytes().to_vec(),
+        Expr::Int64Const { value, .. } => value.to_le_bytes().to_vec(),
+        Expr::UInt64Const { value, .. } => value.to_le_bytes().to_vec(),
+        Expr::FloatConst { value, .. } => value.to_le_bytes().to_vec(),
+        Expr::DoubleConst { value, .. } => value.to_le_bytes().to_vec(),
+        Expr::ByteConst { value, .. } => vec![*value],
+        Expr::StringConst { value, .. } => {
+            let mut out: Vec<u8> = value.chars().map(|c| u32::from(c) as u8).collect();
+            out.push(0);
+            out
+        }
+        Expr::UnicodeStringConst { value, .. } => {
+            let mut out = Vec::new();
+            for unit in value.encode_utf16() {
+                out.extend_from_slice(&unit.to_le_bytes());
+            }
+            out.extend_from_slice(&[0, 0]);
+            out
+        }
+        Expr::NameConst { value, .. } => {
+            let stored = names.store(value);
+            let mut out = Vec::with_capacity(8);
+            out.extend_from_slice(&stored.index.to_le_bytes());
+            out.extend_from_slice(&stored.number.to_le_bytes());
+            out
+        }
+        Expr::Numbers { name, values, .. } => {
+            let mut out = Vec::new();
+            for value in values {
+                if numbers_width(name) == 4 {
+                    out.extend_from_slice(&(*value as f32).to_le_bytes());
+                } else {
+                    out.extend_from_slice(&value.to_le_bytes());
+                }
+            }
+            out
+        }
+        other => {
+            return Err(format!(
+                "{} has no value bytes to write",
+                literal_kind(other)
+            ));
+        }
+    })
+}
+
 /// `CallFunc_<Function>_<Result>[_N]` is how a Blueprint names the local a call fills.
 fn called_function(local: &str) -> Option<&str> {
     let leaf = local.rsplit(['.', ':']).next().unwrap_or(local);
@@ -1026,7 +1438,7 @@ fn render_call(
     format!("{name} {}({}){hint}", object_text(function), list(params))
 }
 
-fn render(expr: &Expr) -> String {
+pub(crate) fn render(expr: &Expr) -> String {
     match expr {
         Expr::Simple { name } => (*name).to_string(),
         Expr::Variable { name, property } => format!("{name}({})", property.path),
@@ -1093,16 +1505,18 @@ fn render(expr: &Expr) -> String {
             function,
             params,
         } => render_call(name, function, params, None),
-        Expr::IntConst { value } => value.to_string(),
-        Expr::Int64Const { value } => value.to_string(),
-        Expr::UInt64Const { value } => value.to_string(),
-        Expr::FloatConst { value } => format!("{value}f"),
-        Expr::DoubleConst { value } => value.to_string(),
+        Expr::IntConst { value, .. } => value.to_string(),
+        Expr::Int64Const { value, .. } => value.to_string(),
+        Expr::UInt64Const { value, .. } => value.to_string(),
+        Expr::FloatConst { value, .. } => format!("{value}f"),
+        Expr::DoubleConst { value, .. } => value.to_string(),
         Expr::ByteConst { value, .. } => value.to_string(),
-        Expr::StringConst { value } | Expr::UnicodeStringConst { value } => format!("{value:?}"),
+        Expr::StringConst { value, .. } | Expr::UnicodeStringConst { value, .. } => {
+            format!("{value:?}")
+        }
         Expr::ObjectConst { object } => format!("Object({})", object_text(object)),
         Expr::NameConst { value, .. } => format!("'{value}'"),
-        Expr::Numbers { name, values } => format!(
+        Expr::Numbers { name, values, .. } => format!(
             "{name}({})",
             values
                 .iter()
@@ -1308,7 +1722,7 @@ mod tests {
             panic!("expected a local final call");
         };
         assert_eq!(function.index, TARGET);
-        assert!(matches!(params[0], Expr::IntConst { value: 411 }));
+        assert!(matches!(params[0], Expr::IntConst { value: 411, .. }));
     }
 
     /// Every object a script names is recorded, so a removal can find it. A stopped walk keeps
@@ -1374,7 +1788,7 @@ mod tests {
             panic!("expected a let");
         };
         assert_eq!(property.as_ref().expect("a property").path, "Damage");
-        assert!(matches!(**value, Expr::IntConst { value: 5 }));
+        assert!(matches!(**value, Expr::IntConst { value: 5, .. }));
     }
 
     /// Jumps and flow pushes are offsets into the loaded script, not the stored one.
@@ -1560,6 +1974,104 @@ mod tests {
             "{}",
             render(&resolved)
         );
+    }
+
+    /// A literal knows where its token sits, and the walk hands literals back in bytecode order
+    /// under the address the disassembly prints.
+    #[test]
+    fn literals_carry_their_file_offsets_in_bytecode_order() {
+        let mut data = vec![0x46];
+        data.extend_from_slice(&TARGET.to_le_bytes());
+        data.push(0x1D);
+        data.extend_from_slice(&411i32.to_le_bytes());
+        data.extend_from_slice(&[0x16, 0x04, 0x0B, 0x53]);
+        let (script, _) = decode(&data, Some(18));
+        assert!(script.complete(), "{:?}", script.stopped);
+
+        let found = literals(&script.statements[0].expr);
+        assert_eq!(found.len(), 1);
+        assert!(matches!(found[0], Expr::IntConst { value: 411, at: 5 }));
+        assert_eq!(stored_width(found[0]), 4);
+        assert_eq!(literal_kind(found[0]), "IntConst");
+
+        let same = literal_at(&script, 0, 0).expect("the call's one literal");
+        assert!(matches!(same, Expr::IntConst { value: 411, .. }));
+        let err = literal_at(&script, 15, 0).expect_err("Return holds nothing");
+        assert!(err.contains("holds no literal constant"), "{err}");
+        let err = literal_at(&script, 0, 1).expect_err("only one literal");
+        assert!(err.contains("[0] IntConst 411"), "{err}");
+        let err = literal_at(&script, 3, 0).expect_err("no statement there");
+        assert!(err.contains("no statement starts at 0x0003"), "{err}");
+    }
+
+    /// A value goes in only where its bytes fit exactly; the forms with no value bytes, and a
+    /// string of another length, are refused with the reason.
+    #[test]
+    fn a_literal_takes_a_value_only_at_its_own_width() {
+        let mut names = FPackageNameMap::create();
+        let int = Expr::IntConst { value: 411, at: 5 };
+        let set = with_value(&int, "1000").expect("an int");
+        assert!(matches!(set, Expr::IntConst { value: 1000, at: 5 }));
+        assert_eq!(
+            literal_bytes(&set, &mut names).expect("bytes"),
+            vec![0xE8, 0x03, 0, 0]
+        );
+        let err = with_value(&int, "big").expect_err("not an int");
+        assert!(err.contains("32-bit integer"), "{err}");
+
+        let float = Expr::FloatConst { value: 1.5, at: 9 };
+        assert!(matches!(
+            with_value(&float, "2.5f").expect("a float"),
+            Expr::FloatConst { value, .. } if value == 2.5
+        ));
+
+        let text = Expr::StringConst {
+            value: "ab".to_string(),
+            at: 0,
+        };
+        assert_eq!(stored_width(&text), 3);
+        let err = with_value(&text, "abc").expect_err("longer");
+        assert!(err.contains("own width"), "{err}");
+        let kept = with_value(&text, " b").expect("same length keeps its space");
+        assert_eq!(
+            literal_bytes(&kept, &mut names).expect("bytes"),
+            vec![b' ', b'b', 0]
+        );
+        let err = with_value(&text, "\u{e9}\u{4e2d}").expect_err("not one byte per char");
+        assert!(err.contains("UnicodeStringConst"), "{err}");
+
+        let vector = Expr::Numbers {
+            name: "Vector3fConst",
+            values: vec![0.0, 0.0, 0.0],
+            at: 0,
+        };
+        assert_eq!(stored_width(&vector), 12);
+        let err = with_value(&vector, "1,2").expect_err("two numbers");
+        assert!(err.contains("takes 3 numbers"), "{err}");
+        let set = with_value(&vector, "0.1, 2, 3").expect("three numbers");
+        assert_eq!(literal_bytes(&set, &mut names).expect("bytes").len(), 12);
+
+        let mut data = vec![0x46];
+        data.extend_from_slice(&TARGET.to_le_bytes());
+        data.extend_from_slice(&[0x25, 0x16, 0x53]);
+        let (script, _) = decode(&data, Some(14));
+        let zero = literal_at(&script, 0, 0).expect("IntZero is addressable");
+        assert!(matches!(zero, Expr::Simple { name: "IntZero" }));
+        let err = with_value(zero, "5").expect_err("no value bytes");
+        assert!(err.contains("one-byte form"), "{err}");
+
+        let name = Expr::NameConst {
+            name: "NameConst",
+            value: "Old".to_string(),
+            at: 0,
+        };
+        let before = names.num_names();
+        let renamed = with_value(&name, "Brand_New").expect("a name");
+        let bytes = literal_bytes(&renamed, &mut names).expect("bytes");
+        assert_eq!(bytes.len(), 8);
+        assert!(names.num_names() > before, "a new name is appended");
+        let err = with_value(&name, "").expect_err("empty");
+        assert!(err.contains("needs a name"), "{err}");
     }
 
     /// The disassembly is one statement per line, addressed the way a jump would name it.
