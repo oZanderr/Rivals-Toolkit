@@ -1,7 +1,7 @@
 //! IoStore (utoc/ucas) read, extract, and repack operations.
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use rayon::prelude::*;
@@ -13,6 +13,8 @@ use retoc::legacy_asset::FSerializedAssetBundle;
 use retoc::version::EngineVersion;
 use retoc::zen_asset_conversion;
 use retoc::{FSFileReader, FSHAHash, FileReaderTrait, UEPath, UEPathBuf};
+
+use rivals_core::pak::iostore_out::HeaderCarry;
 
 use crate::concurrency;
 
@@ -43,12 +45,17 @@ pub(crate) fn cancel_repack_iostore() {
 }
 
 /// Convert a directory of legacy assets into an IoStore container (.utoc + .ucas + .pak).
+///
+/// Files that are not part of a package bundle ride in the `.pak` beside it. `carry` restores what
+/// the header of a container being rebuilt held, which the loose files cannot say.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn repack_iostore(
     input_dir: &str,
     output_utoc: &str,
     oodle_level: Option<retoc::OodleCompressionLevel>,
     obfuscate: bool,
     compression: super::profile::PackCompression,
+    carry: &HeaderCarry,
     app: AppHandle,
 ) -> Result<(), String> {
     REPACK_CANCEL.store(false, Ordering::Relaxed);
@@ -107,6 +114,7 @@ pub(crate) fn repack_iostore(
         path: output_utoc_path,
         disarmed: false,
     };
+    carry.replay(&mut writer)?;
 
     let shader_maps: HashMap<String, Vec<FSHAHash>> = HashMap::new();
     let total = asset_paths.len();
@@ -199,6 +207,7 @@ pub(crate) fn repack_iostore(
         let mut completed = 0usize;
         while let Ok(item) = rx.recv() {
             let mut converted = item?;
+            carry.restore_shader_maps(&mut converted);
             converted
                 .write_package_data(&mut writer)
                 .map_err(|e| e.to_string())?;
@@ -228,18 +237,59 @@ pub(crate) fn repack_iostore(
     writer.finalize().map_err(|e| e.to_string())?;
 
     let pak_path = output_utoc_path.with_extension("pak");
-    write_chunknames_pak(&pak_path, &packed_paths)?;
+    let mut pak_files = vec![(
+        "chunknames".to_string(),
+        packed_paths.join("\n").into_bytes(),
+    )];
+    for rel in non_package_files(input) {
+        let bytes =
+            std::fs::read(input.join(&rel)).map_err(|e| format!("read {}: {e}", rel.display()))?;
+        pak_files.push((rel.to_string_lossy().replace('\\', "/"), bytes));
+    }
+    super::write_pak_bytes(&pak_path.to_string_lossy(), pak_files)?;
 
     guard.disarmed = true;
     Ok(())
 }
 
-fn write_chunknames_pak(pak_path: &Path, packed_paths: &[String]) -> Result<(), String> {
-    let content = packed_paths.join("\n");
-    super::write_pak_bytes(
-        &pak_path.to_string_lossy(),
-        vec![("chunknames".to_string(), content.into_bytes())],
-    )
+/// Extensions that belong to a package bundle alongside its `.uasset`/`.umap`. `.m.ubulk` comes
+/// before `.ubulk`, which it also ends with.
+pub(crate) const COMPANION_EXTS: [&str; 4] = [".uexp", ".m.ubulk", ".ubulk", ".uptnl"];
+
+/// Relative paths under `dir` that are not part of a `.uasset`/`.umap` bundle. A container cannot
+/// hold them, so they ride in the pak beside it.
+pub(crate) fn non_package_files(dir: &Path) -> Vec<PathBuf> {
+    let files: Vec<PathBuf> = walkdir::WalkDir::new(dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .filter_map(|e| e.path().strip_prefix(dir).ok().map(Path::to_path_buf))
+        .collect();
+
+    let lowered: HashSet<String> = files
+        .iter()
+        .map(|p| p.to_string_lossy().replace('\\', "/").to_lowercase())
+        .collect();
+
+    let owned_by_package = |rel: &Path| -> bool {
+        let lower = rel.to_string_lossy().replace('\\', "/").to_lowercase();
+        let stem = match COMPANION_EXTS.iter().find_map(|e| lower.strip_suffix(e)) {
+            Some(stem) => stem.to_string(),
+            None => match lower
+                .strip_suffix(".uasset")
+                .or_else(|| lower.strip_suffix(".umap"))
+            {
+                Some(stem) => stem.to_string(),
+                None => return false,
+            },
+        };
+        lowered.contains(&format!("{stem}.uexp"))
+    };
+
+    files
+        .into_iter()
+        .filter(|rel| !owned_by_package(rel))
+        .collect()
 }
 
 fn cleanup_iostore_files(utoc_path: &Path) {

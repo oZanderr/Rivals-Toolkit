@@ -7,6 +7,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use retoc::iostore::IoStoreTrait;
 use retoc::iostore_writer::IoStoreWriter;
 use retoc::legacy_asset::FSerializedAssetBundle;
 use retoc::version::EngineVersion;
@@ -113,6 +114,73 @@ const PACKAGE_CHUNKS: [EIoChunkType; 4] = [
     EIoChunkType::OptionalBulkData,
     EIoChunkType::MemoryMappedBulkData,
 ];
+
+/// What a container keeps in its header rather than in any chunk, so rebuilding it from its chunks
+/// alone would lose it: the shader maps each package's store entry lists, and the localized
+/// packages and redirects the loader is told to look for.
+#[derive(Default)]
+pub struct HeaderCarry {
+    pub shader_map_hashes: HashMap<FPackageId, Vec<FSHAHash>>,
+    pub localized: Vec<String>,
+    pub redirects: Vec<(String, FPackageId)>,
+}
+
+impl HeaderCarry {
+    pub fn from_store(store: &dyn IoStoreTrait) -> Self {
+        let shader_map_hashes = store
+            .packages()
+            .filter_map(|package| {
+                let hashes = store.package_store_entry(package.id())?.shader_map_hashes;
+                (!hashes.is_empty()).then(|| (package.id(), hashes))
+            })
+            .collect();
+        let Some(header) = store.container_header() else {
+            return Self {
+                shader_map_hashes,
+                ..Default::default()
+            };
+        };
+        Self {
+            shader_map_hashes,
+            localized: header
+                .localized_packages()
+                .map(|name| name.into_owned())
+                .collect(),
+            redirects: header
+                .package_redirects()
+                .map(|(name, id)| (name.into_owned(), id))
+                .collect(),
+        }
+    }
+
+    /// Declares the localized packages and redirects in the header `writer` is building.
+    pub fn replay(&self, writer: &mut IoStoreWriter) -> Result<(), String> {
+        for name in &self.localized {
+            // The culture only matters for pre-Initial headers, which this engine does not write.
+            writer
+                .add_localized_package("", name, FPackageId::from_name(name))
+                .map_err(|e| format!("carry the localized package {name}: {e}"))?;
+        }
+        for (name, target) in &self.redirects {
+            writer
+                .add_package_redirect(name, *target)
+                .map_err(|e| format!("carry the package redirect for {name}: {e}"))?;
+        }
+        Ok(())
+    }
+
+    /// Gives a converted package the shader maps its old entry listed, when it found none itself.
+    pub fn restore_shader_maps(
+        &self,
+        converted: &mut retoc::zen_asset_conversion::ConvertedZenAssetBundle,
+    ) {
+        if converted.store_entry().shader_map_hashes.is_empty()
+            && let Some(hashes) = self.shader_map_hashes.get(&converted.package_id)
+        {
+            converted.set_shader_map_hashes(hashes.clone());
+        }
+    }
+}
 
 /// One package's bytes, owned, so the writer can take them and let them go again. A batch is
 /// produced one of these at a time rather than handed over as a whole.
@@ -268,31 +336,11 @@ pub fn stage_batch_into_iostore(
     if obfuscate {
         writer = writer.with_encryption(profile::obfuscation_key()?);
     }
-    // Localized packages and redirects live in the container header rather than in any chunk, so
-    // rewriting a container without replaying them would leave a mod whose chunks are all present
-    // and whose localized variants the loader no longer knows to look for.
-    if let Some(header) = existing.as_ref().and_then(|store| store.container_header()) {
-        let localized: Vec<String> = header
-            .localized_packages()
-            .map(|name| name.into_owned())
-            .collect();
-        let redirects: Vec<(String, FPackageId)> = header
-            .package_redirects()
-            .map(|(name, id)| (name.into_owned(), id))
-            .collect();
-        for name in &localized {
-            // The culture only matters for pre-Initial headers, which are refused above.
-            writer
-                .add_localized_package("", name, FPackageId::from_name(name))
-                .map_err(|e| format!("carry the localized package {name}: {e}"))?;
-        }
-        for (name, target) in &redirects {
-            writer
-                .add_package_redirect(name, *target)
-                .map_err(|e| format!("carry the package redirect for {name}: {e}"))?;
-        }
-        report.carried_localized = localized.len();
-        report.carried_redirects = redirects.len();
+    if let Some(store) = &existing {
+        let carry = HeaderCarry::from_store(&**store);
+        carry.replay(&mut writer)?;
+        report.carried_localized = carry.localized.len();
+        report.carried_redirects = carry.redirects.len();
     }
 
     let shader_maps: HashMap<String, Vec<FSHAHash>> = HashMap::new();
@@ -302,8 +350,9 @@ pub fn stage_batch_into_iostore(
         let Some(package) = produce(index) else {
             continue;
         };
+        let relative = crate::asset::contained_entry(&package.entry)?;
         names.extend(package.names());
-        let mounted: UEPathBuf = format!("{RIVALS_MOUNT_POINT}{}", package.entry).into();
+        let mounted: UEPathBuf = format!("{RIVALS_MOUNT_POINT}{relative}").into();
         let entry = package.entry;
         let fallback_hashes = package.shader_map_hashes;
         let bundle = FSerializedAssetBundle {
@@ -326,19 +375,20 @@ pub fn stage_batch_into_iostore(
         )
         .map_err(|e| format!("convert {entry} for IoStore: {e}"))?;
 
-        if let Some(store) = &existing {
-            if store.package_store_entry(converted.package_id).is_some() {
-                report.replaced += 1;
-            }
-            if converted.store_entry().shader_map_hashes.is_empty() {
-                let restored = store
-                    .package_store_entry(converted.package_id)
-                    .map(|entry| entry.shader_map_hashes)
-                    .filter(|hashes| !hashes.is_empty())
-                    .unwrap_or(fallback_hashes);
-                if !restored.is_empty() {
-                    converted.set_shader_map_hashes(restored);
-                }
+        let held = existing
+            .as_ref()
+            .and_then(|store| store.package_store_entry(converted.package_id));
+        if held.is_some() {
+            report.replaced += 1;
+        }
+        // The mod's own copy knows best, then the source the package was read from.
+        if converted.store_entry().shader_map_hashes.is_empty() {
+            let restored = held
+                .map(|entry| entry.shader_map_hashes)
+                .filter(|hashes| !hashes.is_empty())
+                .unwrap_or(fallback_hashes);
+            if !restored.is_empty() {
+                converted.set_shader_map_hashes(restored);
             }
         }
         written.extend(PACKAGE_CHUNKS.iter().map(|kind| {
@@ -580,6 +630,47 @@ mod tests {
                 "{name} is the source package, not its localized copy"
             );
         }
+    }
+
+    /// A rebuilt container reads its packages from loose files, which know nothing of the shader
+    /// maps the old header listed, so the carry puts them back on the package they belonged to.
+    #[test]
+    fn a_carry_restores_the_shader_maps_a_package_was_listed_with() {
+        let Ok(root) = std::env::var("RIVALS_GAME_ROOT") else {
+            return;
+        };
+        if !oodle_available() {
+            return;
+        }
+        let entry = "Marvel/Content/Marvel/Data/DataTable/MarvelHeroTable.uasset";
+        let source = format!(
+            "{}/MarvelGame/Marvel/Content/Paks/pakchunk0-Windows.utoc",
+            root.replace('\\', "/")
+        );
+        let loaded =
+            crate::asset::load_bundle(&root, &source, entry, crate::asset::AssetSource::Utoc)
+                .expect("load a package");
+        let mut converted = retoc::zen_asset_conversion::build_zen_asset(
+            loaded,
+            &HashMap::new(),
+            UEPathBuf::from(format!("{RIVALS_MOUNT_POINT}{entry}")).as_ref(),
+            Some(ENGINE.package_file_version()),
+            ENGINE.container_header_version(),
+            false,
+            None,
+            None,
+            &retoc::logging::Log::no_log(),
+        )
+        .expect("convert");
+        assert!(converted.store_entry().shader_map_hashes.is_empty());
+
+        let listed = vec![FSHAHash::default()];
+        let carry = HeaderCarry {
+            shader_map_hashes: HashMap::from([(converted.package_id, listed.clone())]),
+            ..Default::default()
+        };
+        carry.restore_shader_maps(&mut converted);
+        assert_eq!(converted.store_entry().shader_map_hashes, listed);
     }
 
     /// A rewrite carries the header tables across. Without it a localized mod would come out with

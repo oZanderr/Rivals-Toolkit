@@ -246,6 +246,7 @@ struct Staged {
     patched: PatchedBundle,
     loaded: FSerializedAssetBundle,
     changes: Vec<String>,
+    shader_map_hashes: Vec<retoc::FSHAHash>,
 }
 
 impl Staged {
@@ -263,7 +264,7 @@ impl Staged {
                 self.loaded.optional_bulk_data_buffer,
             ),
             memory_mapped_bulk: self.loaded.memory_mapped_bulk_data_buffer,
-            shader_map_hashes: Vec::new(),
+            shader_map_hashes: self.shader_map_hashes,
         }
     }
 }
@@ -318,7 +319,13 @@ pub fn sweep(
         let (id, entry) = &entries[index];
         let resolved = converter.as_ref().zip(*id);
         match stage(request, resolved, entry, mappings, &mut report.skipped) {
-            Ok(Prepared::Ready(one)) => {
+            Ok(Prepared::Ready(mut one)) => {
+                one.shader_map_hashes = store
+                    .as_ref()
+                    .zip(*id)
+                    .and_then(|(store, id)| store.package_store_entry(id))
+                    .map(|held| held.shader_map_hashes)
+                    .unwrap_or_default();
                 report.changed.push(SweptPackage {
                     entry: one.entry.clone(),
                     changes: one.changes.clone(),
@@ -455,6 +462,7 @@ fn stage(
         patched,
         loaded,
         changes,
+        shader_map_hashes: Vec::new(),
     })))
 }
 

@@ -119,6 +119,7 @@ pub(crate) fn repack_iostore(
         oodle_level,
         obfuscate,
         compression,
+        &Default::default(),
         app,
     )
 }

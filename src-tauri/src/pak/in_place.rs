@@ -10,14 +10,12 @@ use tauri::AppHandle;
 
 use crate::paths::mods_dir;
 
-use super::{iostore, reader, writer};
+use super::iostore::{self, COMPANION_EXTS, non_package_files};
+use super::{reader, writer};
 
 /// Sidecar entry every IoStore mod carries. `repack_iostore` regenerates it, so it is never
 /// carried over from the source pak.
 const CHUNKNAMES: &str = "chunknames";
-
-/// Extensions that belong to the package they sit beside rather than being content of their own.
-const COMPANION_EXTS: [&str; 4] = [".uexp", ".m.ubulk", ".ubulk", ".uptnl"];
 
 static TEMP_COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -108,42 +106,6 @@ fn mod_contents(pak: &Path, is_iostore: bool) -> Result<HashSet<String>, String>
     Ok(contents)
 }
 
-/// Relative paths under `dir` that `repack_iostore` would ignore, meaning everything that is not
-/// part of a `.uasset`/`.umap` bundle. They have to ride in the sidecar pak or they are lost.
-fn non_package_files(dir: &Path) -> Vec<PathBuf> {
-    let files: Vec<PathBuf> = walkdir::WalkDir::new(dir)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
-        .filter_map(|e| e.path().strip_prefix(dir).ok().map(Path::to_path_buf))
-        .collect();
-
-    let lowered: HashSet<String> = files
-        .iter()
-        .map(|p| p.to_string_lossy().replace('\\', "/").to_lowercase())
-        .collect();
-
-    let owned_by_package = |rel: &Path| -> bool {
-        let lower = rel.to_string_lossy().replace('\\', "/").to_lowercase();
-        let stem = match COMPANION_EXTS.iter().find_map(|e| lower.strip_suffix(e)) {
-            Some(stem) => stem.to_string(),
-            None => match lower
-                .strip_suffix(".uasset")
-                .or_else(|| lower.strip_suffix(".umap"))
-            {
-                Some(stem) => stem.to_string(),
-                None => return false,
-            },
-        };
-        lowered.contains(&format!("{stem}.uexp"))
-    };
-
-    files
-        .into_iter()
-        .filter(|rel| !owned_by_package(rel))
-        .collect()
-}
-
 /// Copies the given relative paths from one tree into another, creating parents as needed.
 fn copy_files(from: &Path, to: &Path, rels: &[PathBuf]) -> Result<(), String> {
     for rel in rels {
@@ -188,6 +150,15 @@ pub(crate) fn repack_mod_in_place(
     let from_iostore = live_utoc.is_file() && live_ucas.is_file();
 
     let contents_in = mod_contents(&live_pak, from_iostore)?;
+    // Shader maps, localized packages and redirects are in the container header, which the
+    // extracted files cannot say anything about.
+    let carry = if from_iostore {
+        rivals_core::pak::iostore_out::HeaderCarry::from_store(
+            &*rivals_core::pak::containers::open_utoc(&live_utoc.to_string_lossy())?,
+        )
+    } else {
+        Default::default()
+    };
 
     let temp = std::env::temp_dir().join(format!(
         "rivals_repack_{}_{}",
@@ -234,19 +205,17 @@ pub(crate) fn repack_mod_in_place(
             &assets_dir.to_string_lossy(),
             &[],
         )?;
-        if to_iostore {
-            // Packing to IoStore keeps only package bundles, so anything else has to be moved
-            // into the sidecar pak rather than dropped.
-            let loose = non_package_files(&assets_dir);
-            copy_files(&assets_dir, &carried_dir, &loose)?;
-        }
     }
 
-    let carried_pak_entries = walkdir::WalkDir::new(&carried_dir)
+    let mut carried_pak_entries = walkdir::WalkDir::new(&carried_dir)
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
         .count();
+    if to_iostore && !from_iostore {
+        // Packing to IoStore puts anything that is not a package bundle into the sidecar pak.
+        carried_pak_entries += non_package_files(&assets_dir).len();
+    }
 
     let staged_pak = staged.join(format!("{stem}.pak"));
     let staged_utoc = staged.join(format!("{stem}.utoc"));
@@ -258,9 +227,10 @@ pub(crate) fn repack_mod_in_place(
             oodle_level,
             obfuscate,
             compression,
+            &carry,
             app,
         )?;
-        if carried_pak_entries > 0 {
+        if from_iostore && carried_pak_entries > 0 {
             // Fold the carried entries in beside the regenerated `chunknames`.
             let sidecar = temp.join("sidecar");
             reader::unpack_pak(
@@ -420,7 +390,7 @@ mod tests {
             .collect();
 
         assert!(loose.contains("Marvel/Config/mod.ini"));
-        // No .uexp beside it, so repack_iostore would skip it too.
+        // No .uexp beside it, so it is no package and rides in the pak.
         assert!(loose.contains("Marvel/Content/Orphan.uasset"));
         assert!(!loose.contains("Marvel/Content/A.uasset"));
         assert!(!loose.contains("Marvel/Content/A.uexp"));

@@ -492,11 +492,12 @@ pub fn save_copy(
         mod_name: request.mod_name,
         changes: PackageEdits::default(),
     };
-    if let Some(outcome) = destination_check(&into, options)? {
+    let entry = save_entry(&into)?;
+    if let Some(outcome) = destination_check(&into, &entry, options)? {
         return Ok(outcome);
     }
     let (patched, loaded) = preview_copy(request, mappings)?;
-    write_patched(&into, &patched, &loaded, options)
+    write_patched(&into, &entry, &patched, &loaded, options)
 }
 
 pub fn save_edits(
@@ -504,17 +505,41 @@ pub fn save_edits(
     mappings: Option<&Mappings>,
     options: &SaveOptions,
 ) -> Result<SaveOutcome, String> {
-    if let Some(outcome) = destination_check(request, options)? {
+    let entry = save_entry(request)?;
+    if let Some(outcome) = destination_check(request, &entry, options)? {
         return Ok(outcome);
     }
     let (patched, loaded) = preview_edits(request, mappings)?;
-    write_patched(request, &patched, &loaded, options)
+    write_patched(request, &entry, &patched, &loaded, options)
+}
+
+/// The path a save writes under, which is the one the game resolves the package by. A loose file
+/// is named by where it sits on disk and a package can be named by its package name, and neither
+/// is a path inside a container.
+pub fn save_entry(request: &AssetEditRequest<'_>) -> Result<String, String> {
+    let entry = match request.kind {
+        AssetSource::Loose => {
+            let path = Path::new(request.entry);
+            let asset = fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+            let header = rivals_uasset::read_header(&AssetBundle {
+                asset: &asset,
+                exports: &[],
+            })?;
+            asset::game_entry(request.game_root, &header.summary.package_name, path)?
+        }
+        _ if request.entry.starts_with('/') => {
+            asset::game_entry(request.game_root, request.entry, Path::new(request.entry))?
+        }
+        _ => request.entry.to_string(),
+    };
+    asset::contained_entry(&entry)
 }
 
 /// Whether the destination can take the write at all, and whether it already holds a copy. Checked
 /// before the patch so a declined replace does not cost a parse and a verify.
 fn destination_check(
     request: &AssetEditRequest<'_>,
+    entry: &str,
     options: &SaveOptions,
 ) -> Result<Option<SaveOutcome>, String> {
     let pak = mod_pak_path(request.game_root, request.mod_name)?;
@@ -540,9 +565,9 @@ fn destination_check(
     // Checked before the patch so a declined replace does not cost a parse and a verify.
     if !options.replace {
         let held = match options.target {
-            SaveTarget::Pak => pak.is_file() && holds_entry(&pak, request.entry)?,
+            SaveTarget::Pak => pak.is_file() && holds_entry(&pak, entry)?,
             SaveTarget::IoStore => {
-                utoc.is_file() && crate::pak::iostore_out::utoc_holds_entry(&utoc, request.entry)?
+                utoc.is_file() && crate::pak::iostore_out::utoc_holds_entry(&utoc, entry)?
             }
         };
         if held {
@@ -555,6 +580,7 @@ fn destination_check(
 /// The patched bundle onto disk, in whichever form the target asks for.
 fn write_patched(
     request: &AssetEditRequest<'_>,
+    entry: &str,
     patched: &PatchedBundle,
     loaded: &FSerializedAssetBundle,
     options: &SaveOptions,
@@ -567,11 +593,11 @@ fn write_patched(
         .to_string_lossy()
         .into_owned();
     if options.target == SaveTarget::IoStore {
-        return save_into_iostore(request, &utoc, patched, loaded, options);
+        return save_into_iostore(request, entry, &utoc, patched, loaded, options);
     }
     write_into_pak(
         &pak,
-        request.entry,
+        entry,
         &patched.asset,
         &patched.exports,
         [
@@ -593,7 +619,11 @@ fn write_patched(
         ],
     )?;
     Ok(SaveOutcome::Written {
-        message: format!("Saved {} change(s) to {name}", patched.applied.len()),
+        message: format!(
+            "Saved {} change(s) to {name}{}",
+            patched.applied.len(),
+            placed_as(request, entry)
+        ),
         pak,
     })
 }
@@ -601,18 +631,20 @@ fn write_patched(
 /// The IoStore form of a save: the container is written again around the edited package.
 fn save_into_iostore(
     request: &AssetEditRequest<'_>,
+    entry: &str,
     utoc: &Path,
     patched: &PatchedBundle,
     loaded: &FSerializedAssetBundle,
     options: &SaveOptions,
 ) -> Result<SaveOutcome, String> {
+    let shader_map_hashes = source_shader_maps(request, &patched.asset);
     // A read earlier in this session may still hold the container open, and it is about to be
     // replaced underneath.
     crate::pak::containers::drop_cached_store();
     let report = crate::pak::iostore_out::write_into_iostore(
         utoc,
         crate::pak::iostore_out::PackageFiles {
-            entry: request.entry,
+            entry,
             asset: &patched.asset,
             exports: &patched.exports,
             bulk: patched
@@ -624,7 +656,7 @@ fn save_into_iostore(
                 .as_deref()
                 .or(loaded.optional_bulk_data_buffer.as_deref()),
             memory_mapped_bulk: loaded.memory_mapped_bulk_data_buffer.as_deref(),
-            shader_map_hashes: Vec::new(),
+            shader_map_hashes,
         },
         &options.iostore,
     )?;
@@ -640,11 +672,34 @@ fn save_into_iostore(
     };
     Ok(SaveOutcome::Written {
         message: format!(
-            "Saved {} change(s) to {name}{carried}",
-            patched.applied.len()
+            "Saved {} change(s) to {name}{}{carried}",
+            patched.applied.len(),
+            placed_as(request, entry)
         ),
         pak: report.utoc,
     })
+}
+
+/// The shader maps the package's source lists for it, which a material needs carried into the
+/// mod's header or it loses them.
+fn source_shader_maps(request: &AssetEditRequest<'_>, asset: &[u8]) -> Vec<retoc::FSHAHash> {
+    let Ok(header) = rivals_uasset::read_header(&AssetBundle {
+        asset,
+        exports: &[],
+    }) else {
+        return Vec::new();
+    };
+    let container = (request.kind == AssetSource::Utoc).then_some(request.container);
+    asset::shader_map_hashes(request.game_root, container, &header.summary.package_name)
+}
+
+/// Names the game path a save went to when the caller named the package some other way.
+fn placed_as(request: &AssetEditRequest<'_>, entry: &str) -> String {
+    if comparable(request.entry) == comparable(entry) {
+        String::new()
+    } else {
+        format!(" as {entry}")
+    }
 }
 
 /// Whether the pak already carries this entry, compared the way `write_into_pak` names it.
@@ -678,10 +733,13 @@ fn write_into_pak(
     exports_bytes: &[u8],
     sidecars: [(&str, Option<&[u8]>); 3],
 ) -> Result<(), String> {
+    let entry = &asset::contained_entry(entry)?;
     if !pak.is_file() {
         create_empty_pak(pak)?;
     }
-    let stem = entry.rsplit_once('.').map_or(entry, |(stem, _)| stem);
+    let stem = entry
+        .rsplit_once('.')
+        .map_or(entry.as_str(), |(stem, _)| stem);
     let mut files: Vec<(String, &[u8])> = vec![
         (entry.to_string(), asset_bytes),
         (format!("{stem}.uexp"), exports_bytes),
@@ -750,7 +808,7 @@ mod tests {
             game_root: root,
             container: "",
             entry: ENTRY,
-            kind: AssetSource::Loose,
+            kind: AssetSource::Utoc,
             mod_name,
             changes: PackageEdits::default(),
         }
@@ -836,6 +894,70 @@ mod tests {
         )
         .expect_err("refused");
         assert!(error.contains("IoStore"), "{error}");
+    }
+
+    /// A header naming `package`, written where an extraction would have left it on disk.
+    fn loose_package(dir: &Path, package: &str) -> PathBuf {
+        use retoc::legacy_asset::{
+            FLegacyPackageFileSummary, FLegacyPackageHeader, FPackageNameMap,
+        };
+        let mut summary = FLegacyPackageFileSummary {
+            package_name: package.to_string(),
+            ..Default::default()
+        };
+        summary.versioning_info.package_file_version =
+            retoc::version::EngineVersion::UE5_3.package_file_version();
+        let header = FLegacyPackageHeader {
+            summary,
+            name_map: FPackageNameMap::create_from_names(vec!["None".to_string()]),
+            ..Default::default()
+        };
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        header
+            .serialize(&mut bytes, None, &retoc::logging::Log::no_log())
+            .expect("serialize a header");
+        let path = dir.join("Extracted/Somewhere/Thing.uasset");
+        fs::create_dir_all(path.parent().expect("parent")).expect("dirs");
+        fs::write(&path, bytes.into_inner()).expect("write");
+        path
+    }
+
+    /// A loose file is named by where it sits on disk, which is no path inside a container: a save
+    /// has to go under the path its package name gives, or it would override nothing.
+    #[test]
+    fn a_loose_package_is_saved_under_its_game_path() {
+        let scratch = ScratchRoot::new("loose");
+        let root = scratch.game_root();
+        let path = loose_package(&scratch.0, "/Game/Test/Thing");
+        let disk = path.to_string_lossy();
+        let request = AssetEditRequest {
+            entry: &disk,
+            kind: AssetSource::Loose,
+            ..request(&root, "Loose")
+        };
+        assert_eq!(
+            save_entry(&request).expect("an entry"),
+            "Marvel/Content/Test/Thing.uasset"
+        );
+    }
+
+    /// Joining an absolute path onto the pak's scratch folder would replace the folder, so the
+    /// write would land on the disk path itself.
+    #[test]
+    fn a_pak_write_refuses_a_path_outside_the_container() {
+        let scratch = ScratchRoot::new("escape");
+        let root = scratch.game_root();
+        let pak = mod_pak_path(&root, "Escape").expect("pak path");
+        for entry in [
+            "C:/Users/Someone/Thing.uasset",
+            "/Marvel/Content/Thing.uasset",
+            "../../../../Thing.uasset",
+        ] {
+            let error =
+                write_into_pak(&pak, entry, b"", b"", [("ubulk", None); 3]).expect_err("refused");
+            assert!(error.contains("not a path inside a container"), "{error}");
+        }
+        assert!(!pak.exists(), "nothing may be created");
     }
 
     /// The game reads packages only from a container, so a plain pak mod cannot simply gain one
@@ -2267,6 +2389,161 @@ mod game_data_tests {
                 let _ = fs::remove_file(pak.with_extension(extension));
             }
         }
+    }
+
+    /// A material's shader maps are listed in its container's header, not in the package, so the
+    /// first save into a fresh mod has to bring them from the game or the material loses them.
+    #[test]
+    fn a_material_keeps_its_shader_maps_in_a_fresh_mod() {
+        let Some(fixture) = Fixture::open(NANITE_MATERIAL) else {
+            return;
+        };
+        let scratch = ScratchMod {
+            root: fixture.root.clone(),
+            name: "RivalsToolkitShaderMapProbe",
+        };
+        drop(ScratchMod {
+            root: fixture.root.clone(),
+            name: "RivalsToolkitShaderMapProbe",
+        });
+        let header = rivals_uasset::read_header(&fixture.bundle()).expect("header");
+        let package = header.summary.package_name.clone();
+        let base = asset::shader_map_hashes(&fixture.root, Some(&fixture.container), &package);
+        assert!(!base.is_empty(), "{package} lists shader maps in the game");
+
+        let before = fixture.parse();
+        let value = find_named(&before, "ParameterValue").expect("a scalar parameter");
+        let PropertyValue::Float { value: was } = value.value else {
+            unreachable!()
+        };
+        save_edits(
+            &AssetEditRequest {
+                game_root: &fixture.root,
+                container: &fixture.container,
+                entry: fixture.entry,
+                kind: AssetSource::Utoc,
+                mod_name: scratch.name,
+                changes: PackageEdits {
+                    values: vec![ValueEdit {
+                        offset: value.span.expect("a span").0,
+                        expect_name: value.name.clone(),
+                        expect_element: value.element,
+                        expect_kind: "float".into(),
+                        op: EditOp::Set {
+                            text: (was + 0.5).to_string(),
+                        },
+                    }],
+                    ..Default::default()
+                },
+            },
+            Some(&fixture.schema),
+            &SaveOptions::default(),
+        )
+        .expect("save");
+
+        let written = crate::pak::containers::open_utoc(&scratch.container().to_string_lossy())
+            .expect("open the mod");
+        let id = retoc::FPackageId(retoc::FIoContainerId::from_name(&package).0);
+        let entry = written.package_store_entry(id).expect("the mod lists it");
+        assert_eq!(entry.shader_map_hashes, base);
+    }
+
+    /// An extracted package opened from disk saves under the path the game ships it at, so the mod
+    /// overrides it, and the file it was opened from is left as it was.
+    #[test]
+    fn a_loose_save_overrides_the_game_path_and_leaves_the_file_alone() {
+        let Some(fixture) = Fixture::open(DEFAULTS) else {
+            return;
+        };
+        let scratch = ScratchMod {
+            root: fixture.root.clone(),
+            name: "RivalsToolkitLooseProbe",
+        };
+        drop(ScratchMod {
+            root: fixture.root.clone(),
+            name: "RivalsToolkitLooseProbe",
+        });
+        let dir = std::env::temp_dir().join(format!("rivals-loose-{}", std::process::id()));
+        let disk = dir.join("Extracted/MarvelHeroTable.uasset");
+        fs::create_dir_all(disk.parent().expect("parent")).expect("dirs");
+        fs::write(&disk, &fixture.loaded.asset_file_buffer).expect("uasset");
+        fs::write(
+            disk.with_extension("uexp"),
+            &fixture.loaded.exports_file_buffer,
+        )
+        .expect("uexp");
+        let on_disk = fs::read(&disk).expect("read back");
+
+        let before = fixture.parse();
+        let cell = before.exports[0].data_table.as_ref().expect("table").rows[0]
+            .fields
+            .iter()
+            .find(|field| matches!(field.value, PropertyValue::Int { .. }))
+            .expect("an int cell")
+            .clone();
+        let PropertyValue::Int { value: was } = cell.value else {
+            unreachable!()
+        };
+        let disk_path = disk.to_string_lossy().into_owned();
+        let outcome = save_edits(
+            &AssetEditRequest {
+                game_root: &fixture.root,
+                container: "",
+                entry: &disk_path,
+                kind: AssetSource::Loose,
+                mod_name: scratch.name,
+                changes: PackageEdits {
+                    values: vec![ValueEdit {
+                        offset: cell.span.expect("a span").0,
+                        expect_name: cell.name.clone(),
+                        expect_element: cell.element,
+                        expect_kind: "int".into(),
+                        op: EditOp::Set {
+                            text: (was + 1).to_string(),
+                        },
+                    }],
+                    ..Default::default()
+                },
+            },
+            Some(&fixture.schema),
+            &SaveOptions::default(),
+        );
+        let untouched = fs::read(&disk).expect("read back") == on_disk;
+        let _ = fs::remove_dir_all(&dir);
+        let outcome = outcome.expect("save");
+        assert!(
+            matches!(&outcome, SaveOutcome::Written { message, .. } if message.contains(DEFAULTS)),
+            "{outcome:?}"
+        );
+        assert!(
+            untouched,
+            "the file the package was opened from is left alone"
+        );
+        assert!(
+            crate::pak::iostore_out::utoc_holds_entry(&scratch.container(), DEFAULTS)
+                .expect("list"),
+            "the mod carries the game path"
+        );
+    }
+
+    /// Plugin content has no fixed mount to derive a path from, so it is placed by looking its
+    /// package up in the game.
+    #[test]
+    fn a_plugin_package_is_placed_by_the_game() {
+        let Ok(root) = std::env::var("RIVALS_GAME_ROOT") else {
+            return;
+        };
+        let package = format!(
+            "/MarvelGAS/{}",
+            ANIM_BLUEPRINT
+                .strip_prefix("Marvel/Plugins/MarvelGAS/Content/")
+                .and_then(|rest| rest.strip_suffix(".uasset"))
+                .expect("a plugin path")
+        );
+        assert_eq!(
+            asset::game_entry(&root, &package, Path::new("Anywhere.uasset")).expect("placed"),
+            ANIM_BLUEPRINT
+        );
     }
 
     /// The save actually lands: an edit written into an IoStore mod reads back out of the `.utoc`

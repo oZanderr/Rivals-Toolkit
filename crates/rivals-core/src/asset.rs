@@ -189,9 +189,7 @@ fn load_from_utoc(
     // A mount path such as `/MarvelGAS/Marvel/X` names the package directly: its id is a hash of
     // the name, and the store knows which container holds it, whatever the mount point.
     let by_name = || {
-        // A package id is the same lowercase UTF-16 CityHash as a container id, which is the one
-        // retoc exposes.
-        let id = retoc::FPackageId(retoc::FIoContainerId::from_name(entry).0);
+        let id = package_id(entry);
         let chunk = FIoChunkId::from_package_id(id, 0, EIoChunkType::ExportBundleData);
         let path = store.chunk_path(chunk)?;
         Some((
@@ -224,6 +222,104 @@ fn strip_extension(path: &str) -> String {
         Some((stem, _)) if !stem.is_empty() && !stem.ends_with('/') => stem.to_string(),
         _ => path.to_string(),
     }
+}
+
+/// The mount-relative path a package ships under in the game, such as
+/// `Marvel/Content/Marvel/Data/X.uasset`, which is what a mod has to name to override it.
+///
+/// A loose file only knows where it sits on disk, so its header's package name is looked up in the
+/// base game first, which also places plugin content. A package the game does not ship falls back
+/// to the project mount, then to the part of `disk_path` from the `Marvel/` folder down.
+pub fn game_entry(game_root: &str, package_name: &str, disk_path: &Path) -> Result<String, String> {
+    let store = open_base_game_paks(&crate::paths::paks_dir(game_root), "").ok();
+    if let Some(path) = store.and_then(|store| package_path(&*store, package_name)) {
+        return Ok(path);
+    }
+    let extension = disk_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("uasset");
+    if let Some(relative) = mount_relative(package_name) {
+        return Ok(format!("{relative}.{extension}"));
+    }
+    let normalised = disk_path.to_string_lossy().replace('\\', "/");
+    ["Marvel/Content/", "Marvel/Plugins/"]
+        .iter()
+        .filter_map(|root| normalised.rfind(root))
+        .max()
+        .map(|at| normalised[at..].to_string())
+        .ok_or_else(|| {
+            format!(
+                "{} names package {package_name}, which the game does not ship and which sits under no Marvel folder, so there is no game path to save it under",
+                disk_path.display()
+            )
+        })
+}
+
+/// `entry` as a path inside a container, refused when it could reach outside one: a drive, a root
+/// or a `..` would make joining it onto a folder land somewhere else on disk.
+pub fn contained_entry(entry: &str) -> Result<String, String> {
+    let normalised = entry.replace('\\', "/");
+    let relative = normalised
+        .strip_prefix(MOUNT_POINT)
+        .unwrap_or(&normalised)
+        .to_string();
+    let escapes = relative.starts_with('/')
+        || relative.contains(':')
+        || relative.split('/').any(|part| part == "..");
+    if escapes || relative.is_empty() {
+        return Err(format!(
+            "{entry} is not a path inside a container, so it cannot be written into a mod"
+        ));
+    }
+    Ok(relative)
+}
+
+/// A package id is the same lowercase UTF-16 CityHash as a container id, which is the one retoc
+/// exposes.
+fn package_id(package_name: &str) -> retoc::FPackageId {
+    retoc::FPackageId(retoc::FIoContainerId::from_name(package_name).0)
+}
+
+/// Where `store` holds a package, looked up by name, as a mount-relative path.
+fn package_path(store: &dyn IoStoreTrait, package_name: &str) -> Option<String> {
+    let chunk =
+        FIoChunkId::from_package_id(package_id(package_name), 0, EIoChunkType::ExportBundleData);
+    let path = store.chunk_path(chunk)?;
+    Some(path.strip_prefix(MOUNT_POINT).unwrap_or(&path).to_string())
+}
+
+/// The shader maps a package's store entry lists, which live in the container header rather than
+/// the package, so a package read out of its container leaves them behind. Looked up in the store
+/// opened around `container`, or the base game's when the package came from anywhere else.
+pub fn shader_map_hashes(
+    game_root: &str,
+    container: Option<&str>,
+    package_name: &str,
+) -> Vec<retoc::FSHAHash> {
+    let open_as = container
+        .and_then(|path| Path::new(path).file_stem())
+        .and_then(|stem| stem.to_str())
+        .unwrap_or_default();
+    open_base_game_paks(&crate::paths::paks_dir(game_root), open_as)
+        .ok()
+        .and_then(|store| store.package_store_entry(package_id(package_name)))
+        .map(|entry| entry.shader_map_hashes)
+        .unwrap_or_default()
+}
+
+/// `/Game` is the project content directory and `/Engine` the engine's, matching how container
+/// entries are named.
+pub(crate) fn mount_relative(package: &str) -> Option<String> {
+    for (prefix, root) in [
+        ("/Game/", "Marvel/Content/"),
+        ("/Engine/", "Engine/Content/"),
+    ] {
+        if let Some(rest) = package.strip_prefix(prefix) {
+            return Some(format!("{root}{rest}"));
+        }
+    }
+    None
 }
 
 /// Every file stored in a .pak, with the UE mount prefix stripped for display.

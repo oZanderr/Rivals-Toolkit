@@ -271,23 +271,11 @@ fn defining_entry(object_path: &str, source: &PackageSource<'_>) -> Option<Strin
     }
     match source.kind {
         AssetSource::Utoc => Some(package.to_string()),
-        AssetSource::Loose => sibling_on_disk(source.entry, &mount_relative(package)?),
-        AssetSource::Pak => Some(format!("{}.uasset", mount_relative(package)?)),
-    }
-}
-
-/// `/Game` is the project content directory and `/Engine` the engine's, matching how container
-/// entries are named.
-fn mount_relative(package: &str) -> Option<String> {
-    for (prefix, root) in [
-        ("/Game/", "Marvel/Content/"),
-        ("/Engine/", "Engine/Content/"),
-    ] {
-        if let Some(rest) = package.strip_prefix(prefix) {
-            return Some(format!("{root}{rest}"));
+        AssetSource::Loose => {
+            sibling_on_disk(source.entry, &crate::asset::mount_relative(package)?)
         }
+        AssetSource::Pak => Some(format!("{}.uasset", crate::asset::mount_relative(package)?)),
     }
-    None
 }
 
 /// For an extracted tree the caller holds a real path, so rebuild the sibling from the content root
