@@ -134,7 +134,7 @@ fn field_step(
                 )
             })?;
         let fields = match &entry.value {
-            PropertyValue::Unset { .. } | PropertyValue::Default => {
+            PropertyValue::Unset { .. } | PropertyValue::Default { .. } => {
                 return Ok(FieldStep::Store(ValueEdit {
                     offset: walk.offset,
                     expect_name: walk.name.clone(),
@@ -5072,6 +5072,86 @@ mod game_data_tests {
 
     /// A value the header flags as zero has no bytes either, and stores the same way an unset one
     /// does, without first being unset.
+    ///
+    /// A native struct shows the fields it lays out, whether it is zero or unset, and one of them
+    /// is set in a single save while the others keep what storing it gave them.
+    #[test]
+    fn a_field_inside_a_native_struct_is_set_in_one_save() {
+        let Some(fixture) = Fixture::open(CURVE_ANIM_BP) else {
+            return;
+        };
+        let before = fixture.parse();
+        let zero = nested(
+            &before.exports[0].properties,
+            &[
+                "__CustomProperty_WeaponIKParam_F3A3F408442214696AD2C6B08E4E7AAB",
+                "LeftHandEffectorLocation",
+            ],
+        )
+        .clone();
+        let unset_rotator = nested(&before.exports[0].properties, &["LookingRotationBase"]).clone();
+        let preview = |entry: &PropertyEntry| -> Vec<String> {
+            match &entry.value {
+                PropertyValue::Default { fields } | PropertyValue::Unset { fields, .. } => {
+                    fields.iter().map(|field| field.name.clone()).collect()
+                }
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(preview(&zero), ["X", "Y", "Z"]);
+        assert_eq!(preview(&unset_rotator), ["Pitch", "Yaw", "Roll"]);
+
+        for (entry, field, text) in [(&zero, "X", "1.5"), (&unset_rotator, "Yaw", "90")] {
+            let request = AssetEditRequest {
+                game_root: &fixture.root,
+                container: &fixture.container,
+                entry: fixture.entry,
+                kind: AssetSource::Utoc,
+                mod_name: "unused, preview writes nothing",
+                changes: PackageEdits {
+                    field_sets: vec![rivals_uasset::FieldSet {
+                        offset: entry.span.expect("a span").0,
+                        expect_name: entry.name.clone(),
+                        expect_element: entry.element,
+                        path: vec![field.into()],
+                        text: text.into(),
+                    }],
+                    ..Default::default()
+                },
+            };
+            let (patched, _) = preview_edits(&request, Some(&fixture.schema)).expect("one save");
+            let after = Fixture::parse_bundle(
+                &AssetBundle {
+                    asset: &patched.asset,
+                    exports: &patched.exports,
+                },
+                &fixture.schema,
+                &fixture.source(),
+            );
+            let values: Vec<String> = find_named(&after, &entry.name)
+                .map(|stored| match stored.value {
+                    PropertyValue::Struct { fields, .. } => fields
+                        .iter()
+                        .map(|field| format!("{}={}", field.name, field.value.summary()))
+                        .collect(),
+                    other => panic!("{other:?}"),
+                })
+                .expect("the struct");
+            let number = |held: &str| -> (String, f64) {
+                let (name, value) = held.split_once('=').expect("name=value");
+                (name.to_string(), value.parse().expect("a number"))
+            };
+            let want: f64 = text.parse().expect("a number");
+            for (name, value) in values.iter().map(|held| number(held)) {
+                let expected = if name == field { want } else { 0.0 };
+                assert!(
+                    (value - expected).abs() < 1e-6,
+                    "{name} holds {value}, not {expected}: {values:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn a_zero_struct_stores_in_one_save() {
         let Some(fixture) = Fixture::open(CURVE_ANIM_BP) else {
@@ -5084,7 +5164,7 @@ mod game_data_tests {
         ];
         let field = nested(&before.exports[0].properties, &path).clone();
         assert!(
-            matches!(field.value, PropertyValue::Default),
+            matches!(field.value, PropertyValue::Default { .. }),
             "{:?}",
             field.value
         );

@@ -473,6 +473,17 @@ pub(crate) fn empty_header(slots: usize) -> Vec<u8> {
     out
 }
 
+/// The header for a struct that stores every slot as zero, which is how a zero struct keeps being
+/// zero once it is stored: a slot left out would take whatever the archetype holds instead.
+pub(crate) fn zero_header(slots: usize) -> Result<Vec<u8>, String> {
+    let empty = empty_header(slots);
+    let mut header = read_header(&mut Cursor::new(&empty, 0))?;
+    for slot in 0..slots {
+        header.insert_value(slot as u32, true)?;
+    }
+    header.write()
+}
+
 /// UE packs the mask into the narrowest of a byte, a word, or a run of 32-bit words. Every one of
 /// those is little-endian, so the mask is a flat bit array over its bytes whichever width it takes.
 fn mask_len(bits: usize) -> usize {
@@ -551,6 +562,20 @@ mod tests {
     fn read(data: &[u8]) -> UnversionedHeader {
         let mut cursor = Cursor::new(data, 0);
         read_header(&mut cursor).expect("header")
+    }
+
+    /// A stored zero struct holds every slot, each flagged zero, so none takes the archetype's
+    /// value; past one fragment's worth the slots run on into another.
+    #[test]
+    fn a_zero_header_stores_every_slot_as_zero() {
+        for slots in [0, 3, 200] {
+            let header = read(&zero_header(slots).expect("zero header"));
+            assert_eq!(indices(&header), (0..slots as u32).collect::<Vec<_>>());
+            assert!(
+                header.items.iter().all(|item| item.is_zero),
+                "{slots} slots"
+            );
+        }
     }
 
     fn written(header: &UnversionedHeader) -> Vec<u8> {

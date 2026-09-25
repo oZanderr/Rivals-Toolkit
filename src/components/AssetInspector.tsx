@@ -110,7 +110,7 @@ export type PropertyValue =
   | { kind: "map"; entries: { key: PropertyValue; value: PropertyValue }[] }
   | { kind: "struct"; name: string; fields: PropertyEntry[] }
   | { kind: "undecoded"; reason: string; bytes: number }
-  | { kind: "default" }
+  | { kind: "default"; fields?: PropertyEntry[] }
   | { kind: "unset"; declared: string; enum_type?: string; fields?: PropertyEntry[] };
 
 export interface PropertyEntry {
@@ -430,6 +430,7 @@ function isExpandable(value: PropertyValue): boolean {
     case "text":
       return (value.parts?.length ?? 0) > 0;
     case "unset":
+    case "default":
       return (value.fields?.length ?? 0) > 0;
     default:
       return false;
@@ -651,9 +652,10 @@ function childrenOf(row: TreeRow): TreeRow[] {
       });
     case "text":
       return (value.parts ?? []).map((part) => rowOf(part, inner));
-    // The fields an unset struct would hold have no bytes yet, so each is reached through the
+    // The fields of an unset or zero struct have no bytes yet, so each is reached through the
     // struct: a value typed for one stores the struct and sets it in the same save.
     case "unset":
+    case "default":
       return (value.fields ?? []).map((field) => {
         const segment =
           field.element === undefined ? field.name : `${field.name}[${field.element}]`;

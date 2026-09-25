@@ -267,6 +267,9 @@ pub struct UnsetSlot {
     pub default_bytes: Option<Vec<u8>>,
     /// The minimal form of a type that spells a name, finished against the name map at edit time.
     pub default_recipe: Option<Vec<DefaultPart>>,
+    /// For a zero struct, its stored form with every slot flagged zero, which is what keeps it
+    /// zero. The minimal form skips them, and a skipped slot takes the archetype's value.
+    pub zero_bytes: Option<Vec<u8>>,
 }
 
 /// Where a MovieScene channel's two bulk arrays sit. A key is a frame in `Times` and a value block
@@ -465,8 +468,16 @@ pub(crate) fn read_property_block(
                 header_at,
                 item.schema_index as usize,
                 &slot.property.inner,
+                true,
             );
-            zero_value(&slot.property.inner, ctx)
+            match zero_value(&slot.property.inner, ctx) {
+                PropertyValue::Default { .. } if diagnostics.declared_slots => {
+                    PropertyValue::Default {
+                        fields: zero_fields(&slot.property.inner, ctx, 0),
+                    }
+                }
+                other => other,
+            }
         } else {
             read_value(&slot.property.inner, cursor, ctx, diagnostics, depth).map_err(|e| {
                 if diagnostics.failing_structs.last().map(String::as_str) != Some(schema.name()) {
@@ -531,7 +542,15 @@ fn emit_unset(
             continue;
         };
         let declared = storage_kind(&slot.property.inner);
-        record_unset(diagnostics, ctx, at, header_at, index, &slot.property.inner);
+        record_unset(
+            diagnostics,
+            ctx,
+            at,
+            header_at,
+            index,
+            &slot.property.inner,
+            false,
+        );
         entries.push(PropertyEntry {
             name: slot.property.name.clone(),
             element: (slot.property.array_dim > 1).then_some(slot.element),
@@ -562,13 +581,11 @@ fn unset_fields(inner: &PropertyInner, ctx: &Ctx<'_>, depth: u32) -> Vec<Propert
     let PropertyInner::Struct { name } = inner else {
         return Vec::new();
     };
-    if depth >= PREVIEW_DEPTH
-        || !matches!(
-            structs::native_default(name),
-            structs::NativeDefault::NotNative
-        )
-    {
+    if depth >= PREVIEW_DEPTH {
         return Vec::new();
+    }
+    if let Some(fields) = native_fields(name, ctx) {
+        return fields.into_iter().map(unset_preview).collect();
     }
     let Some(schema) = ctx.schema(name) else {
         return Vec::new();
@@ -589,6 +606,109 @@ fn unset_fields(inner: &PropertyInner, ctx: &Ctx<'_>, depth: u32) -> Vec<Propert
         .collect()
 }
 
+/// The fields a zero struct holds, each zero, for showing and addressing them through it.
+fn zero_fields(inner: &PropertyInner, ctx: &Ctx<'_>, depth: u32) -> Vec<PropertyEntry> {
+    let PropertyInner::Struct { name } = inner else {
+        return Vec::new();
+    };
+    if depth >= PREVIEW_DEPTH {
+        return Vec::new();
+    }
+    if let Some(fields) = native_fields(name, ctx) {
+        return fields;
+    }
+    let Some(schema) = ctx.schema(name) else {
+        return Vec::new();
+    };
+    (0..schema.len())
+        .filter_map(|index| schema.slot(index))
+        .map(|slot| PropertyEntry {
+            name: slot.property.name.clone(),
+            element: (slot.property.array_dim > 1).then_some(slot.element),
+            value: match zero_value(&slot.property.inner, ctx) {
+                PropertyValue::Default { .. } => PropertyValue::Default {
+                    fields: zero_fields(&slot.property.inner, ctx, depth + 1),
+                },
+                other => other,
+            },
+            span: None,
+            slot: None,
+        })
+        .collect()
+}
+
+/// A native struct's fields, read from the bytes it holds when every field is default. It lays
+/// itself out, so no schema names them. `None` for a struct that is not native, or whose layout
+/// is one value rather than fields.
+fn native_fields(name: &str, ctx: &Ctx<'_>) -> Option<Vec<PropertyEntry>> {
+    let mut bytes = Vec::new();
+    for part in native_parts(name, ctx)?? {
+        match part {
+            DefaultPart::Bytes(held) => bytes.extend(held),
+            DefaultPart::NoneName => {
+                let none = ctx
+                    .names()
+                    .copy_raw_names()
+                    .iter()
+                    .position(|held| held == "None")?;
+                bytes.extend_from_slice(&(none as i32).to_le_bytes());
+                bytes.extend_from_slice(&0i32.to_le_bytes());
+            }
+            DefaultPart::Struct(_) => return None,
+        }
+    }
+    let mut cursor = Cursor::new(&bytes, 0);
+    let mut scratch = Diagnostics::default();
+    match structs::read_native(name, &mut cursor, ctx, &mut scratch, 0)? {
+        Ok(PropertyValue::Struct { fields, .. }) => Some(without_places(fields)),
+        _ => None,
+    }
+}
+
+/// Entries read from bytes that are not the package's, so no offset in them means anything.
+fn without_places(entries: Vec<PropertyEntry>) -> Vec<PropertyEntry> {
+    entries
+        .into_iter()
+        .map(|mut entry| {
+            entry.span = None;
+            entry.slot = None;
+            if let PropertyValue::Struct { fields, .. } = &mut entry.value {
+                *fields = without_places(std::mem::take(fields));
+            }
+            entry
+        })
+        .collect()
+}
+
+/// A field as an unset struct would hold it: not stored, of the type its default has.
+fn unset_preview(entry: PropertyEntry) -> PropertyEntry {
+    let (declared, fields) = match entry.value {
+        PropertyValue::Bool { .. } => ("Bool", Vec::new()),
+        PropertyValue::Int { .. } => ("Int", Vec::new()),
+        PropertyValue::UInt { .. } => ("UInt32", Vec::new()),
+        PropertyValue::Float { .. } => ("Float", Vec::new()),
+        PropertyValue::Byte { .. } => ("Byte", Vec::new()),
+        PropertyValue::Str { .. } => ("Str", Vec::new()),
+        PropertyValue::Name { .. } | PropertyValue::Enum { .. } => ("Name", Vec::new()),
+        PropertyValue::Text { .. } => ("Text", Vec::new()),
+        PropertyValue::Object { .. } => ("Object", Vec::new()),
+        PropertyValue::SoftObject { .. } => ("SoftObject", Vec::new()),
+        PropertyValue::Array { .. } => ("Array", Vec::new()),
+        PropertyValue::Struct { fields, .. } => {
+            ("Struct", fields.into_iter().map(unset_preview).collect())
+        }
+        _ => ("Struct", Vec::new()),
+    };
+    PropertyEntry {
+        value: PropertyValue::Unset {
+            declared,
+            enum_type: None,
+            fields,
+        },
+        ..entry
+    }
+}
+
 /// What storing a slot that holds no bytes takes: its minimal form, and for a container, how an
 /// element is written into it.
 fn record_unset(
@@ -598,8 +718,15 @@ fn record_unset(
     header_at: u64,
     index: usize,
     inner: &PropertyInner,
+    zero: bool,
 ) {
     let (default_bytes, default_recipe) = split_default(unset_default(inner, ctx));
+    let zero_bytes = match inner {
+        PropertyInner::Struct { name } if zero && native_parts(name, ctx).is_none() => ctx
+            .schema(name)
+            .and_then(|schema| unversioned::zero_header(schema.len()).ok()),
+        _ => None,
+    };
     diagnostics.unset.push(UnsetSlot {
         at,
         header_at,
@@ -611,6 +738,7 @@ fn record_unset(
         },
         default_bytes,
         default_recipe,
+        zero_bytes,
     });
     match inner {
         PropertyInner::Array { inner } => {
@@ -995,7 +1123,7 @@ fn read_instanced_struct(
             name,
             fields: Vec::new(),
         },
-        None => PropertyValue::Default,
+        None => PropertyValue::Default { fields: Vec::new() },
     };
 
     cursor.seek_to(payload_end)?;
@@ -1588,7 +1716,7 @@ fn zero_value(inner: &PropertyInner, ctx: &Ctx<'_>) -> PropertyValue {
         PropertyInner::Map { .. } => PropertyValue::Map {
             entries: Vec::new(),
         },
-        _ => PropertyValue::Default,
+        _ => PropertyValue::Default { fields: Vec::new() },
     }
 }
 

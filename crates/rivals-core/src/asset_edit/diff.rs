@@ -420,12 +420,11 @@ fn diff_value(
                 ));
             }
         }
-        PropertyValue::Unset { fields, .. } => {
+        PropertyValue::Unset { fields, .. } | PropertyValue::Default { fields } => {
             if let Some(edited) = edited.get("fields").and_then(Json::as_array) {
                 field_sets_in(entry, fields, edited, &[], &label, out);
             }
         }
-        PropertyValue::Default => {}
         _ => {
             if summary_changed(&entry.value, edited) {
                 let Some(offset) = at() else {
@@ -473,7 +472,7 @@ fn diff_retyped(
     // way.
     if matches!(was, "unset" | "default") && text_of(edited).is_none() {
         let preview = match &entry.value {
-            PropertyValue::Unset { fields, .. } => &fields[..],
+            PropertyValue::Unset { fields, .. } | PropertyValue::Default { fields } => &fields[..],
             _ => &[],
         };
         if let Some(fields) = edited.get("fields").and_then(Json::as_array)
@@ -548,17 +547,19 @@ fn field_sets_in(
             .iter()
             .find(|held| held.name == name && held.element == element)
             .and_then(|held| match &held.value {
-                PropertyValue::Unset { fields, .. } => Some(&fields[..]),
+                PropertyValue::Unset { fields, .. } | PropertyValue::Default { fields } => {
+                    Some(&fields[..])
+                }
                 _ => None,
             })
             .unwrap_or(&[]);
         match value.get("kind").and_then(Json::as_str) {
-            Some("unset" | "struct") => {
+            Some("unset" | "struct" | "default") => {
                 if let Some(nested) = value.get("fields").and_then(Json::as_array) {
                     found += field_sets_in(entry, inner, nested, &here, label, out);
                 }
             }
-            Some("default") | None => {}
+            None => {}
             Some(_) => match text_of(value) {
                 Some(text) => {
                     out.edits.field_sets.push(rivals_uasset::FieldSet {
@@ -894,7 +895,7 @@ mod tests {
         let out = one(stored.clone(), json!({"kind": "unset", "declared": "Int"}));
         assert!(matches!(value(&out).op, EditOp::Unset));
 
-        let defaulted = entry("Count", PropertyValue::Default, 0x40);
+        let defaulted = entry("Count", PropertyValue::Default { fields: Vec::new() }, 0x40);
         let out = one(defaulted, json!({"kind": "int", "value": 5}));
         assert!(matches!(&value(&out).op, EditOp::Set { text } if text == "5"));
 
@@ -1104,6 +1105,27 @@ mod tests {
             }]
         );
         assert!(out.notes.is_empty(), "{:?}", out.notes);
+
+        // A zero struct shows its fields the same way, and one given a value is set through it.
+        let zero = PropertyEntry {
+            name: "X".into(),
+            element: None,
+            value: PropertyValue::Float { value: 0.0 },
+            span: None,
+            slot: None,
+        };
+        let out = one(
+            entry(
+                "Offset",
+                PropertyValue::Default { fields: vec![zero] },
+                0x50,
+            ),
+            json!({"kind": "default", "fields": [
+                {"name": "X", "value": {"kind": "float", "value": 1.5}},
+            ]}),
+        );
+        assert_eq!(out.edits.field_sets.len(), 1, "{:?}", out.edits);
+        assert_eq!(out.edits.field_sets[0].path, vec!["X".to_string()]);
     }
 
     /// A delegate is bound by the loader rather than stored as text, so a changed one is reported

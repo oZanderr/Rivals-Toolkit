@@ -651,7 +651,11 @@ mod tests {
     #[test]
     fn a_slot_storing_nothing_is_left_alone() {
         let entries = vec![
-            entry("Amplitude", PropertyValue::Default, Some((4, 4))),
+            entry(
+                "Amplitude",
+                PropertyValue::Default { fields: Vec::new() },
+                Some((4, 4)),
+            ),
             entry(
                 "Frequency",
                 PropertyValue::Unset {

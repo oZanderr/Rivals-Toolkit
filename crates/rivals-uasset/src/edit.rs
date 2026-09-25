@@ -326,7 +326,7 @@ pub fn check_expectations(parsed: &ParsedPackage, edits: &PackageEdits) -> Resul
         };
         if !matches!(
             entry.value,
-            PropertyValue::Unset { .. } | PropertyValue::Default
+            PropertyValue::Unset { .. } | PropertyValue::Default { .. }
         ) {
             drift.push(format!(
                 "{} was not stored, and now stores {}",
@@ -465,7 +465,7 @@ pub fn expectations(parsed: &ParsedPackage, edits: &PackageEdits) -> Expected {
             .is_some_and(|entry| {
                 matches!(
                     entry.value,
-                    PropertyValue::Unset { .. } | PropertyValue::Default
+                    PropertyValue::Unset { .. } | PropertyValue::Default { .. }
                 )
             });
         if unstored {
@@ -1118,7 +1118,7 @@ pub fn patch_package_with(
             EditOp::Store => {
                 if !matches!(
                     entry.value,
-                    PropertyValue::Unset { .. } | PropertyValue::Default
+                    PropertyValue::Unset { .. } | PropertyValue::Default { .. }
                 ) {
                     return Err(format!("{} is already stored", entry.label()));
                 }
@@ -4249,6 +4249,11 @@ fn stored_default(
                 entry.label()
             )
         })?;
+    if matches!(entry.value, PropertyValue::Default { .. })
+        && let Some(bytes) = &unset.zero_bytes
+    {
+        return Ok(bytes.clone());
+    }
     if let Some(bytes) = &unset.default_bytes {
         return Ok(bytes.clone());
     }
@@ -5097,7 +5102,7 @@ fn first_difference(
             return Ok(None);
         }
         // An instanced struct whose type export went reads as nothing at all.
-        (PropertyValue::Struct { name, .. }, PropertyValue::Default)
+        (PropertyValue::Struct { name, .. }, PropertyValue::Default { .. })
             if excuses.names_removed(name) =>
         {
             return Ok(None);
@@ -5185,7 +5190,7 @@ pub fn kind_of(value: &PropertyValue) -> String {
         PropertyValue::Map { .. } => "map",
         PropertyValue::Struct { .. } => "struct",
         PropertyValue::Undecoded { .. } => "undecoded",
-        PropertyValue::Default => "default",
+        PropertyValue::Default { .. } => "default",
         PropertyValue::Unset { .. } => "unset",
     }
     .to_string()
@@ -5228,7 +5233,7 @@ fn encode(value: &PropertyValue, text: &str, target: Target<'_>) -> Result<Vec<u
         return encode_native_leaf(leaf, text.trim(), &mut target.tables.names);
     }
     // A zero value has no bytes to rebuild from, so it is written from nothing like an unset one.
-    if matches!(value, PropertyValue::Default) && !target.declared.is_empty() {
+    if matches!(value, PropertyValue::Default { .. }) && !target.declared.is_empty() {
         let declared = target.declared;
         return encode_declared(declared, text, target);
     }
@@ -7960,6 +7965,41 @@ mod tests {
             expect_element: None,
             op,
         }
+    }
+
+    /// A zero struct stored from nothing keeps every field zero; the empty form it would get as an
+    /// unset one would leave each field to its archetype.
+    #[test]
+    fn a_zero_struct_is_stored_with_its_fields_zero() {
+        let slot = crate::value::SlotRef {
+            header_at: 0x10,
+            schema_index: 2,
+            declared: "Struct",
+        };
+        let mut parsed = export_with(vec![PropertyEntry {
+            name: "Params".into(),
+            element: None,
+            value: PropertyValue::Default { fields: Vec::new() },
+            span: Some((0x40, 0x40)),
+            slot: Some(slot),
+        }]);
+        let zero = crate::unversioned::zero_header(3).expect("zero header");
+        parsed.unset = vec![crate::props::UnsetSlot {
+            at: 0x40,
+            header_at: 0x10,
+            schema_index: 2,
+            declared: "Struct",
+            struct_name: Some("Params".into()),
+            default_bytes: Some(crate::unversioned::empty_header(3)),
+            default_recipe: None,
+            zero_bytes: Some(zero.clone()),
+        }];
+        let mut names = FPackageNameMap::create_from_names(vec!["None".into()]);
+        let entry = parsed.exports[0].properties[0].clone();
+        assert_eq!(
+            stored_default(&parsed, &entry, &mut names).expect("stored"),
+            zero
+        );
     }
 
     /// A field set expects its struct to store nothing yet; one that now stores something is
