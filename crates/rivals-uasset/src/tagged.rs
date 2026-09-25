@@ -34,12 +34,15 @@ struct Tag {
     bool_at: Option<usize>,
 }
 
+/// `owner` is the struct or class whose properties the block holds. A tag names a container's
+/// struct elements only as structs, so the owner's schema is what says which.
 pub(crate) fn read_tagged_block(
     cursor: &mut Cursor<'_>,
     ctx: &Ctx<'_>,
     diagnostics: &mut Diagnostics,
     depth: u32,
     entries: &mut Vec<PropertyEntry>,
+    owner: Option<&str>,
 ) -> Result<(), String> {
     for _ in 0..MAX_PROPERTIES {
         let name = cursor.read_name(ctx.names())?;
@@ -68,7 +71,7 @@ pub(crate) fn read_tagged_block(
             payload_end: base + end as u64,
         });
 
-        let value = match read_tagged_value(&tag, cursor, ctx, diagnostics, depth) {
+        let value = match read_tagged_value(&tag, cursor, ctx, diagnostics, depth, owner) {
             Ok(value) if cursor.position() == end => value,
             Ok(_) => {
                 diagnostics.unsupported.insert(tag.type_name.clone());
@@ -165,7 +168,9 @@ fn read_tagged_value(
     ctx: &Ctx<'_>,
     diagnostics: &mut Diagnostics,
     depth: u32,
+    owner: Option<&str>,
 ) -> Result<PropertyValue, String> {
+    let declared = || declared_inner(ctx, owner, &tag.name);
     match tag.type_name.as_str() {
         "BoolProperty" => Ok(PropertyValue::Bool {
             value: tag.bool_value,
@@ -186,7 +191,14 @@ fn read_tagged_value(
         }
         "ArrayProperty" => read_tagged_array(tag, cursor, ctx, diagnostics, depth),
         "SetProperty" => {
-            let element = Element::of(tag.inner_name.as_deref(), cursor)?;
+            let element = Element::of(
+                tag.inner_name.as_deref(),
+                declared().and_then(|inner| match inner {
+                    PropertyInner::Set { key } => struct_name(&key),
+                    _ => None,
+                }),
+                cursor,
+            )?;
             let at = cursor.file_offset();
             // The keys removed from the inherited defaults come first, each a full key.
             for _ in 0..read_count(cursor)? {
@@ -214,8 +226,12 @@ fn read_tagged_value(
             Ok(PropertyValue::Set { items })
         }
         "MapProperty" => {
-            let key_type = Element::of(tag.inner_name.as_deref(), cursor)?;
-            let value_type = Element::of(tag.value_type_name.as_deref(), cursor)?;
+            let (key_struct, value_struct) = match declared() {
+                Some(PropertyInner::Map { key, value }) => (struct_name(&key), struct_name(&value)),
+                _ => (None, None),
+            };
+            let key_type = Element::of(tag.inner_name.as_deref(), key_struct, cursor)?;
+            let value_type = Element::of(tag.value_type_name.as_deref(), value_struct, cursor)?;
             let at = cursor.file_offset();
             for _ in 0..read_count(cursor)? {
                 key_type.read(cursor, ctx, diagnostics, depth + 1)?;
@@ -269,7 +285,7 @@ fn read_tagged_struct(
         return result;
     }
     let mut fields = Vec::new();
-    read_tagged_block(cursor, ctx, diagnostics, depth + 1, &mut fields)?;
+    read_tagged_block(cursor, ctx, diagnostics, depth + 1, &mut fields, Some(name))?;
     Ok(PropertyValue::Struct {
         name: name.to_string(),
         fields,
@@ -336,7 +352,7 @@ fn read_tagged_array(
         return Ok(PropertyValue::Array { items });
     }
 
-    let element = Element::of(Some(inner_type), cursor)?;
+    let element = Element::of(Some(inner_type), None, cursor)?;
     let mut items = Vec::with_capacity(count as usize);
     let mut spans = Vec::with_capacity(count as usize);
     for _ in 0..count {
@@ -357,14 +373,38 @@ enum Element {
     Simple(PropertyInner),
     Bool,
     Enum,
+    /// A struct element, named by the owner's schema since the tag does not say which.
+    Struct(String),
+}
+
+/// The type the owner's schema declares for `property`, when there is a schema to ask.
+fn declared_inner(ctx: &Ctx<'_>, owner: Option<&str>, property: &str) -> Option<PropertyInner> {
+    let schema = ctx.schema(owner?)?;
+    (0..schema.len())
+        .filter_map(|index| schema.slot(index))
+        .find(|slot| slot.property.name == property)
+        .map(|slot| slot.property.inner.clone())
+}
+
+fn struct_name(inner: &PropertyInner) -> Option<String> {
+    match inner {
+        PropertyInner::Struct { name } => Some(name.clone()),
+        _ => None,
+    }
 }
 
 impl Element {
-    fn of(type_name: Option<&str>, cursor: &Cursor<'_>) -> Result<Self, String> {
+    /// `declared_struct` is the struct the owner's schema names for this element, when it does.
+    fn of(
+        type_name: Option<&str>,
+        declared_struct: Option<String>,
+        cursor: &Cursor<'_>,
+    ) -> Result<Self, String> {
         let type_name = type_name.unwrap_or_default();
-        match type_name {
-            "BoolProperty" => Ok(Self::Bool),
-            "EnumProperty" => Ok(Self::Enum),
+        match (type_name, declared_struct) {
+            ("StructProperty", Some(name)) => Ok(Self::Struct(name)),
+            ("BoolProperty", _) => Ok(Self::Bool),
+            ("EnumProperty", _) => Ok(Self::Enum),
             _ => simple_inner(type_name).map(Self::Simple).ok_or_else(|| {
                 cursor.err(format!(
                     "container elements of type {type_name} are not decoded in tagged mode"
@@ -390,6 +430,7 @@ impl Element {
                 name: Some(cursor.read_name(ctx.names())?),
                 enum_type: None,
             }),
+            Self::Struct(name) => read_tagged_struct(name, cursor, ctx, diagnostics, depth),
         }
     }
 
@@ -402,12 +443,38 @@ impl Element {
                 inner: Box::new(PropertyInner::Name),
                 name: String::new(),
             },
+            Self::Struct(name) => PropertyInner::Struct { name: name.clone() },
         }
     }
 
     /// A tag does not say which enum an element belongs to, so the layout just recorded names
     /// none rather than an empty one.
     fn settle(&self, diagnostics: &mut Diagnostics, key: bool) {
+        // A reflected struct element is a tagged block of its own, so a fresh one is the empty
+        // block, its terminating `None`, not the schema's unversioned header.
+        if let Self::Struct(name) = self {
+            if !matches!(
+                structs::native_default(name),
+                structs::NativeDefault::NotNative
+            ) {
+                return;
+            }
+            let Some(layout) = diagnostics.containers.last_mut() else {
+                return;
+            };
+            if key {
+                if let Some(keys) = layout.keys.as_mut() {
+                    keys.default = None;
+                    keys.default_recipe = None;
+                    keys.default_name = Some("None".into());
+                }
+            } else {
+                layout.default_element = None;
+                layout.default_recipe = None;
+                layout.default_name = Some("None".into());
+            }
+            return;
+        }
         if !matches!(self, Self::Enum) {
             return;
         }
@@ -524,7 +591,7 @@ mod tests {
         let mut cursor = Cursor::new(data, 0x100);
         let mut entries = Vec::new();
         let mut diagnostics = Diagnostics::default();
-        read_tagged_block(&mut cursor, &ctx, &mut diagnostics, 0, &mut entries)?;
+        read_tagged_block(&mut cursor, &ctx, &mut diagnostics, 0, &mut entries, None)?;
         Ok((entries, diagnostics))
     }
 

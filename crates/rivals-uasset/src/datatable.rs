@@ -100,7 +100,7 @@ pub(crate) fn read_rows(
             Some(schema) if !tagged => {
                 read_property_block(cursor, schema, ctx, diagnostics, 0, &mut fields)
             }
-            _ => read_tagged_block(cursor, ctx, diagnostics, 0, &mut fields),
+            _ => read_tagged_block(cursor, ctx, diagnostics, 0, &mut fields, Some(&row_struct)),
         };
         let failed = outcome.err().map(|e| format!("row {index} ({name}): {e}"));
         rows.push(DataTableRow { name, fields });

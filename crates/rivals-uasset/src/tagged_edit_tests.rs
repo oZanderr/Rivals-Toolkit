@@ -7,6 +7,7 @@ use retoc::legacy_asset::{
 };
 
 use crate::edit::{EditOp, PackageEdits, ValueEdit, kind_of, patch_package, verify_patch};
+use crate::mappings::Mappings;
 use crate::package::{
     AssetBundle, ExportStatus, FALLBACK_ENGINE_VERSION, ParsedPackage, parse_package,
 };
@@ -55,6 +56,10 @@ const NAMES: &[&str] = &[
     "MapProperty",
     "Flags",
     "Modes",
+    "Holder",
+    "MyHolder",
+    "Pairs",
+    "Structs",
 ];
 
 fn index_of(value: &str) -> i32 {
@@ -221,7 +226,11 @@ fn tagged_package() -> (Vec<u8>, Vec<u8>) {
 
     name(&mut e, "None");
     e.extend_from_slice(&0i32.to_le_bytes());
+    package_of(e)
+}
 
+/// A package whose one export holds the tagged properties in `e`.
+fn package_of(e: Vec<u8>) -> (Vec<u8>, Vec<u8>) {
     let mut summary = FLegacyPackageFileSummary {
         package_name: "/Game/TestPackage".to_string(),
         ..Default::default()
@@ -257,7 +266,11 @@ fn tagged_package() -> (Vec<u8>, Vec<u8>) {
 }
 
 fn parse(asset: &[u8], exports: &[u8]) -> ParsedPackage {
-    let parsed = parse_package(&AssetBundle { asset, exports }, None).expect("parses");
+    parse_with(asset, exports, None)
+}
+
+fn parse_with(asset: &[u8], exports: &[u8], mappings: Option<&Mappings>) -> ParsedPackage {
+    let parsed = parse_package(&AssetBundle { asset, exports }, mappings).expect("parses");
     assert!(
         matches!(parsed.exports[0].status, ExportStatus::Complete),
         "every byte accounted for, got {:?}",
@@ -807,4 +820,159 @@ fn tagged_bool_and_enum_arrays_edit_their_elements() {
         .map(|item| item.summary())
         .collect();
     assert_eq!(modes, vec!["EMode::B", "EMode::A"]);
+}
+
+/// A struct `MyHolder` whose map and set hold `MyStruct` elements, which a tag alone names only as
+/// structs.
+fn holder_package() -> (Vec<u8>, Vec<u8>) {
+    let mut pairs = 0i32.to_le_bytes().to_vec();
+    pairs.extend_from_slice(&1i32.to_le_bytes());
+    name(&mut pairs, "Foo");
+    pairs.extend_from_slice(&my_struct(5));
+    let mut structs = 0i32.to_le_bytes().to_vec();
+    structs.extend_from_slice(&1i32.to_le_bytes());
+    structs.extend_from_slice(&my_struct(7));
+
+    let mut holder = Vec::new();
+    head(&mut holder, "Pairs", "MapProperty", pairs.len());
+    name(&mut holder, "NameProperty");
+    name(&mut holder, "StructProperty");
+    holder.push(0);
+    holder.extend_from_slice(&pairs);
+    head(&mut holder, "Structs", "SetProperty", structs.len());
+    name(&mut holder, "StructProperty");
+    holder.push(0);
+    holder.extend_from_slice(&structs);
+    name(&mut holder, "None");
+
+    let mut e = Vec::new();
+    head(&mut e, "Holder", "StructProperty", holder.len());
+    name(&mut e, "MyHolder");
+    e.extend_from_slice(&[0; 16]);
+    e.push(0);
+    e.extend_from_slice(&holder);
+    name(&mut e, "None");
+    e.extend_from_slice(&0i32.to_le_bytes());
+    package_of(e)
+}
+
+fn holder_mappings() -> Mappings {
+    use usmap::{Property, PropertyInner, Struct};
+    let my_struct = || PropertyInner::Struct {
+        name: "MyStruct".into(),
+    };
+    let property = |name: &str, index: u16, inner: PropertyInner| Property {
+        name: name.into(),
+        array_dim: 1,
+        index,
+        inner,
+    };
+    Mappings::from_structs(vec![
+        Struct {
+            name: "MyHolder".into(),
+            super_struct: None,
+            properties: vec![
+                property(
+                    "Pairs",
+                    0,
+                    PropertyInner::Map {
+                        key: Box::new(PropertyInner::Name),
+                        value: Box::new(my_struct()),
+                    },
+                ),
+                property(
+                    "Structs",
+                    1,
+                    PropertyInner::Set {
+                        key: Box::new(my_struct()),
+                    },
+                ),
+            ],
+        },
+        Struct {
+            name: "MyStruct".into(),
+            super_struct: None,
+            properties: vec![property("X", 0, PropertyInner::Int)],
+        },
+    ])
+}
+
+fn holder_fields(parsed: &ParsedPackage) -> &[PropertyEntry] {
+    match &find(top(parsed), "Holder").value {
+        PropertyValue::Struct { fields, .. } => fields,
+        other => panic!("{other:?}"),
+    }
+}
+
+/// With the owner's schema to say which struct a tag's elements are, a map of structs and a set
+/// of them take field edits, new elements and removals like any other container.
+#[test]
+fn tagged_containers_of_structs_edit_through_the_owners_schema() {
+    let (asset, exports) = holder_package();
+    let mappings = holder_mappings();
+    let before = parse_with(&asset, &exports, Some(&mappings));
+    let pairs = find(holder_fields(&before), "Pairs");
+    let structs = find(holder_fields(&before), "Structs");
+    let x = match &pairs.value {
+        PropertyValue::Map { entries } => match &entries[0].value {
+            PropertyValue::Struct { fields, .. } => find(fields, "X").clone(),
+            other => panic!("{other:?}"),
+        },
+        other => panic!("{other:?}"),
+    };
+    let changes = PackageEdits {
+        values: vec![
+            edit_of(&x, set("6")),
+            edit_of(
+                pairs,
+                EditOp::Insert {
+                    index: 1,
+                    key: Some("Tag".into()),
+                },
+            ),
+            edit_of(structs, EditOp::Remove { index: 0 }),
+        ],
+        ..Default::default()
+    };
+    let bundle = AssetBundle {
+        asset: &asset,
+        exports: &exports,
+    };
+    let patched = patch_package(&bundle, &before, &changes, Some(&mappings)).expect("patch");
+    let after = parse_with(&patched.asset, &patched.exports, Some(&mappings));
+    verify_patch(&before, &after, &changes, &patched.applied).expect("verifies");
+
+    match &find(holder_fields(&after), "Pairs").value {
+        PropertyValue::Map { entries } => {
+            assert_eq!(entries.len(), 2);
+            assert_eq!(entries[1].key.summary(), "Tag");
+            let PropertyValue::Struct { fields, .. } = &entries[0].value else {
+                panic!("{:?}", entries[0].value);
+            };
+            assert!(matches!(
+                find(fields, "X").value,
+                PropertyValue::Int { value: 6 }
+            ));
+            assert!(
+                matches!(&entries[1].value, PropertyValue::Struct { fields, .. } if fields.is_empty()),
+                "a new value is the empty tagged block"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(items_of(find(holder_fields(&after), "Structs")).is_empty());
+}
+
+/// Without a schema the tag cannot say which struct the elements are, so they stay undecoded
+/// and the rest of the package still reads.
+#[test]
+fn tagged_containers_of_structs_stay_undecoded_without_a_schema() {
+    let (asset, exports) = holder_package();
+    let parsed = parse(&asset, &exports);
+    let pairs = find(holder_fields(&parsed), "Pairs");
+    assert!(
+        matches!(&pairs.value, PropertyValue::Struct { fields, .. } if fields[0].name == "(undecoded)"),
+        "{:?}",
+        pairs.value
+    );
 }

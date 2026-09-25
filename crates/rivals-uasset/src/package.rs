@@ -925,7 +925,14 @@ fn parse_one_inner(
     let mut cursor = Cursor::new(slice, base.serial_offset as u64);
     let mut properties = Vec::new();
     let outcome = if tagged {
-        tagged::read_tagged_block(&mut cursor, ctx, diagnostics, 0, &mut properties)
+        tagged::read_tagged_block(
+            &mut cursor,
+            ctx,
+            diagnostics,
+            0,
+            &mut properties,
+            Some(&class_name),
+        )
     } else {
         match ctx.class_schema_at(&class_name, class_path.as_deref()) {
             Some(schema) => {
