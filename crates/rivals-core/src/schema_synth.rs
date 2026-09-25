@@ -419,7 +419,12 @@ mod game_data_tests {
         );
         let table = export.data_table.as_ref().expect("data table");
         assert_eq!(table.row_struct, "MarvelM2206UIHeroAsset");
-        assert_eq!(table.rows.len(), 4);
-        assert_eq!(table.columns.len(), 7);
+        // The shipped row and column counts move with the game; that the synthesised struct
+        // supplies a cell for every column of every row is what the test is for.
+        assert!(!table.rows.is_empty());
+        assert!(!table.columns.is_empty());
+        for row in &table.rows {
+            assert_eq!(row.fields.len(), table.columns.len(), "{}", row.name);
+        }
     }
 }

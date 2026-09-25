@@ -522,6 +522,10 @@ fn source_of(container: &str) -> AssetSource {
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
+    /// How many camera shakes a sweep is allowed to touch. The assertions below compare against
+    /// it rather than a shipped total, which moves with the game.
+    const LIMIT: usize = 12;
+
     use super::*;
     use rivals_uasset::MapEntry;
 
@@ -750,7 +754,7 @@ mod tests {
             &super::super::SaveOptions::default(),
         )
         .expect("sweep");
-        assert_eq!(report.matched, 12);
+        assert_eq!(report.matched, LIMIT);
         assert!(report.failed.is_empty(), "{:?}", report.failed);
         assert!(report.written.is_none(), "a dry run writes nothing");
         assert!(report.edits() > 0, "camera shakes store amplitudes");
@@ -804,7 +808,7 @@ mod tests {
 
         let missing = sweep_with(Some("StaticMesh"));
         assert_eq!(
-            missing.other_class, 12,
+            missing.other_class, LIMIT,
             "no camera shake holds a StaticMesh"
         );
         assert!(missing.changed.is_empty());

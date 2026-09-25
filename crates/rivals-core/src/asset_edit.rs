@@ -929,9 +929,10 @@ mod game_data_tests {
     /// `SerializablePropertySoftPath`, which the mappings describe as two reflected slots.
     const SOFT_PATH_TABLE: &str =
         "Marvel/Content/Marvel/Data/DataTable/GameMode/2201/1023/1023_2201_EffectTable.uasset";
-    /// A Blueprint whose class descends from another Blueprint class in a second package.
-    const PARENT_CHAIN: &str =
-        "Marvel/Content/Marvel/Blueprints/LevelGameplay/M2201/Avengers/M2201PhotoAreaBP_V3.uasset";
+    /// A Blueprint holding components of two Blueprint classes that live in second packages,
+    /// `WC_M2201BallGameTerminalBP_C` and `LevelScopeCheckComponentBP_C`. Neither decodes unless
+    /// the class is read out of its own package first.
+    const PARENT_CHAIN: &str = "Marvel/Content/Marvel/Blueprints/LevelGameplay/Activity/10151/M2201BallGameTerminalBP.uasset";
     /// A widget instancing a widget Blueprint class from a plugin mount point.
     const PLUGIN_WIDGET: &str = "Engine/Plugins/MovieScene/MovieRenderPipeline/Content/Blueprints/UI_MovieRenderPipelineScreenOverlay.uasset";
     /// A Niagara system whose GPU compute script carries seventeen data interface parameter infos,
@@ -1013,6 +1014,181 @@ mod game_data_tests {
     const INSTANCED: &str =
         "Marvel/Content/Marvel/Data/DataTable/GameMode/2206/AIAutoAbilityTable_Zombie.uasset";
 
+    /// Every asset these tests pin, so one check can tell which pins a game patch broke. A path
+    /// that is only ever used as an edit value, never opened, does not belong here.
+    const ALL_FIXTURES: &[(&str, &str)] = &[
+        ("STRINGS", STRINGS),
+        ("DEFAULTS", DEFAULTS),
+        ("MAPS", MAPS),
+        ("TITLES", TITLES),
+        ("SHAKE", SHAKE),
+        ("SAME_NAME_MAP", SAME_NAME_MAP),
+        ("ANIM_BLUEPRINT", ANIM_BLUEPRINT),
+        ("INPUT_CONTEXT", INPUT_CONTEXT),
+        ("REDIRECT_CUE", REDIRECT_CUE),
+        ("CHANNEL_ENUM", CHANNEL_ENUM),
+        ("TEXTURE", TEXTURE),
+        ("STATIC_MESH", STATIC_MESH),
+        ("ENTITY_TREE", ENTITY_TREE),
+        ("PER_PLATFORM_RATE", PER_PLATFORM_RATE),
+        ("SKELETAL_MESH", SKELETAL_MESH),
+        ("NUMBER_TEXT", NUMBER_TEXT),
+        ("FONT", FONT),
+        ("UNRESOLVED_CLASS", UNRESOLVED_CLASS),
+        ("METADATA_TABLE", METADATA_TABLE),
+        ("SUB_SEQUENCE_TREE", SUB_SEQUENCE_TREE),
+        ("TAGGED_TABLE", TAGGED_TABLE),
+        ("SOFT_PATH_TABLE", SOFT_PATH_TABLE),
+        ("PARENT_CHAIN", PARENT_CHAIN),
+        ("PLUGIN_WIDGET", PLUGIN_WIDGET),
+        ("GPU_SCRIPT", GPU_SCRIPT),
+        ("FLOAT_SECTION", FLOAT_SECTION),
+        ("TRANSFORM_SECTION", TRANSFORM_SECTION),
+        ("PATCHED_CUE", PATCHED_CUE),
+        ("STALE_CLASS_MAP", STALE_CLASS_MAP),
+        ("WIDGET_CLASS", WIDGET_CLASS),
+        ("WIDGET_INSTANCE", WIDGET_INSTANCE),
+        ("TWIN_PARENT_WIDGET", TWIN_PARENT_WIDGET),
+        ("TWIN_PARENT_INSTANCE", TWIN_PARENT_INSTANCE),
+        ("CLOTH_MESH", CLOTH_MESH),
+        ("SAMPLED_MESH", SAMPLED_MESH),
+        ("NANITE_MATERIAL", NANITE_MATERIAL),
+        ("POSE_ASSET", POSE_ASSET),
+        ("SOUND_CUE", SOUND_CUE),
+        ("RIG", RIG),
+        ("GROUND_MOTION_ANIM_BP", GROUND_MOTION_ANIM_BP),
+        ("CURVE_ANIM_BP", CURVE_ANIM_BP),
+        ("INSTANCED", INSTANCED),
+        ("LEVEL", LEVEL),
+        ("HOOP_BLUEPRINT", HOOP_BLUEPRINT),
+        ("STRING_TABLE", STRING_TABLE),
+        ("STRUCT", STRUCT),
+        ("NIAGARA", NIAGARA),
+    ];
+
+    /// Pinned paths that are never opened as a fixture, so the audit must not demand them.
+    const NOT_FIXTURES: &[&str] = &[OTHER_MATERIAL];
+
+    /// Every path the shipped game holds, mount-relative, the way a fixture constant spells it.
+    /// Enumeration only: no package bytes are read and no mappings are needed, so checking every
+    /// pin costs about as much as opening one of them.
+    fn shipped_package_paths(root: &str) -> std::collections::HashSet<String> {
+        use crate::pak::containers::{MOUNT_POINT, open_base_game_paks};
+        use retoc::{EIoChunkType, FIoChunkId};
+
+        let store = open_base_game_paks(&crate::paths::paks_dir(root), "pakchunk0-Windows")
+            .expect("open the base paks");
+        store
+            .packages_all()
+            .filter_map(|pkg| {
+                let chunk =
+                    FIoChunkId::from_package_id(pkg.id(), 0, EIoChunkType::ExportBundleData);
+                let path = store.chunk_path(chunk)?;
+                Some(path.strip_prefix(MOUNT_POINT).unwrap_or(&path).to_string())
+            })
+            .collect()
+    }
+
+    /// The gate above only earns its keep if its message is right, and a game patch is a poor time
+    /// to find out otherwise. This needs no game install, so it runs on CI where the rest cannot.
+    #[test]
+    fn a_missing_fixture_reads_as_path_rot_rather_than_a_decoder_bug() {
+        let gone = open_failure(
+            PARENT_CHAIN,
+            &format!("{PARENT_CHAIN} {} pakchunk0-Windows", asset::NOT_A_PACKAGE),
+        );
+        assert!(gone.contains("FIXTURE GONE"), "{gone}");
+        assert!(gone.contains(PARENT_CHAIN), "{gone}");
+
+        let broken = open_failure(STRINGS, "cursor ran past the end of the export");
+        assert!(!broken.contains("FIXTURE GONE"), "{broken}");
+        assert!(broken.contains("cursor ran past"), "{broken}");
+    }
+
+    /// A pinned asset the game no longer ships breaks its test with a failure that says nothing
+    /// about which other pins went with it. This names them all at once, so a patch costs one
+    /// re-pinning pass rather than a series of reruns.
+    #[test]
+    fn every_pinned_fixture_is_still_in_the_shipped_game() {
+        let Ok(root) = std::env::var("RIVALS_GAME_ROOT") else {
+            return;
+        };
+        let shipped = shipped_package_paths(&root);
+        // The one line that tells a run from a skip: both print `... ok` otherwise.
+        eprintln!(
+            "checked {} pinned fixtures against {} shipped packages",
+            ALL_FIXTURES.len() + NAMED_PAYLOADS.len(),
+            shipped.len()
+        );
+        // NAMED_PAYLOADS spells its pairs the other way round, path first.
+        let pinned = ALL_FIXTURES
+            .iter()
+            .map(|(name, path)| (*name, *path))
+            .chain(NAMED_PAYLOADS.iter().map(|(path, kind)| (*kind, *path)));
+        let mut dead: Vec<String> = pinned
+            .filter(|(_, path)| !shipped.contains(*path))
+            .map(|(name, path)| format!("  {name}: {path}"))
+            .collect();
+        dead.sort();
+        assert!(
+            dead.is_empty(),
+            "{} pinned fixture(s) are no longer in the shipped game:\n{}\n\nRe-pin each to an \
+             asset of the same shape (its doc comment says which), and update the export names \
+             the tests that use it assert.",
+            dead.len(),
+            dead.join("\n")
+        );
+    }
+
+    /// The audit is only as good as its list, and nothing makes a new constant join it. This reads
+    /// the test file back and fails if a pinned path escaped, which is cheaper than discovering it
+    /// a season later.
+    #[test]
+    fn the_fixture_list_holds_every_pinned_path() {
+        // Only this module's own constants: the unit tests above it use invented paths.
+        let source = include_str!("asset_edit.rs");
+        let source = source
+            .split_once("mod game_data_tests {")
+            .map(|(_, rest)| rest)
+            .unwrap_or(source);
+        let known: std::collections::HashSet<&str> = ALL_FIXTURES
+            .iter()
+            .map(|(_, path)| *path)
+            .chain(NAMED_PAYLOADS.iter().map(|(path, _)| *path))
+            .chain(NOT_FIXTURES.iter().copied())
+            .collect();
+        let missing: Vec<&str> = source
+            .split('"')
+            .filter(|part| {
+                (part.starts_with("Marvel/") || part.starts_with("Engine/"))
+                    && (part.ends_with(".uasset") || part.ends_with(".umap"))
+            })
+            .filter(|path| !known.contains(path))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "these pinned paths are in no fixture list, so the audit would not notice them going \
+             missing. Add each to ALL_FIXTURES, or to NOT_FIXTURES if it is never opened:\n{}",
+            missing.join("\n")
+        );
+    }
+
+    /// Tells fixture rot apart from a decoder failure. A pinned asset that a game patch removed is
+    /// the common case after an update and says nothing about the reader, so it must not read like
+    /// a bug in one.
+    fn open_failure(entry: &str, error: &str) -> String {
+        if !error.contains(asset::NOT_A_PACKAGE) {
+            return format!("load the fixture {entry}: {error}");
+        }
+        format!(
+            "FIXTURE GONE: {entry} is not in the shipped game.\n\n\
+             This is fixture rot from a game patch, not a decoder failure. The constant needs \
+             re-pinning to an asset of the same shape (its doc comment says which shape), and any \
+             export names this test asserts will need updating with it. Run \
+             `every_pinned_fixture_is_still_in_the_shipped_game` for the full list of dead pins."
+        )
+    }
+
     struct Fixture {
         root: String,
         container: String,
@@ -1031,7 +1207,7 @@ mod game_data_tests {
             );
             let schema = mappings::load(std::path::Path::new(&usmap)).expect("mappings");
             let loaded = asset::load_bundle(&root, &container, entry, AssetSource::Utoc)
-                .expect("load the table");
+                .unwrap_or_else(|e| panic!("{}", open_failure(entry, &e)));
             Some(Self {
                 root,
                 container,
@@ -1145,20 +1321,52 @@ mod game_data_tests {
         }
     }
 
-    /// The first field of `kind` anywhere in the table, with the row it came from.
+    /// A replacement for this cell that is the same width and differs in exactly one byte: a bool
+    /// flips, an integer flips its low bit, an ASCII string swaps its first character. Which kind
+    /// supplies it does not matter, the width is what is under test.
+    fn one_byte_change(field: &PropertyEntry) -> Option<String> {
+        match &field.value {
+            PropertyValue::Bool { value } => Some((!value).to_string()),
+            PropertyValue::Int { value } => Some((value ^ 1).to_string()),
+            PropertyValue::Str { value } => {
+                let first = value.chars().next()?;
+                first.is_ascii_graphic().then(|| {
+                    let swapped = if first == 'A' { 'B' } else { 'A' };
+                    format!("{swapped}{}", &value[first.len_utf8()..])
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// The first row cell the predicate accepts. A miss usually means a game patch reshaped the
+    /// table, so the message says what the table does hold rather than only that nothing matched.
     fn field_where(
         parsed: &rivals_uasset::ParsedPackage,
+        what: &str,
         want: impl Fn(&PropertyEntry) -> bool,
     ) -> PropertyEntry {
-        parsed.exports[0]
+        let table = parsed.exports[0]
             .data_table
             .as_ref()
-            .expect("a data table")
+            .unwrap_or_else(|| panic!("{} holds no data table", parsed.info.package_name));
+        table
             .rows
             .iter()
             .flat_map(|row| &row.fields)
             .find(|field| want(field))
-            .expect("a field matching the test's needs")
+            .unwrap_or_else(|| {
+                let mut kinds: std::collections::BTreeMap<String, usize> = Default::default();
+                for field in table.rows.iter().flat_map(|row| &row.fields).filter(|f| stored(f)) {
+                    *kinds.entry(rivals_uasset::kind_of(&field.value)).or_default() += 1;
+                }
+                let held: Vec<String> = kinds.iter().map(|(k, n)| format!("{k} x{n}")).collect();
+                panic!(
+                    "no stored cell that {what} in {}; its stored cells are {}.\nIf a game patch reshaped the table, widen the test or re-pin it.",
+                    parsed.info.package_name,
+                    held.join(", ")
+                )
+            })
             .clone()
     }
 
@@ -1305,19 +1513,12 @@ mod game_data_tests {
             return;
         };
         let before = fixture.parse();
-        let field = field_where(&before, |f| {
-            matches!(f.value, PropertyValue::Bool { .. }) && stored(f)
+        let field = field_where(&before, "can be rewritten one byte wide", |f| {
+            stored(f) && one_byte_change(f).is_some()
         });
-        let PropertyValue::Bool { value: was } = field.value else {
-            unreachable!()
-        };
+        let text = one_byte_change(&field).expect("the predicate accepted this cell");
 
-        let (patched, after) = fixture.apply(vec![edit_of(
-            &field,
-            EditOp::Set {
-                text: (!was).to_string(),
-            },
-        )]);
+        let (patched, after) = fixture.apply(vec![edit_of(&field, EditOp::Set { text })]);
 
         let changed: Vec<usize> = fixture
             .loaded
@@ -1348,7 +1549,7 @@ mod game_data_tests {
             return;
         };
         let before = fixture.parse();
-        let field = field_where(&before, |f| {
+        let field = field_where(&before, "is a stored non-empty string", |f| {
             matches!(&f.value, PropertyValue::Str { value } if !value.is_empty()) && stored(f)
         });
         let PropertyValue::Str { value: ref was } = field.value else {
@@ -1428,7 +1629,7 @@ mod game_data_tests {
             return;
         };
         let before = fixture.parse();
-        let field = field_where(&before, |f| {
+        let field = field_where(&before, "is a stored non-empty string", |f| {
             matches!(&f.value, PropertyValue::Str { value } if !value.is_empty()) && stored(f)
         });
         let (_, after) = fixture.apply(vec![edit_of(
@@ -1448,7 +1649,7 @@ mod game_data_tests {
             return;
         };
         let before = fixture.parse();
-        let field = field_where(&before, |f| {
+        let field = field_where(&before, "is an int left to its default", |f| {
             matches!(f.value, PropertyValue::Int { .. })
                 && !stored(f)
                 && f.slot.is_some_and(|slot| slot.declared == "Int")
@@ -1485,7 +1686,7 @@ mod game_data_tests {
             return;
         };
         let before = fixture.parse();
-        let field = field_where(&before, |f| {
+        let field = field_where(&before, "is a four byte int", |f| {
             matches!(f.value, PropertyValue::Int { .. })
                 && f.span.is_some_and(|(start, end)| end - start == 4)
         });
@@ -1552,7 +1753,7 @@ mod game_data_tests {
             return;
         };
         let before = fixture.parse();
-        let field = field_where(&before, |f| {
+        let field = field_where(&before, "is a stored soft object path", |f| {
             matches!(&f.value, PropertyValue::SoftObject { path } if !path.is_empty()) && stored(f)
         });
         let wanted = "/Game/Marvel/UI/Invented/WBP_NotReal.WBP_NotReal_C";
@@ -1612,6 +1813,7 @@ mod game_data_tests {
             .expect("two different asset references");
         let field = field_where(
             &before,
+            "is the soft object path this test wrote",
             |f| matches!(&f.value, PropertyValue::SoftObject { path } if *path == paths[0]),
         );
 
@@ -1643,7 +1845,7 @@ mod game_data_tests {
             return;
         };
         let before = fixture.parse();
-        let field = field_where(&before, |f| {
+        let field = field_where(&before, "is a stored name", |f| {
             matches!(&f.value, PropertyValue::Name { .. }) && stored(f)
         });
         let wanted = "ANameNoPackageHasEverHeldBefore";
@@ -3212,7 +3414,7 @@ mod game_data_tests {
         );
         let table = export.string_table.as_ref().expect("string table");
         assert_eq!(table.namespace, "104_Currency_ST");
-        assert_eq!(table.entries.len(), 33);
+        assert!(!table.entries.is_empty());
         assert_eq!(table.entries[0].key, "MarvelCurrencyTable_1_Description");
         assert!(!table.entries[0].source.is_empty());
         let layout = parsed
@@ -3220,14 +3422,19 @@ mod game_data_tests {
             .iter()
             .find(|layout| layout.export == 0)
             .expect("layout");
-        assert_eq!(layout.entries.len(), 33);
+        // The count the table ships is scenery; that the layout accounts for every entry, end to
+        // end and up to the trailer, is the invariant.
+        assert_eq!(layout.entries.len(), table.entries.len());
         assert!(
             layout
                 .entries
                 .windows(2)
                 .all(|pair| pair[0].end == pair[1].key.0)
         );
-        assert_eq!(layout.entries[32].end, layout.trailer_at);
+        assert_eq!(
+            layout.entries.last().expect("an entry").end,
+            layout.trailer_at
+        );
     }
 
     /// A Blueprint struct's export reads to its end, default instance included, and hands back the
@@ -3776,7 +3983,7 @@ mod game_data_tests {
             return;
         };
         let before = fixture.parse();
-        let field = field_where(&before, |f| {
+        let field = field_where(&before, "is a stored string", |f| {
             matches!(&f.value, PropertyValue::Str { .. }) && stored(f)
         });
         let mut edit = edit_of(&field, EditOp::Set { text: "x".into() });
@@ -4177,7 +4384,7 @@ mod game_data_tests {
             "{:?}",
             parsed.twins
         );
-        let default_object = export_at(&parsed, 48);
+        let default_object = export_named(&parsed, "Default__WBP_LeagueSchedule_Dual_C");
         assert!(
             matches!(default_object.status, ExportStatus::Complete),
             "{:?}",
@@ -4187,8 +4394,7 @@ mod game_data_tests {
             return;
         };
         let parsed = instance.parse();
-        let item = export_at(&parsed, 12);
-        assert_eq!(item.class_name, "WBP_LeagueSchedule_Dual_C");
+        let item = export_of_class(&parsed, "WBP_LeagueSchedule_Dual_C");
         assert!(
             matches!(item.status, ExportStatus::Complete),
             "{:?}",
@@ -4206,7 +4412,7 @@ mod game_data_tests {
             return;
         };
         let parsed = fixture.parse();
-        let default_object = export_at(&parsed, 0);
+        let default_object = &parsed.exports[cdo(&parsed)];
         assert!(
             !matches!(
                 default_object.status,
@@ -4236,41 +4442,45 @@ mod game_data_tests {
     /// starts after its skeleton guid, and the rest are named as the payloads they are.
     #[test]
     fn class_tails_read_or_name_every_formerly_unexplained_export() {
-        let complete = |entry: &'static str, index: u32, field: &str| {
+        let complete = |entry: &'static str, class: &str, field: &str| {
             let Some(fixture) = Fixture::open(entry) else {
                 return false;
             };
             let parsed = fixture.parse();
-            let export = export_at(&parsed, index);
+            let export = export_of_class(&parsed, class);
             assert!(
                 matches!(export.status, ExportStatus::Complete),
-                "{entry}#{index}: {:?} {:?}",
+                "{entry}#{class}: {:?} {:?}",
                 export.status,
                 export.note
             );
             if !field.is_empty() {
                 find_field(&export.properties, &|f| f.name == field)
-                    .unwrap_or_else(|| panic!("{entry}#{index} has {field}"));
+                    .unwrap_or_else(|| panic!("{entry}#{class} has {field}"));
             }
             true
         };
-        if !complete(POSE_ASSET, 0, "SkeletonGuid") {
+        if !complete(POSE_ASSET, "PoseAsset", "SkeletonGuid") {
             return;
         }
-        complete(SOUND_CUE, 0, "");
-        complete(SOUND_CUE, 2, "SoundWave");
-        complete(RIG, 0, "");
+        complete(SOUND_CUE, "SoundCue", "");
+        complete(SOUND_CUE, "SoundNodeWavePlayer", "SoundWave");
+        complete(RIG, "Rig", "");
         for (entry, kind) in NAMED_PAYLOADS {
-            let fixture = Fixture::open(entry).expect("game data is present");
+            let Some(fixture) = Fixture::open(entry) else {
+                return;
+            };
             let parsed = fixture.parse();
-            let export = export_at(&parsed, 0);
+            let export = main_export(&parsed, entry);
             assert!(
                 matches!(&export.status, ExportStatus::Payload { kind: found, .. } if *found == kind),
                 "{entry}: {:?}",
                 export.status
             );
         }
-        let fixture = Fixture::open(PER_PLATFORM_RATE).expect("game data is present");
+        let Some(fixture) = Fixture::open(PER_PLATFORM_RATE) else {
+            return;
+        };
         let parsed = fixture.parse();
         let sequence = parsed
             .exports
@@ -4349,11 +4559,14 @@ mod game_data_tests {
             return;
         };
         let parsed = fixture.parse();
-        for index in [429, 413] {
-            let export = export_at(&parsed, index);
+        for export in [
+            export_of_class(&parsed, "WidgetBlueprintGeneratedClass"),
+            export_named(&parsed, "Default__WBP_Common_Item_V2_Light_C"),
+        ] {
             assert!(
                 matches!(export.status, ExportStatus::Complete),
-                "export {index}: {:?} {:?}",
+                "export {}: {:?} {:?}",
+                export.index,
                 export.status,
                 export.note
             );
@@ -4362,8 +4575,7 @@ mod game_data_tests {
             return;
         };
         let parsed = instance.parse();
-        let item = export_at(&parsed, 16);
-        assert_eq!(item.class_name, "WBP_Common_Item_V2_Light_C");
+        let item = export_of_class(&parsed, "WBP_Common_Item_V2_Light_C");
         assert!(
             matches!(item.status, ExportStatus::Complete),
             "{:?}",
@@ -4380,17 +4592,8 @@ mod game_data_tests {
             return;
         };
         let parsed = fixture.parse();
-        let actor = parsed
-            .exports
-            .iter()
-            .find(|e| e.index == 380)
-            .expect("export 380");
-        assert_eq!(actor.class_name, "SM_TokyoH01Building006A_C");
-        assert!(
-            matches!(actor.status, ExportStatus::Complete),
-            "{:?}",
-            actor.status
-        );
+        let actor = export_of_class(&parsed, "SM_TokyoH01Building006A_C");
+        assert_complete(actor);
         let stored_property = |name: &str| {
             actor
                 .properties
@@ -4398,9 +4601,11 @@ mod game_data_tests {
                 .find(|p| p.name == name && stored(p))
                 .unwrap_or_else(|| panic!("{name} stored"))
         };
+        // The path, not the export number: the number moves whenever the level is rebuilt.
         assert!(matches!(
-            stored_property("RootComponent").value,
-            PropertyValue::Object { index: 372, .. }
+            &stored_property("RootComponent").value,
+            PropertyValue::Object { path: Some(path), .. }
+                if path.ends_with(&format!("{}:SM_TokyoH01Building006A", actor.object_name))
         ));
         assert!(matches!(
             &stored_property("BlueprintCreatedComponents").value,
@@ -4422,21 +4627,27 @@ mod game_data_tests {
             return;
         };
         let parsed = fixture.parse();
-        let actor = parsed
+        let twins: Vec<&rivals_uasset::ParsedExport> = parsed
             .exports
             .iter()
-            .find(|e| e.index == 931)
-            .expect("export 931");
-        assert_eq!(actor.class_name, "SM_NewYorkM01Building020A_C");
+            .filter(|e| e.class_name == "SM_NewYorkM01Building020A_C")
+            .collect();
+        assert!(!twins.is_empty(), "the twinned class is instanced");
+        for actor in &twins {
+            assert_complete(actor);
+        }
+        // Only an instance that overrides them stores these, so one carrying both is what proves
+        // the class was read through its own path rather than its twin's.
+        let stored_named = |actor: &rivals_uasset::ParsedExport, name: &str| {
+            actor.properties.iter().any(|p| p.name == name && stored(p))
+        };
         assert!(
-            matches!(actor.status, ExportStatus::Complete),
-            "{:?}",
-            actor.status
+            twins
+                .iter()
+                .any(|actor| stored_named(actor, "RootComponent")
+                    && stored_named(actor, "BlueprintCreatedComponents")),
+            "no instance of the twinned class stores its components"
         );
-        let stored_named =
-            |name: &str| actor.properties.iter().any(|p| p.name == name && stored(p));
-        assert!(stored_named("RootComponent"));
-        assert!(stored_named("BlueprintCreatedComponents"));
     }
 
     /// The default object's sparse class data is a struct reference and a block of a struct this
@@ -4691,6 +4902,9 @@ mod game_data_tests {
         }
     }
 
+    /// Only for an export a test has already identified by content, so it can be looked up again
+    /// in a re-parsed package. Addressing one by a written-down index instead rots: the table
+    /// reshuffles on a game patch and the lookup silently returns a different export.
     fn export_at(
         parsed: &rivals_uasset::ParsedPackage,
         index: u32,
@@ -4700,6 +4914,61 @@ mod game_data_tests {
             .iter()
             .find(|e| e.index == index)
             .unwrap_or_else(|| panic!("export {index}"))
+    }
+
+    /// The package's main object, which the cooker names after the package file. That name
+    /// survives a patch where the export's place in the table does not.
+    fn main_export<'a>(
+        parsed: &'a rivals_uasset::ParsedPackage,
+        entry: &str,
+    ) -> &'a rivals_uasset::ParsedExport {
+        let stem = entry.rsplit('/').next().unwrap_or(entry);
+        let stem = stem.split('.').next().unwrap_or(stem);
+        export_named(parsed, stem)
+    }
+
+    fn export_of_class<'a>(
+        parsed: &'a rivals_uasset::ParsedPackage,
+        class: &str,
+    ) -> &'a rivals_uasset::ParsedExport {
+        export_where(parsed, &format!("of class {class:?}"), |e| {
+            e.class_name == class
+        })
+    }
+
+    fn export_named<'a>(
+        parsed: &'a rivals_uasset::ParsedPackage,
+        name: &str,
+    ) -> &'a rivals_uasset::ParsedExport {
+        export_where(parsed, &format!("named {name:?}"), |e| {
+            e.object_name == name
+        })
+    }
+
+    /// The first export the predicate accepts. A miss lists what the package does hold, since the
+    /// usual cause is a game patch reshaping the asset and the next step is picking a new key.
+    fn export_where<'a>(
+        parsed: &'a rivals_uasset::ParsedPackage,
+        what: &str,
+        want: impl Fn(&rivals_uasset::ParsedExport) -> bool,
+    ) -> &'a rivals_uasset::ParsedExport {
+        parsed.exports.iter().find(|e| want(e)).unwrap_or_else(|| {
+            let held: Vec<String> = parsed
+                .exports
+                .iter()
+                .take(40)
+                .map(|e| format!("[{}] {} {}", e.index, e.class_name, e.object_name))
+                .collect();
+            panic!(
+                "no export {what} in this package.\nIt holds: {}{}\nIf a game patch reshaped the asset, re-pin the test to what it holds now.",
+                held.join(", "),
+                if parsed.exports.len() > 40 {
+                    format!(" and {} more", parsed.exports.len() - 40)
+                } else {
+                    String::new()
+                }
+            )
+        })
     }
 
     fn assert_not_failed(export: &rivals_uasset::ParsedExport) {
@@ -4728,8 +4997,7 @@ mod game_data_tests {
             return;
         };
         let parsed = fixture.parse();
-        let compiled = export_at(&parsed, 183);
-        assert_eq!(compiled.class_name, "MovieSceneCompiledData");
+        let compiled = export_of_class(&parsed, "MovieSceneCompiledData");
         assert_complete(compiled);
         let child = find_field(&compiled.properties, &|f| {
             f.name == "ChildNodes" && f.element == Some(0)
@@ -4752,7 +5020,7 @@ mod game_data_tests {
             return;
         };
         let parsed = fixture.parse();
-        let animation = export_at(&parsed, 0);
+        let animation = export_of_class(&parsed, "AnimSequence");
         assert_not_failed(animation);
         let rate = find_field(&animation.properties, &|f| {
             f.name == "PlatformTargetFrameRate"
@@ -4766,7 +5034,7 @@ mod game_data_tests {
             return;
         };
         let parsed = fixture.parse();
-        let mesh = export_at(&parsed, 1);
+        let mesh = export_of_class(&parsed, "SkeletalMesh");
         assert_not_failed(mesh);
         let hysteresis =
             find_field(&mesh.properties, &|f| f.name == "LODHysteresis").expect("LODHysteresis");
@@ -4783,8 +5051,9 @@ mod game_data_tests {
             return;
         };
         let parsed = fixture.parse();
-        let component = export_at(&parsed, 3179);
+        let component = export_named(&parsed, "ThresholdValueText");
         assert_complete(component);
+        let at = component.index;
         let text = find_field(&component.properties, &|f| f.name == "Text").expect("Text");
         assert!(
             matches!(&text.value, PropertyValue::Text { value: Some(v), .. } if v == "2"),
@@ -4793,7 +5062,7 @@ mod game_data_tests {
         );
 
         let (_, reread) = fixture.apply(vec![edit_of(text, EditOp::Set { text: "3".into() })]);
-        let component = export_at(&reread, 3179);
+        let component = export_at(&reread, at);
         assert_complete(component);
         let after = find_field(&component.properties, &|f| f.name == "Text").expect("Text");
         assert!(
@@ -4810,7 +5079,7 @@ mod game_data_tests {
             return;
         };
         let parsed = fixture.parse();
-        let font = export_at(&parsed, 0);
+        let font = export_of_class(&parsed, "Font");
         assert_not_failed(font);
         let asset =
             find_field(&font.properties, &|f| f.name == "FontFaceAsset").expect("FontFaceAsset");
@@ -4825,14 +5094,11 @@ mod game_data_tests {
             return;
         };
         let parsed = fixture.parse();
-        let component = export_at(&parsed, 30);
         // The class is a script import the game's table cannot name, so retoc carries its raw
         // index through the legacy form rather than a placeholder.
-        assert!(
-            rivals_uasset::is_unresolved_import_name(&component.class_name),
-            "{}",
-            component.class_name
-        );
+        let component = export_where(&parsed, "instancing a class this build lacks", |e| {
+            rivals_uasset::is_unresolved_import_name(&e.class_name)
+        });
         assert!(
             component.class_name.starts_with("__zenrawscripthash_"),
             "{}",
@@ -5354,7 +5620,8 @@ mod game_data_tests {
             return;
         };
         let before = fixture.parse();
-        let export = export_at(&before, 256);
+        let export = export_of_class(&before, "MovieSceneFloatSection");
+        let at = export.index;
         let channel = find_field(&export.properties, &|f| {
             f.span.is_some()
                 && matches!(&f.value, PropertyValue::Struct { name, .. } if name == "MovieSceneFloatChannel")
@@ -5399,7 +5666,7 @@ mod game_data_tests {
             }],
             ..Default::default()
         });
-        let export = export_at(&after, 256);
+        let export = export_at(&after, at);
         assert_complete(export);
         let now = find_field(&export.properties, &|f| {
             f.name == channel.name && f.element == channel.element && f.span.is_some()
@@ -5432,7 +5699,7 @@ mod game_data_tests {
                 text: within.to_string(),
             },
         )]);
-        let export = export_at(&retimed, 256);
+        let export = export_at(&retimed, at);
         assert_complete(export);
         let now = find_field(&export.properties, &|f| {
             f.name == channel.name && f.element == channel.element && f.span.is_some()
@@ -5629,7 +5896,8 @@ mod game_data_tests {
             return;
         };
         let before = fixture.parse();
-        let export = export_at(&before, 256);
+        let export = export_of_class(&before, "MovieSceneFloatSection");
+        let at = export.index;
         assert_complete(export);
         let channel = find_field(&export.properties, &|f| {
             f.span.is_some()
@@ -5676,7 +5944,7 @@ mod game_data_tests {
             ],
             ..Default::default()
         });
-        let export = export_at(&after, 256);
+        let export = export_at(&after, at);
         assert_complete(export);
         let now = find_field(&export.properties, &|f| {
             f.name == channel.name
@@ -5875,7 +6143,9 @@ mod game_data_tests {
             return;
         };
         let parsed = fixture.parse();
-        let table_export = export_at(&parsed, 0);
+        let table_export = export_where(&parsed, "carrying a string table", |e| {
+            e.string_table.is_some()
+        });
         assert_complete(table_export);
         let table = table_export.string_table.as_ref().expect("a string table");
         let with_metadata = table
@@ -5892,8 +6162,7 @@ mod game_data_tests {
             return;
         };
         let parsed = fixture.parse();
-        let compiled = export_at(&parsed, 348);
-        assert_eq!(compiled.class_name, "MovieSceneCompiledData");
+        let compiled = export_of_class(&parsed, "MovieSceneCompiledData");
         assert_complete(compiled);
         let counter = find_field(&compiled.properties, &|f| {
             f.name == "RootToSequenceWarpCounter"
@@ -5912,35 +6181,32 @@ mod game_data_tests {
             return;
         };
         let parsed = fixture.parse();
-        let table_export = export_at(&parsed, 0);
+        let table_export = export_where(&parsed, "carrying a string table", |e| {
+            e.string_table.is_some()
+        });
         assert_complete(table_export);
         let table = table_export.string_table.as_ref().expect("a string table");
         assert!(table.entries.iter().any(|entry| entry.tag == "Encrypt"));
         assert!(table.entries.iter().any(|entry| entry.tag.is_empty()));
     }
 
-    /// A Blueprint class whose parent is another Blueprint class: the parent's package has to be
-    /// read too, or the chain never roots at Object and the class reads as unknown. The package's
-    /// own class, by contrast, names a parent retoc could not resolve, so its default object has
-    /// no layout at all and is named for what it is.
+    /// A component whose class is a Blueprint class in another package: that package has to be
+    /// read too, or the chain never roots at Object and the component reads as unknown. The
+    /// opposite case, a class this build cannot resolve at all, is
+    /// `an_instance_of_a_class_this_build_lacks_is_an_opaque_payload`.
     #[test]
     fn a_blueprint_class_with_a_blueprint_parent_reads_through_its_parent_package() {
         let Some(fixture) = Fixture::open(PARENT_CHAIN) else {
             return;
         };
         let parsed = fixture.parse();
-        let component = export_at(&parsed, 11);
-        assert_eq!(component.class_name, "WC_M2201PhotoAreaBP_C");
-        assert_complete(component);
-
-        let default_object = export_at(&parsed, 3);
-        assert_eq!(default_object.class_name, "M2201PhotoAreaBP_V3_C");
-        assert!(
-            matches!(&default_object.status, ExportStatus::Payload { kind, .. }
-                if *kind == "instance of a class this build does not have"),
-            "{:?}",
-            default_object.status
-        );
+        for class in [
+            "WC_M2201BallGameTerminalBP_C",
+            "LevelScopeCheckComponentBP_C",
+        ] {
+            assert_complete(export_of_class(&parsed, class));
+        }
+        assert_complete(export_named(&parsed, "Default__M2201BallGameTerminalBP_C"));
     }
 
     /// A widget Blueprint class under a plugin mount point: the import's class is a
@@ -5952,8 +6218,7 @@ mod game_data_tests {
             return;
         };
         let parsed = fixture.parse();
-        let row = export_at(&parsed, 41);
-        assert_eq!(row.class_name, "UI_MovieRenderPipelineInfoTableRow_C");
+        let row = export_of_class(&parsed, "UI_MovieRenderPipelineInfoTableRow_C");
         assert_complete(row);
     }
 
@@ -5965,12 +6230,7 @@ mod game_data_tests {
             return;
         };
         let parsed = fixture.parse();
-        let script = parsed
-            .exports
-            .iter()
-            .find(|e| e.index == 151)
-            .expect("export 151");
-        assert_eq!(script.object_name, "GPUComputeScript");
+        let script = export_named(&parsed, "GPUComputeScript");
         assert!(
             matches!(&script.status, ExportStatus::Payload { kind, .. } if *kind == "particle system data"),
             "{:?}",
@@ -6134,12 +6394,8 @@ mod game_data_tests {
             return;
         };
         let parsed = fixture.parse();
-        let section = parsed
-            .exports
-            .iter()
-            .find(|e| e.index == 256)
-            .expect("export 256");
-        assert_eq!(section.class_name, "MovieSceneFloatSection");
+        let section = export_of_class(&parsed, "MovieSceneFloatSection");
+        let at = section.index;
         assert!(
             matches!(section.status, ExportStatus::Complete),
             "{:?}",
@@ -6173,11 +6429,7 @@ mod game_data_tests {
                 text: "0.75".into(),
             },
         )]);
-        let section = reread
-            .exports
-            .iter()
-            .find(|e| e.index == 256)
-            .expect("export 256");
+        let section = export_at(&reread, at);
         assert!(
             matches!(section.status, ExportStatus::Complete),
             "{:?}",
@@ -6201,12 +6453,7 @@ mod game_data_tests {
             return;
         };
         let parsed = fixture.parse();
-        let section = parsed
-            .exports
-            .iter()
-            .find(|e| e.index == 2)
-            .expect("export 2");
-        assert_eq!(section.class_name, "MovieScene3DTransformSection");
+        let section = export_of_class(&parsed, "MovieScene3DTransformSection");
         assert!(
             matches!(section.status, ExportStatus::Complete),
             "{:?}",
@@ -6232,11 +6479,7 @@ mod game_data_tests {
             return;
         };
         let parsed = fixture.parse();
-        let default_object = parsed
-            .exports
-            .iter()
-            .find(|e| e.index == 1)
-            .expect("export 1");
+        let default_object = &parsed.exports[cdo(&parsed)];
         assert_eq!(default_object.class_name, "Cue_Summoner_Loop_10370301_BP_C");
         assert!(
             matches!(default_object.status, ExportStatus::Complete),
@@ -6253,18 +6496,14 @@ mod game_data_tests {
             return;
         };
         let parsed = fixture.parse();
-        for index in [20, 21, 22] {
-            let component = parsed
-                .exports
-                .iter()
-                .find(|e| e.index == index)
-                .expect("Niagara component");
-            assert_eq!(component.class_name, "NiagaraComponent");
-            assert!(
-                matches!(component.status, ExportStatus::Complete),
-                "export {index}: {:?}",
-                component.status
-            );
+        let components: Vec<&rivals_uasset::ParsedExport> = parsed
+            .exports
+            .iter()
+            .filter(|e| e.class_name == "NiagaraComponent")
+            .collect();
+        assert!(components.len() >= 3, "{} found", components.len());
+        for component in components {
+            assert_complete(component);
         }
     }
 
@@ -6309,7 +6548,7 @@ mod game_data_tests {
             return;
         };
         let before = fixture.parse();
-        let field = field_where(&before, |f| {
+        let field = field_where(&before, "is a stored string", |f| {
             matches!(&f.value, PropertyValue::Str { .. }) && stored(f)
         });
         let mut edit = edit_of(&field, EditOp::Set { text: "x".into() });

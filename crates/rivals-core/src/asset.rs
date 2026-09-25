@@ -212,7 +212,7 @@ fn load_from_utoc(
         })
     }
     .ok_or_else(|| {
-        format!("{entry} is not a package in {container_name} or the base paks beside it")
+        format!("{entry} {NOT_A_PACKAGE} {container_name} or the base paks beside it")
     })?;
 
     PackageConverter::new(&*store).convert(package_id, &package_path)
@@ -235,6 +235,10 @@ pub fn list_pak_entries(pak_path: &str) -> Result<Vec<String>, String> {
         .map(|path| path.strip_prefix(MOUNT_POINT).unwrap_or(&path).to_string())
         .collect())
 }
+
+/// The marker in the error `load_bundle` returns for an entry no container holds, so a caller can
+/// tell an asset the game no longer ships from a decode failure.
+pub const NOT_A_PACKAGE: &str = "is not a package in";
 
 /// One package in a container: its id and its mount-relative path.
 pub type PackageEntry = (retoc::FPackageId, String);
