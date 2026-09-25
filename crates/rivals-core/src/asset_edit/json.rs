@@ -46,6 +46,12 @@ pub struct EditList {
     /// the package in.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependencies: Vec<DependencyEdit>,
+    /// What the edits were written against. An edit file without it is applied unchecked.
+    #[serde(default, skip_serializing_if = "rivals_uasset::Expected::is_empty")]
+    pub expect: rivals_uasset::Expected,
+    /// Apply even where the package no longer matches `expect`. Set by the caller, never stored.
+    #[serde(skip)]
+    pub allow_drift: bool,
 }
 
 /// New bytes for one bulk data resource, as a file to read them from.
@@ -77,6 +83,43 @@ impl EditList {
             && self.duplicate_exports.is_empty()
             && self.export_edits.is_empty()
             && self.dependencies.is_empty()
+    }
+
+    /// Records what these edits find in `parsed`, the package they were written against, so applying
+    /// them to one that has changed since is refused.
+    pub fn expect_from(&mut self, parsed: &rivals_uasset::ParsedPackage) {
+        // Only which exports and resources the files name matters here, not their bytes.
+        let skeleton = PackageEdits {
+            bulk: self
+                .bulk
+                .iter()
+                .map(|entry| BulkEdit {
+                    resource: entry.resource,
+                    bytes: Vec::new(),
+                })
+                .collect(),
+            payloads: self
+                .payloads
+                .iter()
+                .map(|entry| PayloadEdit {
+                    export: entry.export,
+                    bytes: Vec::new(),
+                })
+                .collect(),
+            values: self.values.clone(),
+            imports: self.imports.clone(),
+            rows: self.rows.clone(),
+            strings: self.strings.clone(),
+            keys: self.keys.clone(),
+            scripts: self.scripts.clone(),
+            remove_exports: self.remove_exports.clone(),
+            reset_exports: self.reset_exports.clone(),
+            duplicate_exports: self.duplicate_exports.clone(),
+            exports: self.export_edits.clone(),
+            dependencies: self.dependencies.clone(),
+            ..Default::default()
+        };
+        self.expect = rivals_uasset::expectations(parsed, &skeleton);
     }
 
     /// Reads the bulk and payload files, so what comes back is what the patcher takes. A relative
@@ -119,6 +162,8 @@ impl EditList {
             duplicate_exports: self.duplicate_exports,
             exports: self.export_edits,
             dependencies: self.dependencies,
+            expect: self.expect,
+            allow_drift: self.allow_drift,
         })
     }
 }

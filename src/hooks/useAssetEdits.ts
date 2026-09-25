@@ -10,7 +10,7 @@ import {
 
 import { invoke } from "@tauri-apps/api/core";
 
-import type { PropertyEntry } from "@/components/AssetInspector";
+import type { PropertyEntry, PropertyValue } from "@/components/AssetInspector";
 import { emitModsChanged } from "@/lib/modsEvents";
 
 /**
@@ -74,6 +74,35 @@ export interface EditTarget {
   /** A constant inside a function's bytecode: the export, the statement's offset, and which
    *  literal in that statement. */
   script?: { export: number; statement: number; constant: number };
+  /** The value as it read when the draft was made, so a save refuses one that has since changed. */
+  was?: string;
+}
+
+/** A value as an edit types it, for the kinds the backend can compare that way. */
+function valueText(value: PropertyValue | undefined): string | undefined {
+  switch (value?.kind) {
+    case "str":
+    case "name":
+      return value.value;
+    case "soft_object":
+      return value.path;
+    case "text":
+      return value.parts?.length ? undefined : value.value;
+    case "object":
+      return value.path ?? String(value.index);
+    case "bool":
+    case "float":
+      return String(value.value);
+    case "int":
+    case "uint":
+    case "byte":
+      // Past 2^53 a number no longer reads back exactly.
+      return Number.isSafeInteger(value.value) ? String(value.value) : undefined;
+    case "enum":
+      return value.name ?? String(value.value);
+    default:
+      return undefined;
+  }
 }
 
 export interface DraftRecord {
@@ -111,6 +140,7 @@ export function entryTarget(entry: PropertyEntry): EditTarget | null {
     name: entry.name,
     element: entry.element,
     kind: entry.value.kind,
+    was: valueText(entry.value),
   };
 }
 
@@ -119,9 +149,15 @@ export function entryTarget(entry: PropertyEntry): EditTarget | null {
 export function elementTarget(container: PropertyEntry, index: number): EditTarget | null {
   const base = entryTarget(container);
   if (!base) return null;
-  const kind = container.value.kind;
-  if (kind !== "array" && kind !== "set" && kind !== "map") return null;
-  return { ...base, index };
+  const value = container.value;
+  const element =
+    value.kind === "array" || value.kind === "set"
+      ? value.items[index]
+      : value.kind === "map"
+        ? value.entries[index]?.value
+        : null;
+  if (element === null) return null;
+  return { ...base, index, was: valueText(element) };
 }
 
 /** The payload export `exportIndex` carries after its properties. */
@@ -401,6 +437,26 @@ interface EditList {
   duplicate_exports?: { export: number; name: string; into_level?: number }[];
   export_edits?: ExportEdit[];
   dependencies?: DependencyEdit[];
+  expect?: {
+    exports?: Record<number, string>;
+    values?: Record<string, string>;
+  };
+}
+
+/** What the drafts read when they were made: the edited value, or the element of it, and the
+ *  path of the export they sit in. */
+function expectOf(records: DraftRecord[], exportPath: string | undefined, exportIndex: number) {
+  const values: Record<string, string> = {};
+  for (const { target, draft } of records) {
+    if (target.was === undefined) continue;
+    if (draft.op === "set") values[String(target.offset)] = target.was;
+    if (draft.op === "set_element" || draft.op === "remove")
+      values[`${target.offset}[${draft.index}]`] = target.was;
+  }
+  return {
+    exports: exportPath !== undefined ? { [exportIndex]: exportPath } : undefined,
+    values,
+  };
 }
 
 function toImportEdit(draft: ImportDraft): ImportEdit {
@@ -461,8 +517,13 @@ export interface Structural {
 
 export interface SaveOptions {
   replace?: boolean;
+  /** Save even though the asset no longer reads the way it did when the edits were made. */
+  allowDrift?: boolean;
   structural?: Structural;
 }
+
+/** How the backend's refusal of edits made against an older read of the asset begins. */
+const DRIFT = "The package changed since these edits were written";
 
 /** Whether two container paths name the same file, whichever separators and case they use. */
 export function sameContainer(a: string, b: string): boolean {
@@ -494,6 +555,8 @@ interface Args {
   entry: string;
   /** Drafts belong to one export; moving to another starts afresh. */
   exportIndex: number;
+  /** That export's path, which a save checks is still where the drafts were made. */
+  exportPath?: string;
   /** Bumped when the asset is re-read from disk, which invalidates every recorded offset. */
   epoch: number;
   locked: string | null;
@@ -517,6 +580,9 @@ export interface AssetEdits {
    *  Carries the structural change that was being saved, so the go-ahead can repeat it. */
   pendingReplace: { pak: string; structural?: Structural } | null;
   cancelReplace: () => void;
+  /** Set when the asset no longer reads the way it did when the drafts were made. */
+  pendingDrift: { message: string; structural?: Structural } | null;
+  cancelDrift: () => void;
   /** The mod's own edited copy of this asset, when the chosen mod already holds one. */
   modCopy: string | null;
   /** Whether the inspector is reading that copy, so a save builds on it. */
@@ -539,6 +605,7 @@ interface Held {
   drafts: Record<string, DraftRecord>;
   imports: Record<string, ImportDraft>;
   pendingReplace: { pak: string; structural?: Structural } | null;
+  pendingDrift: { message: string; structural?: Structural } | null;
 }
 
 const EMPTY: Record<string, DraftRecord> = {};
@@ -556,15 +623,22 @@ export function useAssetEdits({
   container,
   entry,
   exportIndex,
+  exportPath,
   epoch,
   locked,
   onSaved,
 }: Args): AssetEdits {
   const scope = [container, entry, exportIndex, epoch].join(SEP);
-  const fresh = (): Held => ({ scope, drafts: EMPTY, imports: NO_IMPORTS, pendingReplace: null });
+  const fresh = (): Held => ({
+    scope,
+    drafts: EMPTY,
+    imports: NO_IMPORTS,
+    pendingReplace: null,
+    pendingDrift: null,
+  });
   const [held, setHeld] = useState<Held>(fresh);
   const current: Held = held.scope === scope ? held : fresh();
-  const { drafts, imports: importDrafts, pendingReplace } = current;
+  const { drafts, imports: importDrafts, pendingReplace, pendingDrift } = current;
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -603,7 +677,13 @@ export function useAssetEdits({
         const base: Held =
           prev.scope === scope
             ? prev
-            : { scope, drafts: EMPTY, imports: NO_IMPORTS, pendingReplace: null };
+            : {
+                scope,
+                drafts: EMPTY,
+                imports: NO_IMPORTS,
+                pendingReplace: null,
+                pendingDrift: null,
+              };
         return { ...base, ...change(base) };
       }),
     [scope]
@@ -670,7 +750,13 @@ export function useAssetEdits({
   );
 
   const discard = useCallback(
-    () => update(() => ({ drafts: EMPTY, imports: NO_IMPORTS, pendingReplace: null })),
+    () =>
+      update(() => ({
+        drafts: EMPTY,
+        imports: NO_IMPORTS,
+        pendingReplace: null,
+        pendingDrift: null,
+      })),
     [update]
   );
 
@@ -694,7 +780,12 @@ export function useAssetEdits({
   const save = useCallback(
     async (options?: SaveOptions) => {
       const structural =
-        options?.structural ?? (options?.replace ? pendingReplace?.structural : undefined);
+        options?.structural ??
+        (options?.replace
+          ? pendingReplace?.structural
+          : options?.allowDrift
+            ? pendingDrift?.structural
+            : undefined);
       const records = structural ? [] : Object.values(drafts);
       const cells = records.filter(
         (record) =>
@@ -734,6 +825,7 @@ export function useAssetEdits({
           duplicate_exports: structural?.duplicate ?? [],
           export_edits: structural?.exports ?? [],
           dependencies: structural?.dependencies ?? [],
+          expect: expectOf(cells, exportPath, exportIndex),
         };
         const result = await invoke<SaveResult>("save_asset_edits", {
           gameRoot: gamePath,
@@ -742,6 +834,7 @@ export function useAssetEdits({
           modName: name,
           replace: options?.replace ?? false,
           layer: onModCopy,
+          allowDrift: options?.allowDrift ?? false,
           target: saveTarget,
           edits: list,
         });
@@ -751,7 +844,12 @@ export function useAssetEdits({
         }
         showNotice(withWarnings(result.message, result.warnings), "ok", result.pak);
         setModCopy(result.pak);
-        update(() => ({ drafts: EMPTY, imports: NO_IMPORTS, pendingReplace: null }));
+        update(() => ({
+          drafts: EMPTY,
+          imports: NO_IMPORTS,
+          pendingReplace: null,
+          pendingDrift: null,
+        }));
         // Remembered only once it has actually been used, so a name typed and abandoned is not.
         invoke("set_asset_mod_name", { name }).catch(() => undefined);
         invoke("set_asset_save_target", { target: saveTarget }).catch(() => undefined);
@@ -761,7 +859,12 @@ export function useAssetEdits({
         });
         onSaved();
       } catch (e: unknown) {
-        showNotice(String(e), "err");
+        const message = String(e);
+        if (message.startsWith(DRIFT)) {
+          update(() => ({ pendingDrift: { message, structural } }));
+          return;
+        }
+        showNotice(message, "err");
         console.error("Saving asset edits failed:", e);
       } finally {
         setSaving(false);
@@ -771,11 +874,14 @@ export function useAssetEdits({
       drafts,
       importDrafts,
       pendingReplace,
+      pendingDrift,
       modName,
       saveTarget,
       gamePath,
       container,
       entry,
+      exportIndex,
+      exportPath,
       onModCopy,
       showNotice,
       update,
@@ -789,6 +895,7 @@ export function useAssetEdits({
   );
   const count = Object.keys(drafts).length + Object.keys(importDrafts).length;
   const cancelReplace = useCallback(() => update(() => ({ pendingReplace: null })), [update]);
+  const cancelDrift = useCallback(() => update(() => ({ pendingDrift: null })), [update]);
 
   return {
     session,
@@ -804,6 +911,8 @@ export function useAssetEdits({
     discard,
     pendingReplace,
     cancelReplace,
+    pendingDrift,
+    cancelDrift,
     modCopy,
     onModCopy,
     importDrafts,

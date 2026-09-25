@@ -184,7 +184,281 @@ pub struct PackageEdits {
     /// Replacements for whole preload dependency runs. A save of its own: the runs sit in one
     /// shared table, so changing any of them rewrites all of them.
     pub dependencies: Vec<crate::dependency::DependencyEdit>,
+    /// What the edits were written against, checked before anything is patched.
+    pub expect: Expected,
+    /// Patch even where the package no longer matches `expect`.
+    pub allow_drift: bool,
 }
+
+/// What an edit list expected to find, so one applied to a package that has since changed is
+/// refused rather than landing on whatever now sits at the same index or offset.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Expected {
+    /// Export index to the path it had.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub exports: BTreeMap<u32, String>,
+    /// Import table position to the path it had.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub imports: BTreeMap<u32, String>,
+    /// The value a value edit replaces, keyed by its offset, or `offset[index]` for one element.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub values: BTreeMap<String, String>,
+    /// The constant a script edit replaces, keyed `export:statement:constant`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub scripts: BTreeMap<String, String>,
+}
+
+impl Expected {
+    pub fn is_empty(&self) -> bool {
+        self.exports.is_empty()
+            && self.imports.is_empty()
+            && self.values.is_empty()
+            && self.scripts.is_empty()
+    }
+
+    /// The key a value edit's expected value is filed under.
+    pub fn value_key(edit: &ValueEdit) -> String {
+        match &edit.op {
+            EditOp::SetElement { index, .. } | EditOp::Remove { index } => {
+                format!("{}[{index}]", edit.offset)
+            }
+            _ => edit.offset.to_string(),
+        }
+    }
+
+    /// The key a script edit's expected constant is filed under.
+    pub fn script_key(edit: &ScriptConstEdit) -> String {
+        format!("{}:{}:{}", edit.export, edit.statement, edit.constant)
+    }
+
+    fn merge(&mut self, other: Expected) {
+        self.exports.extend(other.exports);
+        self.imports.extend(other.imports);
+        self.values.extend(other.values);
+        self.scripts.extend(other.scripts);
+    }
+}
+
+/// Every way the package differs from what the edits expected, as one refusal.
+pub fn check_expectations(parsed: &ParsedPackage, edits: &PackageEdits) -> Result<(), String> {
+    if edits.allow_drift || edits.expect.is_empty() {
+        return Ok(());
+    }
+    let expect = &edits.expect;
+    let mut drift = Vec::new();
+    for (index, path) in &expect.exports {
+        match parsed.exports.get(*index as usize) {
+            Some(export) if export.path == *path => {}
+            Some(export) => drift.push(format!(
+                "export {index} was {path}, and is now {}",
+                export.path
+            )),
+            None => drift.push(format!("export {index} was {path}, and is gone")),
+        }
+    }
+    for (index, path) in &expect.imports {
+        match parsed.imports.get(*index as usize) {
+            Some(import) if import.path == *path => {}
+            Some(import) => drift.push(format!(
+                "import {index} was {path}, and is now {}",
+                import.path
+            )),
+            None => drift.push(format!("import {index} was {path}, and is gone")),
+        }
+    }
+    for edit in &edits.values {
+        let Some(was) = expect.values.get(&Expected::value_key(edit)) else {
+            continue;
+        };
+        // A value the edit cannot find is refused by the patch itself, with its own reason.
+        let Some(entry) = find_at(parsed, edit.offset, &edit.expect_name, edit.expect_element)
+        else {
+            continue;
+        };
+        let now = match &edit.op {
+            EditOp::SetElement { index, .. } | EditOp::Remove { index } => {
+                element_value(&entry.value, *index)
+            }
+            EditOp::Set { .. } => Some(&entry.value),
+            _ => continue,
+        };
+        if !now.is_some_and(|now| reads_back_as(now, was)) {
+            drift.push(format!(
+                "{} was {was}, and is now {}",
+                entry.label(),
+                now.map_or_else(|| "missing".to_string(), PropertyValue::summary)
+            ));
+        }
+    }
+    for edit in &edits.scripts {
+        let Some(was) = expect.scripts.get(&Expected::script_key(edit)) else {
+            continue;
+        };
+        let Some(script) = parsed
+            .exports
+            .get(edit.export as usize)
+            .and_then(|export| export.script.as_ref())
+        else {
+            continue;
+        };
+        let Ok(old) = kismet::literal_at(script, edit.statement, edit.constant) else {
+            continue;
+        };
+        let same = kismet::with_value(old, was)
+            .is_ok_and(|expected| kismet::render(&expected) == kismet::render(old));
+        if !same {
+            drift.push(format!(
+                "the constant at {:#X} in export {} was {was}, and is now {}",
+                edit.statement,
+                edit.export,
+                kismet::render(old)
+            ));
+        }
+    }
+    if drift.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "{DRIFT}: {}. Re-read the asset and make the edits again, or apply them anyway",
+        drift.join("; ")
+    ))
+}
+
+/// What `edits` finds in `parsed`, the package they were written against: the path at every export
+/// and import index they name, and the value each value edit and script edit replaces. Kept with
+/// the edits, it lets [`check_expectations`] notice a package that has changed since.
+pub fn expectations(parsed: &ParsedPackage, edits: &PackageEdits) -> Expected {
+    let mut exports: Vec<u32> = Vec::new();
+    let mut imports: Vec<u32> = Vec::new();
+    let raw = |index: i32, exports: &mut Vec<u32>, imports: &mut Vec<u32>| {
+        if index > 0 {
+            exports.push(index as u32 - 1);
+        } else if index < 0 {
+            imports.push((-index) as u32 - 1);
+        }
+    };
+    exports.extend(edits.rows.iter().map(|edit| edit.export));
+    exports.extend(edits.strings.iter().map(|edit| edit.export));
+    exports.extend(edits.scripts.iter().map(|edit| edit.export));
+    exports.extend(edits.payloads.iter().map(|edit| edit.export));
+    exports.extend(edits.remove_exports.iter().copied());
+    exports.extend(edits.reset_exports.iter().copied());
+    exports.extend(edits.duplicate_exports.iter().map(|edit| edit.export));
+    exports.extend(
+        edits
+            .duplicate_exports
+            .iter()
+            .filter_map(|edit| edit.into_level),
+    );
+    for edit in &edits.exports {
+        exports.push(edit.export());
+        match edit {
+            crate::export_edit::ExportEdit::SetOuter {
+                outer: Some(outer), ..
+            } => exports.push(*outer),
+            crate::export_edit::ExportEdit::SetClass { class: index, .. }
+            | crate::export_edit::ExportEdit::SetSuper {
+                super_index: index, ..
+            }
+            | crate::export_edit::ExportEdit::SetTemplate {
+                template: index, ..
+            } => raw(*index, &mut exports, &mut imports),
+            _ => {}
+        }
+    }
+    for edit in &edits.dependencies {
+        exports.push(edit.export);
+        let runs = &edit.runs;
+        for index in runs
+            .serialize_before_serialize
+            .iter()
+            .chain(&runs.create_before_serialize)
+            .chain(&runs.serialize_before_create)
+            .chain(&runs.create_before_create)
+        {
+            raw(*index, &mut exports, &mut imports);
+        }
+    }
+    for edit in &edits.imports {
+        match edit {
+            ImportEdit::Retarget { import, .. } | ImportEdit::Remove { import } => {
+                imports.push(*import)
+            }
+            ImportEdit::Add { .. } => {}
+        }
+    }
+
+    let mut expect = Expected::default();
+    for index in exports {
+        if let Some(export) = parsed.exports.get(index as usize) {
+            expect.exports.insert(index, export.path.clone());
+        }
+    }
+    for index in imports {
+        if let Some(import) = parsed.imports.get(index as usize) {
+            expect.imports.insert(index, import.path.clone());
+        }
+    }
+    for edit in &edits.values {
+        let Some(entry) = find_at(parsed, edit.offset, &edit.expect_name, edit.expect_element)
+        else {
+            continue;
+        };
+        let now = match &edit.op {
+            EditOp::SetElement { index, .. } | EditOp::Remove { index } => {
+                element_value(&entry.value, *index)
+            }
+            EditOp::Set { .. } => Some(&entry.value),
+            _ => None,
+        };
+        if let Some(text) = now.and_then(value_text) {
+            expect.values.insert(Expected::value_key(edit), text);
+        }
+    }
+    for edit in &edits.scripts {
+        let old = parsed
+            .exports
+            .get(edit.export as usize)
+            .and_then(|export| export.script.as_ref())
+            .and_then(|script| kismet::literal_at(script, edit.statement, edit.constant).ok());
+        if let Some(slot) = old.and_then(|old| kismet::literal_slots(old).into_iter().next()) {
+            expect
+                .scripts
+                .insert(Expected::script_key(edit), slot.value);
+        }
+    }
+    expect
+}
+
+/// A value as an edit would type it, for the kinds that can be compared that way.
+fn value_text(value: &PropertyValue) -> Option<String> {
+    let text = match value {
+        PropertyValue::Str { value } | PropertyValue::Name { value } => value.clone(),
+        PropertyValue::SoftObject { path } => path.clone(),
+        PropertyValue::Text {
+            value: Some(value),
+            parts,
+        } if parts.is_empty() => value.clone(),
+        PropertyValue::Object {
+            path: Some(path), ..
+        } => path.clone(),
+        PropertyValue::Object { index, path: None } => index.to_string(),
+        PropertyValue::Bool { value } => value.to_string(),
+        PropertyValue::Int { value } => value.to_string(),
+        PropertyValue::UInt { value } => value.to_string(),
+        PropertyValue::Byte { value } => value.to_string(),
+        PropertyValue::Float { value } => value.to_string(),
+        PropertyValue::Enum {
+            name: Some(name), ..
+        } => name.clone(),
+        PropertyValue::Enum { value, .. } => value.to_string(),
+        _ => return None,
+    };
+    reads_back_as(value, &text).then_some(text)
+}
+
+/// How a refusal from [`check_expectations`] starts, so a caller can offer to apply anyway.
+pub const DRIFT: &str = "The package changed since these edits were written";
 
 impl PackageEdits {
     /// Adds another list's edits to this one, for edits written against the same package that are
@@ -203,6 +477,8 @@ impl PackageEdits {
         self.reset_exports.extend(other.reset_exports);
         self.duplicate_exports.extend(other.duplicate_exports);
         self.dependencies.extend(other.dependencies);
+        self.expect.merge(other.expect);
+        self.allow_drift |= other.allow_drift;
     }
 
     /// Whether this asks for nothing at all, so a caller can refuse before reading the package.
@@ -530,6 +806,7 @@ pub fn patch_package_with(
     edits: &PackageEdits,
     mappings: Option<&Mappings>,
 ) -> Result<PatchedBundle, String> {
+    check_expectations(parsed, edits)?;
     header_round_trips(bundle)?;
     check_inline_bulk(bundle)?;
     let base = header_size(bundle)?;
@@ -3053,7 +3330,7 @@ fn key_splices(
     // the key it acts on, and whether it takes that key out of its slot.
     let mut placed: Vec<(usize, usize, i32, usize, bool)> = Vec::new();
     for (position, edit) in edits.keys.iter().enumerate() {
-        let layout = channel_at(parsed, edit.offset, &edit.expect_name)?;
+        let layout = channel_at(parsed, edit.offset, &edit.expect_name, edit.expect_element)?;
         let frame = match &edit.op {
             KeyOp::Add { time, .. } | KeyOp::Duplicate { time, .. } | KeyOp::Move { time, .. } => {
                 if layout.frames.contains(time) {
@@ -3108,7 +3385,7 @@ fn key_splices(
         let edit = &edits.keys[*position];
         let gap = match &edit.op {
             KeyOp::Remove { .. } => 0,
-            _ => channel_at(parsed, edit.offset, &edit.expect_name)
+            _ => channel_at(parsed, edit.offset, &edit.expect_name, edit.expect_element)
                 .map(|layout| layout.frames.iter().filter(|held| **held < *frame).count())
                 .unwrap_or_default(),
         };
@@ -3116,7 +3393,7 @@ fn key_splices(
     });
     for (position, _, frame, slot, _) in placed {
         let edit = &edits.keys[position];
-        let layout = channel_at(parsed, edit.offset, &edit.expect_name)?;
+        let layout = channel_at(parsed, edit.offset, &edit.expect_name, edit.expect_element)?;
         let label = match edit.expect_element {
             Some(element) => format!("{}[{element}]", edit.expect_name),
             None => edit.expect_name.clone(),
@@ -3252,12 +3529,20 @@ fn channel_at<'a>(
     parsed: &'a ParsedPackage,
     at: u64,
     name: &str,
+    element: Option<u32>,
 ) -> Result<&'a crate::props::ChannelLayout, String> {
-    parsed
+    let layout = parsed
         .channels
         .iter()
         .find(|layout| layout.at == at)
-        .ok_or_else(|| format!("{name} is not a channel this reader recorded the keys of"))
+        .ok_or_else(|| format!("{name} is not a channel this reader recorded the keys of"))?;
+    // The offset alone would take whichever channel now sits there.
+    if find_at(parsed, at, name, element).is_none() {
+        return Err(format!(
+            "no channel called {name} starts at {at:#X}; re-read the asset"
+        ));
+    }
+    Ok(layout)
 }
 
 /// Replays the key edits over each channel as it was read and holds the patched channel to the
@@ -7450,6 +7735,30 @@ mod tests {
             expect_element: None,
             op,
         }
+    }
+
+    /// A key edit names the channel it was made for, and a different channel now at that offset is
+    /// refused rather than edited.
+    #[test]
+    fn a_key_edit_for_another_channel_is_refused() {
+        let (parsed, data) = channel_package(&[(0, 1.0), (20000, 2.0)]);
+        let bundle = AssetBundle {
+            asset: &[],
+            exports: &data,
+        };
+        let mut edit = key_edit(KeyOp::Remove { index: 0 });
+        edit.expect_name = "OtherCurve".into();
+        let err = key_splices(
+            &parsed,
+            &bundle,
+            0x100,
+            &PackageEdits {
+                keys: vec![edit],
+                ..Default::default()
+            },
+        )
+        .expect_err("refused");
+        assert!(err.contains("no channel called OtherCurve"), "{err}");
     }
 
     /// A key between two others goes into both arrays at the same position with the previous

@@ -510,3 +510,53 @@ fn a_marvel_soft_path_is_written_as_one_string() {
         other => panic!("{other:?}"),
     }
 }
+
+/// What an edit was written against is taken from the package it was made on, and applying it once
+/// the package reads differently is refused, unless the caller says to apply anyway.
+#[test]
+fn edits_on_a_changed_package_are_refused_as_drift() {
+    let (asset, exports) = tagged_package();
+    let before = parse(&asset, &exports);
+    let damage = find(top(&before), "Damage").clone();
+    let mut edits = PackageEdits {
+        values: vec![edit_of(&damage, set("5"))],
+        reset_exports: Vec::new(),
+        ..Default::default()
+    };
+    edits.expect = crate::edit::expectations(&before, &edits);
+    assert_eq!(
+        edits
+            .expect
+            .values
+            .get(&damage.span.expect("span").0.to_string()),
+        Some(&"99".to_string())
+    );
+    crate::edit::check_expectations(&before, &edits).expect("unchanged");
+
+    // A later build stored another value there.
+    let (changed, asset, exports) = apply_to(&asset, &exports, |p| {
+        vec![edit_of(find(top(p), "Damage"), set("98"))]
+    });
+    let err = crate::edit::check_expectations(&changed, &edits).expect_err("refused");
+    assert!(err.starts_with(crate::edit::DRIFT), "{err}");
+    assert!(err.contains("Damage was 99, and is now 98"), "{err}");
+
+    // An export index that now names another object is caught the same way.
+    let mut moved = edits.clone();
+    moved.expect.values.clear();
+    moved.expect.exports.insert(0, "/Game/Other.Thing".into());
+    let err = crate::edit::check_expectations(&changed, &moved).expect_err("refused");
+    assert!(err.contains("export 0 was /Game/Other.Thing"), "{err}");
+
+    edits.allow_drift = true;
+    patch_package(
+        &AssetBundle {
+            asset: &asset,
+            exports: &exports,
+        },
+        &changed,
+        &edits,
+        None,
+    )
+    .expect("applied anyway");
+}

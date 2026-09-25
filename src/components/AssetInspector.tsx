@@ -5931,6 +5931,7 @@ export default function AssetInspector({
     container,
     entry,
     exportIndex: selected,
+    exportPath: active?.path,
     epoch,
     locked: active ? lockedReasonOf(active) : "Nothing is loaded.",
     onSaved,
@@ -6705,6 +6706,31 @@ export default function AssetInspector({
                 className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
               >
                 Start over
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+
+        <AlertDialog
+          open={edits.pendingDrift !== null}
+          onOpenChange={(open) => !open && edits.cancelDrift()}
+        >
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>
+                {fileName} has changed since these edits were made
+              </AlertDialogTitle>
+              <AlertDialogDescription>
+                {edits.pendingDrift?.message} Saving anyway writes each edit where it now lands.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction
+                onClick={() => void edits.save({ allowDrift: true })}
+                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              >
+                Save anyway
               </AlertDialogAction>
             </AlertDialogFooter>
           </AlertDialogContent>

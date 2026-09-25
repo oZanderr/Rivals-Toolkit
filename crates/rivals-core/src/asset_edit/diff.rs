@@ -66,6 +66,7 @@ pub fn diff_dump(original: &ParsedPackage, edited: &Json) -> Result<DiffOutcome,
         diff_rows(was, is, at, &mut out);
         diff_strings(was, is, at, &mut out);
     }
+    out.edits.expect_from(original);
     Ok(out)
 }
 

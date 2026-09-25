@@ -1987,6 +1987,9 @@ struct AssetApplyArgs {
     /// Patch and verify every item, then write nothing.
     #[arg(long)]
     dry_run: bool,
+    /// Apply an edit file even where the package no longer matches what it was written against.
+    #[arg(long)]
+    allow_drift: bool,
 }
 
 #[derive(Args)]
@@ -2242,6 +2245,7 @@ fn asset_apply(
             mod_name: args.mod_name.as_deref().or(app.asset_mod_name.as_deref()),
             replace: args.replace,
             layer: cli.layer,
+            allow_drift: args.allow_drift,
             dry_run: args.dry_run,
             target: cli.target.map(Into::into).or(app.asset_save_target),
         },

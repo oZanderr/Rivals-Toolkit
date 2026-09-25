@@ -560,6 +560,8 @@ pub struct ApplyOverrides<'a> {
     pub mod_name: Option<&'a str>,
     pub replace: bool,
     pub layer: bool,
+    /// Apply items whose package no longer matches what they expected.
+    pub allow_drift: bool,
     /// Patch and verify every item, then write nothing.
     pub dry_run: bool,
     /// What to write, when the command line said. An item's own target wins otherwise.
@@ -762,7 +764,8 @@ fn resolve_item(
         return Err("this edit file changes nothing".to_string());
     }
     let container = asset_edit::json::resolve_container(&file.container, base, game_root)?;
-    let changes = file.edits.clone().resolve(base)?;
+    let mut changes = file.edits.clone().resolve(base)?;
+    changes.allow_drift = overrides.allow_drift;
     Ok((
         ApplyKey {
             mod_name: String::new(),

@@ -3151,12 +3151,25 @@ mod game_data_tests {
         assert!(outcome.notes.is_empty(), "{:?}", outcome.notes);
         assert_eq!(outcome.edits.values.len(), 1, "one cell changed");
         assert_eq!(outcome.edits.rows.len(), 1, "one row went");
+        // The file says what it was written against, and says it again once read back.
+        assert_eq!(outcome.edits.expect.values.len(), 1, "the cell's old value");
+        assert_eq!(
+            outcome.edits.expect.exports.get(&0),
+            Some(&before.exports[0].path)
+        );
+        let written = serde_json::to_string(&outcome.edits).expect("json");
+        let reread: crate::asset_edit::json::EditList =
+            serde_json::from_str(&written).expect("read back");
+        assert_eq!(reread.expect, outcome.edits.expect);
 
         let changes = outcome
             .edits
             .resolve(std::path::Path::new("."))
             .expect("resolve");
-        let (_, after) = fixture.apply_changes(changes);
+        let (_, after) = fixture.apply_changes(changes.clone());
+        // The same edits against the package they already changed find a different cell value.
+        let err = rivals_uasset::check_expectations(&after, &changes).expect_err("drift");
+        assert!(err.starts_with(rivals_uasset::DRIFT), "{err}");
         let table = after.exports[0].data_table.as_ref().expect("table");
         assert_eq!(
             table.rows.len(),
