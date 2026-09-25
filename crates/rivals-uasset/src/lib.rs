@@ -35,10 +35,11 @@ pub use datatable::{DataTable, DataTableLayout, DataTableRow, RowSpan};
 pub use dependency::{DependencyEdit, DependencyPlan, Runs, plan_dependency_edits, runs_of};
 pub use duplicate::{DuplicatePlan, LevelSlot, plan_duplication};
 pub use edit::{
-    AppliedEdit, BulkEdit, DRIFT, DuplicateExport, EditOp, Expected, KeyEdit, KeyOp, PackageEdits,
-    PatchedBundle, PayloadEdit, RowEdit, RowOp, ScriptConstEdit, Sidecars, StringEdit, StringOp,
-    ValueEdit, check_expectations, expectations, kind_of, patch_package, patch_package_copy,
-    patch_package_with, patch_values, payload_lock, verify_copy, verify_patch,
+    AppliedEdit, BulkEdit, DRIFT, DuplicateExport, EditOp, Expected, FieldSet, KeyEdit, KeyOp,
+    NOT_STORED, PackageEdits, PatchedBundle, PayloadEdit, RowEdit, RowOp, ScriptConstEdit,
+    Sidecars, StringEdit, StringOp, ValueEdit, check_expectations, entry_named_at, expectations,
+    kind_of, patch_package, patch_package_copy, patch_package_with, patch_values, payload_lock,
+    verify_copy, verify_patch,
 };
 pub use export_edit::{
     EDITABLE_FLAGS, ExportEdit, ExportEditPlan, flag_names, plan_export_edits,

@@ -10,7 +10,8 @@ use std::path::{Path, PathBuf};
 
 use retoc::legacy_asset::FSerializedAssetBundle;
 use rivals_uasset::{
-    AssetBundle, Mappings, PackageEdits, ParseOptions, PatchedBundle, RemovalPlan,
+    AssetBundle, EditOp, Mappings, PackageEdits, ParseOptions, PatchedBundle, PropertyValue,
+    RemovalPlan, ValueEdit,
 };
 
 pub mod diff;
@@ -59,19 +60,35 @@ pub fn preview_read_edits(
     if changes.is_empty() {
         return Err("No changes to save".into());
     }
-    let patched = rivals_uasset::patch_package_with(
+    if !changes.field_sets.is_empty() {
+        return field_passes(request, mappings, loaded, parsed);
+    }
+    let sidecars = rivals_uasset::Sidecars {
+        bulk: loaded.bulk_data_buffer.as_deref(),
+        optional_bulk: loaded.optional_bulk_data_buffer.as_deref(),
+    };
+    let (patched, _) = patch_pass(
+        request,
+        mappings,
         &bundle_of(&loaded),
-        rivals_uasset::Sidecars {
-            bulk: loaded.bulk_data_buffer.as_deref(),
-            optional_bulk: loaded.optional_bulk_data_buffer.as_deref(),
-        },
+        sidecars,
         parsed,
         changes,
-        mappings,
     )?;
+    Ok((patched, loaded))
+}
 
-    // Read the patched bytes back before anything reaches disk: the decoder is the only honest
-    // check that an edit changed exactly what it claimed to.
+/// One patch, read back and checked before anything reaches disk: the decoder is the only honest
+/// check that an edit changed exactly what it claimed to.
+fn patch_pass(
+    request: &AssetEditRequest<'_>,
+    mappings: Option<&Mappings>,
+    bundle: &AssetBundle<'_>,
+    sidecars: rivals_uasset::Sidecars<'_>,
+    parsed: &rivals_uasset::ParsedPackage,
+    changes: &PackageEdits,
+) -> Result<(PatchedBundle, rivals_uasset::ParsedPackage), String> {
+    let patched = rivals_uasset::patch_package_with(bundle, sidecars, parsed, changes, mappings)?;
     let reread = AssetBundle {
         asset: &patched.asset,
         exports: &patched.exports,
@@ -79,6 +96,202 @@ pub fn preview_read_edits(
     let after =
         schema_synth::parse_package_opts(&reread, mappings, &source_of(request), editor_options())?;
     rivals_uasset::verify_patch(parsed, &after, changes, &patched.applied)?;
+    Ok((patched, after))
+}
+
+/// How many times a save may store a struct and read the package again to reach the fields set
+/// inside it, one level of nesting each.
+const FIELD_ROUNDS: usize = 5;
+
+/// A field set on its way down: the struct it has reached, and the names left to walk.
+struct FieldWalk {
+    offset: u64,
+    name: String,
+    element: Option<u32>,
+    path: Vec<String>,
+    text: String,
+}
+
+/// Where a walk stands in the package as it now reads.
+enum FieldStep {
+    /// The struct it has reached stores nothing yet; this stores it.
+    Store(ValueEdit),
+    /// The field itself, and the edit that sets it.
+    Set(ValueEdit),
+}
+
+/// Follows a walk through stored structs until it reaches its field or a struct not stored yet.
+fn field_step(
+    parsed: &rivals_uasset::ParsedPackage,
+    walk: &mut FieldWalk,
+) -> Result<FieldStep, String> {
+    loop {
+        let entry = rivals_uasset::entry_named_at(parsed, walk.offset, &walk.name, walk.element)
+            .ok_or_else(|| {
+                format!(
+                    "no struct called {} starts at {:#X}; re-read the asset",
+                    walk.name, walk.offset
+                )
+            })?;
+        let fields = match &entry.value {
+            PropertyValue::Unset { .. } | PropertyValue::Default => {
+                return Ok(FieldStep::Store(ValueEdit {
+                    offset: walk.offset,
+                    expect_name: walk.name.clone(),
+                    expect_element: walk.element,
+                    expect_kind: rivals_uasset::kind_of(&entry.value),
+                    op: EditOp::Store,
+                }));
+            }
+            PropertyValue::Struct { fields, .. } => fields,
+            other => {
+                return Err(format!(
+                    "{} is a {}, which has no field {}",
+                    entry.label(),
+                    rivals_uasset::kind_of(other),
+                    walk.path.first().map_or("", String::as_str)
+                ));
+            }
+        };
+        let segment = walk.path.first().ok_or("a field set names no field")?;
+        let (name, element) = match segment.strip_suffix(']').and_then(|s| s.split_once('[')) {
+            Some((name, at)) => (
+                name,
+                Some(
+                    at.parse::<u32>()
+                        .map_err(|_| format!("{segment} is not a field name"))?,
+                ),
+            ),
+            None => (segment.as_str(), None),
+        };
+        let field = fields
+            .iter()
+            .find(|field| field.name == name && field.element == element)
+            .ok_or_else(|| format!("{} has no field {segment}", entry.label()))?;
+        let (start, _) = field
+            .span
+            .ok_or_else(|| format!("{} has no recorded position", field.label()))?;
+        if walk.path.len() == 1 {
+            return Ok(FieldStep::Set(ValueEdit {
+                offset: start,
+                expect_name: field.name.clone(),
+                expect_element: field.element,
+                expect_kind: rivals_uasset::kind_of(&field.value),
+                op: EditOp::Set {
+                    text: walk.text.clone(),
+                },
+            }));
+        }
+        walk.offset = start;
+        walk.name = field.name.clone();
+        walk.element = field.element;
+        walk.path.remove(0);
+    }
+}
+
+/// Applies edits that set fields inside structs not stored yet. Each round stores the structs the
+/// walks have reached, reads the package again so their fields have places, and follows the walks
+/// on; a field whose struct is stored is set in the same round. Every other edit goes in the first
+/// round, and each round is checked on its own.
+fn field_passes(
+    request: &AssetEditRequest<'_>,
+    mappings: Option<&Mappings>,
+    loaded: FSerializedAssetBundle,
+    parsed: &rivals_uasset::ParsedPackage,
+) -> Result<(PatchedBundle, FSerializedAssetBundle), String> {
+    rivals_uasset::check_expectations(parsed, &request.changes)?;
+    let mut edits = request.changes.clone();
+    let mut walks: Vec<FieldWalk> = std::mem::take(&mut edits.field_sets)
+        .into_iter()
+        .map(|set| FieldWalk {
+            offset: set.offset,
+            name: set.expect_name,
+            element: set.expect_element,
+            path: set.path,
+            text: set.text,
+        })
+        .collect();
+    let mut current: Option<(PatchedBundle, rivals_uasset::ParsedPackage)> = None;
+    let mut applied = Vec::new();
+    let mut bulk = None;
+    let mut optional_bulk = None;
+    for _ in 0..FIELD_ROUNDS {
+        let now = current.as_ref().map_or(parsed, |(_, held)| held);
+        // Each walk still going, with the store in this round's edits it waits on.
+        let mut waiting: Vec<(FieldWalk, usize)> = Vec::new();
+        for mut walk in std::mem::take(&mut walks) {
+            match field_step(now, &mut walk)? {
+                FieldStep::Set(edit) => edits.values.push(edit),
+                FieldStep::Store(store) => {
+                    let at = edits
+                        .values
+                        .iter()
+                        .position(|held| {
+                            held.offset == store.offset
+                                && held.expect_name == store.expect_name
+                                && held.expect_element == store.expect_element
+                                && matches!(held.op, EditOp::Store)
+                        })
+                        .unwrap_or_else(|| {
+                            edits.values.push(store);
+                            edits.values.len() - 1
+                        });
+                    waiting.push((walk, at));
+                }
+            }
+        }
+        if edits.is_empty() {
+            break;
+        }
+        let (bundle, sidecars) = match &current {
+            Some((patched, _)) => (
+                AssetBundle {
+                    asset: &patched.asset,
+                    exports: &patched.exports,
+                },
+                rivals_uasset::Sidecars {
+                    bulk: bulk.as_deref().or(loaded.bulk_data_buffer.as_deref()),
+                    optional_bulk: optional_bulk
+                        .as_deref()
+                        .or(loaded.optional_bulk_data_buffer.as_deref()),
+                },
+            ),
+            None => (
+                bundle_of(&loaded),
+                rivals_uasset::Sidecars {
+                    bulk: loaded.bulk_data_buffer.as_deref(),
+                    optional_bulk: loaded.optional_bulk_data_buffer.as_deref(),
+                },
+            ),
+        };
+        let (patched, after) = patch_pass(request, mappings, &bundle, sidecars, now, &edits)?;
+        // A stored struct has moved by whatever went in ahead of it, as its edit reports.
+        walks = waiting
+            .into_iter()
+            .map(|(mut walk, at)| {
+                walk.offset = patched.applied[at].offset_after;
+                walk
+            })
+            .collect();
+        applied.extend(patched.applied.iter().cloned());
+        bulk = patched.bulk.clone().or(bulk);
+        optional_bulk = patched.optional_bulk.clone().or(optional_bulk);
+        current = Some((patched, after));
+        // Later rounds hold only what the walks add; the expectations were checked up front.
+        edits = PackageEdits::default();
+        if walks.is_empty() {
+            break;
+        }
+    }
+    if !walks.is_empty() {
+        return Err(format!(
+            "a field set is nested deeper than {FIELD_ROUNDS} unstored structs"
+        ));
+    }
+    let (mut patched, _) = current.ok_or("No changes to save")?;
+    patched.applied = applied;
+    patched.bulk = bulk;
+    patched.optional_bulk = optional_bulk;
     Ok((patched, loaded))
 }
 
@@ -4935,49 +5148,55 @@ mod game_data_tests {
         assert!(matches!(after.exports[at].status, ExportStatus::Complete));
     }
 
-    /// Storing a struct writes its all-skipped header; only then do its fields exist to be set,
-    /// which takes a second round against the patched package.
+    /// An unset struct shows the fields its schema declares, and one of them is set in a single
+    /// save: the struct is stored, the package read again, and the field set inside it.
     #[test]
-    fn an_inherited_struct_is_stored_empty_and_then_edited_inside() {
+    fn a_field_inside_an_unset_struct_is_set_in_one_save() {
         let Some(fixture) = Fixture::open(SHAKE) else {
             return;
         };
         let before = fixture.parse();
         let at = cdo(&before);
         let field = nested(&before.exports[at].properties, &["FOVOscillation"]).clone();
-        assert!(unset(&field));
-
-        let (patched, after) = fixture.apply(vec![edit_of(&field, EditOp::Store)]);
-        let stored_struct = nested(&after.exports[at].properties, &["FOVOscillation"]);
-        let PropertyValue::Struct { fields, .. } = &stored_struct.value else {
-            panic!("expected a struct, got {}", stored_struct.value.summary());
+        let PropertyValue::Unset { fields, .. } = &field.value else {
+            panic!("{:?}", field.value);
         };
         assert!(
-            !fields.is_empty() && fields.iter().all(unset),
-            "a struct stored from nothing declares its fields and stores none"
+            fields
+                .iter()
+                .any(|preview| preview.name == "Amplitude" && preview.span.is_none()),
+            "the fields it would hold are shown, with no bytes of their own"
         );
 
-        let amplitude = nested(
-            &after.exports[at].properties,
-            &["FOVOscillation", "Amplitude"],
-        )
-        .clone();
-        let reread = AssetBundle {
-            asset: &patched.asset,
-            exports: &patched.exports,
+        let (start, _) = field.span.expect("a span");
+        let mut changes = PackageEdits {
+            field_sets: vec![rivals_uasset::FieldSet {
+                offset: start,
+                expect_name: field.name.clone(),
+                expect_element: field.element,
+                path: vec!["Amplitude".into()],
+                text: "2.5".into(),
+            }],
+            ..Default::default()
         };
-        let again = rivals_uasset::patch_values(
-            &reread,
-            &after,
-            &[edit_of(&amplitude, EditOp::Set { text: "2.5".into() })],
-            None,
-        )
-        .expect("second round");
-        let final_bundle = AssetBundle {
-            asset: &again.asset,
-            exports: &again.exports,
+        changes.expect = rivals_uasset::expectations(&before, &changes);
+        let request = AssetEditRequest {
+            game_root: &fixture.root,
+            container: &fixture.container,
+            entry: fixture.entry,
+            kind: AssetSource::Utoc,
+            mod_name: "unused, preview writes nothing",
+            changes,
         };
-        let last = Fixture::parse_bundle(&final_bundle, &fixture.schema, &fixture.source());
+        let (patched, _) = preview_edits(&request, Some(&fixture.schema)).expect("one save");
+        let last = Fixture::parse_bundle(
+            &AssetBundle {
+                asset: &patched.asset,
+                exports: &patched.exports,
+            },
+            &fixture.schema,
+            &fixture.source(),
+        );
         let value = nested(
             &last.exports[at].properties,
             &["FOVOscillation", "Amplitude"],
@@ -4988,6 +5207,20 @@ mod game_data_tests {
             value.value.summary()
         );
         assert!(matches!(last.exports[at].status, ExportStatus::Complete));
+        assert_eq!(patched.applied.len(), 2, "the store and the field");
+
+        // The same save over its own result finds the struct stored, and moved by its header.
+        let again = FSerializedAssetBundle {
+            asset_file_buffer: patched.asset.clone(),
+            exports_file_buffer: patched.exports.clone(),
+            bulk_data_buffer: None,
+            optional_bulk_data_buffer: None,
+            memory_mapped_bulk_data_buffer: None,
+        };
+        assert!(
+            preview_read_edits(&request, Some(&fixture.schema), again, &last).is_err(),
+            "a field set is not applied twice"
+        );
     }
 
     /// The inverse of storing: the value's bytes and header item go, and the object inherits again.

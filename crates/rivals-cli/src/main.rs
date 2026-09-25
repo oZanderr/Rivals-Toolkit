@@ -298,6 +298,11 @@ struct AssetSetArgs {
     #[arg(long, value_name = "N")]
     element: Option<u32>,
 
+    /// A field inside the struct `--name` names, as `A.B.C` from the struct down. The struct and
+    /// any struct on the way that stores nothing yet are stored to hold it, all in one save.
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["op", "index"])]
+    field: Option<String>,
+
     /// `set` writes `--value`; `clear` flags the property as zero; `store` gives an unset struct,
     /// container or reference its empty form; `unset` drops it so the inherited value applies;
     /// `set-element`, `insert` and `remove` act on the container element at `--index`. In a set
@@ -2283,6 +2288,26 @@ fn asset_set(cli: &Cli, app: &settings::AppSettings, args: &AssetSetArgs) -> Res
         return Err(rivals_core::game_status::game_running_error());
     }
     let root = resolve::game_root(cli.game_root.as_deref(), app)?;
+    let mod_name = args
+        .mod_name
+        .as_deref()
+        .or(app.asset_mod_name.as_deref())
+        .unwrap_or(DEFAULT_MOD_NAME);
+    if let Some(field) = &args.field {
+        let message = asset::set_field(
+            &asset_request(cli, app, &args.asset, &root),
+            rivals_uasset::FieldSet {
+                offset: args.offset,
+                expect_name: args.name.clone(),
+                expect_element: args.element,
+                path: field.split('.').map(str::to_string).collect(),
+                text: args.value.clone(),
+            },
+            mod_name,
+            args.replace,
+        )?;
+        return emit(cli, &message, || outln!("{message}"));
+    }
     let message = asset::set(
         &asset_request(cli, app, &args.asset, &root),
         vec![rivals_uasset::ValueEdit {
@@ -2308,10 +2333,7 @@ fn asset_set(cli: &Cli, app: &settings::AppSettings, args: &AssetSetArgs) -> Res
                 },
             },
         }],
-        args.mod_name
-            .as_deref()
-            .or(app.asset_mod_name.as_deref())
-            .unwrap_or(DEFAULT_MOD_NAME),
+        mod_name,
         args.replace,
     )?;
     emit(cli, &message, || outln!("{message}"))

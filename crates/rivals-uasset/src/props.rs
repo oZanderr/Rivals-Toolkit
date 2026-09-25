@@ -541,6 +541,7 @@ fn emit_unset(
                     PropertyInner::Enum { name, .. } => Some(name.clone()),
                     _ => None,
                 },
+                fields: unset_fields(&slot.property.inner, ctx, 0),
             },
             span: Some((at, at)),
             slot: Some(SlotRef {
@@ -550,6 +551,42 @@ fn emit_unset(
             }),
         });
     }
+}
+
+/// How deep an unset struct's preview goes into structs of its own.
+const PREVIEW_DEPTH: u32 = 2;
+
+/// The fields a reflected struct declares, each unset, for showing what storing it would hold.
+/// A native struct lays itself out and names no fields a schema would, so it has none here.
+fn unset_fields(inner: &PropertyInner, ctx: &Ctx<'_>, depth: u32) -> Vec<PropertyEntry> {
+    let PropertyInner::Struct { name } = inner else {
+        return Vec::new();
+    };
+    if depth >= PREVIEW_DEPTH
+        || !matches!(
+            structs::native_default(name),
+            structs::NativeDefault::NotNative
+        )
+    {
+        return Vec::new();
+    }
+    let Some(schema) = ctx.schema(name) else {
+        return Vec::new();
+    };
+    (0..schema.len())
+        .filter_map(|index| schema.slot(index))
+        .map(|slot| PropertyEntry {
+            name: slot.property.name.clone(),
+            element: (slot.property.array_dim > 1).then_some(slot.element),
+            value: PropertyValue::Unset {
+                declared: storage_kind(&slot.property.inner),
+                enum_type: enum_type_of(&slot.property.inner),
+                fields: unset_fields(&slot.property.inner, ctx, depth + 1),
+            },
+            span: None,
+            slot: None,
+        })
+        .collect()
 }
 
 /// What storing a slot that holds no bytes takes: its minimal form, and for a container, how an

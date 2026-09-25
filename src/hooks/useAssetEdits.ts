@@ -76,6 +76,8 @@ export interface EditTarget {
   script?: { export: number; statement: number; constant: number };
   /** The value as it read when the draft was made, so a save refuses one that has since changed. */
   was?: string;
+  /** Field names down from an unset struct at this target to the field the draft sets. */
+  path?: string[];
 }
 
 /** A value as an edit types it, for the kinds the backend can compare that way. */
@@ -128,7 +130,13 @@ export function draftKey(target: EditTarget): string {
     const { export: exportIndex, index, key, field } = target.string;
     return ["str", exportIndex, index === null ? `add${SEP}${key}` : index, field ?? ""].join(SEP);
   }
-  const base = [target.offset, target.name, target.element ?? "", target.field ?? ""].join(SEP);
+  const base = [
+    target.offset,
+    target.name,
+    target.element ?? "",
+    target.field ?? "",
+    (target.path ?? []).join("."),
+  ].join(SEP);
   return target.index === undefined ? base : `${base}${SEP}[${target.index}]`;
 }
 
@@ -437,17 +445,45 @@ interface EditList {
   duplicate_exports?: { export: number; name: string; into_level?: number }[];
   export_edits?: ExportEdit[];
   dependencies?: DependencyEdit[];
+  field_sets?: FieldSet[];
   expect?: {
     exports?: Record<number, string>;
     values?: Record<string, string>;
   };
 }
 
+/** A value for a field inside a struct not stored yet, which the save stores to hold it. */
+interface FieldSet {
+  offset: number;
+  name: string;
+  element?: number;
+  path: string[];
+  text: string;
+}
+
+function toFieldSet({ target, draft }: DraftRecord): FieldSet | null {
+  if (!target.path || draft.op !== "set") return null;
+  return {
+    offset: target.offset,
+    name: target.name,
+    element: target.element,
+    path: target.path,
+    text: draft.text,
+  };
+}
+
+/** The mark the backend expects for a struct a field set finds not stored yet. */
+const NOT_STORED = "(not stored)";
+
 /** What the drafts read when they were made: the edited value, or the element of it, and the
  *  path of the export they sit in. */
 function expectOf(records: DraftRecord[], exportPath: string | undefined, exportIndex: number) {
   const values: Record<string, string> = {};
   for (const { target, draft } of records) {
+    if (target.path) {
+      values[String(target.offset)] = NOT_STORED;
+      continue;
+    }
     if (target.was === undefined) continue;
     if (draft.op === "set") values[String(target.offset)] = target.was;
     if (draft.op === "set_element" || draft.op === "remove")
@@ -794,8 +830,10 @@ export function useAssetEdits({
           !record.target.payload &&
           !record.target.bulk &&
           !record.target.script &&
+          !record.target.path &&
           !isKeyDraft(record.draft)
       );
+      const fieldSets = records.flatMap((record) => toFieldSet(record) ?? []);
       const rows = records.flatMap((record) => toRowEdit(record) ?? []);
       const strings = records.flatMap((record) => toStringEdit(record) ?? []);
       const keys = records.flatMap((record) => toKeyEdit(record) ?? []);
@@ -825,7 +863,12 @@ export function useAssetEdits({
           duplicate_exports: structural?.duplicate ?? [],
           export_edits: structural?.exports ?? [],
           dependencies: structural?.dependencies ?? [],
-          expect: expectOf(cells, exportPath, exportIndex),
+          field_sets: fieldSets,
+          expect: expectOf(
+            [...cells, ...records.filter((record) => record.target.path)],
+            exportPath,
+            exportIndex
+          ),
         };
         const result = await invoke<SaveResult>("save_asset_edits", {
           gameRoot: gamePath,

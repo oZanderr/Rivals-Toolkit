@@ -184,11 +184,32 @@ pub struct PackageEdits {
     /// Replacements for whole preload dependency runs. A save of its own: the runs sit in one
     /// shared table, so changing any of them rewrites all of them.
     pub dependencies: Vec<crate::dependency::DependencyEdit>,
+    /// Values set inside a struct that is not stored yet, which it is stored to hold.
+    pub field_sets: Vec<FieldSet>,
     /// What the edits were written against, checked before anything is patched.
     pub expect: Expected,
     /// Patch even where the package no longer matches `expect`.
     pub allow_drift: bool,
 }
+
+/// A value for a field inside a struct that stores nothing yet, addressed through the struct the
+/// way a value edit addresses a value, then by field names. The struct is stored first and the
+/// field set in it, which takes the package reading again in between, so this is applied by the
+/// caller that can read it: see `rivals_core::asset_edit::preview_edits`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FieldSet {
+    pub offset: u64,
+    #[serde(rename = "name")]
+    pub expect_name: String,
+    #[serde(rename = "element", default, skip_serializing_if = "Option::is_none")]
+    pub expect_element: Option<u32>,
+    /// Field names from the struct down to the value set, each `Name` or `Name[element]`.
+    pub path: Vec<String>,
+    pub text: String,
+}
+
+/// The mark [`Expected::values`] holds for a struct a [`FieldSet`] expects to find unstored.
+pub const NOT_STORED: &str = "(not stored)";
 
 /// What an edit list expected to find, so one applied to a package that has since changed is
 /// refused rather than landing on whatever now sits at the same index or offset.
@@ -287,6 +308,30 @@ pub fn check_expectations(parsed: &ParsedPackage, edits: &PackageEdits) -> Resul
                 "{} was {was}, and is now {}",
                 entry.label(),
                 now.map_or_else(|| "missing".to_string(), PropertyValue::summary)
+            ));
+        }
+    }
+    for edit in &edits.field_sets {
+        if expect
+            .values
+            .get(&edit.offset.to_string())
+            .map(String::as_str)
+            != Some(NOT_STORED)
+        {
+            continue;
+        }
+        let Some(entry) = find_at(parsed, edit.offset, &edit.expect_name, edit.expect_element)
+        else {
+            continue;
+        };
+        if !matches!(
+            entry.value,
+            PropertyValue::Unset { .. } | PropertyValue::Default
+        ) {
+            drift.push(format!(
+                "{} was not stored, and now stores {}",
+                entry.label(),
+                entry.value.summary()
             ));
         }
     }
@@ -415,6 +460,20 @@ pub fn expectations(parsed: &ParsedPackage, edits: &PackageEdits) -> Expected {
             expect.values.insert(Expected::value_key(edit), text);
         }
     }
+    for edit in &edits.field_sets {
+        let unstored = find_at(parsed, edit.offset, &edit.expect_name, edit.expect_element)
+            .is_some_and(|entry| {
+                matches!(
+                    entry.value,
+                    PropertyValue::Unset { .. } | PropertyValue::Default
+                )
+            });
+        if unstored {
+            expect
+                .values
+                .insert(edit.offset.to_string(), NOT_STORED.to_string());
+        }
+    }
     for edit in &edits.scripts {
         let old = parsed
             .exports
@@ -477,6 +536,7 @@ impl PackageEdits {
         self.reset_exports.extend(other.reset_exports);
         self.duplicate_exports.extend(other.duplicate_exports);
         self.dependencies.extend(other.dependencies);
+        self.field_sets.extend(other.field_sets);
         self.expect.merge(other.expect);
         self.allow_drift |= other.allow_drift;
     }
@@ -496,6 +556,7 @@ impl PackageEdits {
             && self.duplicate_exports.is_empty()
             && self.exports.is_empty()
             && self.dependencies.is_empty()
+            && self.field_sets.is_empty()
     }
 }
 
@@ -5174,6 +5235,7 @@ fn encode(value: &PropertyValue, text: &str, target: Target<'_>) -> Result<Vec<u
     if let PropertyValue::Unset {
         declared,
         enum_type,
+        ..
     } = value
     {
         // An enum slot stores its underlying integer; a typed enumerator name becomes that first.
@@ -5733,6 +5795,16 @@ fn locate<'a>(parsed: &'a ParsedPackage, edit: &ValueEdit) -> Result<&'a Propert
 
 /// Finds the entry of that name whose value starts at `offset`, anywhere in the package. A value
 /// holding its default shares its offset with the one stored next, so the name separates them.
+/// The entry an edit addressed by offset, name and element would land on.
+pub fn entry_named_at<'a>(
+    parsed: &'a ParsedPackage,
+    offset: u64,
+    name: &str,
+    element: Option<u32>,
+) -> Option<&'a PropertyEntry> {
+    find_at(parsed, offset, name, element)
+}
+
 fn find_at<'a>(
     parsed: &'a ParsedPackage,
     offset: u64,
@@ -7888,6 +7960,49 @@ mod tests {
             expect_element: None,
             op,
         }
+    }
+
+    /// A field set expects its struct to store nothing yet; one that now stores something is
+    /// refused rather than written over.
+    #[test]
+    fn a_field_set_on_a_struct_stored_since_is_refused_as_drift() {
+        let set = FieldSet {
+            offset: 0x40,
+            expect_name: "Where".into(),
+            expect_element: None,
+            path: vec!["X".into()],
+            text: "1".into(),
+        };
+        let unset = export_with(vec![entry(
+            "Where",
+            PropertyValue::Unset {
+                declared: "Struct",
+                enum_type: None,
+                fields: Vec::new(),
+            },
+            Some((0x40, 0x40)),
+        )]);
+        let mut edits = PackageEdits {
+            field_sets: vec![set],
+            ..Default::default()
+        };
+        edits.expect = expectations(&unset, &edits);
+        assert_eq!(
+            edits.expect.values.get("64").map(String::as_str),
+            Some(NOT_STORED)
+        );
+        check_expectations(&unset, &edits).expect("still unset");
+
+        let stored = export_with(vec![entry(
+            "Where",
+            PropertyValue::Struct {
+                name: "Vector".into(),
+                fields: Vec::new(),
+            },
+            Some((0x40, 0x58)),
+        )]);
+        let err = check_expectations(&stored, &edits).expect_err("stored since");
+        assert!(err.contains("Where was not stored"), "{err}");
     }
 
     /// A key edit names the channel it was made for, and a different channel now at that offset is

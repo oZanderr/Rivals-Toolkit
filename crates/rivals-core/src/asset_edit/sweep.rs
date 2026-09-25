@@ -657,6 +657,7 @@ mod tests {
                 PropertyValue::Unset {
                     declared: "Float",
                     enum_type: None,
+                    fields: Vec::new(),
                 },
                 Some((4, 4)),
             ),

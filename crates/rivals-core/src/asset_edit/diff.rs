@@ -420,7 +420,12 @@ fn diff_value(
                 ));
             }
         }
-        PropertyValue::Default | PropertyValue::Unset { .. } => {}
+        PropertyValue::Unset { fields, .. } => {
+            if let Some(edited) = edited.get("fields").and_then(Json::as_array) {
+                field_sets_in(entry, fields, edited, &[], &label, out);
+            }
+        }
+        PropertyValue::Default => {}
         _ => {
             if summary_changed(&entry.value, edited) {
                 let Some(offset) = at() else {
@@ -464,6 +469,19 @@ fn diff_retyped(
         ));
         return;
     };
+    // Fields filled in inside a struct not stored yet are set through it, which stores it on the
+    // way.
+    if matches!(was, "unset" | "default") && text_of(edited).is_none() {
+        let preview = match &entry.value {
+            PropertyValue::Unset { fields, .. } => &fields[..],
+            _ => &[],
+        };
+        if let Some(fields) = edited.get("fields").and_then(Json::as_array)
+            && field_sets_in(entry, preview, fields, &[], label, out) > 0
+        {
+            return;
+        }
+    }
     let mut push = |op: EditOp| {
         out.edits.values.push(ValueEdit {
             offset,
@@ -492,6 +510,74 @@ fn diff_retyped(
         )),
     }
     let _ = export;
+}
+
+/// The values the edited dump gives fields inside a struct that stores nothing yet, as field sets
+/// addressed through the struct. `preview` is what the reader showed of the struct's fields, which
+/// is how a deeper unset struct is told from a value. Returns how many it found.
+fn field_sets_in(
+    entry: &PropertyEntry,
+    preview: &[PropertyEntry],
+    edited: &[Json],
+    path: &[String],
+    label: &str,
+    out: &mut DiffOutcome,
+) -> usize {
+    let Some((offset, _)) = entry.span else {
+        return 0;
+    };
+    let mut found = 0;
+    for field in edited {
+        let Some(name) = field.get("name").and_then(Json::as_str) else {
+            continue;
+        };
+        let element = field
+            .get("element")
+            .and_then(Json::as_u64)
+            .map(|at| at as u32);
+        let Some(value) = field.get("value") else {
+            continue;
+        };
+        let segment = match element {
+            Some(at) => format!("{name}[{at}]"),
+            None => name.to_string(),
+        };
+        let mut here = path.to_vec();
+        here.push(segment);
+        let inner = preview
+            .iter()
+            .find(|held| held.name == name && held.element == element)
+            .and_then(|held| match &held.value {
+                PropertyValue::Unset { fields, .. } => Some(&fields[..]),
+                _ => None,
+            })
+            .unwrap_or(&[]);
+        match value.get("kind").and_then(Json::as_str) {
+            Some("unset" | "struct") => {
+                if let Some(nested) = value.get("fields").and_then(Json::as_array) {
+                    found += field_sets_in(entry, inner, nested, &here, label, out);
+                }
+            }
+            Some("default") | None => {}
+            Some(_) => match text_of(value) {
+                Some(text) => {
+                    out.edits.field_sets.push(rivals_uasset::FieldSet {
+                        offset,
+                        expect_name: entry.name.clone(),
+                        expect_element: entry.element,
+                        path: here,
+                        text,
+                    });
+                    found += 1;
+                }
+                None => out.notes.push(format!(
+                    "{label}.{}: a value inside a struct not stored yet can only be set from text",
+                    here.join(".")
+                )),
+            },
+        }
+    }
+    found
 }
 
 /// Container elements over the common prefix, then whatever the edited list added or dropped.
@@ -817,6 +903,7 @@ mod tests {
             PropertyValue::Unset {
                 declared: "Int",
                 enum_type: None,
+                fields: Vec::new(),
             },
             0x40,
         );
@@ -834,6 +921,7 @@ mod tests {
                 PropertyValue::Unset {
                     declared: "Struct",
                     enum_type: None,
+                    fields: Vec::new(),
                 },
                 0x40,
             ),
@@ -973,6 +1061,49 @@ mod tests {
         );
         assert!(out.edits.values.is_empty(), "{:?}", out.edits.values);
         assert_eq!(out.notes.len(), 1);
+    }
+
+    /// A value given to a field inside an unset struct is set through the struct, which stores it
+    /// on the way, rather than stored first and noted.
+    #[test]
+    fn a_field_inside_an_unset_struct_becomes_a_field_set() {
+        let preview = PropertyEntry {
+            name: "Amplitude".into(),
+            element: None,
+            value: PropertyValue::Unset {
+                declared: "Float",
+                enum_type: None,
+                fields: Vec::new(),
+            },
+            span: None,
+            slot: None,
+        };
+        let out = one(
+            entry(
+                "FOVOscillation",
+                PropertyValue::Unset {
+                    declared: "Struct",
+                    enum_type: None,
+                    fields: vec![preview],
+                },
+                0x40,
+            ),
+            json!({"kind": "unset", "declared": "Struct", "fields": [
+                {"name": "Amplitude", "value": {"kind": "float", "value": 2.5}},
+            ]}),
+        );
+        assert!(out.edits.values.is_empty(), "{:?}", out.edits.values);
+        assert_eq!(
+            out.edits.field_sets,
+            vec![rivals_uasset::FieldSet {
+                offset: 0x40,
+                expect_name: "FOVOscillation".into(),
+                expect_element: None,
+                path: vec!["Amplitude".into()],
+                text: "2.5".into(),
+            }]
+        );
+        assert!(out.notes.is_empty(), "{:?}", out.notes);
     }
 
     /// A delegate is bound by the loader rather than stored as text, so a changed one is reported

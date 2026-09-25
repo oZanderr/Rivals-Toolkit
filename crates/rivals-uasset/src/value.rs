@@ -143,6 +143,10 @@ pub enum PropertyValue {
         /// The enum type behind an enum slot's declared integer, so a value can be typed by name.
         #[serde(skip_serializing_if = "Option::is_none")]
         enum_type: Option<String>,
+        /// For an unset struct, the fields its schema declares, unset in turn. They have no bytes
+        /// yet, so they are shown and addressed through the struct: see [`crate::FieldSet`].
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        fields: Vec<PropertyEntry>,
     },
 }
 

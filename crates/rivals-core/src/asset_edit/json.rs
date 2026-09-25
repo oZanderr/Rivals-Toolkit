@@ -46,6 +46,9 @@ pub struct EditList {
     /// the package in.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependencies: Vec<DependencyEdit>,
+    /// Values set inside structs that store nothing yet. See [`rivals_uasset::FieldSet`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub field_sets: Vec<rivals_uasset::FieldSet>,
     /// What the edits were written against. An edit file without it is applied unchecked.
     #[serde(default, skip_serializing_if = "rivals_uasset::Expected::is_empty")]
     pub expect: rivals_uasset::Expected,
@@ -83,6 +86,7 @@ impl EditList {
             && self.duplicate_exports.is_empty()
             && self.export_edits.is_empty()
             && self.dependencies.is_empty()
+            && self.field_sets.is_empty()
     }
 
     /// Records what these edits find in `parsed`, the package they were written against, so applying
@@ -117,6 +121,7 @@ impl EditList {
             duplicate_exports: self.duplicate_exports.clone(),
             exports: self.export_edits.clone(),
             dependencies: self.dependencies.clone(),
+            field_sets: self.field_sets.clone(),
             ..Default::default()
         };
         self.expect = rivals_uasset::expectations(parsed, &skeleton);
@@ -162,6 +167,7 @@ impl EditList {
             duplicate_exports: self.duplicate_exports,
             exports: self.export_edits,
             dependencies: self.dependencies,
+            field_sets: self.field_sets,
             expect: self.expect,
             allow_drift: self.allow_drift,
         })

@@ -111,7 +111,7 @@ export type PropertyValue =
   | { kind: "struct"; name: string; fields: PropertyEntry[] }
   | { kind: "undecoded"; reason: string; bytes: number }
   | { kind: "default" }
-  | { kind: "unset"; declared: string; enum_type?: string };
+  | { kind: "unset"; declared: string; enum_type?: string; fields?: PropertyEntry[] };
 
 export interface PropertyEntry {
   name: string;
@@ -429,6 +429,8 @@ function isExpandable(value: PropertyValue): boolean {
       return value.entries.length > 0;
     case "text":
       return (value.parts?.length ?? 0) > 0;
+    case "unset":
+      return (value.fields?.length ?? 0) > 0;
     default:
       return false;
   }
@@ -649,6 +651,22 @@ function childrenOf(row: TreeRow): TreeRow[] {
       });
     case "text":
       return (value.parts ?? []).map((part) => rowOf(part, inner));
+    // The fields an unset struct would hold have no bytes yet, so each is reached through the
+    // struct: a value typed for one stores the struct and sets it in the same save.
+    case "unset":
+      return (value.fields ?? []).map((field) => {
+        const segment =
+          field.element === undefined ? field.name : `${field.name}[${field.element}]`;
+        const through: EditTarget | null = target
+          ? { ...target, path: [...(target.path ?? []), segment], was: undefined }
+          : null;
+        return {
+          entry: field,
+          target: through,
+          reason: through ? null : NO_POSITION,
+          within: inner,
+        };
+      });
     default:
       return [];
   }
@@ -1419,7 +1437,8 @@ const PropertyRow = memo(function PropertyRow({ row, depth }: { row: TreeRow; de
         style={{ paddingLeft: `${depth * 14 + 12}px` }}
         onClick={expandable ? () => setOpen((v) => !v) : undefined}
         onContextMenu={(e) => {
-          if (!target) {
+          // A field inside an unset struct only takes a value; there is nothing to clear or drop.
+          if (!target || target.path) {
             e.preventDefault();
             return;
           }

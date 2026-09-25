@@ -110,6 +110,25 @@ pub fn set(
     )
 }
 
+/// Sets a field inside a struct that may store nothing yet, storing it on the way, and writes the
+/// result into a mod pak.
+pub fn set_field(
+    request: &Request<'_>,
+    field: rivals_uasset::FieldSet,
+    mod_name: &str,
+    replace: bool,
+) -> Result<String, String> {
+    write_edits(
+        request,
+        mod_name,
+        replace,
+        PackageEdits {
+            field_sets: vec![field],
+            ..Default::default()
+        },
+    )
+}
+
 /// Points an import at another object, or adds one, and writes the result into a mod pak.
 pub fn import_edit(
     request: &Request<'_>,
