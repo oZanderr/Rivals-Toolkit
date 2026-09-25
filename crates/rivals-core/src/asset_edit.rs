@@ -5070,9 +5070,60 @@ mod game_data_tests {
         assert!(stored(now));
     }
 
-    /// A value the header flags as zero has no bytes either, and stores the same way an unset one
-    /// does, without first being unset.
-    ///
+    /// A native struct that holds one value, a soft path or a guid, shows no fields and takes its
+    /// value typed in whole while it is unset, in one save, written in its own layout.
+    #[test]
+    fn an_unset_value_struct_is_typed_in_one_save() {
+        let Some(fixture) = Fixture::open(CHANNEL_ENUM) else {
+            return;
+        };
+        let before = fixture.parse();
+        let path = nested(&before.exports[1].properties, &["CustomClockSourcePath"]).clone();
+        let guid = nested(
+            &before.exports[255].properties,
+            &["EvaluationTemplate", "SequenceSignature"],
+        )
+        .clone();
+        for (entry, declared) in [(&path, "SoftObjectPath"), (&guid, "Guid")] {
+            assert!(
+                matches!(&entry.value, PropertyValue::Unset { declared: held, fields, .. }
+                    if *held == declared && fields.is_empty()),
+                "{:?}",
+                entry.value
+            );
+        }
+
+        let (_, after) = fixture.apply(vec![
+            edit_of(
+                &path,
+                EditOp::Set {
+                    text: "/Game/Marvel/Probe.Probe".into(),
+                },
+            ),
+            edit_of(
+                &guid,
+                EditOp::Set {
+                    text: "0123456789abcdef0123456789ABCDEF".into(),
+                },
+            ),
+        ]);
+        let path = nested(&after.exports[1].properties, &["CustomClockSourcePath"]);
+        assert!(
+            matches!(&path.value, PropertyValue::SoftObject { path } if path == "/Game/Marvel/Probe.Probe"),
+            "{:?}",
+            path.value
+        );
+        let guid = nested(
+            &after.exports[255].properties,
+            &["EvaluationTemplate", "SequenceSignature"],
+        );
+        assert!(
+            matches!(&guid.value, PropertyValue::Str { value } if value == "0123456789ABCDEF0123456789ABCDEF"),
+            "{:?}",
+            guid.value
+        );
+    }
+
     /// A native struct shows the fields it lays out, whether it is zero or unset, and one of them
     /// is set in a single save while the others keep what storing it gave them.
     #[test]
@@ -5092,7 +5143,7 @@ mod game_data_tests {
         let unset_rotator = nested(&before.exports[0].properties, &["LookingRotationBase"]).clone();
         let preview = |entry: &PropertyEntry| -> Vec<String> {
             match &entry.value {
-                PropertyValue::Default { fields } | PropertyValue::Unset { fields, .. } => {
+                PropertyValue::Default { fields, .. } | PropertyValue::Unset { fields, .. } => {
                     fields.iter().map(|field| field.name.clone()).collect()
                 }
                 other => panic!("{other:?}"),
@@ -5152,6 +5203,8 @@ mod game_data_tests {
         }
     }
 
+    /// A value the header flags as zero has no bytes either, and stores the same way an unset one
+    /// does, without first being unset.
     #[test]
     fn a_zero_struct_stores_in_one_save() {
         let Some(fixture) = Fixture::open(CURVE_ANIM_BP) else {

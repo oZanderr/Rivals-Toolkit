@@ -110,7 +110,7 @@ export type PropertyValue =
   | { kind: "map"; entries: { key: PropertyValue; value: PropertyValue }[] }
   | { kind: "struct"; name: string; fields: PropertyEntry[] }
   | { kind: "undecoded"; reason: string; bytes: number }
-  | { kind: "default"; fields?: PropertyEntry[] }
+  | { kind: "default"; declared?: string; fields?: PropertyEntry[] }
   | { kind: "unset"; declared: string; enum_type?: string; fields?: PropertyEntry[] };
 
 export interface PropertyEntry {
@@ -694,6 +694,10 @@ function rowLock(row: TreeRow, session: EditSession): string | null {
   if (blocked) return blocked;
   const value = row.entry.value;
   if (value.kind === "unset") return row.target ? unsetReason(value.declared) : row.reason;
+  // A zero value is written from nothing like an unset one, when its type can be typed.
+  if (value.kind === "default" && value.declared && TYPEABLE_DECLARED.has(value.declared)) {
+    return row.target ? null : row.reason;
+  }
   if (value.kind === "undecoded") {
     return "This payload did not decode, so its bytes are kept exactly as they are.";
   }
@@ -2211,6 +2215,12 @@ const CONTAINER_KINDS = new Set(["array", "set", "map"]);
 
 /** Declared storage kinds the writer can produce from typed text when the slot holds nothing yet. */
 const TYPEABLE_DECLARED = new Set([
+  // Native structs that hold one value, typed in whole.
+  "SoftObjectPath",
+  "SoftClassPath",
+  "TopLevelAssetPath",
+  "MarvelSoftObjectPath",
+  "Guid",
   "Str",
   "Utf8Str",
   "AnsiStr",
@@ -2341,6 +2351,9 @@ function editableReason(field: PropertyEntry | undefined): string | null {
   if (!field) return "This row does not store this column.";
   if (!field.span) return NO_POSITION;
   if (field.value.kind === "unset") return unsetReason(field.value.declared);
+  if (field.value.kind === "default" && field.value.declared) {
+    return unsetReason(field.value.declared);
+  }
   if (field.value.kind === "text" && field.value.parts?.length) {
     return "This text is built from the parts below; edit one of them.";
   }

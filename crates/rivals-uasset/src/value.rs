@@ -135,9 +135,13 @@ pub enum PropertyValue {
     /// The property was covered by the header zero mask, so it holds its default value and
     /// occupies no bytes. Kept distinct from a real zero so the UI never implies a stored value.
     Default {
+        /// The type an edit writes it as, where the schema says: the stored kind, or the struct's
+        /// name for a native struct that holds one value, such as a soft object path.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        declared: Option<&'static str>,
         /// For a zero struct, the fields it holds, each zero, with no bytes of their own. They are
         /// addressed through the struct: see [`crate::FieldSet`].
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[serde(skip_serializing_if = "Vec::is_empty")]
         fields: Vec<PropertyEntry>,
     },
     /// The header skips this slot: the export stores nothing for it and the object keeps the value
@@ -278,7 +282,10 @@ mod tests {
             element: Some(3),
             span: None,
             slot: None,
-            value: PropertyValue::Default { fields: Vec::new() },
+            value: PropertyValue::Default {
+                declared: None,
+                fields: Vec::new(),
+            },
         };
         assert_eq!(entry.label(), "LensFlareTints[3]");
     }
@@ -291,7 +298,10 @@ mod tests {
                 element: None,
                 span: None,
                 slot: None,
-                value: PropertyValue::Default { fields: Vec::new() },
+                value: PropertyValue::Default {
+                    declared: None,
+                    fields: Vec::new()
+                },
             }
             .label(),
             "Damage"
@@ -319,7 +329,11 @@ mod tests {
     #[test]
     fn a_defaulted_property_is_never_summarised_as_a_stored_zero() {
         assert_eq!(
-            PropertyValue::Default { fields: Vec::new() }.summary(),
+            PropertyValue::Default {
+                declared: None,
+                fields: Vec::new()
+            }
+            .summary(),
             "(default)"
         );
     }

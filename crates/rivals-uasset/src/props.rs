@@ -471,8 +471,9 @@ pub(crate) fn read_property_block(
                 true,
             );
             match zero_value(&slot.property.inner, ctx) {
-                PropertyValue::Default { .. } if diagnostics.declared_slots => {
+                PropertyValue::Default { declared, .. } if diagnostics.declared_slots => {
                     PropertyValue::Default {
+                        declared,
                         fields: zero_fields(&slot.property.inner, ctx, 0),
                     }
                 }
@@ -555,7 +556,7 @@ fn emit_unset(
             name: slot.property.name.clone(),
             element: (slot.property.array_dim > 1).then_some(slot.element),
             value: PropertyValue::Unset {
-                declared,
+                declared: typed_as(&slot.property.inner),
                 enum_type: match &slot.property.inner {
                     PropertyInner::Enum { name, .. } => Some(name.clone()),
                     _ => None,
@@ -587,6 +588,10 @@ fn unset_fields(inner: &PropertyInner, ctx: &Ctx<'_>, depth: u32) -> Vec<Propert
     if let Some(fields) = native_fields(name, ctx) {
         return fields.into_iter().map(unset_preview).collect();
     }
+    // A struct that writes itself has fields a schema would misname, or none at all.
+    if reads_natively(name, ctx) {
+        return Vec::new();
+    }
     let Some(schema) = ctx.schema(name) else {
         return Vec::new();
     };
@@ -596,7 +601,7 @@ fn unset_fields(inner: &PropertyInner, ctx: &Ctx<'_>, depth: u32) -> Vec<Propert
             name: slot.property.name.clone(),
             element: (slot.property.array_dim > 1).then_some(slot.element),
             value: PropertyValue::Unset {
-                declared: storage_kind(&slot.property.inner),
+                declared: typed_as(&slot.property.inner),
                 enum_type: enum_type_of(&slot.property.inner),
                 fields: unset_fields(&slot.property.inner, ctx, depth + 1),
             },
@@ -617,6 +622,9 @@ fn zero_fields(inner: &PropertyInner, ctx: &Ctx<'_>, depth: u32) -> Vec<Property
     if let Some(fields) = native_fields(name, ctx) {
         return fields;
     }
+    if reads_natively(name, ctx) {
+        return Vec::new();
+    }
     let Some(schema) = ctx.schema(name) else {
         return Vec::new();
     };
@@ -626,7 +634,8 @@ fn zero_fields(inner: &PropertyInner, ctx: &Ctx<'_>, depth: u32) -> Vec<Property
             name: slot.property.name.clone(),
             element: (slot.property.array_dim > 1).then_some(slot.element),
             value: match zero_value(&slot.property.inner, ctx) {
-                PropertyValue::Default { .. } => PropertyValue::Default {
+                PropertyValue::Default { declared, .. } => PropertyValue::Default {
+                    declared,
                     fields: zero_fields(&slot.property.inner, ctx, depth + 1),
                 },
                 other => other,
@@ -635,6 +644,35 @@ fn zero_fields(inner: &PropertyInner, ctx: &Ctx<'_>, depth: u32) -> Vec<Property
             slot: None,
         })
         .collect()
+}
+
+/// Whether a struct serializes itself rather than through its schema. Asked of the native reader
+/// itself over no bytes: it takes any struct it lays out, and fails to read it.
+fn reads_natively(name: &str, ctx: &Ctx<'_>) -> bool {
+    let mut scratch = Diagnostics::default();
+    structs::read_native(name, &mut Cursor::new(&[], 0), ctx, &mut scratch, 0).is_some()
+}
+
+/// The native structs that hold a single value, which an edit types in whole.
+const VALUE_STRUCTS: [&str; 5] = [
+    "SoftObjectPath",
+    "SoftClassPath",
+    "TopLevelAssetPath",
+    "MarvelSoftObjectPath",
+    "Guid",
+];
+
+/// The type an edit writes a slot as: its stored kind, or for a native struct that holds a single
+/// value, that struct's name, which is what says how to write it.
+pub(crate) fn typed_as(inner: &PropertyInner) -> &'static str {
+    match inner {
+        PropertyInner::Struct { name } => VALUE_STRUCTS
+            .iter()
+            .find(|held| **held == name.as_str())
+            .copied()
+            .unwrap_or("Struct"),
+        other => storage_kind(other),
+    }
 }
 
 /// A native struct's fields, read from the bytes it holds when every field is default. It lays
@@ -1123,7 +1161,10 @@ fn read_instanced_struct(
             name,
             fields: Vec::new(),
         },
-        None => PropertyValue::Default { fields: Vec::new() },
+        None => PropertyValue::Default {
+            declared: None,
+            fields: Vec::new(),
+        },
     };
 
     cursor.seek_to(payload_end)?;
@@ -1716,7 +1757,10 @@ fn zero_value(inner: &PropertyInner, ctx: &Ctx<'_>) -> PropertyValue {
         PropertyInner::Map { .. } => PropertyValue::Map {
             entries: Vec::new(),
         },
-        _ => PropertyValue::Default { fields: Vec::new() },
+        _ => PropertyValue::Default {
+            declared: Some(typed_as(inner)),
+            fields: Vec::new(),
+        },
     }
 }
 

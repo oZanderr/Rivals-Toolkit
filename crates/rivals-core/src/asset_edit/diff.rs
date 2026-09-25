@@ -420,7 +420,7 @@ fn diff_value(
                 ));
             }
         }
-        PropertyValue::Unset { fields, .. } | PropertyValue::Default { fields } => {
+        PropertyValue::Unset { fields, .. } | PropertyValue::Default { fields, .. } => {
             if let Some(edited) = edited.get("fields").and_then(Json::as_array) {
                 field_sets_in(entry, fields, edited, &[], &label, out);
             }
@@ -472,7 +472,9 @@ fn diff_retyped(
     // way.
     if matches!(was, "unset" | "default") && text_of(edited).is_none() {
         let preview = match &entry.value {
-            PropertyValue::Unset { fields, .. } | PropertyValue::Default { fields } => &fields[..],
+            PropertyValue::Unset { fields, .. } | PropertyValue::Default { fields, .. } => {
+                &fields[..]
+            }
             _ => &[],
         };
         if let Some(fields) = edited.get("fields").and_then(Json::as_array)
@@ -547,7 +549,7 @@ fn field_sets_in(
             .iter()
             .find(|held| held.name == name && held.element == element)
             .and_then(|held| match &held.value {
-                PropertyValue::Unset { fields, .. } | PropertyValue::Default { fields } => {
+                PropertyValue::Unset { fields, .. } | PropertyValue::Default { fields, .. } => {
                     Some(&fields[..])
                 }
                 _ => None,
@@ -895,7 +897,14 @@ mod tests {
         let out = one(stored.clone(), json!({"kind": "unset", "declared": "Int"}));
         assert!(matches!(value(&out).op, EditOp::Unset));
 
-        let defaulted = entry("Count", PropertyValue::Default { fields: Vec::new() }, 0x40);
+        let defaulted = entry(
+            "Count",
+            PropertyValue::Default {
+                declared: None,
+                fields: Vec::new(),
+            },
+            0x40,
+        );
         let out = one(defaulted, json!({"kind": "int", "value": 5}));
         assert!(matches!(&value(&out).op, EditOp::Set { text } if text == "5"));
 
@@ -1117,7 +1126,10 @@ mod tests {
         let out = one(
             entry(
                 "Offset",
-                PropertyValue::Default { fields: vec![zero] },
+                PropertyValue::Default {
+                    declared: None,
+                    fields: vec![zero],
+                },
                 0x50,
             ),
             json!({"kind": "default", "fields": [

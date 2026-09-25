@@ -653,7 +653,10 @@ mod tests {
         let entries = vec![
             entry(
                 "Amplitude",
-                PropertyValue::Default { fields: Vec::new() },
+                PropertyValue::Default {
+                    declared: None,
+                    fields: Vec::new(),
+                },
                 Some((4, 4)),
             ),
             entry(

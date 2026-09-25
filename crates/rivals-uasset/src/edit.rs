@@ -22,7 +22,7 @@ use crate::package::ExportStatus;
 use crate::package::{
     AssetBundle, ParsedExport, ParsedPackage, header_size, path_from, read_header,
 };
-use crate::props::InstancedLayout;
+use crate::props::{InstancedLayout, NativeLeaf};
 use crate::reader::Cursor;
 use crate::remove::{plan_removal, remove_exports, reset_export};
 use crate::stringtable::{StringTable, StringTableLayout};
@@ -1058,7 +1058,9 @@ pub fn patch_package_with(
                     text,
                     Target {
                         declared: entry.slot.map_or("", |slot| slot.declared),
-                        native: native_leaf_at(parsed, start),
+                        // A value with no bytes shares its offset with the one stored next,
+                        // which is not the struct it is.
+                        native: stored.then(|| native_leaf_at(parsed, start)).flatten(),
                         width: stored.then_some(end - start),
                         was,
                         tables: &mut tables,
@@ -5233,9 +5235,11 @@ fn encode(value: &PropertyValue, text: &str, target: Target<'_>) -> Result<Vec<u
         return encode_native_leaf(leaf, text.trim(), &mut target.tables.names);
     }
     // A zero value has no bytes to rebuild from, so it is written from nothing like an unset one.
-    if matches!(value, PropertyValue::Default { .. }) && !target.declared.is_empty() {
-        let declared = target.declared;
-        return encode_declared(declared, text, target);
+    if let PropertyValue::Default { declared, .. } = value {
+        let declared = declared.unwrap_or(target.declared);
+        if !declared.is_empty() {
+            return encode_declared(declared, text, target);
+        }
     }
     if let PropertyValue::Unset {
         declared,
@@ -5339,6 +5343,21 @@ fn encode_declared(declared: &str, text: &str, target: Target<'_>) -> Result<Vec
         "Int8" | "Int16" | "Int" | "Int64" => scalar(PropertyValue::Int { value: 0 }),
         "UInt16" | "UInt32" | "UInt64" => scalar(PropertyValue::UInt { value: 0 }),
         "Float" | "Double" => scalar(PropertyValue::Float { value: 0.0 }),
+        // Native structs that hold one value are written in their own layout.
+        "Guid" => encode_native_leaf(NativeLeaf::Guid, text.trim(), &mut target.tables.names),
+        "TopLevelAssetPath" => encode_native_leaf(
+            NativeLeaf::TopLevelAssetPath,
+            text.trim(),
+            &mut target.tables.names,
+        ),
+        "MarvelSoftObjectPath" => encode_native_leaf(
+            NativeLeaf::MarvelSoftObjectPath,
+            text.trim(),
+            &mut target.tables.names,
+        ),
+        "SoftObjectPath" | "SoftClassPath" => {
+            Ok(encode_soft_object(text.trim(), &mut target.tables.names))
+        }
         other => Err(format!(
             "a {other} cannot be typed in; store it first and then edit what is inside"
         )),
@@ -7979,7 +7998,10 @@ mod tests {
         let mut parsed = export_with(vec![PropertyEntry {
             name: "Params".into(),
             element: None,
-            value: PropertyValue::Default { fields: Vec::new() },
+            value: PropertyValue::Default {
+                declared: None,
+                fields: Vec::new(),
+            },
             span: Some((0x40, 0x40)),
             slot: Some(slot),
         }]);
