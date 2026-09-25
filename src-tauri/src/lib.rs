@@ -134,6 +134,7 @@ pub fn run() {
             // mods
             mods::commands::get_mods_status,
             mods::commands::check_mod_conflicts,
+            mods::commands::get_mod_report,
             mods::commands::install_signature_bypass,
             mods::commands::remove_signature_bypass,
             mods::commands::is_signature_bypass_installed,

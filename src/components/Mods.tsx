@@ -28,9 +28,11 @@ import {
   X,
   Users,
   Search,
+  ListTree,
 } from "lucide-react";
 
 import { HeroIcon } from "@/components/HeroIcon";
+import { ModReportDialog } from "@/components/ModReportDialog";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -96,7 +98,10 @@ interface ModEntry {
 
 interface AssetConflict {
   asset: string;
+  /** Winner first: highest `_N_P` patch number, then alphabetical. */
   mods: string[];
+  /** The base game ships this asset too. */
+  overrides_game: boolean;
 }
 
 interface ConflictGroup {
@@ -184,6 +189,7 @@ export function Mods({
   const [renamingMod, setRenamingMod] = useState<string | null>(null);
   const [conflictReport, setConflictReport] = useState<ConflictReport | null>(null);
   const [conflictDetailOpen, setConflictDetailOpen] = useState(false);
+  const [reportMod, setReportMod] = useState<string | null>(null);
   const [profiles, setProfiles] = useState<ModProfile[]>([]);
   const [profilesOpen, setProfilesOpen] = useState(false);
   const [knownHeroes, setKnownHeroes] = useState<CharacterSummary[]>([]);
@@ -1040,7 +1046,7 @@ export function Mods({
           <AlertTriangle size={15} className="shrink-0 text-warn" />
           <span className="flex-1 text-[12px] text-warn">
             {conflictCount} mod{conflictCount !== 1 ? "s" : ""} ha
-            {conflictCount !== 1 ? "ve" : "s"} asset conflicts, the alphabetically first pak wins
+            {conflictCount !== 1 ? "ve" : "s"} asset conflicts, the highest _N_P patch number wins
           </span>
           <Button
             variant="ghost"
@@ -1691,6 +1697,13 @@ export function Mods({
                             <PackageOpen />
                             View in Asset Manager
                           </ContextMenuItem>
+                          <ContextMenuItem
+                            disabled={!entry.enabled || entry.kind !== "IoStore"}
+                            onSelect={() => setReportMod(entry.full_name)}
+                          >
+                            <ListTree />
+                            Show contents
+                          </ContextMenuItem>
                           <ContextMenuItem onSelect={() => revealMod(entry)}>
                             <FolderOpen />
                             Show in folder
@@ -1759,7 +1772,7 @@ export function Mods({
             <AlertDialogDescription>
               {conflictReport?.asset_conflicts.length ?? 0} asset
               {conflictReport?.asset_conflicts.length !== 1 ? "s" : ""} modified by multiple mods.
-              The alphabetically first pak file wins.
+              The pak with the highest _N_P patch number wins, then the alphabetically first.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <ConflictList conflicts={conflictReport?.asset_conflicts ?? []} />
@@ -1768,6 +1781,15 @@ export function Mods({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {reportMod !== null && (
+        <ModReportDialog
+          key={reportMod}
+          gamePath={gamePath}
+          modName={reportMod}
+          onClose={() => setReportMod(null)}
+        />
+      )}
     </div>
   );
 }
@@ -1890,9 +1912,20 @@ function ConflictList({ conflicts }: { conflicts: AssetConflict[] }) {
               className="pb-3"
             >
               <div className="rounded border border-border bg-secondary/30 p-2.5 text-[12px]">
-                <Tip content={c.asset}>
-                  <p className="truncate font-mono text-[11px] text-muted-foreground">{c.asset}</p>
-                </Tip>
+                <div className="flex items-center gap-1.5">
+                  <Tip content={c.asset}>
+                    <p className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground">
+                      {c.asset}
+                    </p>
+                  </Tip>
+                  {c.overrides_game && (
+                    <Tip content="The base game ships this asset; each mod here replaces it.">
+                      <span className="shrink-0 rounded bg-warn/15 px-1 py-0.5 text-[9px] font-semibold uppercase leading-none text-warn">
+                        Vanilla override
+                      </span>
+                    </Tip>
+                  )}
+                </div>
                 <div className="mt-1.5 flex flex-col gap-0.5">
                   {c.mods.map((mod, i) => (
                     <span key={mod} className="flex items-center gap-1.5">

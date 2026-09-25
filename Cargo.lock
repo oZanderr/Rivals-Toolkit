@@ -3486,6 +3486,7 @@ dependencies = [
  "cityhasher",
  "dirs 5.0.1",
  "hex",
+ "rayon",
  "repak",
  "retoc",
  "rivals-uasset",

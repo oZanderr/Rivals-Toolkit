@@ -68,10 +68,49 @@ pub fn held_open_hint(error: &std::io::Error) -> &'static str {
     }
 }
 
+/// The patch number UE reads from a `Name_<N>_P` file: a higher number mounts above a lower one,
+/// and a name without the suffix sits below every patch. Directories and extensions are ignored.
+pub fn pak_priority(file_name: &str) -> Option<u32> {
+    let name = file_name.rsplit(['/', '\\']).next().unwrap_or(file_name);
+    let name = name.strip_suffix(".disabled").unwrap_or(name);
+    let stem = Path::new(name).file_stem()?.to_str()?;
+    let (rest, _) = stem
+        .rsplit_once('_')
+        .filter(|(_, p)| p.eq_ignore_ascii_case("p"))?;
+    rest.rsplit_once('_')?.1.parse().ok()
+}
+
+/// Orders mods so the one whose copy of a shared asset wins comes first: highest patch number,
+/// then alphabetical, which is the order the loader breaks a tie in.
+pub fn winner_order(a: &str, b: &str) -> std::cmp::Ordering {
+    pak_priority(b)
+        .cmp(&pak_priority(a))
+        .then_with(|| a.to_lowercase().cmp(&b.to_lowercase()))
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_patch_number_is_the_one_before_a_trailing_p() {
+        assert_eq!(
+            pak_priority("!ProjectGalacta_9999999_P.pak"),
+            Some(9_999_999)
+        );
+        assert_eq!(pak_priority("sub/Foo_Bar_12_p.utoc.disabled"), Some(12));
+        assert_eq!(pak_priority("Foo_P.pak"), None);
+        assert_eq!(pak_priority("Foo_12.pak"), None);
+        assert_eq!(pak_priority("Foo.pak"), None);
+    }
+
+    #[test]
+    fn the_highest_patch_wins_and_names_break_a_tie() {
+        let mut mods = vec!["b_1_P.pak", "Plain.pak", "a_1_P.pak", "z_50_P.pak"];
+        mods.sort_by(|a, b| winner_order(a, b));
+        assert_eq!(mods, ["z_50_P.pak", "a_1_P.pak", "b_1_P.pak", "Plain.pak"]);
+    }
 
     fn scratch(tag: &str) -> PathBuf {
         let stamp = std::time::SystemTime::now()

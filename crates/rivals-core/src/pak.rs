@@ -2,5 +2,6 @@
 
 pub mod containers;
 pub mod crypto;
+pub mod extract;
 pub mod iostore_out;
 pub mod profile;

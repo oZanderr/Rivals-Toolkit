@@ -44,7 +44,7 @@ fn parse(request: &Request<'_>) -> Result<ParsedPackage, String> {
     let schema = mappings::resolve(request.usmap, request.configured_usmap)
         .and_then(|path| mappings::load(&path))
         .ok();
-    schema_synth::parse_package_opts(
+    let parsed = schema_synth::parse_package_opts(
         &AssetBundle {
             asset: &bundle.asset_file_buffer,
             exports: &bundle.exports_file_buffer,
@@ -60,7 +60,11 @@ fn parse(request: &Request<'_>) -> Result<ParsedPackage, String> {
             declared_slots: request.declared,
             ..Default::default()
         },
-    )
+    )?;
+    if let Some(warning) = rivals_uasset::lost_import_warning(&parsed.imports) {
+        eprintln!("warning: {warning}");
+    }
+    Ok(parsed)
 }
 
 fn kind_of(request: &Request<'_>) -> AssetSource {

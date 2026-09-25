@@ -4,6 +4,7 @@ use serde::Serialize;
 
 use crate::props::{Ctx, Diagnostics, MissingSchema, read_property_block};
 use crate::reader::Cursor;
+use crate::tagged::read_tagged_block;
 use crate::value::{PropertyEntry, PropertyValue};
 
 #[derive(Debug, Clone, Serialize)]
@@ -34,6 +35,8 @@ pub struct DataTableLayout {
     pub count_at: u64,
     /// How many slots the row struct declares, which is what an empty row's header has to cover.
     pub row_slots: usize,
+    /// Rows are tagged property blocks, so an empty one is a lone `None` rather than a header.
+    pub tagged: bool,
     /// One span per decoded row, in table order.
     pub rows: Vec<RowSpan>,
 }
@@ -50,22 +53,28 @@ pub(crate) fn read_rows(
     properties: &[PropertyEntry],
     ctx: &Ctx<'_>,
     export: u32,
+    tagged: bool,
     diagnostics: &mut Diagnostics,
 ) -> Result<DataTable, String> {
     let path = row_struct_path(properties)
         .ok_or_else(|| cursor.err("DataTable has no resolvable RowStruct"))?;
     let row_struct = last_path_segment(&path);
-    let schema = ctx.schema(&row_struct).ok_or_else(|| {
-        // A Blueprint row struct lives in its own package, so record where it is: the caller can
-        // read the definition from there and parse again.
-        diagnostics.missing_schemas.push(MissingSchema {
-            name: row_struct.clone(),
-            object_path: path,
-        });
-        cursor.err(format!(
-            "row struct {row_struct} is not in the mappings file"
-        ))
-    })?;
+    // Tagged rows describe themselves, so the schema only names the columns and is not required.
+    let schema = match ctx.schema(&row_struct) {
+        Some(schema) => Some(schema),
+        None if tagged => None,
+        None => {
+            // A Blueprint row struct lives in its own package, so record where it is: the caller
+            // can read the definition from there and parse again.
+            diagnostics.missing_schemas.push(MissingSchema {
+                name: row_struct.clone(),
+                object_path: path,
+            });
+            return Err(cursor.err(format!(
+                "row struct {row_struct} is not in the mappings file"
+            )));
+        }
+    };
 
     let count_at = cursor.file_offset();
     let count = cursor.read_i32()?;
@@ -87,7 +96,12 @@ pub(crate) fn read_rows(
             }
         };
         let mut fields = Vec::new();
-        let outcome = read_property_block(cursor, &schema, ctx, diagnostics, 0, &mut fields);
+        let outcome = match &schema {
+            Some(schema) if !tagged => {
+                read_property_block(cursor, schema, ctx, diagnostics, 0, &mut fields)
+            }
+            _ => read_tagged_block(cursor, ctx, diagnostics, 0, &mut fields),
+        };
         let failed = outcome.err().map(|e| format!("row {index} ({name}): {e}"));
         rows.push(DataTableRow { name, fields });
         spans.push(RowSpan {
@@ -102,12 +116,17 @@ pub(crate) fn read_rows(
     diagnostics.tables.push(DataTableLayout {
         export,
         count_at,
-        row_slots: schema.len(),
+        row_slots: if tagged {
+            0
+        } else {
+            schema.as_ref().map_or(0, |s| s.len())
+        },
+        tagged,
         rows: spans,
     });
 
-    Ok(DataTable {
-        columns: schema
+    let columns = match &schema {
+        Some(schema) => schema
             .iter()
             .map(|s| {
                 if s.property.array_dim > 1 {
@@ -117,11 +136,27 @@ pub(crate) fn read_rows(
                 }
             })
             .collect(),
+        None => decoded_columns(&rows),
+    };
+    Ok(DataTable {
+        columns,
         row_struct,
         rows,
         declared_rows: count as u32,
         truncated,
     })
+}
+
+/// Without a schema, the columns are every field the rows stored, in the order first seen.
+fn decoded_columns(rows: &[DataTableRow]) -> Vec<String> {
+    let mut columns: Vec<String> = Vec::new();
+    for field in rows.iter().flat_map(|row| &row.fields) {
+        let label = field.label();
+        if !columns.contains(&label) {
+            columns.push(label);
+        }
+    }
+    columns
 }
 
 /// `RowStruct` is an object property pointing at the UScriptStruct describing every row.

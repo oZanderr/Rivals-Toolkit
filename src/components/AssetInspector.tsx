@@ -2280,9 +2280,11 @@ function ImportPathCell({ info, edits }: { info: ImportInfo; edits: AssetEdits }
     <Tip
       content={
         locked ??
-        (info.unresolved
-          ? "retoc could not resolve this object when converting the package; the hash stands in for it."
-          : "Click to point this import at another object: /Game/Path/Asset.Object, or :Sub for a subobject.")
+        (info.object_name === "UnknownExport"
+          ? "An older converter dropped this import's hash when the package was extracted. Re-extract it from its container to recover the reference."
+          : info.unresolved
+            ? "retoc could not resolve this object when converting the package; the hash stands in for it."
+            : "Click to point this import at another object: /Game/Path/Asset.Object, or :Sub for a subobject.")
       }
     >
       <span

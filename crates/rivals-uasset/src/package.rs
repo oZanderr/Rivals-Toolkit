@@ -148,6 +148,38 @@ pub fn unresolved_import_note(name: &str) -> Option<String> {
     (name == "UnknownExport").then(|| "unresolved".to_string())
 }
 
+/// The paths of every import retoc left unnamed, read from the header alone so no mappings file
+/// is needed.
+pub fn unresolved_imports(bundle: &AssetBundle<'_>) -> Result<Vec<String>, String> {
+    let header = read_header(bundle)?;
+    Ok(header
+        .imports
+        .iter()
+        .enumerate()
+        .filter_map(|(at, import)| {
+            let name = header.name_map.get(import.object_name).ok()?;
+            is_unresolved_import_name(&name)
+                .then(|| dotted_path(&header, FPackageIndex::create_import(at as u32)))
+                .flatten()
+        })
+        .collect())
+}
+
+/// A bare `UnknownExport` import lost its hash to a converter that predates keeping it, so nothing
+/// can name it again: the package has to be converted afresh from the container it came from.
+pub fn lost_import_warning(imports: &[ImportInfo]) -> Option<String> {
+    let lost = imports
+        .iter()
+        .filter(|import| import.object_name == "UnknownExport")
+        .count();
+    (lost > 0).then(|| {
+        format!(
+            "{lost} import(s) were extracted by a converter that dropped their hash; \
+             re-extract this package from its container to recover them"
+        )
+    })
+}
+
 /// One row of the import table, with its references resolved to a path.
 #[derive(Debug, Clone, Serialize)]
 pub struct ImportInfo {
@@ -926,11 +958,13 @@ fn parse_one_inner(
     }
 
     let mut data_table = None;
-    if ctx
+    // A tagged package reads without mappings, so its tables are known by their class name.
+    let is_table = ctx
         .mappings
         .is_some_and(|m| m.inherits_from(&class_name, "DataTable"))
-    {
-        match datatable::read_rows(&mut cursor, &properties, ctx, index, diagnostics) {
+        || (tagged && matches!(class_name.as_str(), "DataTable" | "CompositeDataTable"));
+    if is_table {
+        match datatable::read_rows(&mut cursor, &properties, ctx, index, tagged, diagnostics) {
             Ok(table) => {
                 if let Some(reason) = table.truncated.clone() {
                     return ParsedExport {
@@ -1471,6 +1505,22 @@ mod tagged_package_tests {
         "TestClass",
         "Damage",
         "IntProperty",
+        "/Script/Engine",
+        "/Script/CoreUObject",
+        "Package",
+        "Class",
+        "ScriptStruct",
+        "DataTable",
+        "CompositeDataTable",
+        "TestRow",
+        "RowStruct",
+        "ObjectProperty",
+        "ParentTables",
+        "ArrayProperty",
+        "Label",
+        "StrProperty",
+        "RowA",
+        "RowB",
     ];
 
     fn name_index(value: &str) -> i32 {
@@ -1564,6 +1614,142 @@ mod tagged_package_tests {
             export.properties[0].value,
             crate::value::PropertyValue::Int { value: 99 }
         ));
+    }
+
+    fn write_tag(out: &mut Vec<u8>, name: &str, kind: &str, size: i32) {
+        write_name(out, name);
+        write_name(out, kind);
+        out.extend_from_slice(&size.to_le_bytes());
+        out.extend_from_slice(&0i32.to_le_bytes());
+    }
+
+    fn import(class: &str, outer: FPackageIndex, name: &str) -> retoc::legacy_asset::FObjectImport {
+        retoc::legacy_asset::FObjectImport {
+            class_package: minimal_name("/Script/CoreUObject"),
+            class_name: minimal_name(class),
+            outer_index: outer,
+            object_name: minimal_name(name),
+            is_optional: false,
+        }
+    }
+
+    /// A tagged table of class `class`: a `RowStruct` pointing at an imported struct, then two
+    /// rows, the second storing a field the first leaves out. A composite also lists its parents.
+    fn tagged_table_package(class: &str) -> (Vec<u8>, Vec<u8>) {
+        let mut exports = Vec::new();
+        if class == "CompositeDataTable" {
+            write_tag(&mut exports, "ParentTables", "ArrayProperty", 4);
+            write_name(&mut exports, "ObjectProperty");
+            exports.push(0);
+            exports.extend_from_slice(&0i32.to_le_bytes());
+        }
+        write_tag(&mut exports, "RowStruct", "ObjectProperty", 4);
+        exports.push(0);
+        exports.extend_from_slice(&FPackageIndex::create_import(2).index.to_le_bytes());
+        write_name(&mut exports, "None");
+        exports.extend_from_slice(&0i32.to_le_bytes());
+
+        exports.extend_from_slice(&2i32.to_le_bytes());
+        write_name(&mut exports, "RowA");
+        write_tag(&mut exports, "Damage", "IntProperty", 4);
+        exports.push(0);
+        exports.extend_from_slice(&7i32.to_le_bytes());
+        write_name(&mut exports, "None");
+        write_name(&mut exports, "RowB");
+        write_tag(&mut exports, "Damage", "IntProperty", 4);
+        exports.push(0);
+        exports.extend_from_slice(&9i32.to_le_bytes());
+        write_tag(&mut exports, "Label", "StrProperty", 7);
+        exports.push(0);
+        exports.extend_from_slice(&3i32.to_le_bytes());
+        exports.extend_from_slice(b"hi\0");
+        write_name(&mut exports, "None");
+
+        let mut summary = FLegacyPackageFileSummary {
+            package_name: "/Game/TestPackage".to_string(),
+            ..Default::default()
+        };
+        summary.versioning_info.package_file_version =
+            FALLBACK_ENGINE_VERSION.package_file_version();
+        summary.versioning_info.total_header_size = HEADER_SIZE as i32;
+        summary.package_flags = EPackageFlags::Cooked as u32;
+
+        let engine = FPackageIndex::create_import(0);
+        let header = FLegacyPackageHeader {
+            summary,
+            name_map: FPackageNameMap::create_from_names(
+                NAMES.iter().map(|n| (*n).to_string()).collect(),
+            ),
+            imports: vec![
+                import("Package", FPackageIndex::create_null(), "/Script/Engine"),
+                import("Class", engine, class),
+                import("ScriptStruct", engine, "TestRow"),
+            ],
+            exports: vec![FObjectExport {
+                class_index: FPackageIndex::create_import(1),
+                object_name: minimal_name("TestObject"),
+                serial_offset: 0,
+                serial_size: exports.len() as i64,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let mut asset = std::io::Cursor::new(Vec::new());
+        header
+            .serialize(
+                &mut asset,
+                Some(HEADER_SIZE),
+                &retoc::logging::Log::no_log(),
+            )
+            .expect("serialize the test package header");
+        (asset.into_inner(), exports)
+    }
+
+    fn parse_table(class: &str) -> ParsedPackage {
+        let (asset, exports) = tagged_table_package(class);
+        parse_package(
+            &AssetBundle {
+                asset: &asset,
+                exports: &exports,
+            },
+            None,
+        )
+        .expect("a tagged table needs no mappings")
+    }
+
+    #[test]
+    fn a_tagged_data_table_reads_its_rows_with_no_mappings_file() {
+        let parsed = parse_table("DataTable");
+        let export = &parsed.exports[0];
+        assert!(
+            matches!(export.status, ExportStatus::Complete),
+            "expected every byte accounted for, got {:?}",
+            export.status
+        );
+        let table = export.data_table.as_ref().expect("rows are read");
+        assert_eq!(table.row_struct, "TestRow");
+        assert_eq!(table.columns, ["Damage", "Label"]);
+        let names: Vec<&str> = table.rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["RowA", "RowB"]);
+        assert_eq!(table.rows[1].fields.len(), 2);
+
+        let layout = &parsed.tables[0];
+        assert!(layout.tagged);
+        assert_eq!(layout.rows.len(), 2);
+        assert_eq!(
+            layout.rows[1].end as i64,
+            HEADER_SIZE as i64 + export.serial_size
+        );
+    }
+
+    #[test]
+    fn a_tagged_composite_table_is_read_as_a_table_too() {
+        let parsed = parse_table("CompositeDataTable");
+        let export = &parsed.exports[0];
+        assert!(matches!(export.status, ExportStatus::Complete));
+        assert!(export.properties.iter().any(|p| p.name == "ParentTables"));
+        assert_eq!(export.data_table.as_ref().expect("rows").rows.len(), 2);
     }
 
     /// Re-serializing a header is not symmetrical: `deserialize` hands back offsets with the header

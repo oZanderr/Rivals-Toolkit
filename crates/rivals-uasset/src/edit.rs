@@ -3604,7 +3604,11 @@ fn row_splices(
                 book.claim(table, edit.export, name)?;
                 let at = insertion_point(*at)?;
                 let mut bytes = encode_name(name, names);
-                bytes.extend(unversioned::empty_header(layout.row_slots));
+                if layout.tagged {
+                    bytes.extend(encode_name("None", names));
+                } else {
+                    bytes.extend(unversioned::empty_header(layout.row_slots));
+                }
                 (
                     Splice {
                         start: at,
@@ -5620,6 +5624,7 @@ mod tests {
             export: 0,
             count_at: 0x100,
             row_slots: 1,
+            tagged: false,
             rows: vec![
                 RowSpan {
                     start: 0x104,
@@ -5689,6 +5694,26 @@ mod tests {
         assert_eq!(out[1].1.before, "copy of a");
         assert_eq!(out[2].1.after, "(removed)");
         assert_eq!(names.num_names(), 5);
+    }
+
+    #[test]
+    fn a_row_added_to_a_tagged_table_is_its_name_and_a_lone_none() {
+        let (mut parsed, data) = table_package();
+        parsed.tables[0].tagged = true;
+        parsed.tables[0].row_slots = 0;
+        let bundle = AssetBundle {
+            asset: &[],
+            exports: &data,
+        };
+        let edits = row_edits(vec![RowOp::Add {
+            name: "C".into(),
+            at: None,
+        }]);
+        let out =
+            row_splices(&parsed, &bundle, 0x100, &mut table_names(), &edits).expect("splices");
+        let mut added = 3i32.to_le_bytes().to_vec();
+        added.extend_from_slice(&[0; 12]);
+        assert_eq!(out[0].0.bytes, added);
     }
 
     #[test]

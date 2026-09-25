@@ -21,7 +21,7 @@ pub(crate) struct MappingsStatus {
     pub error: Option<String>,
 }
 
-fn configured_usmap(state: &State<'_, SettingsState>) -> Option<String> {
+pub(crate) fn configured_usmap(state: &State<'_, SettingsState>) -> Option<String> {
     state.lock().ok().and_then(|s| s.usmap_path.clone())
 }
 

@@ -6,6 +6,9 @@ mod asset;
 mod resolve;
 mod settings;
 
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use rivals_core::pak_tweaks::{self, PakIniFileContent, PakTweakEdit};
 use rivals_core::tweaks::{TweakDefinition, TweakKind, TweakSetting, catalogue::tweak_catalogue};
@@ -711,6 +714,10 @@ struct DiagnoseArgs {
 enum PaksCmd {
     /// List paks carrying editable INI files.
     List(PaksListArgs),
+    /// Convert the packages an IoStore mod ships back into loose .uasset/.uexp files.
+    Extract(PaksExtractArgs),
+    /// Summarise an IoStore mod: overrides, natives it calls, files and save slots it touches.
+    Report(PaksReportArgs),
 }
 
 #[derive(Subcommand)]
@@ -829,6 +836,28 @@ struct PaksListArgs {
     no_recursive: bool,
 }
 
+#[derive(Args)]
+struct PaksExtractArgs {
+    /// The mod: a .utoc or .pak path, or a name in `~mods`.
+    #[arg(long)]
+    container: String,
+
+    /// Folder the package tree is written under.
+    #[arg(long, value_name = "DIR")]
+    out: PathBuf,
+
+    /// Only packages whose path contains this text. Repeatable.
+    #[arg(long)]
+    filter: Vec<String>,
+}
+
+#[derive(Args)]
+struct PaksReportArgs {
+    /// The mod: a .utoc or .pak path, or a name in `~mods`.
+    #[arg(long)]
+    pak: String,
+}
+
 fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
     match run(&cli) {
@@ -868,6 +897,8 @@ fn run(cli: &Cli) -> Result<(), String> {
         Command::Ini(IniCmd::Set(a)) => ini_set(cli, &app, a),
         Command::Ini(IniCmd::Unset(a)) => ini_unset(cli, &app, a),
         Command::Paks(PaksCmd::List(a)) => paks_list(cli, &app, a),
+        Command::Paks(PaksCmd::Extract(a)) => paks_extract(cli, &app, a),
+        Command::Paks(PaksCmd::Report(a)) => paks_report(cli, &app, a),
         Command::Asset(AssetCmd::List(a)) => asset_list(cli, &app, a),
         Command::Asset(AssetCmd::Info(a)) => asset_info(cli, &app, a),
         Command::Asset(AssetCmd::Dump(a)) => asset_dump(cli, &app, a),
@@ -1296,6 +1327,141 @@ fn paks_list(cli: &Cli, app: &settings::AppSettings, args: &PaksListArgs) -> Res
         report_unreadable(found.unreadable.len(), found.paks.len());
         for bad in &found.unreadable {
             eprintln!("  {}: {}", bad.pak_name, bad.error);
+        }
+    })
+}
+
+#[derive(Serialize)]
+struct ExtractResult {
+    out: String,
+    extracted: Vec<String>,
+    errors: Vec<String>,
+    /// Imports each package still could not name, keyed by package path.
+    unresolved: BTreeMap<String, Vec<String>>,
+}
+
+fn paks_extract(
+    cli: &Cli,
+    app: &settings::AppSettings,
+    args: &PaksExtractArgs,
+) -> Result<(), String> {
+    let root = resolve::game_root(cli.game_root.as_deref(), app)?;
+    let utoc = Path::new(&resolve::pak(
+        &args.container,
+        cli.game_root.as_deref(),
+        app,
+    )?)
+    .with_extension("utoc");
+    if !utoc.is_file() {
+        return Err(format!("{} is not an IoStore mod", utoc.display()));
+    }
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    let quiet = cli.json;
+    let progress = |done: usize, total: usize| {
+        if !quiet {
+            eprint!("\rconverted {done}/{total}");
+        }
+    };
+    let result = rivals_core::pak::extract::extract_legacy(
+        &utoc,
+        &root,
+        &args.out,
+        &args.filter,
+        &cancel,
+        &progress,
+    )?;
+    if !quiet {
+        eprintln!();
+    }
+
+    let mut unresolved = BTreeMap::new();
+    for path in result.extracted.iter().filter(|p| p.ends_with(".uasset")) {
+        let bundle = rivals_core::asset::load_from_disk(&args.out.join(path))?;
+        let names = rivals_uasset::unresolved_imports(&rivals_uasset::AssetBundle {
+            asset: &bundle.asset_file_buffer,
+            exports: &bundle.exports_file_buffer,
+        })?;
+        if !names.is_empty() {
+            unresolved.insert(path.clone(), names);
+        }
+    }
+
+    let report = ExtractResult {
+        out: args.out.display().to_string(),
+        extracted: result.extracted,
+        errors: result.errors,
+        unresolved,
+    };
+    emit(cli, &report, || {
+        outln!(
+            "{} package(s) written under {}",
+            report.extracted.len(),
+            report.out
+        );
+        for err in &report.errors {
+            eprintln!("  failed: {err}");
+        }
+        if report.unresolved.is_empty() {
+            outln!("every import resolved");
+        }
+        for (package, names) in &report.unresolved {
+            outln!("{package}: {} unresolved import(s)", names.len());
+            for name in names {
+                outln!("    {name}");
+            }
+        }
+    })
+}
+
+fn paks_report(
+    cli: &Cli,
+    app: &settings::AppSettings,
+    args: &PaksReportArgs,
+) -> Result<(), String> {
+    let root = resolve::game_root(cli.game_root.as_deref(), app)?;
+    let utoc =
+        Path::new(&resolve::pak(&args.pak, cli.game_root.as_deref(), app)?).with_extension("utoc");
+    if !utoc.is_file() {
+        return Err(format!("{} is not an IoStore mod", utoc.display()));
+    }
+    let schema = rivals_core::mappings::resolve(cli.usmap.as_deref(), app.usmap_path.as_deref())
+        .and_then(|path| rivals_core::mappings::load(&path))
+        .ok();
+    let report = rivals_core::mod_report::mod_report(&root, &utoc, schema.as_deref())?;
+    emit(cli, &report, || {
+        let priority = report
+            .patch_priority
+            .map_or_else(|| "none".to_string(), |p| p.to_string());
+        outln!("{}  (patch priority {priority})", report.container);
+        outln!("\npackages:");
+        for package in &report.packages {
+            let role = if package.overrides_game {
+                "override"
+            } else {
+                "new"
+            };
+            outln!("  {role:<8} {:<18} {}", package.kind, package.path);
+            if let Some(error) = &package.error {
+                outln!("           not read: {error}");
+            }
+        }
+        for (title, section) in [
+            ("runtime natives", &report.runtime_natives),
+            ("python classes", &report.python_classes),
+            ("files", &report.files),
+            ("save slots", &report.save_slots),
+            ("urls", &report.urls),
+        ] {
+            if section.is_empty() {
+                continue;
+            }
+            outln!("\n{title}:");
+            for (package, values) in section {
+                outln!("  {package}");
+                for value in values {
+                    outln!("      {value}");
+                }
+            }
         }
     })
 }

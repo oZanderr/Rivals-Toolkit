@@ -13,8 +13,13 @@ use super::walk_mod_files;
 pub(crate) struct AssetConflict {
     /// The asset path that multiple mods touch.
     pub asset: String,
-    /// Mod display names that contain this asset, sorted alphabetically (winner first).
+    /// Mod display names that contain this asset, winner first: highest `_N_P` patch number,
+    /// then alphabetical.
     pub mods: Vec<String>,
+    /// The base game ships this asset too, so every mod here replaces a vanilla package and only
+    /// the winner's copy loads.
+    #[serde(default)]
+    pub overrides_game: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -115,14 +120,30 @@ pub(crate) fn check_conflicts(game_root: &str, recursive: bool) -> Result<Confli
         .into_iter()
         .filter(|(_, mods)| mods.len() > 1)
         .map(|(asset, mut mods)| {
-            mods.sort_by_key(|a| a.to_lowercase());
+            mods.sort_by(|a, b| rivals_core::mods::winner_order(a, b));
             mods.dedup();
-            AssetConflict { asset, mods }
+            AssetConflict {
+                asset,
+                mods,
+                overrides_game: false,
+            }
         })
         .filter(|c| c.mods.len() > 1)
         .collect();
 
     asset_conflicts.sort_by(|a, b| b.mods.len().cmp(&a.mods.len()));
+
+    // Opening the base game is the slow part, so it is only paid when there is a conflict to mark.
+    if !asset_conflicts.is_empty() {
+        let shipped = rivals_core::mod_report::shipped_by_game(
+            game_root,
+            asset_conflicts.iter().map(|c| c.asset.as_str()),
+        )
+        .unwrap_or_default();
+        for conflict in &mut asset_conflicts {
+            conflict.overrides_game = shipped.contains(&conflict.asset);
+        }
+    }
 
     // Build per-mod conflict groups.
     let mut mod_conflicts: HashMap<String, HashSet<String>> = HashMap::new();

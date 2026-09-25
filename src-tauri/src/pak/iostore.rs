@@ -2,25 +2,17 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use rayon::prelude::*;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
-use retoc::asset_conversion::{self, FZenPackageContext};
-use retoc::container_header::{EIoContainerHeaderVersion, StoreEntry};
-use retoc::iostore::IoStoreTrait;
-use retoc::iostore::{ChunkInfo, PackageInfo};
 use retoc::iostore_writer::IoStoreWriter;
 use retoc::legacy_asset::FSerializedAssetBundle;
 use retoc::version::EngineVersion;
 use retoc::zen_asset_conversion;
-use retoc::{
-    EIoChunkType, EIoStoreTocVersion, FIoChunkId, FIoChunkIdRaw, FPackageId, FSFileReader,
-    FSFileWriter, FSHAHash, FileReaderTrait, UEPath, UEPathBuf,
-};
+use retoc::{FSFileReader, FSHAHash, FileReaderTrait, UEPath, UEPathBuf};
 
 use crate::concurrency;
 
@@ -273,7 +265,6 @@ impl Drop for IoStoreCleanupGuard<'_> {
 
 use rivals_core::pak::containers::open_utoc;
 
-use rivals_core::pak::containers::{open_base_game_paks, open_target_only};
 pub(crate) use rivals_core::pak::containers::{
     undecryptable_container_stems, utoc_is_decryptable, utoc_is_obfuscated,
 };
@@ -415,178 +406,13 @@ pub(crate) fn extract_utoc_file(
     Err(format!("File not found in container: {file_name}"))
 }
 
-/// Collect asset paths from a .utoc container (standalone, no base-game merge).
-/// Directory-index-only; the subsequent extract step opens the full container.
-fn collect_target_paths(utoc_path: &str) -> Result<HashSet<String>, String> {
-    let file = std::fs::File::open(utoc_path).map_err(|e| e.to_string())?;
-    let mut reader = std::io::BufReader::new(file);
-    let config = super::profile::make_config()?;
-    let raw = retoc::read_toc_paths(&mut reader, config).map_err(|e| e.to_string())?;
-    Ok(raw
-        .into_iter()
-        .map(|p| p.strip_prefix(MOUNT_POINT).unwrap_or(&p).to_string())
-        .collect())
-}
-
-type PackageList = Vec<(retoc::FPackageId, String)>;
-
-/// Resolve convertible packages in a container, filtered to target-only paths.
-fn resolve_target_packages(
-    target_paths: &HashSet<String>,
-    game_root: &str,
-    target_container: &str,
-    filter: &[String],
-) -> Result<(Arc<dyn IoStoreTrait>, PackageList), String> {
-    let paks_dir = crate::paths::paks_dir(game_root);
-    let store = open_base_game_paks(&paks_dir, target_container)?;
-
-    let target = store
-        .child_containers()
-        .find(|c| c.container_name() == target_container)
-        .ok_or_else(|| format!("Container not found: {target_container}"))?;
-
-    let packages: Vec<_> = target
-        .packages()
-        .filter_map(|pkg| {
-            let chunk_id = FIoChunkId::from_package_id(pkg.id(), 0, EIoChunkType::ExportBundleData);
-            let path = store.chunk_path(chunk_id)?;
-            let stripped = path.strip_prefix(MOUNT_POINT).unwrap_or(&path).to_string();
-            if !target_paths.contains(&stripped) {
-                return None;
-            }
-            if !filter.is_empty() && !filter.iter().any(|f| stripped.contains(f.as_str())) {
-                return None;
-            }
-            Some((pkg.id(), stripped))
-        })
-        .collect();
-
-    Ok((store, packages))
-}
-
 /// Count legacy-convertible packages in a .utoc container.
 pub(crate) fn count_utoc_legacy_packages(
     utoc_path: &str,
     game_root: &str,
     filter: &[String],
 ) -> Result<usize, String> {
-    let target_container = Path::new(utoc_path)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .ok_or("Invalid utoc path")?
-        .to_string();
-
-    let paks_dir = crate::paths::paks_dir(game_root);
-    let store = open_target_only(&paks_dir, Path::new(utoc_path), &target_container)?;
-
-    let target = store
-        .child_containers()
-        .find(|c| c.container_name() == target_container)
-        .ok_or_else(|| format!("Container not found: {target_container}"))?;
-
-    let count = target
-        .packages()
-        .filter(|pkg| {
-            let chunk_id = FIoChunkId::from_package_id(pkg.id(), 0, EIoChunkType::ExportBundleData);
-            let Some(path) = store.chunk_path(chunk_id) else {
-                return false;
-            };
-            let stripped = path.strip_prefix(MOUNT_POINT).unwrap_or(&path);
-            filter.is_empty() || filter.iter().any(|f| stripped.contains(f.as_str()))
-        })
-        .count();
-
-    Ok(count)
-}
-
-/// IoStore wrapper that scopes bulk data reads to the target container,
-/// preventing base-game bulk data from leaking into mod legacy output.
-struct ModScopedStore {
-    full: Arc<dyn IoStoreTrait>,
-    target: Box<dyn IoStoreTrait>,
-}
-
-impl ModScopedStore {
-    fn is_bulk_data_type(chunk_id: FIoChunkId) -> bool {
-        matches!(
-            chunk_id.get_chunk_type(),
-            EIoChunkType::BulkData
-                | EIoChunkType::OptionalBulkData
-                | EIoChunkType::MemoryMappedBulkData
-        )
-    }
-}
-
-impl IoStoreTrait for ModScopedStore {
-    fn container_name(&self) -> &str {
-        self.full.container_name()
-    }
-    fn container_file_version(&self) -> Option<EIoStoreTocVersion> {
-        self.full.container_file_version()
-    }
-    fn container_header_version(&self) -> Option<EIoContainerHeaderVersion> {
-        self.full.container_header_version()
-    }
-    fn compression_block_size(&self) -> Option<u32> {
-        self.full.compression_block_size()
-    }
-    fn print_info(&self, depth: usize) {
-        self.full.print_info(depth);
-    }
-    fn read(&self, chunk_id: FIoChunkId) -> retoc::anyhow::Result<Vec<u8>> {
-        if Self::is_bulk_data_type(chunk_id) {
-            if self.target.has_chunk_id(chunk_id) {
-                self.target.read(chunk_id)
-            } else {
-                Ok(Vec::new())
-            }
-        } else {
-            self.full.read(chunk_id)
-        }
-    }
-    fn read_raw(&self, chunk_id_raw: FIoChunkIdRaw) -> retoc::anyhow::Result<Vec<u8>> {
-        self.full.read_raw(chunk_id_raw)
-    }
-    fn has_chunk_id(&self, chunk_id: FIoChunkId) -> bool {
-        if Self::is_bulk_data_type(chunk_id) {
-            self.target.has_chunk_id(chunk_id)
-        } else {
-            self.full.has_chunk_id(chunk_id)
-        }
-    }
-    fn has_chunk_id_raw(&self, chunk_id_raw: FIoChunkIdRaw) -> bool {
-        self.full.has_chunk_id_raw(chunk_id_raw)
-    }
-    fn chunks(&self) -> Box<dyn Iterator<Item = ChunkInfo<'_>> + Send + '_> {
-        self.full.chunks()
-    }
-    fn chunks_all(&self) -> Box<dyn Iterator<Item = ChunkInfo<'_>> + Send + '_> {
-        self.full.chunks_all()
-    }
-    fn packages(&self) -> Box<dyn Iterator<Item = PackageInfo<'_>> + Send + '_> {
-        self.full.packages()
-    }
-    fn packages_all(&self) -> Box<dyn Iterator<Item = PackageInfo<'_>> + Send + '_> {
-        self.full.packages_all()
-    }
-    fn child_containers(&self) -> Box<dyn Iterator<Item = &dyn IoStoreTrait> + '_> {
-        self.full.child_containers()
-    }
-    fn chunk_path(&self, chunk_id: FIoChunkId) -> Option<String> {
-        self.full.chunk_path(chunk_id)
-    }
-    fn package_store_entry(&self, package_id: FPackageId) -> Option<StoreEntry> {
-        self.full.package_store_entry(package_id)
-    }
-    fn lookup_package_redirect(&self, source_package_id: FPackageId) -> Option<FPackageId> {
-        self.full.lookup_package_redirect(source_package_id)
-    }
-    fn container_header(&self) -> Option<&retoc::container_header::FIoContainerHeader> {
-        self.full.container_header()
-    }
-    fn compression_methods(&self) -> &[retoc::compression::CompressionMethod] {
-        self.full.compression_methods()
-    }
+    rivals_core::pak::extract::count_legacy_packages(Path::new(utoc_path), game_root, filter)
 }
 
 /// Extract IoStore assets to legacy format (.uasset/.uexp/.ubulk).
@@ -598,110 +424,44 @@ pub(crate) fn extract_utoc_legacy(
     app: AppHandle,
 ) -> Result<Vec<String>, String> {
     LEGACY_CANCEL.store(false, Ordering::Relaxed);
-
-    let target_paths = collect_target_paths(utoc_path)?;
-    let target_container = Path::new(utoc_path)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .ok_or("Invalid utoc path")?
-        .to_string();
-    let (full_store, packages) =
-        resolve_target_packages(&target_paths, game_root, &target_container, filter)?;
-
-    let paks_dir = crate::paths::paks_dir(game_root);
-    let target_store = open_target_only(&paks_dir, Path::new(utoc_path), &target_container)?;
-    let store = ModScopedStore {
-        full: full_store,
-        target: target_store,
+    let progress = |current, total| {
+        let _ = app.emit(
+            "legacy-extraction-progress",
+            LegacyExtractionProgress { current, total },
+        );
     };
+    let result = concurrency::POOL.install(|| {
+        rivals_core::pak::extract::extract_legacy(
+            Path::new(utoc_path),
+            game_root,
+            Path::new(output_dir),
+            filter,
+            &LEGACY_CANCEL,
+            &progress,
+        )
+    })?;
 
-    let engine_version = EngineVersion::UE5_3;
-    let log = retoc::logging::Log::no_log();
-    let package_context = FZenPackageContext::create(
-        &store,
-        Some(engine_version.package_file_version()),
-        &log,
-        None,
-    )
-    .with_extra_script_objects(rivals_core::script_objects::current());
-
-    let writer = FSFileWriter::new(output_dir);
-
-    let total = packages.len();
-    let completed = std::sync::atomic::AtomicUsize::new(0);
-
-    let pool = &*concurrency::POOL;
-    let results: Vec<Option<Result<String, String>>> = pool.install(|| {
-        packages
-            .par_iter()
-            .map(|(pkg_id, stripped)| {
-                if LEGACY_CANCEL.load(Ordering::Relaxed) {
-                    return None;
-                }
-
-                let result = match asset_conversion::build_legacy(
-                    &package_context,
-                    *pkg_id,
-                    UEPath::new(stripped),
-                    &writer,
-                ) {
-                    Ok(()) => Ok(stripped.clone()),
-                    Err(e) => Err(format!("{stripped}: {e}")),
-                };
-
-                let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
-                if done.is_multiple_of(10) || done == total {
-                    let _ = app.emit(
-                        "legacy-extraction-progress",
-                        LegacyExtractionProgress {
-                            current: done,
-                            total,
-                        },
-                    );
-                }
-
-                Some(result)
-            })
-            .collect()
-    });
-
-    let mut extracted: Vec<String> = Vec::new();
-    let mut errors: Vec<String> = Vec::new();
-    for result in results.into_iter().flatten() {
-        match result {
-            Ok(path) => extracted.push(path),
-            Err(err) => errors.push(err),
-        }
-    }
-
-    if LEGACY_CANCEL.load(Ordering::Relaxed) {
-        let _ = std::fs::remove_dir_all(output_dir);
-        return Err(format!(
-            "Cancelled after converting {}/{total} asset(s).",
-            extracted.len()
-        ));
-    }
-
-    if extracted.is_empty() {
-        if let Some(first_err) = errors.first() {
-            return Err(format!("Legacy conversion failed: {first_err}"));
-        }
-        return Err("No matching packages found in container".to_string());
-    }
-
-    extracted.sort();
-
+    let mut extracted = result.extracted;
+    let errors = result.errors;
     if !errors.is_empty() {
         let warnings: Vec<String> = errors.iter().take(5).map(|e| format!("  - {e}")).collect();
         let suffix = if errors.len() > 5 {
-            format!("\n  ...and {} more", errors.len() - 5)
+            format!(
+                "
+  ...and {} more",
+                errors.len() - 5
+            )
         } else {
             String::new()
         };
         extracted.push(format!(
-            "__warnings__: {} asset(s) failed to convert:\n{}{}",
+            "__warnings__: {} asset(s) failed to convert:
+{}{}",
             errors.len(),
-            warnings.join("\n"),
+            warnings.join(
+                "
+"
+            ),
             suffix,
         ));
     }
