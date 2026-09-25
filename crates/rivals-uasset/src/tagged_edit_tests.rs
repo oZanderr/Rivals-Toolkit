@@ -1030,3 +1030,40 @@ fn clearing_a_tagged_property_says_what_to_do_instead() {
     };
     assert!(err.contains("unset it"), "{err}");
 }
+
+/// A field set that goes through a container's elements records how many it held, so the same
+/// edits applied once it has grown are drift rather than a write into another element.
+#[test]
+fn a_field_set_through_a_container_expects_its_length() {
+    let (asset, exports) = tagged_package();
+    let before = parse(&asset, &exports);
+    let values = find(top(&before), "Values");
+    let mut changes = PackageEdits {
+        field_sets: vec![crate::edit::FieldSet {
+            offset: values.span.expect("a span").0,
+            expect_name: values.name.clone(),
+            expect_element: values.element,
+            path: vec!["[0]".into()],
+            text: "5".into(),
+        }],
+        ..Default::default()
+    };
+    changes.expect = crate::edit::expectations(&before, &changes);
+    assert_eq!(
+        changes.expect.values.values().collect::<Vec<_>>(),
+        ["[2 items]"]
+    );
+    crate::edit::check_expectations(&before, &changes).expect("as read");
+
+    let grown = apply(|p| {
+        vec![edit_of(
+            find(top(p), "Values"),
+            EditOp::Insert {
+                index: 2,
+                key: None,
+            },
+        )]
+    });
+    let drift = crate::edit::check_expectations(&grown, &changes).expect_err("drift");
+    assert!(drift.contains("[3 items]"), "{drift}");
+}

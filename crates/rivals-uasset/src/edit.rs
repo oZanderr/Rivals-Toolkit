@@ -192,10 +192,11 @@ pub struct PackageEdits {
     pub allow_drift: bool,
 }
 
-/// A value for a field inside a struct that stores nothing yet, addressed through the struct the
-/// way a value edit addresses a value, then by field names. The struct is stored first and the
-/// field set in it, which takes the package reading again in between, so this is applied by the
-/// caller that can read it: see `rivals_core::asset_edit::preview_edits`.
+/// A value for a field inside a struct that stores nothing yet or inside an element the same save
+/// adds, addressed the way a value edit addresses a value, then by field names and element indices.
+/// What it goes through is stored or added first and the value set after, which takes the package
+/// reading again in between, so this is applied by the caller that can read it: see
+/// `rivals_core::asset_edit::preview_edits`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FieldSet {
     pub offset: u64,
@@ -203,7 +204,9 @@ pub struct FieldSet {
     pub expect_name: String,
     #[serde(rename = "element", default, skip_serializing_if = "Option::is_none")]
     pub expect_element: Option<u32>,
-    /// Field names from the struct down to the value set, each `Name` or `Name[element]`.
+    /// From the value addressed down to the one set: a field as `Name` or `Name[element]`, or an
+    /// element of the container reached so far as `[index]`. An index counts the container as it
+    /// reads once this save's inserts and removals into it have landed.
     pub path: Vec<String>,
     pub text: String,
 }
@@ -312,24 +315,26 @@ pub fn check_expectations(parsed: &ParsedPackage, edits: &PackageEdits) -> Resul
         }
     }
     for edit in &edits.field_sets {
-        if expect
-            .values
-            .get(&edit.offset.to_string())
-            .map(String::as_str)
-            != Some(NOT_STORED)
-        {
+        let Some(was) = expect.values.get(&edit.offset.to_string()) else {
             continue;
-        }
+        };
         let Some(entry) = find_at(parsed, edit.offset, &edit.expect_name, edit.expect_element)
         else {
             continue;
         };
-        if !matches!(
+        let unstored = matches!(
             entry.value,
             PropertyValue::Unset { .. } | PropertyValue::Default { .. }
-        ) {
+        );
+        if was == NOT_STORED && !unstored {
             drift.push(format!(
                 "{} was not stored, and now stores {}",
+                entry.label(),
+                entry.value.summary()
+            ));
+        } else if was != NOT_STORED && entry.value.summary() != *was {
+            drift.push(format!(
+                "{} was {was}, and is now {}",
                 entry.label(),
                 entry.value.summary()
             ));
@@ -461,17 +466,24 @@ pub fn expectations(parsed: &ParsedPackage, edits: &PackageEdits) -> Expected {
         }
     }
     for edit in &edits.field_sets {
-        let unstored = find_at(parsed, edit.offset, &edit.expect_name, edit.expect_element)
-            .is_some_and(|entry| {
-                matches!(
-                    entry.value,
-                    PropertyValue::Unset { .. } | PropertyValue::Default { .. }
-                )
-            });
-        if unstored {
-            expect
-                .values
-                .insert(edit.offset.to_string(), NOT_STORED.to_string());
+        let Some(entry) = find_at(parsed, edit.offset, &edit.expect_name, edit.expect_element)
+        else {
+            continue;
+        };
+        match &entry.value {
+            PropertyValue::Unset { .. } | PropertyValue::Default { .. } => {
+                expect
+                    .values
+                    .insert(edit.offset.to_string(), NOT_STORED.to_string());
+            }
+            // Its elements are addressed by index, which means another element once it has grown
+            // or shrunk.
+            PropertyValue::Array { .. } | PropertyValue::Set { .. } | PropertyValue::Map { .. } => {
+                expect
+                    .values
+                    .insert(edit.offset.to_string(), entry.value.summary());
+            }
+            _ => {}
         }
     }
     for edit in &edits.scripts {

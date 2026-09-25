@@ -298,8 +298,10 @@ struct AssetSetArgs {
     #[arg(long, value_name = "N")]
     element: Option<u32>,
 
-    /// A field inside the struct `--name` names, as `A.B.C` from the struct down. The struct and
-    /// any struct on the way that stores nothing yet are stored to hold it, all in one save.
+    /// A value inside the struct or container `--name` names, as `A.B.C` from the struct down, or
+    /// `[2].X` for field `X` of element 2. Any struct on the way that stores nothing yet is stored
+    /// to hold it, and an element counts the container once the save's own inserts and removals
+    /// have landed, all in one save.
     #[arg(long, value_name = "PATH", conflicts_with_all = ["op", "index"])]
     field: Option<String>,
 

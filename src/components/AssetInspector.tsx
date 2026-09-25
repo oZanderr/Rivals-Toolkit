@@ -613,25 +613,61 @@ interface TreeRow {
   reason: string | null;
   /** Keys of the containers this row sits inside, outermost first. */
   within: string[];
+  /** For a row inside an element a pending add brings, the key of the container adding it. That
+   *  add is what the row fills in, so it does not lock the row. */
+  pending?: string;
 }
 
 const NO_POSITION = "This value has no recorded position in the file.";
+const PENDING_INSIDE = "Save first to change what this holds; it comes in with the new element.";
+
+/** The row of the element a pending add brings, which reads as the copy it starts as. */
+function isPendingElement(row: TreeRow): boolean {
+  return row.pending !== undefined && row.target?.path?.length === 1;
+}
 
 function rowOf(entry: PropertyEntry, within: string[]): TreeRow {
   const target = entryTarget(entry);
   return { entry, target, reason: target ? null : NO_POSITION, within };
 }
 
-function childrenOf(row: TreeRow): TreeRow[] {
-  const { entry, target, within } = row;
+/** The rows under `row`. `draft` is the row's own, which for an array can be a pending add whose
+ *  element is shown and filled in before it is saved. */
+function childrenOf(row: TreeRow, draft?: Draft): TreeRow[] {
+  const { entry, target, within, pending } = row;
   const value = entry.value;
   const inner = target ? [...within, draftKey(target)] : within;
+  // A value with no bytes of its own yet is reached through what holds it: a field of an unset or
+  // zero struct, or anything inside an element a pending add brings.
+  const through = (field: PropertyEntry): TreeRow => {
+    const segment = field.element === undefined ? field.name : `${field.name}[${field.element}]`;
+    const at: EditTarget | null = target
+      ? { ...target, path: [...(target.path ?? []), segment], was: undefined }
+      : null;
+    return { entry: field, target: at, reason: at ? null : NO_POSITION, within: inner, pending };
+  };
+  if (pending !== undefined) {
+    switch (value.kind) {
+      case "struct":
+        return value.fields.map(through);
+      case "unset":
+      case "default":
+        return (value.fields ?? []).map(through);
+      default:
+        return childrenOf({ ...row, target: null, pending: undefined }).map((child) => ({
+          ...child,
+          target: null,
+          reason: PENDING_INSIDE,
+          pending,
+        }));
+    }
+  }
   switch (value.kind) {
     case "struct":
       return value.fields.map((field) => rowOf(field, inner));
     case "array":
-    case "set":
-      return value.items.map((item, i) => {
+    case "set": {
+      const rows: TreeRow[] = value.items.map((item, i) => {
         const element = target ? elementTarget(entry, i) : null;
         return {
           entry: { name: `[${i}]`, value: item },
@@ -640,6 +676,21 @@ function childrenOf(row: TreeRow): TreeRow[] {
           within: inner,
         };
       });
+      // The element an add brings to an array starts as a copy of the one at its index, or of the
+      // last, and is filled in through its index in the same save.
+      if (value.kind === "array" && target && draft?.op === "insert" && value.items.length > 0) {
+        const copy = value.items[Math.min(draft.index, value.items.length - 1)];
+        const segment = `[${draft.index}]`;
+        rows.splice(Math.min(draft.index, rows.length), 0, {
+          entry: { name: `${segment} new`, value: copy },
+          target: { ...target, path: [segment], was: undefined },
+          reason: null,
+          within: inner,
+          pending: draftKey(target),
+        });
+      }
+      return rows;
+    }
     case "map":
       return value.entries.map((pair, i) => {
         const element = target ? elementTarget(entry, i) : null;
@@ -656,19 +707,7 @@ function childrenOf(row: TreeRow): TreeRow[] {
     // struct: a value typed for one stores the struct and sets it in the same save.
     case "unset":
     case "default":
-      return (value.fields ?? []).map((field) => {
-        const segment =
-          field.element === undefined ? field.name : `${field.name}[${field.element}]`;
-        const through: EditTarget | null = target
-          ? { ...target, path: [...(target.path ?? []), segment], was: undefined }
-          : null;
-        return {
-          entry: field,
-          target: through,
-          reason: through ? null : NO_POSITION,
-          within: inner,
-        };
-      });
+      return (value.fields ?? []).map(through);
     default:
       return [];
   }
@@ -680,7 +719,7 @@ function structuralLock(row: TreeRow, session: EditSession): string | null {
   if (session.locked) return session.locked;
   const above = row.within.find((key) => {
     const held = session.drafts[key];
-    return held !== undefined && isStructural(held.draft);
+    return key !== row.pending && held !== undefined && isStructural(held.draft);
   });
   if (above) {
     return `Finish or discard the add/drop on ${session.drafts[above].target.name} first.`;
@@ -1413,8 +1452,9 @@ const PropertyRow = memo(function PropertyRow({ row, depth }: { row: TreeRow; de
   const draft = key ? session.drafts[key]?.draft : undefined;
   const locked = rowLock(row, session);
   const editing = key !== null && menu?.editingKey === key;
-  // A container element is always stored; only a property can hold its default.
-  const stored = target?.index !== undefined || isStored(entry);
+  // A container element is always stored, and so is one a pending add brings; only a property can
+  // hold its default.
+  const stored = target?.index !== undefined || isPendingElement(row) || isStored(entry);
   const isUnset = entry.value.kind === "unset";
   const text =
     draftText(draft, elementCount(entry.value)) ??
@@ -1513,7 +1553,7 @@ const PropertyRow = memo(function PropertyRow({ row, depth }: { row: TreeRow; de
       </div>
       {expandable &&
         open &&
-        childrenOf(row).map((child, i) => (
+        childrenOf(row, draft).map((child, i) => (
           <PropertyRow key={`${child.entry.name}-${i}`} row={child} depth={depth + 1} />
         ))}
     </>

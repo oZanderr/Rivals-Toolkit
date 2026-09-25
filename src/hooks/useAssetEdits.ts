@@ -76,7 +76,8 @@ export interface EditTarget {
   script?: { export: number; statement: number; constant: number };
   /** The value as it read when the draft was made, so a save refuses one that has since changed. */
   was?: string;
-  /** Field names down from an unset struct at this target to the field the draft sets. */
+  /** Down from the value at this target to the one the draft sets: field names through an unset
+   *  struct, or `[index]` for an element a pending add brings. */
   path?: string[];
 }
 
@@ -480,8 +481,9 @@ const NOT_STORED = "(not stored)";
 function expectOf(records: DraftRecord[], exportPath: string | undefined, exportIndex: number) {
   const values: Record<string, string> = {};
   for (const { target, draft } of records) {
+    // A path into an element an add brings starts at a stored container, not an unset struct.
     if (target.path) {
-      values[String(target.offset)] = NOT_STORED;
+      if (!target.path[0]?.startsWith("[")) values[String(target.offset)] = NOT_STORED;
       continue;
     }
     if (target.was === undefined) continue;
@@ -777,9 +779,16 @@ export function useAssetEdits({
   const dropDraft = useCallback(
     (key: string) =>
       update((prev) => {
-        if (!(key in prev.drafts)) return {};
+        const held = prev.drafts[key];
+        if (!held) return {};
         const next = { ...prev.drafts };
         delete next[key];
+        // Values drafted inside an element an add brings go with the add.
+        if (isStructural(held.draft)) {
+          for (const [other, record] of Object.entries(prev.drafts)) {
+            if (record.within.includes(key)) delete next[other];
+          }
+        }
         return { drafts: next };
       }),
     [update]

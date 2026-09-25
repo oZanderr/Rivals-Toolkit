@@ -104,12 +104,13 @@ fn patch_pass(
     Ok((patched, after))
 }
 
-/// How many times a save may store a struct and read the package again to reach the fields set
-/// inside it, one level of nesting each.
-const FIELD_ROUNDS: usize = 5;
+/// How many times a save may read the package again to reach what a walk sets: once for an element
+/// added to a container, then once for each struct on the way that stores nothing yet, and once
+/// more for the value.
+const FIELD_ROUNDS: usize = rivals_uasset::PREVIEW_DEPTH as usize + 3;
 
-/// An edit on its way down: the value it has reached, the field names left to walk, and what it
-/// does once there.
+/// An edit on its way down: the value it has reached, the field names and element indices left to
+/// walk, and what it does once there.
 struct FieldWalk {
     offset: u64,
     name: String,
@@ -124,6 +125,19 @@ enum FieldStep {
     Store(ValueEdit),
     /// The value the walk ends at, and the edit it makes there.
     Edit(ValueEdit),
+    /// The container it goes into next has an element added or dropped by the edit at this
+    /// position in the round, so its indices mean something only once that has landed.
+    Wait(usize),
+}
+
+/// The element a path segment such as `[2]` names in the container reached so far.
+fn element_segment(segment: &str) -> Option<Result<u32, String>> {
+    let inner = segment.strip_prefix('[')?.strip_suffix(']')?;
+    Some(
+        inner
+            .parse::<u32>()
+            .map_err(|_| format!("{segment} is not an element index")),
+    )
 }
 
 /// An insert into a tagged container the package does not hold yet, which is stored in one round
@@ -140,21 +154,39 @@ fn inserts_into_absent(parsed: &rivals_uasset::ParsedPackage, edit: &ValueEdit) 
         .is_some_and(|entry| matches!(entry.value, PropertyValue::Unset { .. }))
 }
 
-/// Follows a walk through stored structs until it reaches its value or one not stored yet.
+/// Follows a walk through stored structs and container elements until it reaches its value, one
+/// not stored yet, or a container whose elements the round is still adding or dropping. `pending`
+/// is the round's edits so far.
 fn field_step(
     parsed: &rivals_uasset::ParsedPackage,
     walk: &mut FieldWalk,
+    pending: &[ValueEdit],
 ) -> Result<FieldStep, String> {
     loop {
         let entry = rivals_uasset::entry_named_at(parsed, walk.offset, &walk.name, walk.element)
             .ok_or_else(|| {
                 format!(
-                    "no struct called {} starts at {:#X}; re-read the asset",
+                    "no value called {} starts at {:#X}; re-read the asset",
                     walk.name, walk.offset
                 )
             })?;
-        let fields = match &entry.value {
-            PropertyValue::Unset { .. } | PropertyValue::Default { .. } => {
+        let index = walk
+            .path
+            .first()
+            .and_then(|segment| element_segment(segment))
+            .transpose()?;
+        if index.is_some()
+            && let Some(at) = pending.iter().position(|held| {
+                held.offset == walk.offset
+                    && held.expect_name == walk.name
+                    && held.expect_element == walk.element
+                    && matches!(held.op, EditOp::Insert { .. } | EditOp::Remove { .. })
+            })
+        {
+            return Ok(FieldStep::Wait(at));
+        }
+        let fields = match (&entry.value, index) {
+            (PropertyValue::Unset { .. } | PropertyValue::Default { .. }, _) => {
                 return Ok(FieldStep::Store(ValueEdit {
                     offset: walk.offset,
                     expect_name: walk.name.clone(),
@@ -163,7 +195,7 @@ fn field_step(
                     op: EditOp::Store,
                 }));
             }
-            value if walk.path.is_empty() => {
+            (value, _) if walk.path.is_empty() => {
                 return Ok(FieldStep::Edit(ValueEdit {
                     offset: walk.offset,
                     expect_name: walk.name.clone(),
@@ -172,8 +204,54 @@ fn field_step(
                     op: walk.op.clone(),
                 }));
             }
-            PropertyValue::Struct { fields, .. } => fields,
-            other => {
+            (PropertyValue::Struct { fields, .. }, None) => fields,
+            (container, Some(index)) => {
+                let item = match container {
+                    PropertyValue::Array { items } | PropertyValue::Set { items } => {
+                        items.get(index as usize)
+                    }
+                    PropertyValue::Map { entries } => {
+                        entries.get(index as usize).map(|pair| &pair.value)
+                    }
+                    other => {
+                        return Err(format!(
+                            "{} is a {}, which has no elements",
+                            entry.label(),
+                            rivals_uasset::kind_of(other)
+                        ));
+                    }
+                }
+                .ok_or_else(|| format!("{} has no element {index}", entry.label()))?;
+                if walk.path.len() == 1 {
+                    let EditOp::Set { text } = &walk.op else {
+                        return Err(format!(
+                            "{}[{index}] can only be given a value",
+                            entry.label()
+                        ));
+                    };
+                    return Ok(FieldStep::Edit(ValueEdit {
+                        offset: walk.offset,
+                        expect_name: walk.name.clone(),
+                        expect_element: walk.element,
+                        expect_kind: rivals_uasset::kind_of(&entry.value),
+                        op: EditOp::SetElement {
+                            index,
+                            text: text.clone(),
+                        },
+                    }));
+                }
+                let PropertyValue::Struct { fields, .. } = item else {
+                    return Err(format!(
+                        "{}[{index}] is a {}, which has no field {}",
+                        entry.label(),
+                        rivals_uasset::kind_of(item),
+                        walk.path[1]
+                    ));
+                };
+                walk.path.remove(0);
+                fields
+            }
+            (other, None) => {
                 return Err(format!(
                     "{} is a {}, which has no field {}",
                     entry.label(),
@@ -216,11 +294,11 @@ fn field_step(
     }
 }
 
-/// Applies edits that set fields inside structs not stored yet, or insert into tagged containers
-/// not stored yet. Each round stores the values the walks have reached, reads the package again so
-/// what is inside has places, and follows the walks on; a walk whose value is stored makes its edit
-/// in the same round. Every other edit goes in the first round, and each round is checked on its
-/// own.
+/// Applies edits that set fields inside structs not stored yet or inside elements the same save
+/// adds, or insert into tagged containers not stored yet. Each round stores the values the walks
+/// have reached, reads the package again so what is inside has places, and follows the walks on; a
+/// walk whose value is stored makes its edit in the same round. Every other edit goes in the first
+/// round, and each round is checked on its own.
 fn field_passes(
     request: &AssetEditRequest<'_>,
     mappings: Option<&Mappings>,
@@ -229,7 +307,21 @@ fn field_passes(
 ) -> Result<(PatchedBundle, FSerializedAssetBundle), String> {
     rivals_uasset::check_expectations(parsed, &request.changes)?;
     let mut edits = request.changes.clone();
-    let mut walks = Vec::new();
+    // The inserts first, so a field walk into the same container finds them in the round and waits.
+    let (inserts, values): (Vec<ValueEdit>, Vec<ValueEdit>) = std::mem::take(&mut edits.values)
+        .into_iter()
+        .partition(|edit| inserts_into_absent(parsed, edit));
+    edits.values = values;
+    let mut walks: Vec<FieldWalk> = inserts
+        .into_iter()
+        .map(|edit| FieldWalk {
+            offset: edit.offset,
+            name: edit.expect_name,
+            element: edit.expect_element,
+            path: Vec::new(),
+            op: edit.op,
+        })
+        .collect();
     for set in std::mem::take(&mut edits.field_sets) {
         if set.path.is_empty() {
             return Err("a field set names no field".into());
@@ -242,28 +334,18 @@ fn field_passes(
             op: EditOp::Set { text: set.text },
         });
     }
-    let (inserts, values): (Vec<ValueEdit>, Vec<ValueEdit>) = std::mem::take(&mut edits.values)
-        .into_iter()
-        .partition(|edit| inserts_into_absent(parsed, edit));
-    edits.values = values;
-    walks.extend(inserts.into_iter().map(|edit| FieldWalk {
-        offset: edit.offset,
-        name: edit.expect_name,
-        element: edit.expect_element,
-        path: Vec::new(),
-        op: edit.op,
-    }));
     let mut current: Option<(PatchedBundle, rivals_uasset::ParsedPackage)> = None;
     let mut applied = Vec::new();
     let mut bulk = None;
     let mut optional_bulk = None;
     for _ in 0..FIELD_ROUNDS {
         let now = current.as_ref().map_or(parsed, |(_, held)| held);
-        // Each walk still going, with the store in this round's edits it waits on.
+        // Each walk still going, with the edit in this round it waits on.
         let mut waiting: Vec<(FieldWalk, usize)> = Vec::new();
         for mut walk in std::mem::take(&mut walks) {
-            match field_step(now, &mut walk)? {
+            match field_step(now, &mut walk, &edits.values)? {
                 FieldStep::Edit(edit) => edits.values.push(edit),
+                FieldStep::Wait(at) => waiting.push((walk, at)),
                 FieldStep::Store(store) => {
                     let at = edits
                         .values
@@ -307,7 +389,8 @@ fn field_passes(
             ),
         };
         let (patched, after) = patch_pass(request, mappings, &bundle, sidecars, now, &edits)?;
-        // A stored struct has moved by whatever went in ahead of it, as its edit reports.
+        // A stored struct or a grown container has moved by whatever went in ahead of it, as its
+        // edit reports.
         walks = waiting
             .into_iter()
             .map(|(mut walk, at)| {
@@ -327,7 +410,7 @@ fn field_passes(
     }
     if !walks.is_empty() {
         return Err(format!(
-            "a field set is nested deeper than {FIELD_ROUNDS} unstored structs"
+            "a field set reaches deeper than {FIELD_ROUNDS} reads of the package can follow"
         ));
     }
     let (mut patched, _) = current.ok_or("No changes to save")?;
@@ -1852,6 +1935,90 @@ mod tests {
             field(holder, "Count").value,
             PropertyValue::Unset { .. }
         ));
+    }
+
+    /// An edit at an absent tagged property of the synthetic package.
+    fn edit_at(parsed: &rivals_uasset::ParsedPackage, name: &str, op: EditOp) -> ValueEdit {
+        let entry = field(holder_of(parsed), name);
+        ValueEdit {
+            offset: entry.span.expect("a span").0,
+            expect_name: entry.name.clone(),
+            expect_element: entry.element,
+            expect_kind: rivals_uasset::kind_of(&entry.value),
+            op,
+        }
+    }
+
+    fn field_set_at(
+        parsed: &rivals_uasset::ParsedPackage,
+        name: &str,
+        path: &[&str],
+        text: &str,
+    ) -> rivals_uasset::FieldSet {
+        let entry = field(holder_of(parsed), name);
+        rivals_uasset::FieldSet {
+            offset: entry.span.expect("a span").0,
+            expect_name: entry.name.clone(),
+            expect_element: entry.element,
+            path: path.iter().map(|segment| segment.to_string()).collect(),
+            text: text.into(),
+        }
+    }
+
+    const APPEND: EditOp = EditOp::Insert {
+        index: 0,
+        key: None,
+    };
+
+    /// An element added to a tagged array of structs the package does not hold is filled in by the
+    /// same save: the array is stored, the element goes in, then its field.
+    #[test]
+    fn a_new_element_of_an_absent_tagged_array_is_filled_in_one_save() {
+        let after = preview_sparse(|parsed| PackageEdits {
+            values: vec![edit_at(parsed, "Items", APPEND)],
+            field_sets: vec![field_set_at(parsed, "Items", &["[0]", "Y"], "4")],
+            ..Default::default()
+        })
+        .expect("saved");
+        let PropertyValue::Array { items } = &field(holder_of(&after), "Items").value else {
+            panic!("Items is stored");
+        };
+        assert_eq!(items.len(), 1);
+        let PropertyValue::Struct { fields, .. } = &items[0] else {
+            panic!("{:?}", items[0]);
+        };
+        assert_eq!(field(fields, "Y").value.summary(), "4");
+    }
+
+    /// A scalar element is given its value through its index, the same save that adds it.
+    #[test]
+    fn a_new_scalar_element_takes_its_value_through_its_index() {
+        let after = preview_sparse(|parsed| PackageEdits {
+            values: vec![edit_at(parsed, "Counts", APPEND)],
+            field_sets: vec![field_set_at(parsed, "Counts", &["[0]"], "9")],
+            ..Default::default()
+        })
+        .expect("saved");
+        let PropertyValue::Array { items } = &field(holder_of(&after), "Counts").value else {
+            panic!("Counts is stored");
+        };
+        assert_eq!(
+            items.iter().map(PropertyValue::summary).collect::<Vec<_>>(),
+            ["9"]
+        );
+    }
+
+    /// An index past what the container will hold is refused by name rather than landing anywhere.
+    #[test]
+    fn an_index_past_the_new_elements_is_refused() {
+        let Err(error) = preview_sparse(|parsed| PackageEdits {
+            values: vec![edit_at(parsed, "Counts", APPEND)],
+            field_sets: vec![field_set_at(parsed, "Counts", &["[1]"], "9")],
+            ..Default::default()
+        }) else {
+            panic!("refused");
+        };
+        assert!(error.contains("has no element 1"), "{error}");
     }
 }
 
@@ -5394,6 +5561,161 @@ mod game_data_tests {
             now.value.summary()
         );
         assert!(stored(now));
+    }
+
+    /// A bool field of a struct element: stored, or zero-flagged, which reads as false.
+    fn bool_field(item: &PropertyValue, name: &str) -> bool {
+        let PropertyValue::Struct { fields, .. } = item else {
+            panic!("{item:?}");
+        };
+        match fields
+            .iter()
+            .find(|field| field.name == name)
+            .map(|f| &f.value)
+        {
+            Some(PropertyValue::Bool { value }) => *value,
+            Some(PropertyValue::Default { .. }) => false,
+            other => panic!("{name}: {other:?}"),
+        }
+    }
+
+    fn items_of(parsed: &rivals_uasset::ParsedPackage, name: &str) -> Vec<PropertyValue> {
+        match &nested(&parsed.exports[0].properties, &[name]).value {
+            PropertyValue::Array { items } => items.clone(),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// An element added to a stored array of structs is filled in by the same save, while the one
+    /// it copied keeps its value. The edit list says how long the array was, so applying it again
+    /// to the grown array is drift rather than a write into another element.
+    #[test]
+    fn a_new_struct_element_is_filled_in_the_save_that_adds_it() {
+        let Some(fixture) = Fixture::open(INPUT_CONTEXT) else {
+            return;
+        };
+        let before = fixture.parse();
+        let mappings = nested(&before.exports[0].properties, &["Mappings"]).clone();
+        let items = items_of(&before, "Mappings");
+        let count = items.len();
+        let was = bool_field(&items[count - 1], "bIgnorLowPriority");
+
+        let mut changes = PackageEdits {
+            values: vec![edit_of(
+                &mappings,
+                EditOp::Insert {
+                    index: count as u32,
+                    key: None,
+                },
+            )],
+            field_sets: vec![rivals_uasset::FieldSet {
+                offset: mappings.span.expect("a span").0,
+                expect_name: mappings.name.clone(),
+                expect_element: mappings.element,
+                path: vec![format!("[{count}]"), "bIgnorLowPriority".into()],
+                text: (!was).to_string(),
+            }],
+            ..Default::default()
+        };
+        changes.expect = rivals_uasset::expectations(&before, &changes);
+        let (_, after) = fixture.apply_changes(changes.clone());
+        assert!(matches!(after.exports[0].status, ExportStatus::Complete));
+        let now = items_of(&after, "Mappings");
+        assert_eq!(now.len(), count + 1);
+        assert_eq!(bool_field(&now[count], "bIgnorLowPriority"), !was);
+        assert_eq!(
+            bool_field(&now[count - 1], "bIgnorLowPriority"),
+            was,
+            "the element copied keeps its value"
+        );
+
+        let drift = rivals_uasset::check_expectations(&after, &changes).expect_err("drift");
+        assert!(drift.starts_with(rivals_uasset::DRIFT), "{drift}");
+    }
+
+    /// An edited dump that appends an element with a changed field diffs to an insert and a field
+    /// set through the new index, with nothing left for a second pass, and the save lands both.
+    #[test]
+    fn a_dump_that_appends_an_element_diffs_to_one_save() {
+        let Some(fixture) = Fixture::open(INPUT_CONTEXT) else {
+            return;
+        };
+        let before = fixture.parse();
+        let items = items_of(&before, "Mappings");
+        let was = bool_field(&items[items.len() - 1], "bIgnorLowPriority");
+        let mut dump = serde_json::to_value(&before).expect("dump");
+        {
+            let mappings = dump["exports"][0]["properties"]
+                .as_array_mut()
+                .expect("properties")
+                .iter_mut()
+                .find(|entry| entry["name"] == "Mappings")
+                .expect("Mappings");
+            let list = mappings["value"]["items"].as_array_mut().expect("items");
+            let mut added = list.last().expect("an element").clone();
+            let flag = added["fields"]
+                .as_array_mut()
+                .expect("fields")
+                .iter_mut()
+                .find(|field| field["name"] == "bIgnorLowPriority")
+                .expect("the flag");
+            flag["value"] = serde_json::json!({"kind": "bool", "value": !was});
+            list.push(added);
+        }
+        let outcome = crate::asset_edit::diff::diff_dump(&before, &dump).expect("diff");
+        assert!(outcome.notes.is_empty(), "{:?}", outcome.notes);
+        assert_eq!(outcome.edits.values.len(), 1, "the insert");
+        assert_eq!(outcome.edits.field_sets.len(), 1, "the flag");
+
+        let changes = outcome.edits.resolve(Path::new(".")).expect("resolve");
+        let (_, after) = fixture.apply_changes(changes);
+        let now = items_of(&after, "Mappings");
+        assert_eq!(now.len(), items.len() + 1);
+        assert_eq!(bool_field(&now[items.len()], "bIgnorLowPriority"), !was);
+    }
+
+    /// An array nothing stores takes two elements and a value for the second in one save: the walk
+    /// waits for the inserts rather than storing the array a second way.
+    #[test]
+    fn an_unset_array_takes_elements_and_a_value_for_one_in_one_save() {
+        let Some(fixture) = Fixture::open(SHAKE) else {
+            return;
+        };
+        let before = fixture.parse();
+        let timelines = nested(&before.exports[0].properties, &["Timelines"]).clone();
+        assert!(unset(&timelines), "{:?}", timelines.value);
+        // Its elements are object references, so the value is an object the package names.
+        let named = before
+            .imports
+            .iter()
+            .find(|import| !import.unresolved && import.class_name != "Package")
+            .expect("an imported object")
+            .path
+            .clone();
+        let insert = |index| edit_of(&timelines, EditOp::Insert { index, key: None });
+        let (_, after) = fixture.apply_changes(PackageEdits {
+            values: vec![insert(0), insert(1)],
+            field_sets: vec![rivals_uasset::FieldSet {
+                offset: timelines.span.expect("a span").0,
+                expect_name: timelines.name.clone(),
+                expect_element: timelines.element,
+                path: vec!["[1]".into()],
+                text: named.clone(),
+            }],
+            ..Default::default()
+        });
+        let now = items_of(&after, "Timelines");
+        assert_eq!(now.len(), 2);
+        assert!(
+            matches!(&now[0], PropertyValue::Object { index: 0, .. }),
+            "{:?}",
+            now[0]
+        );
+        assert!(
+            matches!(&now[1], PropertyValue::Object { path: Some(path), .. } if *path == named),
+            "{:?}",
+            now[1]
+        );
     }
 
     /// A native struct that holds one value, a soft path or a guid, shows no fields and takes its

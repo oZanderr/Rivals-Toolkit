@@ -67,8 +67,8 @@ pub use package::{
     parse_package_with, read_header, unresolved_import_note, unresolved_imports,
 };
 pub use props::{
-    ContainerLayout, Diagnostics, IndexRef, InstancedLayout, MapKeys, MissingSchema, TraceEntry,
-    UndecodedPayload, UnsetSlot,
+    ContainerLayout, Diagnostics, IndexRef, InstancedLayout, MapKeys, MissingSchema, PREVIEW_DEPTH,
+    TraceEntry, UndecodedPayload, UnsetSlot,
 };
 pub use remove::{ClearedReference, Importers, RemovalPlan, RemovedExport, plan_removal};
 pub use stringtable::{StringEntrySpan, StringTable, StringTableEntry, StringTableLayout};

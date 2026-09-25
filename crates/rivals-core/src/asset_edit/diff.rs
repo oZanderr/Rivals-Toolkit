@@ -468,6 +468,32 @@ fn diff_retyped(
         ));
         return;
     };
+    // An array nothing stores yet takes the dump's elements in the same save, each filled in
+    // through its index.
+    if matches!(was, "unset" | "default")
+        && is == "array"
+        && let Some(items) = edited
+            .get("items")
+            .and_then(Json::as_array)
+            .filter(|items| !items.is_empty())
+    {
+        for position in 0..items.len() {
+            out.edits.values.push(ValueEdit {
+                offset,
+                expect_name: entry.name.clone(),
+                expect_element: entry.element,
+                expect_kind: was.to_string(),
+                op: EditOp::Insert {
+                    index: position as u32,
+                    key: None,
+                },
+            });
+        }
+        for (position, item) in items.iter().enumerate() {
+            element_sets(entry, None, item, vec![format!("[{position}]")], label, out);
+        }
+        return;
+    }
     // Fields filled in inside a struct not stored yet are set through it, which stores it on the
     // way.
     if matches!(was, "unset" | "default") && text_of(edited).is_none() {
@@ -640,6 +666,8 @@ fn diff_items(
     };
     let kind = kind_of(&entry.value);
     let is_set = matches!(entry.value, PropertyValue::Set { .. });
+    // An element added to the end of an array starts as a copy of the last one read.
+    let source = items.last();
     for (position, added) in now.iter().enumerate().skip(items.len()) {
         // A set's element is its own key, so the new value goes in with the insert. One with no
         // text form, such as a struct, can only come in as the default.
@@ -661,16 +689,20 @@ fn diff_items(
                 key: key.clone(),
             },
         });
-        if key.is_none() {
-            let starts = if is_set {
-                "takes the element type's default"
-            } else {
-                "copies the one before it"
-            };
+        if is_set && key.is_none() {
             out.notes.push(format!(
-                "{label}[{position}]: a new element {starts}; dump the saved copy and diff again \
-                 to give it a value"
+                "{label}[{position}]: a new element takes the element type's default; dump the \
+                 saved copy and diff again to give it a value"
             ));
+        } else if !is_set {
+            element_sets(
+                entry,
+                source,
+                added,
+                vec![format!("[{position}]")],
+                label,
+                out,
+            );
         }
     }
     for position in (now.len()..items.len()).rev() {
@@ -684,6 +716,123 @@ fn diff_items(
             },
         });
     }
+}
+
+/// Field sets that give an element the same save adds what the edited dump holds, addressed
+/// through `path` from the container. `source` is what the element starts as: a copy of the one
+/// read before it, or the type's default when there is none. Returns whether every change could be
+/// expressed; a note says why for any that could not.
+fn element_sets(
+    entry: &PropertyEntry,
+    source: Option<&PropertyValue>,
+    edited: &Json,
+    path: Vec<String>,
+    label: &str,
+    out: &mut DiffOutcome,
+) -> bool {
+    let Some((offset, _)) = entry.span else {
+        return false;
+    };
+    let kind = edited
+        .get("kind")
+        .and_then(Json::as_str)
+        .unwrap_or_default();
+    let stored = source.filter(|was| {
+        !matches!(
+            was,
+            PropertyValue::Unset { .. } | PropertyValue::Default { .. }
+        )
+    });
+    let at = || {
+        let rest: String = path
+            .iter()
+            .map(|segment| match segment.starts_with('[') {
+                true => segment.clone(),
+                false => format!(".{segment}"),
+            })
+            .collect();
+        format!("{label}{rest}")
+    };
+    if matches!(kind, "unset" | "default")
+        && let Some(was) = stored
+    {
+        out.notes.push(format!(
+            "{}: a new element starts as a copy holding {}, and a value can be given but not \
+             taken away in the save that adds it",
+            at(),
+            was.summary()
+        ));
+        return false;
+    }
+    if matches!(kind, "struct" | "unset" | "default")
+        && let Some(fields) = edited.get("fields").and_then(Json::as_array)
+    {
+        let before: &[PropertyEntry] = match source {
+            Some(
+                PropertyValue::Struct { fields, .. }
+                | PropertyValue::Unset { fields, .. }
+                | PropertyValue::Default { fields, .. },
+            ) => fields,
+            _ => &[],
+        };
+        let mut complete = true;
+        for field in fields {
+            let (Some(name), Some(value)) =
+                (field.get("name").and_then(Json::as_str), field.get("value"))
+            else {
+                continue;
+            };
+            let element = field
+                .get("element")
+                .and_then(Json::as_u64)
+                .map(|at| at as u32);
+            let was = before
+                .iter()
+                .find(|held| held.name == name && held.element == element)
+                .map(|held| &held.value);
+            let mut here = path.clone();
+            here.push(match element {
+                Some(at) => format!("{name}[{at}]"),
+                None => name.to_string(),
+            });
+            complete &= element_sets(entry, was, value, here, label, out);
+        }
+        return complete;
+    }
+    if matches!(kind, "unset" | "default") {
+        return true;
+    }
+    if let Some(text) = text_of(edited) {
+        if stored.is_none_or(|was| text != was.summary()) {
+            out.edits.field_sets.push(rivals_uasset::FieldSet {
+                offset,
+                expect_name: entry.name.clone(),
+                expect_element: entry.element,
+                path,
+                text,
+            });
+        }
+        return true;
+    }
+    // A container, or a value the loader binds, which a field set cannot write.
+    let empty = ["items", "entries"].iter().any(|key| {
+        edited
+            .get(*key)
+            .and_then(Json::as_array)
+            .is_some_and(Vec::is_empty)
+    });
+    let same = match source {
+        Some(was) => serde_json::to_value(was).is_ok_and(|was| &was == edited),
+        None => empty,
+    };
+    if !same {
+        out.notes.push(format!(
+            "{}: a {kind} inside a new element starts as the copy's; dump the saved copy and diff \
+             again to change it",
+            at()
+        ));
+    }
+    same
 }
 
 /// A map's value half. It is addressed as an element of the map, so only a scalar change is an
@@ -1006,8 +1155,9 @@ mod tests {
         );
     }
 
-    /// A longer list inserts at the end, each with the note that its value needs a second pass;
-    /// a shorter one removes from the end down, so an earlier removal does not move a later one.
+    /// A longer list inserts at the end, each new element given its value through its index in the
+    /// same save; a shorter one removes from the end down, so an earlier removal does not move a
+    /// later one.
     #[test]
     fn a_container_grows_by_inserts_and_shrinks_by_removes() {
         let out = one(
@@ -1015,13 +1165,25 @@ mod tests {
             json!({"kind": "array", "items": [
                 {"kind": "str", "value": "a"},
                 {"kind": "str", "value": "b"},
+                {"kind": "str", "value": "a"},
             ]}),
         );
         assert!(matches!(
             out.edits.values[0].op,
             EditOp::Insert { index: 1, .. }
         ));
-        assert_eq!(out.notes.len(), 1);
+        assert!(out.notes.is_empty(), "{:?}", out.notes);
+        let sets: Vec<(&[String], &str)> = out
+            .edits
+            .field_sets
+            .iter()
+            .map(|set| (&set.path[..], set.text.as_str()))
+            .collect();
+        assert_eq!(
+            sets,
+            [(&["[1]".to_string()][..], "b")],
+            "the third starts as a copy of the last element read, which it already equals"
+        );
 
         let out = one(
             array(vec![
@@ -1041,6 +1203,115 @@ mod tests {
             })
             .collect();
         assert_eq!(indices, vec![2, 1], "removed from the end down");
+    }
+
+    fn my_struct(x: i64, y: PropertyValue) -> PropertyValue {
+        PropertyValue::Struct {
+            name: "MyStruct".into(),
+            fields: vec![
+                entry("X", PropertyValue::Int { value: x }, 0x50),
+                entry("Y", y, 0x54),
+            ],
+        }
+    }
+
+    fn sets_of(out: &DiffOutcome) -> Vec<(String, &str)> {
+        out.edits
+            .field_sets
+            .iter()
+            .map(|set| (set.path.join("."), set.text.as_str()))
+            .collect()
+    }
+
+    /// A struct element added to an array is filled in through its index, for the fields that
+    /// differ from the element it starts as a copy of.
+    #[test]
+    fn a_new_struct_element_is_filled_in_through_its_index() {
+        let out = one(
+            array(vec![my_struct(1, PropertyValue::Int { value: 2 })]),
+            json!({"kind": "array", "items": [
+                {"kind": "struct", "fields": [
+                    {"name": "X", "value": {"kind": "int", "value": 1}},
+                    {"name": "Y", "value": {"kind": "int", "value": 2}},
+                ]},
+                {"kind": "struct", "fields": [
+                    {"name": "X", "value": {"kind": "int", "value": 1}},
+                    {"name": "Y", "value": {"kind": "int", "value": 5}},
+                ]},
+            ]}),
+        );
+        assert!(matches!(
+            value(&out).op,
+            EditOp::Insert {
+                index: 1,
+                key: None
+            }
+        ));
+        assert_eq!(sets_of(&out), [("[1].Y".to_string(), "5")]);
+        assert!(out.notes.is_empty(), "{:?}", out.notes);
+    }
+
+    /// A field set only carries a value, so a new element's field the dump leaves unset while its
+    /// copy stores one is noted rather than dropped silently.
+    #[test]
+    fn a_new_elements_field_left_unset_is_noted() {
+        let out = one(
+            array(vec![my_struct(1, PropertyValue::Int { value: 2 })]),
+            json!({"kind": "array", "items": [
+                {"kind": "struct", "fields": [
+                    {"name": "X", "value": {"kind": "int", "value": 1}},
+                    {"name": "Y", "value": {"kind": "int", "value": 2}},
+                ]},
+                {"kind": "struct", "fields": [
+                    {"name": "X", "value": {"kind": "int", "value": 3}},
+                    {"name": "Y", "value": {"kind": "unset", "declared": "Int"}},
+                ]},
+            ]}),
+        );
+        assert_eq!(sets_of(&out), [("[1].X".to_string(), "3")]);
+        assert_eq!(out.notes.len(), 1, "{:?}", out.notes);
+        assert!(out.notes[0].contains("Tags[1].Y"), "{}", out.notes[0]);
+    }
+
+    /// An array nothing stores yet takes the dump's elements in one save: an insert for each, and
+    /// every value they hold, since they start as the type's default.
+    #[test]
+    fn an_unset_array_given_elements_inserts_and_fills_them() {
+        let out = one(
+            entry(
+                "Tags",
+                PropertyValue::Unset {
+                    declared: "Array",
+                    enum_type: None,
+                    fields: Vec::new(),
+                },
+                0x30,
+            ),
+            json!({"kind": "array", "items": [
+                {"kind": "struct", "fields": [
+                    {"name": "X", "value": {"kind": "int", "value": 7}},
+                    {"name": "Y", "value": {"kind": "unset", "declared": "Int"}},
+                ]},
+                {"kind": "struct", "fields": [
+                    {"name": "X", "value": {"kind": "int", "value": 8}},
+                ]},
+            ]}),
+        );
+        let inserts: Vec<u32> = out
+            .edits
+            .values
+            .iter()
+            .map(|edit| match (&edit.op, edit.expect_kind.as_str()) {
+                (EditOp::Insert { index, key: None }, "unset") => *index,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(inserts, [0, 1]);
+        assert_eq!(
+            sets_of(&out),
+            [("[0].X".to_string(), "7"), ("[1].X".to_string(), "8")]
+        );
+        assert!(out.notes.is_empty(), "{:?}", out.notes);
     }
 
     /// A set keys on its elements, so a new one goes in by its value in one pass. Without a key a
