@@ -5,6 +5,7 @@ use tauri::State;
 
 use rivals_core::asset::{self, AssetSource};
 use rivals_core::asset_edit::{self, AssetEditRequest};
+use rivals_core::inherit;
 use rivals_core::localization;
 use rivals_core::mappings;
 use rivals_core::schema_synth::{self, PackageSource};
@@ -58,6 +59,59 @@ fn show_game_text(
             mappings: schema.as_deref(),
         },
     );
+}
+
+/// The package the inspector last asked inherited values for, parsed once for every export the
+/// user opens in it. `generation` changes whenever the inspector reads the package again.
+fn viewed_package(
+    game_root: &str,
+    container: &str,
+    entry: &str,
+    generation: u32,
+    usmap: Option<String>,
+) -> Result<std::sync::Arc<ParsedPackage>, String> {
+    type Viewed = Option<(String, std::sync::Arc<ParsedPackage>)>;
+    static VIEWED: std::sync::Mutex<Viewed> = std::sync::Mutex::new(None);
+    let key = format!("{game_root}\u{1}{container}\u{1}{entry}\u{1}{generation}");
+    if let Some((held, parsed)) = &*VIEWED.lock().map_err(|e| e.to_string())?
+        && *held == key
+    {
+        return Ok(parsed.clone());
+    }
+    let parsed = std::sync::Arc::new(parse(game_root, container, entry, usmap)?);
+    *VIEWED.lock().map_err(|e| e.to_string())? = Some((key, parsed.clone()));
+    Ok(parsed)
+}
+
+/// The values export `export` does not store, as its archetypes hold them, for the inspector to
+/// show in place of "not stored" when it is opened.
+#[tauri::command]
+pub(crate) async fn inherited_values(
+    state: State<'_, SettingsState>,
+    game_root: String,
+    container: String,
+    entry: String,
+    export: u32,
+    generation: u32,
+) -> Result<inherit::InheritReport, String> {
+    let usmap = configured_usmap(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let parsed = viewed_package(&game_root, &container, &entry, generation, usmap.clone())?;
+        let schema = mappings::resolve(None, usmap.as_deref())
+            .and_then(|path| mappings::load(&path))
+            .ok();
+        inherit::inherited_for(
+            &parsed,
+            export,
+            &inherit::ArchetypeSource {
+                game_root: &game_root,
+                container: &container,
+                mappings: schema.as_deref(),
+            },
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// The languages the game ships translations for, for the inspector's language picker.

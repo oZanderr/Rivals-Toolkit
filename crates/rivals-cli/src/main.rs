@@ -217,6 +217,11 @@ struct DumpArgs {
     /// Print only this export index.
     #[arg(long, value_name = "N")]
     export: Option<u32>,
+
+    /// Show the values an export does not store as its archetypes hold them, in place of "not
+    /// stored". Reads each archetype's package; native classes keep theirs in code.
+    #[arg(long)]
+    inherited: bool,
 }
 
 #[derive(Args)]
@@ -1726,14 +1731,25 @@ fn culture(cli: &Cli, app: &settings::AppSettings) -> asset::Culture {
 
 fn asset_dump(cli: &Cli, app: &settings::AppSettings, args: &DumpArgs) -> Result<(), String> {
     let root = resolve::game_root(cli.game_root.as_deref(), app)?;
-    let parsed = asset::dump(
-        &asset_request(cli, app, &args.asset, &root),
-        args.export,
-        &culture(cli, app),
-    )?;
-    emit(cli, &parsed, || {
-        asset::print_dump(&parsed, &mut |line| outln!("{line}"));
-    })
+    let mut request = asset_request(cli, app, &args.asset, &root);
+    // What an export leaves out is only listed by the parse that declares every slot.
+    request.declared |= args.inherited;
+    let parsed = asset::dump(&request, args.export, &culture(cli, app))?;
+    let inherited = if args.inherited {
+        asset::inherited(&request, &parsed)?
+    } else {
+        std::collections::BTreeMap::new()
+    };
+    emit(
+        cli,
+        &asset::DumpReport {
+            package: &parsed,
+            inherited: &inherited,
+        },
+        || {
+            asset::print_dump(&parsed, &inherited, &mut |line| outln!("{line}"));
+        },
+    )
 }
 
 fn asset_table(cli: &Cli, app: &settings::AppSettings, args: &AssetArgs) -> Result<(), String> {

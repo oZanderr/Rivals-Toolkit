@@ -184,6 +184,7 @@ pub fn run() {
             asset_view::export_bulk,
             asset_view::enum_options,
             asset_view::text_cultures,
+            asset_view::inherited_values,
             asset_view::get_text_culture,
             asset_view::set_text_culture,
             asset_view::save_asset_edits,

@@ -1,10 +1,11 @@
 //! Asset inspection subcommands, and the audit that measures parse coverage over a whole container.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use rivals_core::asset::{self, AssetSource};
 use rivals_core::asset_edit::{self, AssetEditRequest};
+use rivals_core::inherit;
 use rivals_core::localization;
 use rivals_core::mappings;
 use rivals_core::schema_synth::{self, PackageSource};
@@ -1823,6 +1824,40 @@ fn show_game_text(
     Ok(())
 }
 
+/// A dump, with the inherited values it was asked for, keyed by export.
+#[derive(Serialize)]
+pub struct DumpReport<'a> {
+    #[serde(flatten)]
+    pub package: &'a ParsedPackage,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub inherited: &'a BTreeMap<u32, inherit::InheritReport>,
+}
+
+/// The values each export in `parsed` does not store, as its archetypes hold them.
+pub fn inherited(
+    request: &Request<'_>,
+    parsed: &ParsedPackage,
+) -> Result<BTreeMap<u32, inherit::InheritReport>, String> {
+    let schema = mappings::resolve(request.usmap, request.configured_usmap)
+        .and_then(|path| mappings::load(&path))
+        .ok();
+    let source = inherit::ArchetypeSource {
+        game_root: request.game_root,
+        container: request.container,
+        mappings: schema.as_deref(),
+    };
+    parsed
+        .exports
+        .iter()
+        .map(|export| {
+            Ok((
+                export.index,
+                inherit::inherited_for(parsed, export.index, &source)?,
+            ))
+        })
+        .collect()
+}
+
 /// How a value reads when shown: a text as the game shows it, what it stores after it.
 fn shown(value: &PropertyValue) -> String {
     match value {
@@ -1851,8 +1886,22 @@ pub fn dump(
     Ok(parsed)
 }
 
-pub fn print_dump(parsed: &ParsedPackage, out: &mut impl FnMut(String)) {
+pub fn print_dump(
+    parsed: &ParsedPackage,
+    inherited: &BTreeMap<u32, inherit::InheritReport>,
+    out: &mut impl FnMut(String),
+) {
     for export in &parsed.exports {
+        let from: HashMap<String, &inherit::Inherited> = inherited
+            .get(&export.index)
+            .map(|report| {
+                report
+                    .values
+                    .iter()
+                    .map(|value| (value.path.join("."), value))
+                    .collect()
+            })
+            .unwrap_or_default();
         out(format!(
             "[{}] {} ({})  {}",
             export.index,
@@ -1874,10 +1923,16 @@ pub fn print_dump(parsed: &ParsedPackage, out: &mut impl FnMut(String)) {
                 payload.struct_name, payload.at, payload.end, payload.reason
             ));
         }
-        print_entries(&export.properties, 1, out);
+        print_entries(&export.properties, 1, &Inherits::of(&from), out);
+        if let Some(why) = inherited
+            .get(&export.index)
+            .and_then(|report| report.stopped.as_deref())
+        {
+            out(format!("     not inherited further: {why}"));
+        }
         if !export.defaults.is_empty() {
             out("     defaults:".to_string());
-            print_entries(&export.defaults, 2, out);
+            print_entries(&export.defaults, 2, &Inherits::none(), out);
         }
         if let Some(table) = &export.data_table {
             out(format!(
@@ -1912,21 +1967,73 @@ pub fn print_dump(parsed: &ParsedPackage, out: &mut impl FnMut(String)) {
     }
 }
 
-fn print_entries(entries: &[PropertyEntry], depth: usize, out: &mut impl FnMut(String)) {
+/// The inherited values a dump prints in place of "not stored", by the path from the export, and
+/// the path the entries being printed sit at.
+struct Inherits<'a> {
+    values: Option<&'a HashMap<String, &'a inherit::Inherited>>,
+    prefix: Vec<String>,
+}
+
+impl<'a> Inherits<'a> {
+    fn of(values: &'a HashMap<String, &'a inherit::Inherited>) -> Self {
+        Self {
+            values: Some(values),
+            prefix: Vec::new(),
+        }
+    }
+
+    fn none() -> Self {
+        Self {
+            values: None,
+            prefix: Vec::new(),
+        }
+    }
+
+    fn inside(&self, segment: &str) -> Self {
+        let mut prefix = self.prefix.clone();
+        prefix.push(segment.to_string());
+        Self {
+            values: self.values,
+            prefix,
+        }
+    }
+
+    fn at(&self, segment: &str) -> Option<&'a inherit::Inherited> {
+        let mut path = self.prefix.clone();
+        path.push(segment.to_string());
+        self.values?.get(&path.join(".")).copied()
+    }
+}
+
+fn print_entries(
+    entries: &[PropertyEntry],
+    depth: usize,
+    inherits: &Inherits<'_>,
+    out: &mut impl FnMut(String),
+) {
     let pad = "  ".repeat(depth + 1);
     for entry in entries {
         let label = match entry.element {
             Some(index) => format!("{}[{index}]", entry.name),
             None => entry.name.clone(),
         };
+        if let (PropertyValue::Unset { .. }, Some(inherited)) = (&entry.value, inherits.at(&label))
+        {
+            out(format!(
+                "{pad}{label}: {}  (inherited from {})",
+                shown(&inherited.value),
+                inherited.from
+            ));
+            continue;
+        }
         match &entry.value {
             PropertyValue::Struct { name, fields } if entry.value.summary().contains('{') => {
                 out(format!("{pad}{label}: {name}"));
-                print_entries(fields, depth + 1, out);
+                print_entries(fields, depth + 1, &inherits.inside(&label), out);
             }
             PropertyValue::Text { parts, .. } if !parts.is_empty() => {
                 out(format!("{pad}{label}: {}", shown(&entry.value)));
-                print_entries(parts, depth + 1, out);
+                print_entries(parts, depth + 1, &Inherits::none(), out);
             }
             PropertyValue::Array { items } if !items.is_empty() => {
                 out(format!("{pad}{label}: [{}]", items.len()));
@@ -1934,7 +2041,7 @@ fn print_entries(entries: &[PropertyEntry], depth: usize, out: &mut impl FnMut(S
                     match item {
                         PropertyValue::Struct { name, fields } if item.summary().contains('{') => {
                             out(format!("{pad}  [{index}] {name}"));
-                            print_entries(fields, depth + 2, out);
+                            print_entries(fields, depth + 2, &Inherits::none(), out);
                         }
                         other => out(format!("{pad}  [{index}] {}", shown(other))),
                     }

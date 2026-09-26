@@ -635,6 +635,48 @@ interface TreeRow {
   /** For a row inside an element a pending add brings, the key of the container adding it. That
    *  add is what the row fills in, so it does not lock the row. */
   pending?: string;
+  /** From the export down to this row, as field sets name it, for matching the values an
+   *  archetype gives. Only rows reached through properties and struct fields have one. */
+  path?: string[];
+}
+
+/** A field's segment in a path: its name, and its slot for a static array. */
+function fieldSegment(entry: PropertyEntry): string {
+  return entry.element === undefined ? entry.name : `${entry.name}[${entry.element}]`;
+}
+
+/** What the backend found an export's archetypes give for the values it does not store. */
+interface InheritReport {
+  values: { path: string[]; value: PropertyValue; from: string }[];
+  stopped?: string;
+  loaded: number;
+}
+
+/** Inherited values by path, for the rows of the export on show. */
+interface InheritedValues {
+  values: Map<string, { value: PropertyValue; from: string }>;
+  stopped?: string;
+}
+
+const InheritedContext = createContext<InheritedValues | null>(null);
+
+/** The value an archetype gives at `path`: found there, or inside a struct it gives further up. */
+function inheritedAt(
+  inherited: InheritedValues | null,
+  path: string[]
+): { value: PropertyValue; from: string } | null {
+  if (!inherited) return null;
+  for (let depth = path.length; depth > 0; depth--) {
+    const found = inherited.values.get(path.slice(0, depth).join("."));
+    if (!found) continue;
+    let value: PropertyValue | undefined = found.value;
+    for (const segment of path.slice(depth)) {
+      if (value?.kind !== "struct") return null;
+      value = value.fields.find((field) => fieldSegment(field) === segment)?.value;
+    }
+    return value ? { value, from: found.from } : null;
+  }
+  return null;
 }
 
 const NO_POSITION = "This value has no recorded position in the file.";
@@ -645,9 +687,9 @@ function isPendingElement(row: TreeRow): boolean {
   return row.pending !== undefined && row.target?.path?.length === 1;
 }
 
-function rowOf(entry: PropertyEntry, within: string[]): TreeRow {
+function rowOf(entry: PropertyEntry, within: string[], path?: string[]): TreeRow {
   const target = entryTarget(entry);
-  return { entry, target, reason: target ? null : NO_POSITION, within };
+  return { entry, target, reason: target ? null : NO_POSITION, within, path };
 }
 
 /** The rows under `row`. `draft` is the row's own, which for an array can be a pending add whose
@@ -663,7 +705,14 @@ function childrenOf(row: TreeRow, draft?: Draft): TreeRow[] {
     const at: EditTarget | null = target
       ? { ...target, path: [...(target.path ?? []), segment], was: undefined }
       : null;
-    return { entry: field, target: at, reason: at ? null : NO_POSITION, within: inner, pending };
+    return {
+      entry: field,
+      target: at,
+      reason: at ? null : NO_POSITION,
+      within: inner,
+      pending,
+      path: row.path && [...row.path, segment],
+    };
   };
   if (pending !== undefined) {
     switch (value.kind) {
@@ -683,7 +732,9 @@ function childrenOf(row: TreeRow, draft?: Draft): TreeRow[] {
   }
   switch (value.kind) {
     case "struct":
-      return value.fields.map((field) => rowOf(field, inner));
+      return value.fields.map((field) =>
+        rowOf(field, inner, row.path && [...row.path, fieldSegment(field)])
+      );
     case "array":
     case "set": {
       const rows: TreeRow[] = value.items.map((item, i) => {
@@ -1475,9 +1526,15 @@ const PropertyRow = memo(function PropertyRow({ row, depth }: { row: TreeRow; de
   // hold its default.
   const stored = target?.index !== undefined || isPendingElement(row) || isStored(entry);
   const isUnset = entry.value.kind === "unset";
+  const inherited = useContext(InheritedContext);
+  const from = isUnset && row.path ? inheritedAt(inherited, row.path) : null;
   const text =
     draftText(draft, elementCount(entry.value)) ??
-    (stored || isUnset ? summarise(entry.value) : "(default)");
+    (from ? summarise(from.value) : stored || isUnset ? summarise(entry.value) : "(default)");
+  const fromHint = from
+    ? `Inherited from ${from.from}. Set it to store a value of its own.${locked ? ` ${locked}` : ""}`
+    : null;
+  const unsetHint = inherited?.stopped ? `${UNSET_HINT} ${inherited.stopped}.` : UNSET_HINT;
   const muted = entry.value.kind === "default" || (!stored && draft === undefined);
 
   const commit = (next: string) => {
@@ -1541,7 +1598,7 @@ const PropertyRow = memo(function PropertyRow({ row, depth }: { row: TreeRow; de
             />
           </span>
         ) : (
-          <Tip content={locked ?? (isUnset ? UNSET_HINT : textHint(entry.value))}>
+          <Tip content={fromHint ?? locked ?? (isUnset ? unsetHint : textHint(entry.value))}>
             <span
               className={cn(
                 "min-w-0 flex-1 break-all font-mono",
@@ -6357,7 +6414,9 @@ export default function AssetInspector({
     const shown = (entries: PropertyEntry[]) =>
       showInherited ? entries : withoutInherited(entries);
     if (!active.data_table) {
-      const rows = shown(active.properties).map((property) => rowOf(property, []));
+      const rows = shown(active.properties).map((property) =>
+        rowOf(property, [], [fieldSegment(property)])
+      );
       // A Blueprint struct's defaults are values of their own, grouped under one row.
       if (active.defaults?.length) {
         rows.push({
@@ -6383,6 +6442,43 @@ export default function AssetInspector({
       )
     );
   }, [active, showInherited]);
+
+  // What the open export's archetypes give for what it does not store, looked up when shown.
+  const [inherited, setInherited] = useState<{ key: string; values: InheritedValues } | null>(null);
+  const inheritedKey = active ? `${active.index}:${epoch}` : "";
+  useEffect(() => {
+    if (!showInherited || !active || active.template_index === 0) return;
+    if (inherited?.key === inheritedKey) return;
+    let cancelled = false;
+    void invoke<InheritReport>("inherited_values", {
+      gameRoot: gamePath,
+      container,
+      entry,
+      export: active.index,
+      generation: epoch,
+    }).then(
+      (report) => {
+        if (cancelled) return;
+        setInherited({
+          key: inheritedKey,
+          values: {
+            values: new Map(
+              report.values.map((found) => [
+                found.path.join("."),
+                { value: found.value, from: found.from },
+              ])
+            ),
+            stopped: report.stopped,
+          },
+        });
+      },
+      () => undefined
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [showInherited, active, inherited, inheritedKey, epoch, gamePath, container, entry]);
+  const inheritedValues = inherited?.key === inheritedKey ? inherited.values : null;
   const inheritedCount = active
     ? active.properties.filter((p) => p.value.kind === "unset").length
     : 0;
@@ -6808,7 +6904,9 @@ export default function AssetInspector({
                     onOpen={openScript}
                   />
                 ) : active && treeRows.length > 0 ? (
-                  <PropertyTree rows={treeRows} />
+                  <InheritedContext.Provider value={inheritedValues}>
+                    <PropertyTree rows={treeRows} />
+                  </InheritedContext.Provider>
                 ) : (
                   <div className="min-h-0 min-w-0 flex-1 overflow-auto">
                     <p className="p-6 text-center text-sm text-muted-foreground">
