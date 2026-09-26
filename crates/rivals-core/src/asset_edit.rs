@@ -2008,6 +2008,48 @@ mod tests {
         );
     }
 
+    /// A dump filling in a field three unset structs down diffs to one field set, and one save
+    /// stores every struct on the way and sets it.
+    #[test]
+    fn a_field_three_unset_structs_down_is_diffed_and_set_in_one_save() {
+        let after = preview_sparse(|parsed| {
+            let mut dump = serde_json::to_value(parsed).expect("dump");
+            let holder = dump["exports"][0]["properties"]
+                .as_array_mut()
+                .expect("properties")
+                .iter_mut()
+                .find(|entry| entry["name"] == "Holder")
+                .expect("Holder");
+            let chain = holder["value"]["fields"]
+                .as_array_mut()
+                .expect("fields")
+                .iter_mut()
+                .find(|field| field["name"] == "Chain")
+                .expect("Chain");
+            let leaf = &mut chain["value"]["fields"][0]["value"]["fields"][0]["value"]["fields"][0];
+            assert_eq!(leaf["name"], "Leaf", "{leaf}");
+            leaf["value"] = serde_json::json!({"kind": "int", "value": 6});
+            let outcome = diff::diff_dump(parsed, &dump).expect("diff");
+            assert!(outcome.notes.is_empty(), "{:?}", outcome.notes);
+            assert_eq!(outcome.edits.field_sets.len(), 1);
+            outcome
+                .edits
+                .resolve(std::path::Path::new("."))
+                .expect("resolve")
+        })
+        .expect("saved");
+        let struct_fields = |value: &PropertyValue| -> Vec<rivals_uasset::PropertyEntry> {
+            match value {
+                PropertyValue::Struct { fields, .. } => fields.clone(),
+                other => panic!("{other:?}"),
+            }
+        };
+        let level2 = struct_fields(&field(holder_of(&after), "Chain").value);
+        let level3 = struct_fields(&field(&level2, "Level2").value);
+        let leaf = struct_fields(&field(&level3, "Level3").value);
+        assert_eq!(field(&leaf, "Leaf").value.summary(), "6");
+    }
+
     /// An index past what the container will hold is refused by name rather than landing anywhere.
     #[test]
     fn an_index_past_the_new_elements_is_refused() {

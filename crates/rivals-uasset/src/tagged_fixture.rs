@@ -170,9 +170,8 @@ pub fn sparse_package() -> (Vec<u8>, Vec<u8>) {
 /// The schema [`sparse_package`] was cooked against.
 pub fn sparse_mappings() -> Mappings {
     use usmap::{Property, PropertyInner, Struct};
-    let my_struct = || PropertyInner::Struct {
-        name: "MyStruct".into(),
-    };
+    let struct_named = |name: &str| PropertyInner::Struct { name: name.into() };
+    let my_struct = || struct_named("MyStruct");
     let property = |name: &str, index: u16, inner: PropertyInner| Property {
         name: name.into(),
         array_dim: 1,
@@ -221,7 +220,24 @@ pub fn sparse_mappings() -> Mappings {
                         inner: Box::new(PropertyInner::Int),
                     },
                 ),
+                property("Chain", 11, struct_named("Level1")),
             ],
+        },
+        // Structs three deep, for previews and field sets that reach past two.
+        Struct {
+            name: "Level1".into(),
+            super_struct: None,
+            properties: vec![property("Level2", 0, struct_named("Level2"))],
+        },
+        Struct {
+            name: "Level2".into(),
+            super_struct: None,
+            properties: vec![property("Level3", 0, struct_named("Level3"))],
+        },
+        Struct {
+            name: "Level3".into(),
+            super_struct: None,
+            properties: vec![property("Leaf", 0, PropertyInner::Int)],
         },
         Struct {
             name: "MyStruct".into(),

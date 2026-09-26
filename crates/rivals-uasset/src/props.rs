@@ -608,7 +608,7 @@ fn emit_unset(
 }
 
 /// How deep an unset struct's preview goes into structs of its own.
-pub const PREVIEW_DEPTH: u32 = 2;
+pub const PREVIEW_DEPTH: u32 = 5;
 
 /// The fields a reflected struct declares, each unset, for showing what storing it would hold.
 /// A native struct lays itself out and names no fields a schema would, so it has none here.

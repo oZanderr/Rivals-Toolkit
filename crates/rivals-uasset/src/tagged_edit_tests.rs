@@ -915,7 +915,7 @@ fn a_tagged_block_lists_what_its_schema_declares_and_it_lacks() {
     assert_eq!(
         absent,
         [
-            "Extra", "Label", "On", "Mode", "Nested", "Items", "Scores", "Counts"
+            "Extra", "Label", "On", "Mode", "Nested", "Items", "Scores", "Counts", "Chain"
         ]
     );
     let inner = find(holder(&parsed), "Inner");
@@ -1066,4 +1066,22 @@ fn a_field_set_through_a_container_expects_its_length() {
     });
     let drift = crate::edit::check_expectations(&grown, &changes).expect_err("drift");
     assert!(drift.contains("[3 items]"), "{drift}");
+}
+
+/// An unset struct's preview reaches a field three structs down, so it can be shown and diffed.
+#[test]
+fn a_preview_reaches_a_field_three_structs_down() {
+    let (asset, exports) = sparse_package();
+    let mappings = sparse_mappings();
+    let parsed = parse_declared(&asset, &exports, Some(&mappings));
+    let level = |entries: &[PropertyEntry], name: &str| -> Vec<PropertyEntry> {
+        match &find(entries, name).value {
+            PropertyValue::Unset { fields, .. } => fields.clone(),
+            other => panic!("{name}: {other:?}"),
+        }
+    };
+    let level2 = level(holder(&parsed), "Chain");
+    let level3 = level(&level2, "Level2");
+    let leaf = level(&level3, "Level3");
+    assert!(is_absent(find(&leaf, "Leaf")), "{leaf:?}");
 }
