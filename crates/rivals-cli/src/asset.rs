@@ -395,6 +395,9 @@ pub fn importers(
         }
         (true, _) => rivals_core::import_index::build(game_root, progress)?,
     };
+    if index.is_stale(game_root) {
+        eprintln!("warning: {}", rivals_core::import_index::STALE_WARNING);
+    }
     Ok(index.importers_of(path))
 }
 

@@ -432,6 +432,10 @@ pub fn plan_export_removal(
         && let Ok(Some(index)) = crate::import_index::load(request.game_root)
     {
         plan.resolve_importers(|path| index.importers_of(path).packages);
+        if index.is_stale(request.game_root) {
+            plan.warnings
+                .push(crate::import_index::STALE_WARNING.to_string());
+        }
     }
     Ok(plan)
 }
@@ -632,6 +636,10 @@ pub fn plan_export_edits(
         && let Ok(Some(index)) = crate::import_index::load(request.game_root)
     {
         plan.resolve_importers(|path| index.importers_of(path).packages);
+        if index.is_stale(request.game_root) {
+            plan.warnings
+                .push(crate::import_index::STALE_WARNING.to_string());
+        }
     }
     Ok(plan)
 }

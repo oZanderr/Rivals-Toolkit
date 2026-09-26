@@ -1,16 +1,18 @@
-//! Indexes which packages import which objects across the game's containers, so an export removal
-//! can name the packages that would break.
+//! Indexes which packages import which objects across the game's containers and the installed
+//! mods, so an export removal or rename can name the packages that would break.
 //!
 //! Two tiers come out of one walk. The container header's store entries say which packages each
 //! package imports; the zen package header's import map says which objects, as
 //! `(package id, public export hash)`, which is exactly what the loader resolves and so is immune
-//! to case and separators. The result is cached on disk and keyed by the containers' names, sizes
-//! and modification times.
+//! to case and separators. Each package's name map also says which packages it names by path,
+//! which is every package it could point at softly. The result is cached on disk and keyed by the
+//! containers' names, sizes and modification times.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::{Cursor, ErrorKind};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use retoc::iostore::IoStoreTrait;
@@ -20,13 +22,15 @@ use retoc::zen_asset_conversion::get_public_export_hash;
 use retoc::{EIoChunkType, FIoChunkId};
 use serde::Serialize;
 
-use crate::pak::containers::{MOUNT_POINT, open_base_game_paks};
+use crate::pak::containers::{
+    MOUNT_POINT, open_base_game_paks, open_target_only, undecryptable_container_stems,
+};
 use crate::paths::paks_dir;
 
 /// The container whose siblings make up the base game; the walk covers everything the merged
 /// store admits alongside it.
 const BASE_CONTAINER: &str = "pakchunk0-Windows";
-const MAGIC: &[u8; 8] = b"RVLIMPX1";
+const MAGIC: &[u8; 8] = b"RVLIMPX2";
 const ENGINE_VERSION: EngineVersion = EngineVersion::UE5_3;
 
 /// One package importing one object of another. A zero hash records the package dependency alone.
@@ -37,9 +41,18 @@ struct Edge {
     importer: u64,
 }
 
+/// One package naming another by path, which is what a soft reference to it needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Mention {
+    target: u64,
+    mentioner: u64,
+}
+
 pub struct ImportIndex {
     /// Sorted, so one binary search finds every importer of an object.
     edges: Vec<Edge>,
+    /// Sorted the same way, by the package named.
+    mentions: Vec<Mention>,
     /// Package id to container-relative path for every package the walk saw.
     paths: BTreeMap<u64, String>,
     pub built_at: u64,
@@ -84,26 +97,59 @@ fn cache_tag(game_root: &str) -> u64 {
     cityhasher::hash(normalised.as_bytes())
 }
 
-/// What the containers looked like: every top-level `.utoc` under Paks by name, size and mtime.
+/// The installed mods' containers the walk reads: every enabled `.utoc` under `~mods`, the copy
+/// the game loads first leading, so a package several mods ship is read from the winner.
+fn mod_containers(paks: &Path) -> Vec<PathBuf> {
+    let undecryptable = undecryptable_container_stems(paks);
+    let mut found: Vec<PathBuf> = walkdir::WalkDir::new(paks.join("~mods"))
+        .into_iter()
+        .filter_map(Result::ok)
+        .map(walkdir::DirEntry::into_path)
+        .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("utoc"))
+        .filter(|path| !undecryptable.contains(&stem(path)))
+        .collect();
+    found.sort_by(|a, b| crate::mods::winner_order(&stem(a), &stem(b)));
+    found
+}
+
+fn stem(path: &Path) -> String {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// What the walk reads: the base game's top-level containers and the enabled mods', by name,
+/// size and mtime. A container the walk leaves out is left out here too, so it never reads as a
+/// change.
 fn fingerprint(game_root: &str) -> Result<Vec<u8>, String> {
     let dir = paks_dir(game_root);
-    let mut entries: Vec<(String, u64, u64)> = Vec::new();
+    let undecryptable = undecryptable_container_stems(&dir);
+    let mut containers: Vec<PathBuf> = Vec::new();
     for entry in fs::read_dir(&dir).map_err(|e| format!("Could not read {}: {e}", dir.display()))? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("utoc") {
-            continue;
+        let path = entry.map_err(|e| e.to_string())?.path();
+        let name = stem(&path);
+        if path.extension().and_then(|e| e.to_str()) == Some("utoc")
+            && !undecryptable.contains(&name)
+            && !name.contains("_9999999_")
+        {
+            containers.push(path);
         }
-        let meta = entry.metadata().map_err(|e| e.to_string())?;
+    }
+    containers.extend(mod_containers(&dir));
+    let mut entries: Vec<(String, u64, u64)> = Vec::new();
+    for path in containers {
+        let meta = fs::metadata(&path).map_err(|e| e.to_string())?;
         let mtime = meta
             .modified()
             .ok()
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map_or(0, |d| d.as_secs());
         let name = path
-            .file_name()
-            .unwrap_or_default()
+            .strip_prefix(&dir)
+            .unwrap_or(&path)
             .to_string_lossy()
+            .replace('\\', "/")
             .to_ascii_lowercase();
         entries.push((name, meta.len(), mtime));
     }
@@ -125,28 +171,64 @@ pub fn build(
     progress: &mut dyn FnMut(usize, usize),
 ) -> Result<ImportIndex, String> {
     let fingerprint = fingerprint(game_root)?;
-    let store = open_base_game_paks(&paks_dir(game_root), BASE_CONTAINER)?;
-    // Deduped with the highest-priority copy first, so a patched package is indexed once, from
-    // its patched header.
-    let list: Vec<_> = store
-        .packages_all()
-        .filter_map(|pkg| {
+    let paks = paks_dir(game_root);
+    // The mods first, each alone and the winner leading, then the game: a package is indexed from
+    // the copy the game loads.
+    let mut stores: Vec<(Option<String>, Arc<dyn IoStoreTrait>)> = Vec::new();
+    for container in mod_containers(&paks) {
+        let name = stem(&container);
+        if let Ok(store) = open_target_only(&paks, &container, &name) {
+            stores.push((Some(name), Arc::from(store)));
+        }
+    }
+    stores.push((None, open_base_game_paks(&paks, BASE_CONTAINER)?));
+    let mut index = walk(&stores, progress);
+    index.fingerprint = fingerprint;
+    let cache = cache_path(game_root)?;
+    fs::write(&cache, index.encode())
+        .map_err(|e| format!("Could not write {}: {e}", cache.display()))?;
+    Ok(index)
+}
+
+/// Indexes every package the stores hold, each once, from the first store holding it. A mod's
+/// packages are listed with the mod's name after their path.
+fn walk(
+    stores: &[(Option<String>, Arc<dyn IoStoreTrait>)],
+    progress: &mut dyn FnMut(usize, usize),
+) -> ImportIndex {
+    let mut seen = HashSet::new();
+    let mut list = Vec::new();
+    for (mod_name, store) in stores {
+        // Deduped with the highest-priority copy first, so a patched package is indexed once,
+        // from its patched header.
+        for pkg in store.packages_all() {
+            if !seen.insert(pkg.id().0) {
+                continue;
+            }
             let chunk = FIoChunkId::from_package_id(pkg.id(), 0, EIoChunkType::ExportBundleData);
-            let path = store.chunk_path(chunk)?;
+            let Some(path) = store.chunk_path(chunk) else {
+                continue;
+            };
             let stripped = path.strip_prefix(MOUNT_POINT).unwrap_or(&path).to_string();
+            let shown = match mod_name {
+                Some(name) => format!("{stripped} (in {name})"),
+                None => stripped,
+            };
             let container = pkg.container();
-            Some((
+            list.push((
+                store,
                 pkg.id(),
-                stripped,
+                shown,
                 container.container_file_version(),
                 container.container_header_version(),
-            ))
-        })
-        .collect();
+            ));
+        }
+    }
     let total = list.len();
     let mut edges = Vec::new();
+    let mut mentions = Vec::new();
     let mut paths = BTreeMap::new();
-    for (done, (id, path, toc_version, header_version)) in list.into_iter().enumerate() {
+    for (done, (store, id, path, toc_version, header_version)) in list.into_iter().enumerate() {
         paths.insert(id.0, path);
         let entry = store.package_store_entry(id);
         for imported in entry
@@ -174,6 +256,19 @@ pub fn build(
                 Some(ENGINE_VERSION.package_file_version()),
             )
         {
+            for name in header.name_map.copy_raw_names() {
+                if !name.starts_with('/') || name.starts_with("/Script/") {
+                    continue;
+                }
+                let package = name.split(['.', ':']).next().unwrap_or(&name);
+                let target = package_id(package);
+                if target != id.0 {
+                    mentions.push(Mention {
+                        target,
+                        mentioner: id.0,
+                    });
+                }
+            }
             for import in &header.import_map {
                 let Some(reference) = import.package_import() else {
                     continue;
@@ -199,18 +294,17 @@ pub fn build(
     }
     edges.sort_unstable();
     edges.dedup();
-    let index = ImportIndex {
+    mentions.sort_unstable();
+    mentions.dedup();
+    ImportIndex {
         edges,
+        mentions,
         paths,
         built_at: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs()),
-        fingerprint,
-    };
-    let cache = cache_path(game_root)?;
-    fs::write(&cache, index.encode())
-        .map_err(|e| format!("Could not write {}: {e}", cache.display()))?;
-    Ok(index)
+        fingerprint: Vec::new(),
+    }
 }
 
 /// The cached index, or `None` when there is none yet or the file is not one this build wrote.
@@ -223,6 +317,11 @@ pub fn load(game_root: &str) -> Result<Option<ImportIndex>, String> {
     };
     Ok(ImportIndex::decode(&bytes))
 }
+
+/// What a plan says when the index it named importers from was built before the game or the mods
+/// last changed.
+pub const STALE_WARNING: &str = "The import index was built before your last game update or \
+     mod change, so the packages it names may be out of date. Rebuild it to be sure.";
 
 pub fn status(game_root: &str) -> Result<ImportIndexStatus, String> {
     let cache = cache_path(game_root)?.display().to_string();
@@ -279,21 +378,36 @@ impl ImportIndex {
             }
             None => self.between((target, 0), (target, u64::MAX)),
         };
-        let mut packages: Vec<String> = importers
-            .into_iter()
-            .map(|id| {
-                self.paths
-                    .get(&id)
-                    .cloned()
-                    .unwrap_or_else(|| format!("package {id:016x}"))
-            })
-            .collect();
+        let mut packages: Vec<String> = importers.into_iter().map(|id| self.path_of(id)).collect();
         packages.sort();
         packages.dedup();
         Importers {
             path: text.to_string(),
             packages,
         }
+    }
+
+    /// The packages naming `package` by path, which is every package that could point at it or at
+    /// an object in it softly. A candidate list: naming it is needed for a soft reference, not
+    /// proof of one.
+    pub fn mentions_of(&self, package: &str) -> Vec<String> {
+        let target = package_id(package.split(['.', ':']).next().unwrap_or(package).trim());
+        let start = self.mentions.partition_point(|m| m.target < target);
+        let end = self.mentions.partition_point(|m| m.target <= target);
+        let mut packages: Vec<String> = self.mentions[start..end]
+            .iter()
+            .map(|m| self.path_of(m.mentioner))
+            .collect();
+        packages.sort();
+        packages.dedup();
+        packages
+    }
+
+    fn path_of(&self, id: u64) -> String {
+        self.paths
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| format!("package {id:016x}"))
     }
 
     /// Importer ids of every edge whose `(target, hash)` lies in the inclusive range.
@@ -325,6 +439,11 @@ impl ImportIndex {
             out.extend_from_slice(&edge.hash.to_le_bytes());
             out.extend_from_slice(&edge.importer.to_le_bytes());
         }
+        out.extend_from_slice(&(self.mentions.len() as u64).to_le_bytes());
+        for mention in &self.mentions {
+            out.extend_from_slice(&mention.target.to_le_bytes());
+            out.extend_from_slice(&mention.mentioner.to_le_bytes());
+        }
         out
     }
 
@@ -352,8 +471,17 @@ impl ImportIndex {
                 importer: reader.u64()?,
             });
         }
+        let count = usize::try_from(reader.u64()?).ok()?;
+        let mut mentions = Vec::with_capacity(count.min(1 << 24));
+        for _ in 0..count {
+            mentions.push(Mention {
+                target: reader.u64()?,
+                mentioner: reader.u64()?,
+            });
+        }
         Some(Self {
             edges,
+            mentions,
             paths,
             built_at,
             fingerprint,
@@ -418,9 +546,15 @@ mod tests {
         edges.sort_unstable();
         let mut paths = BTreeMap::new();
         paths.insert(b, "Marvel/Content/B.uasset".to_string());
-        paths.insert(c, "Marvel/Content/C.uasset".to_string());
+        paths.insert(c, "Marvel/Content/C.uasset (in SomeMod)".to_string());
+        let mut mentions = vec![Mention {
+            target: a,
+            mentioner: c,
+        }];
+        mentions.sort_unstable();
         ImportIndex {
             edges,
+            mentions,
             paths,
             built_at: 7,
             fingerprint: b"fp".to_vec(),
@@ -435,10 +569,13 @@ mod tests {
         let found = index.importers_of("/Game/A.Default__X_C:Sub");
         assert_eq!(
             found.packages,
-            vec!["Marvel/Content/B.uasset", "Marvel/Content/C.uasset"]
+            vec![
+                "Marvel/Content/B.uasset",
+                "Marvel/Content/C.uasset (in SomeMod)"
+            ]
         );
         let found = index.importers_of("/game/a.DEFAULT__X_C");
-        assert_eq!(found.packages, vec!["Marvel/Content/C.uasset"]);
+        assert_eq!(found.packages, vec!["Marvel/Content/C.uasset (in SomeMod)"]);
         assert!(index.importers_of("/Game/A.Nothing").packages.is_empty());
     }
 
@@ -447,7 +584,10 @@ mod tests {
         let found = index().importers_of("/Game/A");
         assert_eq!(
             found.packages,
-            vec!["Marvel/Content/B.uasset", "Marvel/Content/C.uasset"]
+            vec![
+                "Marvel/Content/B.uasset",
+                "Marvel/Content/C.uasset (in SomeMod)"
+            ]
         );
         assert!(index().importers_of("/Game/B").packages.is_empty());
     }
@@ -470,7 +610,94 @@ mod tests {
         assert_eq!(back.paths, index.paths);
         assert_eq!(back.built_at, 7);
         assert_eq!(back.fingerprint, b"fp");
+        assert_eq!(back.mentions, index.mentions);
         assert!(ImportIndex::decode(b"not an index").is_none());
         assert!(ImportIndex::decode(&bytes[..bytes.len() - 5]).is_none());
+    }
+
+    /// A package named by path in another's names is a candidate for a soft reference, by
+    /// package or by any object in it.
+    #[test]
+    fn a_package_named_in_another_is_a_soft_reference_candidate() {
+        let index = index();
+        assert_eq!(
+            index.mentions_of("/Game/A"),
+            vec!["Marvel/Content/C.uasset (in SomeMod)"]
+        );
+        assert_eq!(
+            index.mentions_of("/game/a.Default__X_C:Sub"),
+            vec!["Marvel/Content/C.uasset (in SomeMod)"]
+        );
+        assert!(index.mentions_of("/Game/B").is_empty());
+    }
+
+    /// A mod enabled or changed under `~mods` changes the fingerprint; a container the walk leaves
+    /// out does not, so it never makes the index read as stale.
+    #[test]
+    fn the_fingerprint_follows_the_mods_and_ignores_what_the_walk_skips() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let root =
+            std::env::temp_dir().join(format!("rivals-index-fp-{}-{stamp}", std::process::id()));
+        let paks = paks_dir(&root.to_string_lossy());
+        let write = |path: &Path, bytes: usize| {
+            fs::create_dir_all(path.parent().expect("parent")).expect("dir");
+            let mut header = vec![0u8; bytes.max(0x90)];
+            header[0..16].copy_from_slice(b"-==--==--==--==-");
+            fs::write(path, header).expect("write");
+        };
+        let game_root = root.to_string_lossy().to_string();
+        write(&paks.join("pakchunk0-Windows.utoc"), 0x90);
+        let base = fingerprint(&game_root).expect("fingerprint");
+
+        write(&paks.join("Stray_9999999_P.utoc"), 0x90);
+        assert_eq!(fingerprint(&game_root).expect("fingerprint"), base);
+
+        write(&paks.join("~mods").join("SomeMod_9999999_P.utoc"), 0x90);
+        let with_mod = fingerprint(&game_root).expect("fingerprint");
+        assert_ne!(with_mod, base);
+
+        write(
+            &paks.join("~mods").join("Off_9999999_P.utoc.disabled"),
+            0x90,
+        );
+        assert_eq!(fingerprint(&game_root).expect("fingerprint"), with_mod);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The installed mods' packages are indexed under the mod's name, with the imports their own
+    /// headers carry. Walks only the mods, which is quick; skipped when none is installed.
+    #[test]
+    fn an_installed_mod_s_packages_are_indexed_under_its_name() {
+        let Ok(root) = std::env::var("RIVALS_GAME_ROOT") else {
+            return;
+        };
+        let paks = paks_dir(&root);
+        let stores: Vec<(Option<String>, Arc<dyn IoStoreTrait>)> = mod_containers(&paks)
+            .into_iter()
+            .filter_map(|container| {
+                let name = stem(&container);
+                let store = open_target_only(&paks, &container, &name).ok()?;
+                Some((Some(name), Arc::from(store)))
+            })
+            .collect();
+        let Some((Some(first), _)) = stores.first() else {
+            return;
+        };
+        let index = walk(&stores, &mut |_, _| {});
+        let from_mod: Vec<&String> = index
+            .paths
+            .values()
+            .filter(|path| path.ends_with(&format!("(in {first})")))
+            .collect();
+        assert!(!from_mod.is_empty(), "{first} lists no packages");
+        assert!(
+            index.edges.iter().any(|edge| index
+                .paths
+                .get(&edge.importer)
+                .is_some_and(|p| p.contains(first.as_str()))),
+            "{first}'s packages import nothing"
+        );
     }
 }
