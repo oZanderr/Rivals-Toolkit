@@ -447,6 +447,7 @@ interface EditList {
   export_edits?: ExportEdit[];
   dependencies?: DependencyEdit[];
   field_sets?: FieldSet[];
+  compact_names?: boolean;
   expect?: {
     exports?: Record<number, string>;
     values?: Record<string, string>;
@@ -551,6 +552,8 @@ export interface Structural {
   removeImports?: number[];
   exports?: ExportEdit[];
   dependencies?: DependencyEdit[];
+  /** Drop the names nothing in the package uses. */
+  compactNames?: boolean;
 }
 
 export interface SaveOptions {
@@ -935,6 +938,7 @@ export function useAssetEdits({
           export_edits: structural?.exports ?? [],
           dependencies: structural?.dependencies ?? [],
           field_sets: fieldSets,
+          compact_names: structural?.compactNames ?? false,
           expect: expectOf(
             [...cells, ...records.filter((record) => record.target.path)],
             exportPath,

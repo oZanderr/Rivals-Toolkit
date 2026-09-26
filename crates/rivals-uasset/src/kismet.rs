@@ -42,6 +42,9 @@ pub struct Script {
     /// Why the walk stopped, when it did. A script that stopped is not trusted for its references.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stopped: Option<ScriptStop>,
+    /// Where each name the statements hold was read from, when the walk was whole.
+    #[serde(skip)]
+    pub names: Vec<u64>,
 }
 
 impl Script {
@@ -947,9 +950,11 @@ pub(crate) fn read_script(
             "the walk accounts for {decoded_size} loaded bytes where the export declares {declared}"
         )));
     }
+    let mut names = reader.cursor.take_names();
     if stopped.is_some() {
         // A script that did not decode whole may have named its objects at the wrong offsets.
         diagnostics.references.truncate(mark);
+        names.clear();
     }
     Script {
         buffer_size: buffer_size.unwrap_or(decoded_size),
@@ -960,6 +965,7 @@ pub(crate) fn read_script(
         end: start + bytes.len() as u64,
         statements,
         stopped,
+        names,
     }
 }
 
@@ -2345,6 +2351,7 @@ mod tests {
                 })
                 .collect(),
             stopped: None,
+            names: Vec::new(),
         }
     }
 

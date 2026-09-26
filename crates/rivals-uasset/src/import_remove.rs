@@ -438,6 +438,7 @@ mod tests {
                 defaults: Vec::new(),
                 super_struct_at: None,
                 name_refs: Vec::new(),
+                names_complete: false,
             }],
             unresolved_structs: Vec::new(),
             property_kinds: Default::default(),

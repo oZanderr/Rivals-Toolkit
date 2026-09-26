@@ -1151,3 +1151,59 @@ fn a_struct_key_edited_into_another_is_refused() {
     })
     .expect("a key of its own");
 }
+
+/// A save that drops the names nothing uses keeps the ones in use, a name an earlier save added
+/// among them, and every value reads the same, as the save's own check confirms.
+#[test]
+fn names_nothing_uses_are_dropped_and_every_value_reads_the_same() {
+    let (asset, exports) = tagged_package();
+    let (_, asset, exports) = apply_to(&asset, &exports, |p| {
+        vec![edit_of(find(top(p), "Tag"), set("Brand_New"))]
+    });
+    let before = parse(&asset, &exports);
+    let header = crate::package::read_header(&AssetBundle {
+        asset: &asset,
+        exports: &exports,
+    })
+    .expect("header");
+    let total = crate::package::header_size(&AssetBundle {
+        asset: &asset,
+        exports: &exports,
+    })
+    .expect("size");
+    let unused = crate::names::unused_names(&before, &header, &exports, total).expect("known");
+    assert!(unused.contains(&"EMode::B".to_string()), "{unused:?}");
+    assert!(!unused.contains(&"Brand_New".to_string()), "{unused:?}");
+    assert!(!unused.contains(&"None".to_string()), "{unused:?}");
+
+    let changes = PackageEdits {
+        compact_names: true,
+        ..Default::default()
+    };
+    let bundle = AssetBundle {
+        asset: &asset,
+        exports: &exports,
+    };
+    let patched = patch_package(&bundle, &before, &changes, None).expect("patch");
+    let after = parse(&patched.asset, &patched.exports);
+    verify_patch(&before, &after, &changes, &patched.applied).expect("verifies");
+    assert_eq!(after.names.len(), before.names.len() - unused.len());
+    assert!(!after.names.iter().any(|name| name == "EMode::B"));
+    match &find(top(&after), "Tag").value {
+        PropertyValue::Name { value } => assert_eq!(value, "Brand_New"),
+        other => panic!("{other:?}"),
+    }
+
+    let again = patch_package(
+        &AssetBundle {
+            asset: &patched.asset,
+            exports: &patched.exports,
+        },
+        &after,
+        &changes,
+        None,
+    )
+    .err()
+    .expect("nothing left to drop");
+    assert!(again.contains("every name"), "{again}");
+}

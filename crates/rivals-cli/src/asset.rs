@@ -207,6 +207,39 @@ pub fn reset_export(
     )
 }
 
+/// The names nothing in the package uses, as a save dropping them would find them.
+pub fn unused_names(request: &Request<'_>, mod_name: &str) -> Result<Vec<String>, String> {
+    let schema = mappings::resolve(request.usmap, request.configured_usmap)
+        .and_then(|path| mappings::load(&path))
+        .ok();
+    asset_edit::unused_names(
+        &edit_request(request, mod_name, PackageEdits::default()),
+        schema.as_deref(),
+        &asset_edit::SaveOptions {
+            layer: request.layer,
+            target: request.target,
+            ..Default::default()
+        },
+    )
+}
+
+/// Drops the names nothing in the package uses and writes the result into a mod pak.
+pub fn compact_names(
+    request: &Request<'_>,
+    mod_name: &str,
+    replace: bool,
+) -> Result<String, String> {
+    write_edits(
+        request,
+        mod_name,
+        replace,
+        PackageEdits {
+            compact_names: true,
+            ..Default::default()
+        },
+    )
+}
+
 /// Adds, copies, renames or removes a DataTable row and writes the result into a mod pak.
 pub fn row(
     request: &Request<'_>,

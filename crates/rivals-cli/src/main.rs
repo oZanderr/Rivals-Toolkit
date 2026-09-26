@@ -162,8 +162,9 @@ enum AssetCmd {
     ExportEdit(ExportEditArgs),
     /// List the import table with what names each entry, and which are named by nothing.
     Imports(ImportsArgs),
-    /// Print the package name table that FName indices resolve against.
-    Names(AssetArgs),
+    /// Print the package name table that FName indices resolve against, or drop the names nothing
+    /// in the package uses.
+    Names(NamesArgs),
     /// Apply an edit file, or a manifest of them, writing each into its mod pak.
     Apply(AssetApplyArgs),
     /// Compare an edited JSON dump against the package it came from and write the edit file that
@@ -446,6 +447,34 @@ struct ResetExportArgs {
     /// Export index to reset, as `asset info` prints it.
     #[arg(long, value_name = "N")]
     export: u32,
+
+    /// Mod pak to write into, created in `~mods` if it does not exist. Defaults to the name the
+    /// desktop app last saved into, then to `AssetEdits`.
+    #[arg(long, value_name = "NAME")]
+    mod_name: Option<String>,
+
+    /// Overwrite an edited copy of this asset that the mod pak already holds.
+    #[arg(long)]
+    replace: bool,
+}
+
+#[derive(Args)]
+struct NamesArgs {
+    #[command(flatten)]
+    asset: AssetArgs,
+
+    /// Only the names nothing in the package uses.
+    #[arg(long)]
+    unused: bool,
+
+    /// Drop the names nothing in the package uses and write the result into a mod pak. Refused for
+    /// a package with bytes the reader cannot follow, which may hold names nothing tracks.
+    #[arg(long)]
+    compact: bool,
+
+    /// With `--compact`, say what would be dropped and write nothing.
+    #[arg(long)]
+    dry_run: bool,
 
     /// Mod pak to write into, created in `~mods` if it does not exist. Defaults to the name the
     /// desktop app last saved into, then to `AssetEdits`.
@@ -2925,9 +2954,31 @@ fn asset_importers(
     })
 }
 
-fn asset_names(cli: &Cli, app: &settings::AppSettings, args: &AssetArgs) -> Result<(), String> {
+fn asset_names(cli: &Cli, app: &settings::AppSettings, args: &NamesArgs) -> Result<(), String> {
     let root = resolve::game_root(cli.game_root.as_deref(), app)?;
-    let lines = asset::names(&asset_request(cli, app, args, &root))?;
+    let request = asset_request(cli, app, &args.asset, &root);
+    let mod_name = mod_name_of(app, args.mod_name.as_deref());
+    if args.unused || args.compact {
+        let unused = asset::unused_names(&request, mod_name)?;
+        if !args.compact || args.dry_run {
+            return emit(cli, &unused, || {
+                for name in &unused {
+                    outln!("{name}");
+                }
+                outln!("{} unused name(s)", unused.len());
+            });
+        }
+        if unused.is_empty() {
+            return Err("every name in the package is in use, so there is nothing to drop".into());
+        }
+        if !cli.force && rivals_core::game_status::should_block_for_game() {
+            return Err(rivals_core::game_status::game_running_error());
+        }
+        let message = asset::compact_names(&request, mod_name, args.replace)?;
+        let message = format!("{message}\ndropped {} unused name(s)", unused.len());
+        return emit(cli, &message, || outln!("{message}"));
+    }
+    let lines = asset::names(&request)?;
     emit(cli, &lines, || {
         for line in &lines {
             outln!("{line}");

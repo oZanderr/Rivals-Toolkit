@@ -283,6 +283,11 @@ type StructuralAsk =
       error: string | null;
     }
   | {
+      kind: "compact_names";
+      unused: string[] | null;
+      error: string | null;
+    }
+  | {
       kind: "paste";
       held: ExportClipboard;
       /** The export the copy goes under, or null for the package root. */
@@ -2913,6 +2918,7 @@ function PackageView({
   onPaste,
   onDeps,
   onDropImport,
+  onCompactNames,
 }: {
   pkg: ParsedPackage;
   edits: AssetEdits;
@@ -2932,6 +2938,7 @@ function PackageView({
   onPaste: () => void;
   onDeps: (index: number) => void;
   onDropImport: (at: number) => void;
+  onCompactNames: () => void;
 }) {
   const adds = Object.entries(edits.importDrafts).filter(([key]) => key.startsWith("add:"));
   const payloadActions = (exp: ParsedExport): PayloadActions => {
@@ -3263,8 +3270,22 @@ function PackageView({
       )}
 
       <details className="border-b border-border">
-        <summary className="cursor-pointer px-3 py-2 text-xs font-semibold text-foreground hover:text-primary">
+        <summary className="flex cursor-pointer items-center gap-2 px-3 py-2 text-xs font-semibold text-foreground hover:text-primary">
           Names ({pkg.names.length})
+          <Tip content={lock ?? "Take out the names nothing in the package uses any more."}>
+            <Button
+              size="sm"
+              variant="outline"
+              className="ml-auto h-6 text-[11px] font-normal"
+              disabled={!!lock}
+              onClick={(e) => {
+                e.preventDefault();
+                onCompactNames();
+              }}
+            >
+              <Eraser size={12} /> Drop unused names…
+            </Button>
+          </Tip>
         </summary>
         <div className="grid grid-cols-[3rem_1fr] gap-x-3 px-3 pb-3 font-mono text-[11px]">
           {pkg.names.map((name, i) => (
@@ -3668,9 +3689,11 @@ function StructuralDialog({
   onClose: () => void;
   onConfirm: (structural: Structural) => void;
 }) {
-  // Every ask but these two is about one export, and names it by index.
+  // Every ask but these is about one export, and names it by index.
   const target =
-    ask && ask.kind !== "drop_import" && ask.kind !== "paste" ? pkg.exports[ask.index] : undefined;
+    ask && ask.kind !== "drop_import" && ask.kind !== "paste" && ask.kind !== "compact_names"
+      ? pkg.exports[ask.index]
+      : undefined;
   const pak = previewContainerFilename(modName, saveTarget);
   const plan = ask?.kind === "remove" ? ask.plan : null;
   const unsafe = plan !== null && plan.warnings.length > 0;
@@ -3894,6 +3917,52 @@ function StructuralDialog({
             error={ask.error}
             onConfirm={() => onConfirm({ removeImports: [ask.import] })}
           />
+        )}
+        {ask?.kind === "compact_names" && (
+          <>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Drop unused names?</AlertDialogTitle>
+              <AlertDialogDescription>
+                Names stay in the name map after the last value using them changes. Dropping them
+                renumbers the rest and changes nothing the package reads.{" "}
+                {pak ? `Writes the result into ${pak}.` : "Name a mod to save into first."}
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            {ask.error && <p className="text-xs text-err">{ask.error}</p>}
+            {!ask.error && !ask.unused && (
+              <p className="flex items-center gap-2 text-xs text-muted-foreground">
+                <Loader2 size={13} className="animate-spin" /> Finding the names nothing uses
+              </p>
+            )}
+            {ask.unused && ask.unused.length === 0 && (
+              <p className="text-xs text-muted-foreground">
+                Every one of the {pkg.names.length} names is in use.
+              </p>
+            )}
+            {ask.unused && ask.unused.length > 0 && (
+              <div className="text-xs">
+                <p className="mb-1 text-muted-foreground">
+                  {ask.unused.length} of {pkg.names.length} names are unused:
+                </p>
+                <div className={list}>
+                  {ask.unused.map((name) => (
+                    <Tip key={name} content={name} disabled={name.length <= 64}>
+                      <div className="truncate">{name}</div>
+                    </Tip>
+                  ))}
+                </div>
+              </div>
+            )}
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction
+                disabled={saving || !pak || !ask.unused || ask.unused.length === 0}
+                onClick={() => onConfirm({ compactNames: true })}
+              >
+                Drop {ask.unused?.length ?? ""} names
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </>
         )}
         {ask?.kind === "reset" && target && (
           <>
@@ -6669,6 +6738,16 @@ export default function AssetInspector({
     },
     [gamePath, container, entry]
   );
+  const askCompactNames = () => {
+    setAsk({ kind: "compact_names", unused: null, error: null });
+    invoke<string[]>("unused_names", { gameRoot: gamePath, container, entry })
+      .then((unused) =>
+        setAsk((held) => (held?.kind === "compact_names" ? { ...held, unused } : held))
+      )
+      .catch((e: unknown) =>
+        setAsk((held) => (held?.kind === "compact_names" ? { ...held, error: String(e) } : held))
+      );
+  };
   const askDropImport = (at: number) => {
     setAsk({ kind: "drop_import", import: at, plan: null, error: null });
     invoke<ImportRemovalPlan>("plan_import_removal", {
@@ -7208,6 +7287,7 @@ export default function AssetInspector({
                       })
                     }
                     onDropImport={askDropImport}
+                    onCompactNames={askCompactNames}
                   />
                 ) : active && effectiveView === "table" && active.data_table ? (
                   <DataTableGrid table={active.data_table} exportIndex={active.index} />

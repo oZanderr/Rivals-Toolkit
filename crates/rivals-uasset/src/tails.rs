@@ -355,7 +355,7 @@ pub(crate) fn read_class_tail(
                 TailOutcome::Consumed
             }
             "Enum" => {
-                read_enum_tail(cursor)?;
+                read_enum_tail(cursor, &ctx.header.name_map)?;
                 TailOutcome::Consumed
             }
             // Every font closes with one word that has read zero in every font inspected.
@@ -629,12 +629,18 @@ fn read_counted_payload(
 
 /// `UEnum::Serialize`: the enumerators as name and value pairs, then the `ECppForm` byte. This
 /// build writes no enum flags after it, which the export's declared size confirms.
-fn read_enum_tail(cursor: &mut Cursor<'_>) -> Result<(), String> {
+fn read_enum_tail(
+    cursor: &mut Cursor<'_>,
+    names: &retoc::legacy_asset::FPackageNameMap,
+) -> Result<(), String> {
     let count = cursor.read_i32()?;
     if count < 0 || (count as usize).saturating_mul(ENUMERATOR_BYTES) > cursor.remaining() {
         return Err(cursor.err(format!("implausible enumerator count {count}")));
     }
-    cursor.skip(count as usize * ENUMERATOR_BYTES)?;
+    for _ in 0..count {
+        cursor.read_name(names)?;
+        cursor.skip(8)?;
+    }
     cursor.skip(1)
 }
 
@@ -1147,16 +1153,22 @@ mod tests {
 
     #[test]
     fn an_enum_tail_is_its_enumerators_and_the_form_byte() {
+        let names = retoc::legacy_asset::FPackageNameMap::create_from_names(vec!["E::A".into()]);
         let mut data = 2i32.to_le_bytes().to_vec();
         data.extend_from_slice(&[0u8; 32]);
         data.push(2);
         let mut cursor = Cursor::new(&data, 0);
-        read_enum_tail(&mut cursor).expect("consumed");
+        read_enum_tail(&mut cursor, &names).expect("consumed");
         assert_eq!(cursor.remaining(), 0);
+        assert_eq!(
+            cursor.take_names(),
+            vec![4, 20],
+            "each enumerator's name is recorded"
+        );
 
         let data = 9i32.to_le_bytes();
         let mut cursor = Cursor::new(&data, 0);
-        let err = read_enum_tail(&mut cursor).expect_err("refused");
+        let err = read_enum_tail(&mut cursor, &names).expect_err("refused");
         assert!(err.contains("9"), "{err}");
     }
 

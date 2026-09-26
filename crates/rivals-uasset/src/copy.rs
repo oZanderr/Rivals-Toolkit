@@ -794,6 +794,7 @@ mod tests {
             script: None,
             super_struct_at: None,
             name_refs: Vec::new(),
+            names_complete: false,
             undecoded: Vec::new(),
             defaults: Vec::new(),
         }

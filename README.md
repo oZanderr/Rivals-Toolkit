@@ -177,6 +177,7 @@ rivals-cli asset strings --container ... --entry ... --export 0 --op set-source 
 rivals-cli asset export-edit --container ... --entry ... --export 3 --rename NewName   # header rows
 rivals-cli asset export-edit --container ... --entry ... --export 3 --class -32         # retype
 rivals-cli asset imports --container ... --entry ... --unused                           # tidy the table
+rivals-cli asset names   --container ... --entry ... --compact --mod-name MyMod         # drop unused names
 rivals-cli asset deps    --container ... --entry ... --export 3                         # load order
 rivals-cli asset script  --container ... --entry ... --export 26                        # disassembly
 rivals-cli asset script-set --container ... --entry ... --export 26 --statement 0x0664 --const 0 --value 1000 --mod-name MyMod

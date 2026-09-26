@@ -102,6 +102,10 @@ pub struct ParsedExport {
     /// package rewrites each of them, and nothing in the bytes says which pairs are names.
     #[serde(skip)]
     pub name_refs: Vec<u64>,
+    /// Whether `name_refs` is every name the export holds: its bytes were read to the end, and any
+    /// bytecode decoded whole. Anything left unread may hold names nothing tracks.
+    #[serde(skip)]
+    pub names_complete: bool,
     /// Where the export's `SuperStruct` index sits, for a class, function or struct whose layout
     /// was walked. `None` for everything else, which is what makes a reparent refusable.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1130,9 +1134,17 @@ fn parse_one_inner(
         }
     }
 
+    // Every name the export holds is on record only when every byte of it was read, bytecode
+    // included.
+    base.names_complete =
+        cursor.remaining() == 0 && script.as_ref().is_none_or(crate::kismet::Script::complete);
+    base.name_refs = cursor.take_names();
+    if let Some(script) = &script {
+        base.name_refs.extend(&script.names);
+        base.name_refs.sort_unstable();
+    }
     base.script = script;
     base.super_struct_at = super_struct_at;
-    base.name_refs = cursor.take_names();
     let consumed = cursor.position() as u64;
     let expected = base.serial_size.max(0) as u64;
     let status = if let Some((start, end)) = bytecode {
@@ -1250,6 +1262,7 @@ fn skeleton(
         script: None,
         super_struct_at: None,
         name_refs: Vec::new(),
+        names_complete: false,
         undecoded: Vec::new(),
         defaults: Vec::new(),
     };

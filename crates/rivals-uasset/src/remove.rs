@@ -772,6 +772,7 @@ mod tests {
             defaults: Vec::new(),
             super_struct_at: None,
             name_refs: Vec::new(),
+            names_complete: false,
         }
     }
 

@@ -49,6 +49,9 @@ pub struct EditList {
     /// Values set inside structs that store nothing yet. See [`rivals_uasset::FieldSet`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub field_sets: Vec<rivals_uasset::FieldSet>,
+    /// Drop the names nothing in the package uses. A save of its own.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub compact_names: bool,
     /// What the edits were written against. An edit file without it is applied unchecked.
     #[serde(default, skip_serializing_if = "rivals_uasset::Expected::is_empty")]
     pub expect: rivals_uasset::Expected,
@@ -171,6 +174,7 @@ impl EditList {
             exports: self.export_edits,
             dependencies: self.dependencies,
             field_sets: self.field_sets,
+            compact_names: self.compact_names,
             expect: self.expect,
             allow_drift: self.allow_drift,
             allow_missing: self.allow_missing,

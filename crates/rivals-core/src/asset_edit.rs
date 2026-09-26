@@ -620,6 +620,33 @@ pub fn preview_copy(
     Ok((patched, loaded))
 }
 
+/// The names nothing in the package uses, which a save dropping unused names takes out, read from
+/// wherever a save with these options reads. Refused with the reason where unread bytes may hold
+/// names nothing tracks.
+pub fn unused_names(
+    request: &AssetEditRequest<'_>,
+    mappings: Option<&Mappings>,
+    options: &SaveOptions,
+) -> Result<Vec<String>, String> {
+    let (loaded, parsed) = match layered_read(request, options)? {
+        Some((container, entry, kind)) => read_package(
+            &AssetEditRequest {
+                container: &container,
+                entry: &entry,
+                kind,
+                changes: PackageEdits::default(),
+                ..*request
+            },
+            mappings,
+        )?,
+        None => read_package(request, mappings)?,
+    };
+    let bundle = bundle_of(&loaded);
+    let header = rivals_uasset::read_header(&bundle)?;
+    let total = rivals_uasset::header_size(&bundle)?;
+    rivals_uasset::unused_names(&parsed, &header, &loaded.exports_file_buffer, total)
+}
+
 /// What the copy would bring across and what stands in the way. Nothing is written.
 pub fn plan_copy(
     request: &CopyRequest<'_>,
@@ -3180,6 +3207,96 @@ mod game_data_tests {
                 .flat_map(|row| &row.fields)
                 .any(|f| matches!(&f.value, PropertyValue::Name { value } if value == wanted))
         );
+    }
+
+    /// Replacing the one cell that names a name leaves it unused, and a save dropping unused names
+    /// then takes it out of the map while every value reads the same.
+    #[test]
+    fn a_name_no_cell_uses_any_more_is_dropped() {
+        let Some(fixture) = Fixture::open(DEFAULTS) else {
+            return;
+        };
+        let before = fixture.parse();
+        let table = table_of(&before);
+        let cells: Vec<&PropertyEntry> = table.rows.iter().flat_map(|row| &row.fields).collect();
+        let uses = |name: &str| {
+            cells
+                .iter()
+                .filter(|f| matches!(&f.value, PropertyValue::Name { value } if value == name))
+                .count()
+                + table.rows.iter().filter(|row| row.name == name).count()
+                + before
+                    .imports
+                    .iter()
+                    .filter(|i| i.object_name == name || i.class_name == name)
+                    .count()
+        };
+        let field = cells
+            .iter()
+            .find(|f| {
+                stored(f)
+                    && matches!(&f.value, PropertyValue::Name { value } if value != "None" && uses(value) == 1)
+            })
+            .expect("a name only one cell holds");
+        let PropertyValue::Name { value: old } = &field.value else {
+            unreachable!()
+        };
+        let wanted = "ANameNoPackageHasEverHeldBefore";
+        let (edited, _) = fixture.apply(vec![edit_of(
+            field,
+            EditOp::Set {
+                text: wanted.into(),
+            },
+        )]);
+        let parsed = Fixture::parse_bundle(
+            &AssetBundle {
+                asset: &edited.asset,
+                exports: &edited.exports,
+            },
+            &fixture.schema,
+            &fixture.source(),
+        );
+        let loaded = FSerializedAssetBundle {
+            asset_file_buffer: edited.asset.clone(),
+            exports_file_buffer: edited.exports.clone(),
+            bulk_data_buffer: None,
+            optional_bulk_data_buffer: None,
+            memory_mapped_bulk_data_buffer: None,
+        };
+        let request = fixture.request_changes(PackageEdits {
+            compact_names: true,
+            ..Default::default()
+        });
+        let (compacted, _) = preview_read_edits(&request, Some(&fixture.schema), loaded, &parsed)
+            .expect("the unused names are dropped");
+        let after = Fixture::parse_bundle(
+            &AssetBundle {
+                asset: &compacted.asset,
+                exports: &compacted.exports,
+            },
+            &fixture.schema,
+            &fixture.source(),
+        );
+        assert!(parsed.names.contains(old), "{old} was still in the map");
+        assert!(!after.names.contains(old), "{old} is dropped");
+        assert!(after.names.iter().any(|name| name == wanted));
+        assert!(matches!(after.exports[0].status, ExportStatus::Complete));
+    }
+
+    /// Unread payload bytes may hold names nothing tracks, so a texture keeps all of its names.
+    #[test]
+    fn names_are_not_dropped_from_a_package_with_unread_payloads() {
+        let Some(fixture) = Fixture::open(TEXTURE) else {
+            return;
+        };
+        let request = fixture.request_changes(PackageEdits {
+            compact_names: true,
+            ..Default::default()
+        });
+        let Err(refused) = preview_edits(&request, Some(&fixture.schema)) else {
+            panic!("names were dropped from a texture");
+        };
+        assert!(refused.contains("read whole"), "{refused}");
     }
 
     /// An array with something in it. Containers are where the reader records element spans, and

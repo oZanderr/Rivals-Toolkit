@@ -13,6 +13,7 @@ mod import_remove;
 mod kismet;
 mod mappings;
 mod moviescene;
+mod names;
 mod niagara;
 mod package;
 mod props;
@@ -59,6 +60,7 @@ pub use kismet::{
     script_lines, statement_terms, token_name, ubergraph_entries,
 };
 pub use mappings::{Mappings, Schema, SchemaFixups, SchemaSlot, kind_name};
+pub use names::unused_names;
 pub use package::{
     AppliedFixup, AssetBundle, ExportStatus, ImportInfo, PackageInfo, ParseOptions, ParsedExport,
     ParsedPackage, TwinChoice, dotted_path, export_bytes, header_size, is_unresolved_import_name,

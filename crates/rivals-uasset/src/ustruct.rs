@@ -262,7 +262,7 @@ pub(crate) fn scan_struct_tail(
 
     if chain.contains(&"Class") {
         for _ in 0..read_count(cursor, "function map")? {
-            cursor.skip(8)?;
+            cursor.read_name(&header.name_map)?;
             take_index(cursor, &mut references)?;
         }
         // ClassFlags, ClassWithin, ClassConfigName, ClassGeneratedBy. The generated-by reference
@@ -271,15 +271,18 @@ pub(crate) fn scan_struct_tail(
         // desynced while the order was the other way round.
         cursor.skip(4)?;
         take_index(cursor, &mut references)?;
-        cursor.skip(8)?;
+        cursor.read_name(&header.name_map)?;
         take_index(cursor, &mut references)?;
         // `FImplementedInterface`: the class, its pointer offset and whether Blueprint implements it.
         for _ in 0..read_count(cursor, "interfaces")? {
             take_index(cursor, &mut references)?;
             cursor.skip(8)?;
         }
-        // bDeprecatedForceScriptOrder, an unused name, bCooked.
-        cursor.skip(4 + 8 + 4)?;
+        // bDeprecatedForceScriptOrder, an unused name, bCooked. The names are read rather than
+        // stepped over, so a package's names can be counted as used.
+        cursor.skip(4)?;
+        cursor.read_name(&header.name_map)?;
+        cursor.skip(4)?;
         take_index(cursor, &mut references)?;
         if chain.contains(&"BlueprintGeneratedClass") && cursor.remaining() > 0 {
             read_class_metadata(cursor, header)?;
@@ -546,7 +549,7 @@ fn read_kind(
         }
         // The property class is an `FFieldClass`, written as its name.
         "FieldPathProperty" => {
-            cursor.skip(8)?;
+            cursor.read_name(&header.name_map)?;
             PropertyInner::FieldPath
         }
         "StructProperty" => {

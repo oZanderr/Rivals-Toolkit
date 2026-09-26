@@ -186,6 +186,8 @@ pub struct PackageEdits {
     pub dependencies: Vec<crate::dependency::DependencyEdit>,
     /// Values set inside a struct that is not stored yet, which it is stored to hold.
     pub field_sets: Vec<FieldSet>,
+    /// Drop the names nothing in the package uses. A save of its own: it renumbers every name.
+    pub compact_names: bool,
     /// What the edits were written against, checked before anything is patched.
     pub expect: Expected,
     /// Patch even where the package no longer matches `expect`.
@@ -552,6 +554,7 @@ impl PackageEdits {
         self.duplicate_exports.extend(other.duplicate_exports);
         self.dependencies.extend(other.dependencies);
         self.field_sets.extend(other.field_sets);
+        self.compact_names |= other.compact_names;
         self.expect.merge(other.expect);
         self.allow_drift |= other.allow_drift;
         self.allow_missing |= other.allow_missing;
@@ -573,6 +576,7 @@ impl PackageEdits {
             && self.exports.is_empty()
             && self.dependencies.is_empty()
             && self.field_sets.is_empty()
+            && !self.compact_names
     }
 }
 
@@ -896,6 +900,24 @@ pub fn patch_package_with(
             _ => None,
         })
         .collect();
+    if edits.compact_names {
+        // Every name after a dropped one moves down, and the other edits were addressed against
+        // the map as it stands now.
+        let alone = PackageEdits {
+            compact_names: false,
+            expect: Expected::default(),
+            allow_drift: false,
+            allow_missing: false,
+            ..edits.clone()
+        };
+        if !alone.is_empty() {
+            return Err(
+                "dropping unused names is a save of its own; save or discard the other edits first"
+                    .into(),
+            );
+        }
+        return patch_name_compaction(bundle, parsed, &package);
+    }
     if !edits.dependencies.is_empty() {
         // The runs share one table addressed by one index per export, so changing any of them
         // rewrites the whole thing and moves every other export's run.
@@ -2373,6 +2395,36 @@ fn patch_import_removal(
         asset: rewritten.asset,
         exports: rewritten.exports,
         applied: removal.applied,
+        bulk: None,
+        optional_bulk: None,
+    })
+}
+
+fn patch_name_compaction(
+    bundle: &AssetBundle<'_>,
+    parsed: &ParsedPackage,
+    package: &retoc::legacy_asset::FLegacyPackageHeader,
+) -> Result<PatchedBundle, String> {
+    let total = header_size(bundle)?;
+    let compaction = crate::names::compact_names(parsed, package, bundle.exports, total)?;
+    let rewritten = rewrite(
+        bundle,
+        &compaction.splices,
+        HeaderDraft {
+            names: Some(compaction.names),
+            imports: Some(compaction.imports),
+            exports: Some(compaction.exports),
+            ..Default::default()
+        },
+    )?;
+    check_inline_bulk(&AssetBundle {
+        asset: &rewritten.asset,
+        exports: &rewritten.exports,
+    })?;
+    Ok(PatchedBundle {
+        asset: rewritten.asset,
+        exports: rewritten.exports,
+        applied: Vec::new(),
         bulk: None,
         optional_bulk: None,
     })
@@ -4682,6 +4734,9 @@ pub fn verify_patch(
         verify_dependency_edits(before, after, edits)?;
         return Ok(());
     }
+    if edits.compact_names {
+        verify_name_compaction(before, after)?;
+    }
     let dropped_imports: Vec<i32> = edits
         .imports
         .iter()
@@ -4997,6 +5052,48 @@ pub fn verify_patch(
         }
     }
     verify_unique_keys(before, after, edits, applied)
+}
+
+/// Dropping names changes which index each name has and nothing else, so the tables, the scripts
+/// and the struct layouts read exactly as they did, and the map is smaller. The values are compared
+/// with everything else's.
+fn verify_name_compaction(before: &ParsedPackage, after: &ParsedPackage) -> Result<(), String> {
+    if after.names.len() >= before.names.len() {
+        return Err(format!(
+            "the package still holds {} names after dropping the unused ones",
+            after.names.len()
+        ));
+    }
+    if before.imports.len() != after.imports.len() {
+        return Err("the import table changed length while dropping names".into());
+    }
+    for (was, is) in before.imports.iter().zip(&after.imports) {
+        if was.path != is.path
+            || was.class_package != is.class_package
+            || was.class_name != is.class_name
+        {
+            return Err(format!(
+                "import {} read {} ({}) and now reads {} ({})",
+                was.index, was.path, was.class_name, is.path, is.class_name
+            ));
+        }
+    }
+    for (was, is) in before.exports.iter().zip(&after.exports) {
+        if was.path != is.path || was.class_name != is.class_name {
+            return Err(format!(
+                "export {} read {} and now reads {}",
+                was.index, was.path, is.path
+            ));
+        }
+        let script = |export: &ParsedExport| export.script.as_ref().map(kismet::render_script);
+        if script(was) != script(is) {
+            return Err(format!("the bytecode of {} reads differently", was.path));
+        }
+        if format!("{:?}", was.struct_definition) != format!("{:?}", is.struct_definition) {
+            return Err(format!("the fields {} declares read differently", was.path));
+        }
+    }
+    Ok(())
 }
 
 /// A set or a map the save touched must not hold one key twice where it did not already: the
@@ -6613,6 +6710,7 @@ mod tests {
                 defaults: Vec::new(),
                 super_struct_at: None,
                 name_refs: Vec::new(),
+                names_complete: false,
             }],
             unresolved_structs: Vec::new(),
             property_kinds: Default::default(),
@@ -8150,6 +8248,7 @@ mod tests {
                 expr: call(literal),
             }],
             stopped: None,
+            names: Vec::new(),
         };
         parsed.exports[1].script = Some(script(Expr::IntConst {
             value: 411,
@@ -8221,6 +8320,7 @@ mod tests {
             end: start + 4,
             statements: Vec::new(),
             stopped: None,
+            names: Vec::new(),
         });
 
         // Four Nothings and the end marker: five bytes stored and five once loaded.
