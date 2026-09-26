@@ -104,6 +104,10 @@ pub(crate) struct Settings {
     /// setting means IoStore; a plain pak is for tooling that converts it onward itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) asset_save_target: Option<rivals_core::asset_edit::SaveTarget>,
+    /// The language the inspector shows texts in, as the game names it (`en`, `ja`, ...). Unset
+    /// means English.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) text_culture: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -128,6 +132,7 @@ impl Default for Settings {
             usmap_path: None,
             asset_mod_name: None,
             asset_save_target: None,
+            text_culture: None,
         }
     }
 }

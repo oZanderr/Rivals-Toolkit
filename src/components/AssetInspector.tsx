@@ -37,6 +37,7 @@ import {
   Save,
   Table2,
   Trash2,
+  Languages,
   Undo2,
   X,
 } from "lucide-react";
@@ -61,6 +62,13 @@ import {
 } from "@/components/ui/context-menu";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Tip } from "@/components/ui/tooltip";
 import {
   bulkTarget,
@@ -98,7 +106,16 @@ export type PropertyValue =
   | { kind: "byte"; value: number }
   | { kind: "str"; value: string }
   | { kind: "name"; value: string }
-  | { kind: "text"; value?: string; parts?: PropertyEntry[] }
+  | {
+      kind: "text";
+      value?: string;
+      parts?: PropertyEntry[];
+      /** A localized text's namespace and key, which its translations are filed under. */
+      namespace?: string;
+      key?: string;
+      /** What the game shows for it in the chosen language, where that differs from `value`. */
+      display?: string;
+    }
   | { kind: "enum"; value: number; name?: string; enum_type?: string }
   | { kind: "object"; index: number; path?: string }
   | { kind: "soft_object"; path: string }
@@ -453,7 +470,7 @@ function summarise(value: PropertyValue, depth = 0): string {
     case "name":
       return value.value;
     case "text":
-      return value.value ?? "";
+      return value.display ?? value.value ?? "";
     case "enum":
       return value.name ?? String(value.value);
     case "object":
@@ -1524,7 +1541,7 @@ const PropertyRow = memo(function PropertyRow({ row, depth }: { row: TreeRow; de
             />
           </span>
         ) : (
-          <Tip content={locked ?? (isUnset ? UNSET_HINT : null)}>
+          <Tip content={locked ?? (isUnset ? UNSET_HINT : textHint(entry.value))}>
             <span
               className={cn(
                 "min-w-0 flex-1 break-all font-mono",
@@ -2356,9 +2373,24 @@ function editText(value: PropertyValue): string {
     // be pointed at, so the path is what a person can sensibly retype.
     case "object":
       return value.path ?? String(value.index);
+    // Shown as the game shows it, but written as the source it stores.
+    case "text":
+      return value.value ?? "";
     default:
       return summarise(value);
   }
+}
+
+/** What a text row says on hover: what the game shows it from, and what an edit does to it. */
+function textHint(value: PropertyValue): string | null {
+  if (value.kind !== "text") return null;
+  if (value.namespace !== undefined && value.key !== undefined && value.key !== "") {
+    return `Source: ${value.value ?? ""} · Key: ${value.namespace}/${value.key} · An edit shows as typed in every language; the translations for this key stop applying.`;
+  }
+  if (value.display !== undefined && (value.parts?.length ?? 0) > 0) {
+    return `Shows string table entry ${value.value ?? ""}. Edit that table's entry to change the text.`;
+  }
+  return null;
 }
 
 /** A container element goes through its own serialization, which writes an enum as its
@@ -5736,7 +5768,15 @@ function DataTableGrid({ table, exportIndex }: { table: DataTable; exportIndex: 
                       const trigger = <ContextMenuTrigger asChild>{cell}</ContextMenuTrigger>;
                       // The lock reason wins; otherwise a long value gets its full text, since the
                       // column is narrower than most strings.
-                      const hint = locked && field ? locked : text.length > 24 ? text : null;
+                      const about = field ? textHint(field.value) : null;
+                      const hint =
+                        locked && field
+                          ? locked
+                          : about
+                            ? `${text} · ${about}`
+                            : text.length > 24
+                              ? text
+                              : null;
                       return (
                         <ContextMenu key={column}>
                           {hint ? <Tip content={hint}>{trigger}</Tip> : trigger}
@@ -5905,6 +5945,23 @@ export default function AssetInspector({
   const [indexing, setIndexing] = useState<{ current: number; total: number } | null>(null);
   /// Bumped after a save so the asset is read again from disk rather than shown from memory.
   const [epoch, setEpoch] = useState(0);
+  // Re-reads the package in another language without touching the drafts, which `epoch` scopes.
+  const [textEpoch, setTextEpoch] = useState(0);
+  const [cultures, setCultures] = useState<string[]>([]);
+  const [culture, setCulture] = useState<string>("en");
+  useEffect(() => {
+    void invoke<string>("get_text_culture").then(setCulture, () => undefined);
+    void invoke<string[]>("text_cultures", { gameRoot: gamePath }).then(setCultures, () =>
+      setCultures([])
+    );
+  }, [gamePath]);
+  const chooseCulture = (next: string) => {
+    setCulture(next);
+    void invoke("set_text_culture", { culture: next }).then(
+      () => setTextEpoch((n) => n + 1),
+      () => undefined
+    );
+  };
   /// What to run once the user confirms abandoning unsaved edits.
   const [confirmLeave, setConfirmLeave] = useState<(() => void) | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -5985,7 +6042,7 @@ export default function AssetInspector({
     return () => {
       cancelled = true;
     };
-  }, [gamePath, container, entry, epoch]);
+  }, [gamePath, container, entry, epoch, textEpoch]);
 
   const fileName = entry.split("/").pop() ?? entry;
   const active = pkg?.exports[selected];
@@ -6431,6 +6488,29 @@ export default function AssetInspector({
                       })
                     }
                   />
+                )}
+                {(effectiveView === "tree" || effectiveView === "table") && cultures.length > 0 && (
+                  <Select value={culture} onValueChange={chooseCulture}>
+                    <Tip
+                      content="The language texts are shown in, as the game shows them"
+                      side="bottom"
+                    >
+                      <SelectTrigger
+                        size="sm"
+                        className="h-7 w-24 px-2 text-[10px] font-semibold uppercase"
+                      >
+                        <Languages size={13} className="text-muted-foreground" />
+                        <SelectValue />
+                      </SelectTrigger>
+                    </Tip>
+                    <SelectContent className="max-h-72">
+                      {cultures.map((name) => (
+                        <SelectItem key={name} value={name} className="text-[11px]">
+                          {name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 )}
                 {(effectiveView === "tree" || effectiveView === "table") && (
                   <Tip

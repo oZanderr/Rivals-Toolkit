@@ -1360,6 +1360,7 @@ fn read_text(
     let history = cursor.read_i8()?;
     *diagnostics.text_histories.entry(history).or_default() += 1;
     let mut parts = Vec::new();
+    let (mut namespace, mut key) = (None, None);
     let value = match history {
         -1 => {
             if cursor.read_bool32()? {
@@ -1369,8 +1370,8 @@ fn read_text(
             }
         }
         0 => {
-            let _namespace = cursor.read_string()?;
-            let _key = cursor.read_string()?;
+            namespace = Some(cursor.read_string()?);
+            key = Some(cursor.read_string()?);
             Some(cursor.read_string()?)
         }
         10 => {
@@ -1407,7 +1408,13 @@ fn read_text(
             )));
         }
     };
-    Ok(PropertyValue::Text { value, parts })
+    Ok(PropertyValue::Text {
+        value,
+        parts,
+        namespace,
+        key,
+        display: None,
+    })
 }
 
 /// A text nested in another, kept as a part so it can be edited as a text of its own; the
@@ -2006,9 +2013,36 @@ mod tests {
 
     fn parts_of(value: PropertyValue) -> (Option<String>, Vec<PropertyEntry>) {
         match value {
-            PropertyValue::Text { value, parts } => (value, parts),
+            PropertyValue::Text { value, parts, .. } => (value, parts),
             other => panic!("expected a text, got {other:?}"),
         }
+    }
+
+    /// A localized text keeps the namespace and key its translations are filed under, next to the
+    /// source it shows.
+    #[test]
+    fn a_localized_text_keeps_its_namespace_and_key() {
+        let mut body = Vec::new();
+        fstring(&mut body, "Menu");
+        fstring(&mut body, "Quick");
+        fstring(&mut body, "Quick Match");
+        let data = text_bytes(0, &body);
+        let (value, consumed) = read_one(&PropertyInner::Text, &data).expect("base");
+        assert_eq!(consumed, data.len());
+        let PropertyValue::Text {
+            value,
+            namespace,
+            key,
+            display,
+            ..
+        } = value
+        else {
+            panic!("a text");
+        };
+        assert_eq!(value.as_deref(), Some("Quick Match"));
+        assert_eq!(namespace.as_deref(), Some("Menu"));
+        assert_eq!(key.as_deref(), Some("Quick"));
+        assert!(display.is_none(), "only a lookup after parsing fills it");
     }
 
     /// The transform and string table histories expose their pieces as parts.

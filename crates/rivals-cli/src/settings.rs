@@ -25,6 +25,9 @@ pub struct AppSettings {
     pub asset_mod_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub asset_save_target: Option<rivals_core::asset_edit::SaveTarget>,
+    /// The language the desktop app shows texts in.
+    #[serde(default)]
+    pub text_culture: Option<String>,
     /// Tweak presets saved from the desktop app, so `--preset` applies the same thing the GUI
     /// would.
     #[serde(default)]

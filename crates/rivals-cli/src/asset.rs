@@ -5,6 +5,7 @@ use std::path::Path;
 
 use rivals_core::asset::{self, AssetSource};
 use rivals_core::asset_edit::{self, AssetEditRequest};
+use rivals_core::localization;
 use rivals_core::mappings;
 use rivals_core::schema_synth::{self, PackageSource};
 use rivals_uasset::{
@@ -1789,8 +1790,58 @@ pub fn hex(request: &Request<'_>, export: u32, from: Option<u64>) -> Result<Vec<
         .collect())
 }
 
-pub fn dump(request: &Request<'_>, only: Option<u32>) -> Result<ParsedPackage, String> {
+/// The language texts are shown in. One asked for by name has to exist; the default falls back to
+/// what the package stores when the game has no translations for it.
+pub struct Culture {
+    pub name: String,
+    pub asked: bool,
+}
+
+/// Fills in what the game shows for each text, in `culture`.
+fn show_game_text(
+    parsed: &mut ParsedPackage,
+    request: &Request<'_>,
+    culture: &Culture,
+) -> Result<(), String> {
+    let localizer = match localization::Localizer::for_culture(request.game_root, &culture.name) {
+        Ok(localizer) => localizer,
+        Err(reason) if culture.asked => return Err(reason),
+        Err(_) => return Ok(()),
+    };
+    let schema = mappings::resolve(request.usmap, request.configured_usmap)
+        .and_then(|path| mappings::load(&path))
+        .ok();
+    localization::localize(
+        parsed,
+        &localizer,
+        &localization::TableSource {
+            game_root: request.game_root,
+            container: request.container,
+            mappings: schema.as_deref(),
+        },
+    );
+    Ok(())
+}
+
+/// How a value reads when shown: a text as the game shows it, what it stores after it.
+fn shown(value: &PropertyValue) -> String {
+    match value {
+        PropertyValue::Text {
+            display: Some(display),
+            value: Some(stored),
+            ..
+        } => format!("{display}  ({stored})"),
+        other => other.summary(),
+    }
+}
+
+pub fn dump(
+    request: &Request<'_>,
+    only: Option<u32>,
+    culture: &Culture,
+) -> Result<ParsedPackage, String> {
     let mut parsed = parse(request)?;
+    show_game_text(&mut parsed, request, culture)?;
     if let Some(index) = only {
         parsed.exports.retain(|e| e.index == index);
         if parsed.exports.is_empty() {
@@ -1874,7 +1925,7 @@ fn print_entries(entries: &[PropertyEntry], depth: usize, out: &mut impl FnMut(S
                 print_entries(fields, depth + 1, out);
             }
             PropertyValue::Text { parts, .. } if !parts.is_empty() => {
-                out(format!("{pad}{label}: {}", entry.value.summary()));
+                out(format!("{pad}{label}: {}", shown(&entry.value)));
                 print_entries(parts, depth + 1, out);
             }
             PropertyValue::Array { items } if !items.is_empty() => {
@@ -1885,11 +1936,11 @@ fn print_entries(entries: &[PropertyEntry], depth: usize, out: &mut impl FnMut(S
                             out(format!("{pad}  [{index}] {name}"));
                             print_entries(fields, depth + 2, out);
                         }
-                        other => out(format!("{pad}  [{index}] {}", other.summary())),
+                        other => out(format!("{pad}  [{index}] {}", shown(other))),
                     }
                 }
             }
-            other => out(format!("{pad}{label}: {}", other.summary())),
+            other => out(format!("{pad}{label}: {}", shown(other))),
         }
     }
 }
@@ -1902,8 +1953,9 @@ pub struct TableReport {
     pub rows: Vec<BTreeMap<String, String>>,
 }
 
-pub fn table(request: &Request<'_>) -> Result<TableReport, String> {
-    let parsed = parse(request)?;
+pub fn table(request: &Request<'_>, culture: &Culture) -> Result<TableReport, String> {
+    let mut parsed = parse(request)?;
+    show_game_text(&mut parsed, request, culture)?;
     let export = parsed
         .exports
         .iter()
@@ -1920,7 +1972,14 @@ pub fn table(request: &Request<'_>) -> Result<TableReport, String> {
             let mut cells = BTreeMap::new();
             cells.insert("__row".to_string(), row.name.clone());
             for field in &row.fields {
-                cells.insert(field.label(), field.value.summary());
+                let cell = match &field.value {
+                    PropertyValue::Text {
+                        display: Some(display),
+                        ..
+                    } => display.clone(),
+                    other => other.summary(),
+                };
+                cells.insert(field.label(), cell);
             }
             cells
         })

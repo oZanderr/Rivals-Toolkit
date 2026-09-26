@@ -81,6 +81,15 @@ pub enum PropertyValue {
         /// where the text as a whole is not.
         #[serde(skip_serializing_if = "Vec::is_empty")]
         parts: Vec<PropertyEntry>,
+        /// For a localized text, the namespace and key its translations are filed under.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        key: Option<String>,
+        /// What the game shows for it in the language looked up, where that differs from `value`.
+        /// Filled by a lookup after parsing, never by the reader, and never written back.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display: Option<String>,
     },
     Enum {
         value: i64,

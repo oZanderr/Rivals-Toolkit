@@ -9,6 +9,7 @@ pub mod asset;
 pub mod asset_edit;
 pub mod game_status;
 pub mod import_index;
+pub mod localization;
 pub mod mappings;
 pub mod mod_report;
 pub mod mod_search;

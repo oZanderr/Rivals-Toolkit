@@ -3,5 +3,6 @@
 pub mod containers;
 pub mod crypto;
 pub mod extract;
+pub mod game_files;
 pub mod iostore_out;
 pub mod profile;

@@ -361,7 +361,7 @@ fn diff_value(
                 diff_entries(fields, items, export, &label, out);
             }
         }
-        PropertyValue::Text { parts, value } if !parts.is_empty() => {
+        PropertyValue::Text { parts, value, .. } if !parts.is_empty() => {
             let _ = value;
             if let Some(items) = edited.get("parts").and_then(Json::as_array) {
                 diff_entries(parts, items, export, &label, out);

@@ -509,6 +509,7 @@ fn value_text(value: &PropertyValue) -> Option<String> {
         PropertyValue::Text {
             value: Some(value),
             parts,
+            ..
         } if parts.is_empty() => value.clone(),
         PropertyValue::Object {
             path: Some(path), ..

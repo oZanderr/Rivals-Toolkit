@@ -5,6 +5,7 @@ use tauri::State;
 
 use rivals_core::asset::{self, AssetSource};
 use rivals_core::asset_edit::{self, AssetEditRequest};
+use rivals_core::localization;
 use rivals_core::mappings;
 use rivals_core::schema_synth::{self, PackageSource};
 use rivals_uasset::{AssetBundle, HexRow, PackageEdits, ParsedPackage, RemovalPlan};
@@ -23,6 +24,63 @@ pub(crate) struct MappingsStatus {
 
 fn configured_usmap(state: &State<'_, SettingsState>) -> Option<String> {
     state.lock().ok().and_then(|s| s.usmap_path.clone())
+}
+
+fn text_culture(state: &State<'_, SettingsState>) -> String {
+    state
+        .lock()
+        .ok()
+        .and_then(|s| s.text_culture.clone())
+        .unwrap_or_else(|| "en".to_string())
+}
+
+/// Fills in what the game shows for each text, in `culture`. Translations that cannot be read
+/// leave the texts as the package stores them.
+fn show_game_text(
+    parsed: &mut ParsedPackage,
+    game_root: &str,
+    container: &str,
+    usmap: Option<&str>,
+    culture: &str,
+) {
+    let Ok(localizer) = localization::Localizer::for_culture(game_root, culture) else {
+        return;
+    };
+    let schema = mappings::resolve(None, usmap)
+        .and_then(|path| mappings::load(&path))
+        .ok();
+    localization::localize(
+        parsed,
+        &localizer,
+        &localization::TableSource {
+            game_root,
+            container,
+            mappings: schema.as_deref(),
+        },
+    );
+}
+
+/// The languages the game ships translations for, for the inspector's language picker.
+#[tauri::command]
+pub(crate) async fn text_cultures(game_root: String) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || localization::cultures(&game_root))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub(crate) fn get_text_culture(state: State<'_, SettingsState>) -> String {
+    text_culture(&state)
+}
+
+#[tauri::command]
+pub(crate) fn set_text_culture(
+    state: State<'_, SettingsState>,
+    culture: String,
+) -> Result<(), String> {
+    let mut guard = state.lock().map_err(|e| e.to_string())?;
+    guard.text_culture = Some(culture).filter(|c| !c.is_empty());
+    guard.save()
 }
 
 #[derive(Serialize)]
@@ -192,9 +250,20 @@ pub(crate) async fn inspect_asset(
     entry: String,
 ) -> Result<ParsedPackage, String> {
     let usmap = configured_usmap(&state);
-    tauri::async_runtime::spawn_blocking(move || parse(&game_root, &container, &entry, usmap))
-        .await
-        .map_err(|e| e.to_string())?
+    let culture = text_culture(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut parsed = parse(&game_root, &container, &entry, usmap.clone())?;
+        show_game_text(
+            &mut parsed,
+            &game_root,
+            &container,
+            usmap.as_deref(),
+            &culture,
+        );
+        Ok(parsed)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

@@ -75,6 +75,11 @@ struct Cli {
     #[arg(long, global = true)]
     layer: bool,
 
+    /// The language texts are shown in, as the game names it (`en`, `ja`, `zh-hans`, ...).
+    /// Defaults to the app's setting, then English.
+    #[arg(long, global = true, value_name = "CULTURE")]
+    culture: Option<String>,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -1705,9 +1710,27 @@ fn asset_info(cli: &Cli, app: &settings::AppSettings, args: &AssetArgs) -> Resul
     })
 }
 
+/// The language texts are shown in, and whether it was asked for rather than defaulted.
+fn culture(cli: &Cli, app: &settings::AppSettings) -> asset::Culture {
+    match &cli.culture {
+        Some(name) => asset::Culture {
+            name: name.clone(),
+            asked: true,
+        },
+        None => asset::Culture {
+            name: app.text_culture.clone().unwrap_or_else(|| "en".to_string()),
+            asked: false,
+        },
+    }
+}
+
 fn asset_dump(cli: &Cli, app: &settings::AppSettings, args: &DumpArgs) -> Result<(), String> {
     let root = resolve::game_root(cli.game_root.as_deref(), app)?;
-    let parsed = asset::dump(&asset_request(cli, app, &args.asset, &root), args.export)?;
+    let parsed = asset::dump(
+        &asset_request(cli, app, &args.asset, &root),
+        args.export,
+        &culture(cli, app),
+    )?;
     emit(cli, &parsed, || {
         asset::print_dump(&parsed, &mut |line| outln!("{line}"));
     })
@@ -1715,7 +1738,7 @@ fn asset_dump(cli: &Cli, app: &settings::AppSettings, args: &DumpArgs) -> Result
 
 fn asset_table(cli: &Cli, app: &settings::AppSettings, args: &AssetArgs) -> Result<(), String> {
     let root = resolve::game_root(cli.game_root.as_deref(), app)?;
-    let report = asset::table(&asset_request(cli, app, args, &root))?;
+    let report = asset::table(&asset_request(cli, app, args, &root), &culture(cli, app))?;
     emit(cli, &report, || {
         asset::print_table(&report, &mut |line| outln!("{line}"));
     })
