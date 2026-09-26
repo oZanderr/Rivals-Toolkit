@@ -1824,6 +1824,10 @@ pub fn print_dump(parsed: &ParsedPackage, out: &mut impl FnMut(String)) {
             ));
         }
         print_entries(&export.properties, 1, out);
+        if !export.defaults.is_empty() {
+            out("     defaults:".to_string());
+            print_entries(&export.defaults, 2, out);
+        }
         if let Some(table) = &export.data_table {
             out(format!(
                 "     rows: {} of {}",

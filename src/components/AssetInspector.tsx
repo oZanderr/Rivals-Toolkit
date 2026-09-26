@@ -160,6 +160,8 @@ interface ParsedExport {
   /** Instanced struct payloads inside this export that did not decode. The export can still read
    *  as exact, since each payload's length prefix puts the cursor back. */
   undecoded?: UndecodedPayload[];
+  /** A Blueprint struct's default instance: the values a new one of it starts with. */
+  defaults?: PropertyEntry[];
   /** The bytecode this export stores, when it has any. */
   script?: { buffer_size: number; storage_size: number; decoded_size: number };
 }
@@ -6297,7 +6299,22 @@ export default function AssetInspector({
     if (!active) return [];
     const shown = (entries: PropertyEntry[]) =>
       showInherited ? entries : withoutInherited(entries);
-    if (!active.data_table) return shown(active.properties).map((property) => rowOf(property, []));
+    if (!active.data_table) {
+      const rows = shown(active.properties).map((property) => rowOf(property, []));
+      // A Blueprint struct's defaults are values of their own, grouped under one row.
+      if (active.defaults?.length) {
+        rows.push({
+          entry: {
+            name: "Default values",
+            value: { kind: "struct", name: active.object_name, fields: shown(active.defaults) },
+          },
+          target: null,
+          reason: "The values a new one of this struct starts with. Edit them one by one.",
+          within: [],
+        });
+      }
+      return rows;
+    }
     const rowStruct = active.data_table.row_struct;
     return active.data_table.rows.map((row) =>
       rowOf(

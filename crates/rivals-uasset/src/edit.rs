@@ -4895,6 +4895,7 @@ pub fn verify_patch(
             continue;
         }
         same_entries(&old.properties, &new.properties, &skip, &excuses, old.index)?;
+        same_entries(&old.defaults, &new.defaults, &skip, &excuses, old.index)?;
         match (&old.data_table, &new.data_table) {
             (None, None) => {}
             (Some(was), Some(is)) => verify_rows(old.index, was, is, edits, &excuses)?,
@@ -5046,14 +5047,16 @@ fn keyed_container<'a>(
         return Some(entry);
     }
     parsed.exports.iter().find_map(|export| {
-        keyed_holder(&export.properties, offset, name, element).or_else(|| {
-            export.data_table.as_ref().and_then(|table| {
-                table
-                    .rows
-                    .iter()
-                    .find_map(|row| keyed_holder(&row.fields, offset, name, element))
+        keyed_holder(&export.properties, offset, name, element)
+            .or_else(|| keyed_holder(&export.defaults, offset, name, element))
+            .or_else(|| {
+                export.data_table.as_ref().and_then(|table| {
+                    table
+                        .rows
+                        .iter()
+                        .find_map(|row| keyed_holder(&row.fields, offset, name, element))
+                })
             })
-        })
     })
 }
 
@@ -6359,7 +6362,9 @@ fn find_at<'a>(
     element: Option<u32>,
 ) -> Option<&'a PropertyEntry> {
     for export in &parsed.exports {
-        if let Some(found) = find_in(&export.properties, offset, name, element) {
+        if let Some(found) = find_in(&export.properties, offset, name, element)
+            .or_else(|| find_in(&export.defaults, offset, name, element))
+        {
             return Some(found);
         }
         if let Some(table) = &export.data_table {
@@ -6601,6 +6606,7 @@ mod tests {
                 note: None,
                 script: None,
                 undecoded: Vec::new(),
+                defaults: Vec::new(),
                 super_struct_at: None,
                 name_refs: Vec::new(),
             }],

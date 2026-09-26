@@ -63,6 +63,9 @@ pub fn diff_dump(original: &ParsedPackage, edited: &Json) -> Result<DiffOutcome,
             continue;
         };
         diff_entries(&was.properties, properties, at, &was.path, &mut out);
+        if let Some(defaults) = is.get("defaults").and_then(Json::as_array) {
+            diff_entries(&was.defaults, defaults, at, &was.path, &mut out);
+        }
         diff_rows(was, is, at, &mut out);
         diff_strings(was, is, at, &mut out);
     }

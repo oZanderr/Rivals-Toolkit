@@ -118,6 +118,10 @@ pub struct ParsedExport {
     /// place such a failure is counted.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub undecoded: Vec<crate::props::UndecodedPayload>,
+    /// A Blueprint struct's default instance: the values a new one of it starts with, read with
+    /// the fields its own definition declares.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub defaults: Vec<PropertyEntry>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1055,6 +1059,7 @@ fn parse_one_inner(
     let mut bytecode = None;
     let mut script = None;
     let mut struct_definition = None;
+    let mut defaults = Vec::new();
     let mut super_struct_at = None;
     if !block_consumed
         && cursor.remaining() > 0
@@ -1105,7 +1110,13 @@ fn parse_one_inner(
                             properties,
                         };
                         if chain.contains(&"UserDefinedStruct") && cursor.remaining() > 0 {
-                            read_default_instance(&mut cursor, ctx, diagnostics, &definition);
+                            defaults = read_default_instance(
+                                &mut cursor,
+                                ctx,
+                                diagnostics,
+                                &definition,
+                                tagged,
+                            );
                         }
                         struct_definition = Some(definition);
                     }
@@ -1153,23 +1164,26 @@ fn parse_one_inner(
         data_table,
         string_table,
         struct_definition,
+        defaults,
         trailing_hex,
         ..base
     }
 }
 
-/// A Blueprint struct stores its default instance as a block of its own fields, so the definition
-/// just scanned is the schema to read it with. A block that does not read cleanly is left where it
-/// was, and the export reports the bytes as unexplained.
+/// A Blueprint struct stores its default instance as a block of its own fields, written the way
+/// the package writes every block, so the definition just scanned is the schema to read it with.
+/// A block that does not read cleanly is left where it was, and the export reports the bytes as
+/// unexplained.
 fn read_default_instance(
     cursor: &mut Cursor<'_>,
     ctx: &Ctx<'_>,
     diagnostics: &mut Diagnostics,
     definition: &usmap::Struct,
-) {
+    tagged: bool,
+) -> Vec<PropertyEntry> {
     let local = Mappings::from_structs(vec![definition.clone()]);
     let Some(schema) = local.schema(&definition.name) else {
-        return;
+        return Vec::new();
     };
     let local_ctx = Ctx {
         mappings: ctx.mappings,
@@ -1181,10 +1195,24 @@ fn read_default_instance(
     let restore = cursor.position();
     let named = cursor.names_len();
     let mut fields = Vec::new();
-    if read_property_block(cursor, &schema, &local_ctx, diagnostics, 0, &mut fields).is_err() {
+    let outcome = if tagged {
+        crate::tagged::read_tagged_block(
+            cursor,
+            &local_ctx,
+            diagnostics,
+            0,
+            &mut fields,
+            Some(&definition.name),
+        )
+    } else {
+        read_property_block(cursor, &schema, &local_ctx, diagnostics, 0, &mut fields)
+    };
+    if outcome.is_err() {
         cursor.seek_to(restore).ok();
         cursor.truncate_names(named);
+        return Vec::new();
     }
+    fields
 }
 
 /// Everything an export table row says about an export before a byte of it is read. The parse
@@ -1223,6 +1251,7 @@ fn skeleton(
         super_struct_at: None,
         name_refs: Vec::new(),
         undecoded: Vec::new(),
+        defaults: Vec::new(),
     };
     if let Some(export) = export {
         base.object_name = header
@@ -1546,6 +1575,7 @@ mod tagged_package_tests {
         "StrProperty",
         "RowA",
         "RowB",
+        "UserDefinedStruct",
     ];
 
     fn name_index(value: &str) -> i32 {
@@ -1775,6 +1805,151 @@ mod tagged_package_tests {
         assert!(matches!(export.status, ExportStatus::Complete));
         assert!(export.properties.iter().any(|p| p.name == "ParentTables"));
         assert_eq!(export.data_table.as_ref().expect("rows").rows.len(), 2);
+    }
+
+    /// A field record of a struct's definition with no type tail beyond the common part.
+    fn write_field(out: &mut Vec<u8>, kind: &str, field: &str) {
+        write_name(out, kind);
+        write_name(out, field);
+        for word in [0i32, 1, 4] {
+            out.extend_from_slice(&word.to_le_bytes()); // object flags, ArrayDim, ElementSize
+        }
+        out.extend_from_slice(&0u64.to_le_bytes()); // property flags
+        out.extend_from_slice(&[0, 0]); // RepIndex
+        write_name(out, "None"); // RepNotifyFunc
+        out.push(0); // replication condition
+    }
+
+    /// A Blueprint struct cooked with tagged properties: no values of its own, a definition
+    /// declaring `Damage` and `Label`, then its default instance as a tagged block.
+    fn tagged_struct_package() -> (Vec<u8>, Vec<u8>) {
+        let mut exports = Vec::new();
+        write_name(&mut exports, "None");
+        exports.extend_from_slice(&0i32.to_le_bytes()); // no object guid
+        for word in [0i32, 0, 2] {
+            exports.extend_from_slice(&word.to_le_bytes()); // no super, no children, two fields
+        }
+        write_field(&mut exports, "IntProperty", "Damage");
+        write_field(&mut exports, "StrProperty", "Label");
+        for word in [0i32, 0, 0] {
+            exports.extend_from_slice(&word.to_le_bytes()); // no bytecode, struct flags
+        }
+        write_tag(&mut exports, "Damage", "IntProperty", 4);
+        exports.push(0);
+        exports.extend_from_slice(&42i32.to_le_bytes());
+        write_tag(&mut exports, "Label", "StrProperty", 7);
+        exports.push(0);
+        exports.extend_from_slice(&3i32.to_le_bytes());
+        exports.extend_from_slice(b"hi ");
+        write_name(&mut exports, "None");
+
+        let mut summary = FLegacyPackageFileSummary {
+            package_name: "/Game/TestPackage".to_string(),
+            ..Default::default()
+        };
+        summary.versioning_info.package_file_version =
+            FALLBACK_ENGINE_VERSION.package_file_version();
+        summary.versioning_info.total_header_size = HEADER_SIZE as i32;
+        summary.package_flags = EPackageFlags::Cooked as u32;
+        let core = FPackageIndex::create_import(0);
+        let header = FLegacyPackageHeader {
+            summary,
+            name_map: FPackageNameMap::create_from_names(
+                NAMES.iter().map(|n| (*n).to_string()).collect(),
+            ),
+            imports: vec![
+                import(
+                    "Package",
+                    FPackageIndex::create_null(),
+                    "/Script/CoreUObject",
+                ),
+                import("Class", core, "UserDefinedStruct"),
+            ],
+            exports: vec![FObjectExport {
+                class_index: FPackageIndex::create_import(1),
+                object_name: minimal_name("TestObject"),
+                serial_offset: 0,
+                serial_size: exports.len() as i64,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut asset = std::io::Cursor::new(Vec::new());
+        header
+            .serialize(
+                &mut asset,
+                Some(HEADER_SIZE),
+                &retoc::logging::Log::no_log(),
+            )
+            .expect("serialize the test package header");
+        (asset.into_inner(), exports)
+    }
+
+    /// The class chain a Blueprint struct's layout walk needs to recognise it.
+    fn struct_classes() -> Mappings {
+        let class = |name: &str, parent: Option<&str>| usmap::Struct {
+            name: name.into(),
+            super_struct: parent.map(Into::into),
+            properties: Vec::new(),
+        };
+        Mappings::from_structs(vec![
+            class("UserDefinedStruct", Some("ScriptStruct")),
+            class("ScriptStruct", Some("Struct")),
+            class("Struct", None),
+        ])
+    }
+
+    /// A tagged Blueprint struct reads to its end, its default instance kept as values that edit
+    /// and verify like any other.
+    #[test]
+    fn a_tagged_blueprint_struct_reads_and_edits_its_default_instance() {
+        let (asset, exports) = tagged_struct_package();
+        let mappings = struct_classes();
+        let bundle = AssetBundle {
+            asset: &asset,
+            exports: &exports,
+        };
+        let parsed = parse_package(&bundle, Some(&mappings)).expect("parses");
+        let export = &parsed.exports[0];
+        assert!(
+            matches!(export.status, ExportStatus::Complete),
+            "{:?}",
+            export.status
+        );
+        let summary: Vec<(&str, String)> = export
+            .defaults
+            .iter()
+            .map(|entry| (entry.name.as_str(), entry.value.summary()))
+            .collect();
+        assert_eq!(
+            summary,
+            [("Damage", "42".to_string()), ("Label", "hi".to_string())]
+        );
+
+        let damage = &export.defaults[0];
+        let changes = crate::edit::PackageEdits {
+            values: vec![crate::edit::ValueEdit {
+                offset: damage.span.expect("a span").0,
+                expect_name: "Damage".into(),
+                expect_element: None,
+                expect_kind: "int".into(),
+                op: crate::edit::EditOp::Set { text: "43".into() },
+            }],
+            ..Default::default()
+        };
+        let patched =
+            crate::edit::patch_package(&bundle, &parsed, &changes, Some(&mappings)).expect("patch");
+        let after = parse_package(
+            &AssetBundle {
+                asset: &patched.asset,
+                exports: &patched.exports,
+            },
+            Some(&mappings),
+        )
+        .expect("reparses");
+        crate::edit::verify_patch(&parsed, &after, &changes, &patched.applied).expect("verifies");
+        assert_eq!(after.exports[0].defaults[0].value.summary(), "43");
+        assert!(matches!(after.exports[0].status, ExportStatus::Complete));
     }
 
     /// Re-serializing a header is not symmetrical: `deserialize` hands back offsets with the header

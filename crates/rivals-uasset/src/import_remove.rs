@@ -435,6 +435,7 @@ mod tests {
                 note: None,
                 script: None,
                 undecoded: Vec::new(),
+                defaults: Vec::new(),
                 super_struct_at: None,
                 name_refs: Vec::new(),
             }],
