@@ -99,7 +99,7 @@ fn cache_tag(game_root: &str) -> u64 {
 
 /// The installed mods' containers the walk reads: every enabled `.utoc` under `~mods`, the copy
 /// the game loads first leading, so a package several mods ship is read from the winner.
-fn mod_containers(paks: &Path) -> Vec<PathBuf> {
+pub fn enabled_mod_containers(paks: &Path) -> Vec<PathBuf> {
     let undecryptable = undecryptable_container_stems(paks);
     let mut found: Vec<PathBuf> = walkdir::WalkDir::new(paks.join("~mods"))
         .into_iter()
@@ -136,7 +136,7 @@ fn fingerprint(game_root: &str) -> Result<Vec<u8>, String> {
             containers.push(path);
         }
     }
-    containers.extend(mod_containers(&dir));
+    containers.extend(enabled_mod_containers(&dir));
     let mut entries: Vec<(String, u64, u64)> = Vec::new();
     for path in containers {
         let meta = fs::metadata(&path).map_err(|e| e.to_string())?;
@@ -175,7 +175,7 @@ pub fn build(
     // The mods first, each alone and the winner leading, then the game: a package is indexed from
     // the copy the game loads.
     let mut stores: Vec<(Option<String>, Arc<dyn IoStoreTrait>)> = Vec::new();
-    for container in mod_containers(&paks) {
+    for container in enabled_mod_containers(&paks) {
         let name = stem(&container);
         if let Ok(store) = open_target_only(&paks, &container, &name) {
             stores.push((Some(name), Arc::from(store)));
@@ -674,7 +674,7 @@ mod tests {
             return;
         };
         let paks = paks_dir(&root);
-        let stores: Vec<(Option<String>, Arc<dyn IoStoreTrait>)> = mod_containers(&paks)
+        let stores: Vec<(Option<String>, Arc<dyn IoStoreTrait>)> = enabled_mod_containers(&paks)
             .into_iter()
             .filter_map(|container| {
                 let name = stem(&container);

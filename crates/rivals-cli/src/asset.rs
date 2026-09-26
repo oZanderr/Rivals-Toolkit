@@ -27,6 +27,8 @@ pub struct Request<'a> {
     pub target: asset_edit::SaveTarget,
     /// Build a write on the mod's own copy when it already holds one.
     pub layer: bool,
+    /// Save imports that point at nothing the game or an enabled mod has.
+    pub allow_missing: bool,
 }
 
 fn source_of(container: &str) -> AssetSource {
@@ -82,8 +84,9 @@ fn kind_of(request: &Request<'_>) -> AssetSource {
 fn edit_request<'a>(
     request: &Request<'a>,
     mod_name: &'a str,
-    changes: PackageEdits,
+    mut changes: PackageEdits,
 ) -> AssetEditRequest<'a> {
+    changes.allow_missing |= request.allow_missing;
     AssetEditRequest {
         game_root: request.game_root,
         container: request.container,
@@ -586,6 +589,8 @@ pub struct ApplyOverrides<'a> {
     pub layer: bool,
     /// Apply items whose package no longer matches what they expected.
     pub allow_drift: bool,
+    /// Save imports that point at nothing the game or an enabled mod has.
+    pub allow_missing: bool,
     /// Patch and verify every item, then write nothing.
     pub dry_run: bool,
     /// What to write, when the command line said. An item's own target wins otherwise.
@@ -810,6 +815,7 @@ fn resolve_item(
     let container = asset_edit::json::resolve_container(&file.container, base, game_root)?;
     let mut changes = file.edits.clone().resolve(base)?;
     changes.allow_drift = overrides.allow_drift;
+    changes.allow_missing = overrides.allow_missing;
     Ok((
         ApplyKey {
             mod_name: String::new(),

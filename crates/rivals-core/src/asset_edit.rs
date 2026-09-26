@@ -101,7 +101,58 @@ fn patch_pass(
     let after =
         schema_synth::parse_package_opts(&reread, mappings, &source_of(request), editor_options())?;
     rivals_uasset::verify_patch(parsed, &after, changes, &patched.applied)?;
+    if !request.changes.allow_missing {
+        check_new_imports(request, parsed, &after)?;
+    }
     Ok((patched, after))
+}
+
+/// Refuses imports the patch added or retargeted that point at nothing the game or an enabled mod
+/// has: the loader leaves such an import null, so whatever reads it finds nothing.
+fn check_new_imports(
+    request: &AssetEditRequest<'_>,
+    before: &rivals_uasset::ParsedPackage,
+    after: &rivals_uasset::ParsedPackage,
+) -> Result<(), String> {
+    let had: std::collections::HashSet<String> = before
+        .imports
+        .iter()
+        .map(|import| import.path.to_ascii_lowercase())
+        .collect();
+    let new: Vec<&str> = after
+        .imports
+        .iter()
+        .map(|import| import.path.as_str())
+        .filter(|path| !path.is_empty() && !had.contains(&path.to_ascii_lowercase()))
+        .collect();
+    // A package import added along with an object in it is checked through the object.
+    let paths: Vec<String> = new
+        .iter()
+        .filter(|path| {
+            path.contains('.')
+                || !new
+                    .iter()
+                    .any(|other| other.starts_with(&format!("{path}.")))
+        })
+        .map(|path| path.to_string())
+        .collect();
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let missing: Vec<String> =
+        crate::object_check::objects_exist(request.game_root, request.container, &paths)
+            .iter()
+            .zip(&paths)
+            .filter_map(|(found, path)| found.reason(path))
+            .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "{}:\n  {}\nAdd the asset first, or save anyway if something loaded alongside provides it.",
+        crate::object_check::MISSING,
+        missing.join("\n  ")
+    ))
 }
 
 /// How many times a save may read the package again to reach what a walk sets: once for an element
@@ -432,6 +483,7 @@ pub fn plan_export_removal(
         && let Ok(Some(index)) = crate::import_index::load(request.game_root)
     {
         plan.resolve_importers(|path| index.importers_of(path).packages);
+        plan.resolve_mentions(|package| index.mentions_of(package));
         if index.is_stale(request.game_root) {
             plan.warnings
                 .push(crate::import_index::STALE_WARNING.to_string());
@@ -636,6 +688,7 @@ pub fn plan_export_edits(
         && let Ok(Some(index)) = crate::import_index::load(request.game_root)
     {
         plan.resolve_importers(|path| index.importers_of(path).packages);
+        plan.resolve_mentions(|package| index.mentions_of(package));
         if index.is_stale(request.game_root) {
             plan.warnings
                 .push(crate::import_index::STALE_WARNING.to_string());
@@ -2095,10 +2148,10 @@ mod game_data_tests {
     /// A DataAsset whose Object properties point at material imports, so imports can be retargeted
     /// and references pointed at assets the package never named.
     const TITLES: &str = "Marvel/Content/Marvel/Data/DataAsset/Career/MarvelHeroTitleData.uasset";
-    /// A material in the same family as the one the asset imports. Only the mechanics are under
-    /// test here, so it need not exist in this build.
+    /// A material beside the one the asset imports. It has to exist: a save refuses an import of
+    /// nothing.
     const OTHER_MATERIAL: &str =
-        "/Game/Marvel/UI/Materials/Common/MI_ColorFont_Dark.MI_ColorFont_Dark";
+        "/Game/Marvel/UI/Materials/Common/MI_Com_ItemBgBrighten.MI_Com_ItemBgBrighten";
     /// A Blueprint class default object rather than a table: its values sit in the export's own
     /// property tree, three structs deep.
     const SHAKE: &str = "Marvel/Content/Marvel/AbilitySystem/1011/101111/CameraShake_101111.uasset";
@@ -3365,11 +3418,43 @@ mod game_data_tests {
         );
         let value = nested(&after.exports[0].properties, &[field.name.as_str()]);
         assert!(
-            matches!(&value.value, PropertyValue::Object { path: Some(path), .. } if path.ends_with("MI_ColorFont_Dark")),
+            matches!(&value.value, PropertyValue::Object { path: Some(path), .. } if path.ends_with("MI_Com_ItemBgBrighten")),
             "{}",
             value.value.summary()
         );
         assert!(matches!(after.exports[0].status, ExportStatus::Complete));
+    }
+
+    /// An import of a package neither the game nor a mod has is refused, and saved once the caller
+    /// says a mod loaded alongside provides it.
+    #[test]
+    fn an_import_of_nothing_is_refused_unless_allowed() {
+        let Some(fixture) = Fixture::open(TITLES) else {
+            return;
+        };
+        const NOTHING: &str = "/Game/Made/Up/Nothing.Nothing";
+        let changes = |allow_missing| PackageEdits {
+            imports: vec![ImportEdit::Add {
+                path: NOTHING.into(),
+                class_package: "/Script/Engine".into(),
+                class_name: "Texture2D".into(),
+            }],
+            allow_missing,
+            ..Default::default()
+        };
+        let Err(refused) = preview_edits(
+            &fixture.request_changes(changes(false)),
+            Some(&fixture.schema),
+        ) else {
+            panic!("an import of nothing was saved");
+        };
+        assert!(
+            refused.starts_with(crate::object_check::MISSING),
+            "{refused}"
+        );
+        assert!(refused.contains(NOTHING), "{refused}");
+        let (_, after) = fixture.apply_changes(changes(true));
+        assert!(after.imports.iter().any(|import| import.path == NOTHING));
     }
 
     /// Typing a path the package never named into an object cell adds the imports for it, typed

@@ -197,6 +197,7 @@ pub fn run() {
             import_index::import_index_status,
             import_index::build_import_index,
             import_index::importers_of,
+            import_index::check_object_path,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

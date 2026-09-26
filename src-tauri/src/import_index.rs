@@ -1,9 +1,11 @@
-//! Tauri commands for the import index that names the packages an export removal would break.
+//! Tauri commands for the import index that names the packages an export removal would break, and
+//! for checking that a path an import is pointed at exists.
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
 use rivals_core::import_index::{self, ImportIndexStatus, Importers};
+use rivals_core::object_check::{self, Existence};
 
 #[derive(Clone, Serialize)]
 struct ImportIndexProgress {
@@ -49,4 +51,19 @@ pub(crate) async fn importers_of(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Whether an object path names something the game or an enabled mod has, for a path typed into
+/// an import before it is saved.
+#[tauri::command]
+pub(crate) async fn check_object_path(
+    game_root: String,
+    container: String,
+    path: String,
+) -> Result<Existence, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        object_check::object_exists(&game_root, &container, &path)
+    })
+    .await
+    .map_err(|e| e.to_string())
 }

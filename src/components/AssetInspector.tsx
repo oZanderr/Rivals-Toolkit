@@ -91,6 +91,8 @@ import {
   type EditSession,
   type EditTarget,
   type Structural,
+  pathCheckText,
+  usePathCheck,
   withWarnings,
 } from "@/hooks/useAssetEdits";
 import { useExportClipboard, type ExportClipboard } from "@/hooks/useExportClipboard";
@@ -215,6 +217,7 @@ interface RemovalPlan {
   public: string[];
   importers: { path: string; packages: string[] }[];
   index_available: boolean;
+  mentioned_by: string[];
 }
 
 /** What `plan_export_edits` reports: the paths a table edit moves, and who follows them by hash. */
@@ -225,6 +228,7 @@ interface ExportEditPlan {
   repathed: [string, string][];
   importers: { path: string; packages: string[] }[];
   index_available: boolean;
+  mentioned_by: string[];
 }
 
 /** What `plan_import_removal` reports before an import row is dropped. */
@@ -246,6 +250,14 @@ type StructuralAsk =
       kind: "rename";
       index: number;
       name: string;
+      plan: ExportEditPlan | null;
+      error: string | null;
+    }
+  | {
+      kind: "move";
+      index: number;
+      /** The export it goes under, or null for the package root. */
+      outer: number | null;
       plan: ExportEditPlan | null;
       error: string | null;
     }
@@ -2729,6 +2741,25 @@ function referencePath(pkg: ParsedPackage, index: number): string {
 }
 
 /** An import path cell: click to retarget the import at another object. */
+/** A warning mark beside a path an import is being pointed at, when nothing is there or it could
+ *  not be looked for. */
+function PathCheckMark({ edits, path }: { edits: AssetEdits; path: string | undefined }) {
+  const check = usePathCheck(edits, path);
+  const text = path ? pathCheckText(check, path.trim()) : null;
+  if (!text) return null;
+  return (
+    <Tip content={text}>
+      <AlertTriangle
+        size={12}
+        className={cn(
+          "shrink-0",
+          check?.found === "unchecked" ? "text-muted-foreground" : "text-amber-400"
+        )}
+      />
+    </Tip>
+  );
+}
+
 function ImportPathCell({ info, edits }: { info: ImportInfo; edits: AssetEdits }) {
   const key = `retarget:${info.index}`;
   const draft = edits.importDrafts[key];
@@ -2749,30 +2780,33 @@ function ImportPathCell({ info, edits }: { info: ImportInfo; edits: AssetEdits }
     );
   }
   return (
-    <Tip
-      content={
-        locked ??
-        (info.object_name === "UnknownExport"
-          ? "An older converter dropped this import's hash when the package was extracted. Re-extract it from its container to recover the reference."
-          : info.unresolved
-            ? "retoc could not resolve this object when converting the package; the hash stands in for it."
-            : "Click to point this import at another object: /Game/Path/Asset.Object, or :Sub for a subobject.")
-      }
-    >
-      <span
-        className={cn(
-          "block min-w-0 truncate font-mono",
-          info.unresolved && "text-muted-foreground italic",
-          draft !== undefined && "rounded-sm bg-blue-accent/15 px-1 text-blue-accent-foreground",
-          !locked && "cursor-text hover:ring-1 hover:ring-inset hover:ring-primary/40"
-        )}
-        onClick={() => {
-          if (!locked) setEditing(true);
-        }}
+    <span className="flex min-w-0 items-center gap-1">
+      <Tip
+        content={
+          locked ??
+          (info.object_name === "UnknownExport"
+            ? "An older converter dropped this import's hash when the package was extracted. Re-extract it from its container to recover the reference."
+            : info.unresolved
+              ? "retoc could not resolve this object when converting the package; the hash stands in for it."
+              : "Click to point this import at another object: /Game/Path/Asset.Object, or :Sub for a subobject.")
+        }
       >
-        {draft?.path ?? info.path}
-      </span>
-    </Tip>
+        <span
+          className={cn(
+            "block min-w-0 truncate font-mono",
+            info.unresolved && "text-muted-foreground italic",
+            draft !== undefined && "rounded-sm bg-blue-accent/15 px-1 text-blue-accent-foreground",
+            !locked && "cursor-text hover:ring-1 hover:ring-inset hover:ring-primary/40"
+          )}
+          onClick={() => {
+            if (!locked) setEditing(true);
+          }}
+        >
+          {draft?.path ?? info.path}
+        </span>
+      </Tip>
+      {draft && <PathCheckMark edits={edits} path={draft.path} />}
+    </span>
   );
 }
 
@@ -2820,15 +2854,18 @@ function AddImportRow({
           </Tip>
         </td>
         <td className="px-1 py-1" colSpan={2}>
-          <Input
-            value={path}
-            onChange={(e) => setPath(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !disabled) add();
-            }}
-            placeholder="/Game/Path/Asset.Object"
-            className="h-7 w-full font-mono text-[11px]"
-          />
+          <div className="flex items-center gap-1">
+            <Input
+              value={path}
+              onChange={(e) => setPath(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !disabled) add();
+              }}
+              placeholder="/Game/Path/Asset.Object"
+              className="h-7 w-full font-mono text-[11px]"
+            />
+            {valid && <PathCheckMark edits={edits} path={path} />}
+          </div>
         </td>
         <td className="px-1 py-1">
           <Tip content={edits.session.locked ?? "Add import"}>
@@ -2868,6 +2905,7 @@ function PackageView({
   onReset,
   onDuplicate,
   onRename,
+  onMove,
   onFlags,
   onRetype,
   onCopyOut,
@@ -2885,6 +2923,7 @@ function PackageView({
   onReset: (index: number) => void;
   onDuplicate: (index: number) => void;
   onRename: (index: number) => void;
+  onMove: (index: number) => void;
   onFlags: (index: number) => void;
   onRetype: (index: number) => void;
   onCopyOut: (index: number) => void;
@@ -2985,6 +3024,7 @@ function PackageView({
                   <span className="min-w-0 truncate rounded-sm bg-blue-accent/15 px-1 text-blue-accent-foreground">
                     {draft.path}
                   </span>
+                  <PathCheckMark edits={edits} path={draft.path} />
                   <Button
                     size="sm"
                     variant="ghost"
@@ -3079,6 +3119,7 @@ function PackageView({
                         onReset={() => onReset(exp.index)}
                         onDuplicate={() => onDuplicate(exp.index)}
                         onRename={() => onRename(exp.index)}
+                        onMove={() => onMove(exp.index)}
                         onFlags={() => onFlags(exp.index)}
                         onRetype={() => onRetype(exp.index)}
                         onDeps={() => onDeps(exp.index)}
@@ -3284,6 +3325,7 @@ function ExportActions({
   onReset,
   onDuplicate,
   onRename,
+  onMove,
   onFlags,
   onRetype,
   onDeps,
@@ -3296,6 +3338,7 @@ function ExportActions({
   onReset: () => void;
   onDuplicate: () => void;
   onRename: () => void;
+  onMove: () => void;
   onFlags: () => void;
   onRetype: () => void;
   onDeps: () => void;
@@ -3337,6 +3380,24 @@ function ExportActions({
             }}
           >
             <Pencil size={14} /> Rename export…
+          </button>
+        </Tip>
+        <Tip
+          content={
+            lock ??
+            "Put the object beneath another, or at the package root. Its path and its subobjects' move with it."
+          }
+          side="right"
+        >
+          <button
+            className={cn(item, lock ? "cursor-not-allowed opacity-50" : "hover:bg-muted")}
+            disabled={!!lock}
+            onClick={() => {
+              setOpen(false);
+              onMove();
+            }}
+          >
+            <ArrowLeftRight size={14} /> Move export…
           </button>
         </Tip>
         <Tip content={lock ?? "Change the flags the loader reads this object by."} side="right">
@@ -3473,6 +3534,106 @@ function ExportActions({
   );
 }
 
+/** Who follows the objects a table edit moves or removes: the packages importing them and the ones
+ *  naming their package by path, from the import index, or the offer to build one. */
+function ImportersPanel({
+  plan,
+  subject,
+  indexing,
+  onBuild,
+}: {
+  plan: {
+    public: string[];
+    importers: { path: string; packages: string[] }[];
+    index_available: boolean;
+    mentioned_by?: string[];
+  };
+  subject: string;
+  indexing: { current: number; total: number } | null;
+  onBuild: () => void;
+}) {
+  const list =
+    "max-h-40 overflow-auto rounded-md border border-border bg-muted/40 p-2 font-mono text-[11px]";
+  if (plan.public.length === 0) return null;
+  if (!plan.index_available) {
+    return (
+      <div className="flex items-center gap-3 text-muted-foreground">
+        <span className="min-w-0 flex-1">
+          An import index can name the packages that import {subject} or name them by path. Building
+          it reads every package once and takes a minute or two.
+        </span>
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-7 shrink-0"
+          disabled={indexing !== null}
+          onClick={onBuild}
+        >
+          {indexing && <Loader2 size={13} className="animate-spin" />}
+          {indexing
+            ? indexing.total > 0
+              ? `${indexing.current} / ${indexing.total}`
+              : "Opening containers…"
+            : "Build index"}
+        </Button>
+      </div>
+    );
+  }
+  const mentioned = plan.mentioned_by ?? [];
+  return (
+    <div className="flex flex-col gap-2">
+      <div>
+        <p className="mb-1 text-muted-foreground">
+          Packages importing {subject}, from the import index:
+        </p>
+        <div className={list}>
+          {plan.importers.map((entry) => (
+            <div key={entry.path}>
+              <Tip content={entry.path}>
+                <div className="truncate">
+                  {entry.path.split(/[.:]/).pop()}:{" "}
+                  <span className="text-muted-foreground">
+                    {entry.packages.length === 0
+                      ? "no importer known"
+                      : `${entry.packages.length} package${entry.packages.length === 1 ? "" : "s"}`}
+                  </span>
+                </div>
+              </Tip>
+              {entry.packages.slice(0, 20).map((p) => (
+                <Tip key={p} content={p}>
+                  <div className="truncate pl-3 text-muted-foreground">{p}</div>
+                </Tip>
+              ))}
+              {entry.packages.length > 20 && (
+                <div className="pl-3 text-muted-foreground">
+                  and {entry.packages.length - 20} more
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+      {mentioned.length > 0 && (
+        <div>
+          <p className="mb-1 text-muted-foreground">
+            Packages naming this package by path, which may point at {subject} softly:
+          </p>
+          <div className={list}>
+            {mentioned.slice(0, 20).map((p) => (
+              <Tip key={p} content={p}>
+                <div className="truncate text-muted-foreground">{p}</div>
+              </Tip>
+            ))}
+            {mentioned.length > 20 && (
+              <div className="text-muted-foreground">and {mentioned.length - 20} more</div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** Confirms a removal or reset, showing what the removal plan found before anything is written. */
 function StructuralDialog({
   ask,
@@ -3483,6 +3644,7 @@ function StructuralDialog({
   indexing,
   onBuildIndex,
   onRenamePlan,
+  onMovePlan,
   onRetypePlan,
   onDependencyPlan,
   onPastePlan,
@@ -3498,6 +3660,7 @@ function StructuralDialog({
   indexing: { current: number; total: number } | null;
   onBuildIndex: (index: number) => void;
   onRenamePlan: (index: number, name: string) => void;
+  onMovePlan: (index: number, outer: number | null) => void;
   onRetypePlan: (index: number, target: number) => void;
   onDependencyPlan: (index: number, runs: DependencyRuns) => void;
   onPastePlan: (outer: number | null, name: string) => void;
@@ -3598,61 +3761,12 @@ function StructuralDialog({
                     {w}
                   </p>
                 ))}
-                {plan.public.length > 0 &&
-                  (plan.index_available ? (
-                    <div>
-                      <p className="mb-1 text-muted-foreground">
-                        Packages importing the removed exports, from the import index:
-                      </p>
-                      <div className={list}>
-                        {plan.importers.map((entry) => (
-                          <div key={entry.path}>
-                            <Tip content={entry.path}>
-                              <div className="truncate">
-                                {entry.path.split(/[.:]/).pop()}:{" "}
-                                <span className="text-muted-foreground">
-                                  {entry.packages.length === 0
-                                    ? "no importer known"
-                                    : `${entry.packages.length} package${entry.packages.length === 1 ? "" : "s"}`}
-                                </span>
-                              </div>
-                            </Tip>
-                            {entry.packages.slice(0, 20).map((p) => (
-                              <Tip key={p} content={p}>
-                                <div className="truncate pl-3 text-muted-foreground">{p}</div>
-                              </Tip>
-                            ))}
-                            {entry.packages.length > 20 && (
-                              <div className="pl-3 text-muted-foreground">
-                                and {entry.packages.length - 20} more
-                              </div>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="flex items-center gap-3 text-muted-foreground">
-                      <span className="min-w-0 flex-1">
-                        An import index can name the packages that import the removed exports.
-                        Building it reads every package once and takes a few minutes.
-                      </span>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="h-7 shrink-0"
-                        disabled={indexing !== null}
-                        onClick={() => onBuildIndex(ask.index)}
-                      >
-                        {indexing && <Loader2 size={13} className="animate-spin" />}
-                        {indexing
-                          ? indexing.total > 0
-                            ? `${indexing.current} / ${indexing.total}`
-                            : "Opening containers…"
-                          : "Build index"}
-                      </Button>
-                    </div>
-                  ))}
+                <ImportersPanel
+                  plan={plan}
+                  subject="the removed exports"
+                  indexing={indexing}
+                  onBuild={() => onBuildIndex(ask.index)}
+                />
               </div>
             )}
             <AlertDialogFooter>
@@ -3690,9 +3804,28 @@ function StructuralDialog({
             saving={saving}
             plan={ask.plan}
             error={ask.error}
+            indexing={indexing}
+            onBuildIndex={() => onBuildIndex(ask.index)}
             onName={onRenamePlan}
             onConfirm={(name) =>
               onConfirm({ exports: [{ op: "rename", export: ask.index, name }] })
+            }
+          />
+        )}
+        {ask?.kind === "move" && target && (
+          <MoveForm
+            key={ask.index}
+            target={target}
+            pkg={pkg}
+            pak={pak}
+            saving={saving}
+            plan={ask.plan}
+            error={ask.error}
+            indexing={indexing}
+            onBuildIndex={() => onBuildIndex(ask.index)}
+            onOuter={onMovePlan}
+            onConfirm={(outer) =>
+              onConfirm({ exports: [{ op: "set_outer", export: ask.index, outer }] })
             }
           />
         )}
@@ -3802,6 +3935,8 @@ function RenameForm({
   saving,
   plan,
   error,
+  indexing,
+  onBuildIndex,
   onName,
   onConfirm,
 }: {
@@ -3811,6 +3946,8 @@ function RenameForm({
   saving: boolean;
   plan: ExportEditPlan | null;
   error: string | null;
+  indexing: { current: number; total: number } | null;
+  onBuildIndex: () => void;
   onName: (index: number, name: string) => void;
   onConfirm: (name: string) => void;
 }) {
@@ -3900,6 +4037,12 @@ function RenameForm({
               {w}
             </p>
           ))}
+          <ImportersPanel
+            plan={plan}
+            subject="the moved exports"
+            indexing={indexing}
+            onBuild={onBuildIndex}
+          />
         </div>
       )}
       <AlertDialogFooter>
@@ -3909,6 +4052,138 @@ function RenameForm({
           onClick={() => onConfirm(trimmed)}
         >
           Rename
+        </AlertDialogAction>
+      </AlertDialogFooter>
+    </>
+  );
+}
+
+/** Moves an object under another, or to the package root, showing what the move touches first. */
+function MoveForm({
+  target,
+  pkg,
+  pak,
+  saving,
+  plan,
+  error,
+  indexing,
+  onBuildIndex,
+  onOuter,
+  onConfirm,
+}: {
+  target: ParsedExport;
+  pkg: ParsedPackage;
+  pak: string | null;
+  saving: boolean;
+  plan: ExportEditPlan | null;
+  error: string | null;
+  indexing: { current: number; total: number } | null;
+  onBuildIndex: () => void;
+  onOuter: (index: number, outer: number | null) => void;
+  onConfirm: (outer: number | null) => void;
+}) {
+  const current = target.outer_index > 0 ? target.outer_index - 1 : null;
+  const [outer, setOuter] = useState<number | null>(current);
+  const changed = outer !== current;
+  // It cannot go under itself or anything under it.
+  const inside = useMemo(() => {
+    const held = new Set<number>([target.index]);
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const exp of pkg.exports) {
+        if (exp.outer_index > 0 && held.has(exp.outer_index - 1) && !held.has(exp.index)) {
+          held.add(exp.index);
+          grew = true;
+        }
+      }
+    }
+    return held;
+  }, [pkg, target.index]);
+  useEffect(() => {
+    if (changed) onOuter(target.index, outer);
+  }, [changed, outer, target.index, onOuter]);
+  const blocked = (plan?.blockers.length ?? 0) > 0;
+  const list =
+    "max-h-40 overflow-auto rounded-md border border-border bg-muted/40 p-2 font-mono text-[11px]";
+  return (
+    <>
+      <AlertDialogHeader>
+        <AlertDialogTitle>Move {target.object_name}</AlertDialogTitle>
+        <AlertDialogDescription>
+          Puts the object and everything under it beneath another, which moves their paths.{" "}
+          {pak ? `Writes the result into ${pak}.` : "Name a mod to save into first."}
+        </AlertDialogDescription>
+      </AlertDialogHeader>
+      <select
+        value={outer ?? ""}
+        onChange={(e) => setOuter(e.target.value === "" ? null : Number(e.target.value))}
+        className="h-8 rounded-md border border-input bg-transparent px-2 font-mono text-xs"
+      >
+        <option value="">(the package root)</option>
+        {pkg.exports
+          .filter((exp) => !inside.has(exp.index))
+          .map((exp) => (
+            <option key={exp.index} value={exp.index}>
+              [{exp.index}] {exp.object_name} ({exp.class_name})
+            </option>
+          ))}
+      </select>
+      {error && <p className="text-xs text-err">{error}</p>}
+      {changed && !error && !plan && (
+        <p className="flex items-center gap-2 text-xs text-muted-foreground">
+          <Loader2 size={13} className="animate-spin" /> Working out what the move touches
+        </p>
+      )}
+      {plan && changed && (
+        <div className="flex flex-col gap-3 text-xs">
+          {plan.repathed.length > 0 && (
+            <div>
+              <p className="mb-1 text-muted-foreground">
+                {plan.repathed.length === 1
+                  ? "One path moves:"
+                  : `${plan.repathed.length} paths move:`}
+              </p>
+              <div className={list}>
+                {plan.repathed.map(([was, now]) => (
+                  <Tip key={was} content={`${was} to ${now}`}>
+                    <div className="truncate">{now}</div>
+                  </Tip>
+                ))}
+              </div>
+            </div>
+          )}
+          {plan.blockers.map((b, i) => (
+            <p
+              key={i}
+              className="rounded-md border border-red-500/30 bg-red-500/10 px-2 py-1.5 text-red-300"
+            >
+              {b}
+            </p>
+          ))}
+          {plan.warnings.map((w, i) => (
+            <p
+              key={i}
+              className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1.5 text-amber-300"
+            >
+              {w}
+            </p>
+          ))}
+          <ImportersPanel
+            plan={plan}
+            subject="the moved exports"
+            indexing={indexing}
+            onBuild={onBuildIndex}
+          />
+        </div>
+      )}
+      <AlertDialogFooter>
+        <AlertDialogCancel>Cancel</AlertDialogCancel>
+        <AlertDialogAction
+          disabled={!changed || !plan || saving || !pak || blocked}
+          onClick={() => onConfirm(outer)}
+        >
+          Move
         </AlertDialogAction>
       </AlertDialogFooter>
     </>
@@ -6236,6 +6511,36 @@ export default function AssetInspector({
     },
     [gamePath, container, entry]
   );
+  const askMovePlan = useCallback(
+    (index: number, outer: number | null) => {
+      setAsk((held) =>
+        held?.kind === "move" && held.index === index
+          ? { ...held, outer, plan: null, error: null }
+          : held
+      );
+      invoke<ExportEditPlan>("plan_export_edits", {
+        gameRoot: gamePath,
+        container,
+        entry,
+        edits: [{ op: "set_outer", export: index, outer }],
+      })
+        .then((plan) =>
+          setAsk((held) =>
+            held?.kind === "move" && held.index === index && held.outer === outer
+              ? { ...held, plan }
+              : held
+          )
+        )
+        .catch((e: unknown) =>
+          setAsk((held) =>
+            held?.kind === "move" && held.index === index && held.outer === outer
+              ? { ...held, error: String(e) }
+              : held
+          )
+        );
+    },
+    [gamePath, container, entry]
+  );
   const clipboard = useExportClipboard();
   const askPastePlan = useCallback(
     (outer: number | null, name: string) => {
@@ -6389,12 +6694,19 @@ export default function AssetInspector({
       "import-index-progress",
       (event) => setIndexing(event.payload)
     );
+    // The dialog that asked is planned again with the index to answer it.
+    const asking = ask;
     try {
       await invoke("build_import_index", { gameRoot: gamePath });
-      askRemoval(index);
+      if (asking?.kind === "rename") askRenamePlan(index, asking.name);
+      else if (asking?.kind === "move") askMovePlan(index, asking.outer);
+      else askRemoval(index);
     } catch (e: unknown) {
       setAsk((held) =>
-        held?.kind === "remove" && held.index === index ? { ...held, error: String(e) } : held
+        (held?.kind === "remove" || held?.kind === "rename" || held?.kind === "move") &&
+        held.index === index
+          ? { ...held, error: String(e) }
+          : held
       );
     } finally {
       unlisten();
@@ -6555,6 +6867,15 @@ export default function AssetInspector({
                         kind: "rename",
                         index: active.index,
                         name: active.object_name,
+                        plan: null,
+                        error: null,
+                      })
+                    }
+                    onMove={() =>
+                      setAsk({
+                        kind: "move",
+                        index: active.index,
+                        outer: active.outer_index > 0 ? active.outer_index - 1 : null,
                         plan: null,
                         error: null,
                       })
@@ -6831,6 +7152,16 @@ export default function AssetInspector({
                         error: null,
                       })
                     }
+                    onMove={(index) => {
+                      const outer = pkg.exports[index].outer_index;
+                      setAsk({
+                        kind: "move",
+                        index,
+                        outer: outer > 0 ? outer - 1 : null,
+                        plan: null,
+                        error: null,
+                      });
+                    }}
                     onFlags={(index) => setAsk({ kind: "flags", index, set: 0, clear: 0 })}
                     onRetype={(index) =>
                       setAsk({ kind: "retype", index, class: null, plan: null, error: null })
@@ -7020,6 +7351,34 @@ export default function AssetInspector({
             </AlertDialogContent>
           </AlertDialog>
 
+          <AlertDialog
+            open={edits.pendingMissing !== null}
+            onOpenChange={(open) => !open && edits.cancelMissing()}
+          >
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>An import points at nothing</AlertDialogTitle>
+                <AlertDialogDescription className="whitespace-pre-line">
+                  {edits.pendingMissing?.message}
+                  {"\n\n"}The game loads such an import as nothing, so whatever uses it finds
+                  nothing too. Add it anyway only if a mod loaded alongside this one provides it.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                <AlertDialogAction
+                  onClick={() => {
+                    const options = edits.pendingMissing?.options;
+                    void edits.save({ ...options, allowMissing: true });
+                  }}
+                  className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                >
+                  Add anyway
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
+
           {pkg && (
             <StructuralDialog
               ask={ask}
@@ -7030,6 +7389,7 @@ export default function AssetInspector({
               indexing={indexing}
               onBuildIndex={(index) => void buildIndex(index)}
               onRenamePlan={askRenamePlan}
+              onMovePlan={askMovePlan}
               onRetypePlan={askRetypePlan}
               onDependencyPlan={askDependencyPlan}
               onPastePlan={askPastePlan}

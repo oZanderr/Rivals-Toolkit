@@ -557,11 +557,63 @@ export interface SaveOptions {
   replace?: boolean;
   /** Save even though the asset no longer reads the way it did when the edits were made. */
   allowDrift?: boolean;
+  /** Save imports that point at a path neither the game nor an enabled mod has. */
+  allowMissing?: boolean;
   structural?: Structural;
 }
 
 /** How the backend's refusal of edits made against an older read of the asset begins. */
 const DRIFT = "The package changed since these edits were written";
+/** How the backend's refusal of an import pointed at nothing begins. */
+const MISSING = "Nothing is at the path these edits point at";
+
+/** What `check_object_path` found at a path. */
+export type ObjectCheck =
+  | { found: "found" }
+  | { found: "no_package" }
+  | { found: "no_object" }
+  | { found: "unchecked"; reason: string };
+
+/** Why a path is not safe to point an import at, or null when it is or has not been checked. */
+export function pathCheckText(check: ObjectCheck | null, path: string): string | null {
+  if (!check) return null;
+  const pkg = path.split(".")[0];
+  switch (check.found) {
+    case "no_package":
+      return `Neither the game nor an enabled mod has ${pkg}, so this import would load as nothing.`;
+    case "no_object":
+      return `${pkg} exports nothing by that name, so this import would load as nothing.`;
+    case "unchecked":
+      return `Not checked: ${check.reason}`;
+    default:
+      return null;
+  }
+}
+
+const OBJECT_PATH = /^\/[^.]+(\.[^.:]+(:[^.:]+)*)?$/;
+
+/** What is at `path`, asked a little after it stops changing. */
+export function usePathCheck(edits: AssetEdits, path: string | undefined): ObjectCheck | null {
+  const [result, setResult] = useState<{ path: string; check: ObjectCheck } | null>(null);
+  const { checkPath } = edits;
+  const text = path?.trim() ?? "";
+  useEffect(() => {
+    if (!OBJECT_PATH.test(text)) return;
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      checkPath(text)
+        .then((check) => {
+          if (!cancelled) setResult({ path: text, check });
+        })
+        .catch(() => undefined);
+    }, 400);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [checkPath, text]);
+  return result && result.path === text ? result.check : null;
+}
 
 /** Whether two container paths name the same file, whichever separators and case they use. */
 export function sameContainer(a: string, b: string): boolean {
@@ -621,6 +673,12 @@ export interface AssetEdits {
   /** Set when the asset no longer reads the way it did when the drafts were made. */
   pendingDrift: { message: string; structural?: Structural } | null;
   cancelDrift: () => void;
+  /** Set when an import the save adds or retargets points at nothing. Carries the options the
+   *  save was made with, so going ahead repeats it. */
+  pendingMissing: { message: string; options: SaveOptions } | null;
+  cancelMissing: () => void;
+  /** What is at an object path, looked up in the game and the enabled mods. */
+  checkPath: (path: string) => Promise<ObjectCheck>;
   /** The mod's own edited copy of this asset, when the chosen mod already holds one. */
   modCopy: string | null;
   /** Whether the inspector is reading that copy, so a save builds on it. */
@@ -644,6 +702,7 @@ interface Held {
   imports: Record<string, ImportDraft>;
   pendingReplace: { pak: string; structural?: Structural } | null;
   pendingDrift: { message: string; structural?: Structural } | null;
+  pendingMissing: { message: string; options: SaveOptions } | null;
 }
 
 const EMPTY: Record<string, DraftRecord> = {};
@@ -673,10 +732,11 @@ export function useAssetEdits({
     imports: NO_IMPORTS,
     pendingReplace: null,
     pendingDrift: null,
+    pendingMissing: null,
   });
   const [held, setHeld] = useState<Held>(fresh);
   const current: Held = held.scope === scope ? held : fresh();
-  const { drafts, imports: importDrafts, pendingReplace, pendingDrift } = current;
+  const { drafts, imports: importDrafts, pendingReplace, pendingDrift, pendingMissing } = current;
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -721,6 +781,7 @@ export function useAssetEdits({
                 imports: NO_IMPORTS,
                 pendingReplace: null,
                 pendingDrift: null,
+                pendingMissing: null,
               };
         return { ...base, ...change(base) };
       }),
@@ -801,6 +862,7 @@ export function useAssetEdits({
         imports: NO_IMPORTS,
         pendingReplace: null,
         pendingDrift: null,
+        pendingMissing: null,
       })),
     [update]
   );
@@ -887,6 +949,7 @@ export function useAssetEdits({
           replace: options?.replace ?? false,
           layer: onModCopy,
           allowDrift: options?.allowDrift ?? false,
+          allowMissing: options?.allowMissing ?? false,
           target: saveTarget,
           edits: list,
         });
@@ -901,6 +964,7 @@ export function useAssetEdits({
           imports: NO_IMPORTS,
           pendingReplace: null,
           pendingDrift: null,
+          pendingMissing: null,
         }));
         // Remembered only once it has actually been used, so a name typed and abandoned is not.
         invoke("set_asset_mod_name", { name }).catch(() => undefined);
@@ -914,6 +978,13 @@ export function useAssetEdits({
         const message = String(e);
         if (message.startsWith(DRIFT)) {
           update(() => ({ pendingDrift: { message, structural } }));
+          return;
+        }
+        if (message.startsWith(MISSING)) {
+          update(() => ({
+            pendingDrift: null,
+            pendingMissing: { message, options: { ...options, structural } },
+          }));
           return;
         }
         showNotice(message, "err");
@@ -948,6 +1019,12 @@ export function useAssetEdits({
   const count = Object.keys(drafts).length + Object.keys(importDrafts).length;
   const cancelReplace = useCallback(() => update(() => ({ pendingReplace: null })), [update]);
   const cancelDrift = useCallback(() => update(() => ({ pendingDrift: null })), [update]);
+  const cancelMissing = useCallback(() => update(() => ({ pendingMissing: null })), [update]);
+  const checkPath = useCallback(
+    (path: string) =>
+      invoke<ObjectCheck>("check_object_path", { gameRoot: gamePath, container, path }),
+    [gamePath, container]
+  );
 
   return {
     session,
@@ -965,6 +1042,9 @@ export function useAssetEdits({
     cancelReplace,
     pendingDrift,
     cancelDrift,
+    pendingMissing,
+    cancelMissing,
+    checkPath,
     modCopy,
     onModCopy,
     importDrafts,

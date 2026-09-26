@@ -55,6 +55,9 @@ pub struct EditList {
     /// Apply even where the package no longer matches `expect`. Set by the caller, never stored.
     #[serde(skip)]
     pub allow_drift: bool,
+    /// Save imports that point at nothing the game or an enabled mod has. Set by the caller.
+    #[serde(skip)]
+    pub allow_missing: bool,
 }
 
 /// New bytes for one bulk data resource, as a file to read them from.
@@ -170,6 +173,7 @@ impl EditList {
             field_sets: self.field_sets,
             expect: self.expect,
             allow_drift: self.allow_drift,
+            allow_missing: self.allow_missing,
         })
     }
 }

@@ -190,6 +190,8 @@ pub struct PackageEdits {
     pub expect: Expected,
     /// Patch even where the package no longer matches `expect`.
     pub allow_drift: bool,
+    /// Save imports that point at a path neither the game nor an enabled mod has.
+    pub allow_missing: bool,
 }
 
 /// A value for a field inside a struct that stores nothing yet or inside an element the same save
@@ -552,6 +554,7 @@ impl PackageEdits {
         self.field_sets.extend(other.field_sets);
         self.expect.merge(other.expect);
         self.allow_drift |= other.allow_drift;
+        self.allow_missing |= other.allow_missing;
     }
 
     /// Whether this asks for nothing at all, so a caller can refuse before reading the package.

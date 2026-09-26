@@ -619,10 +619,12 @@ pub(crate) async fn save_asset_edits(
     replace: Option<bool>,
     layer: Option<bool>,
     allow_drift: Option<bool>,
+    allow_missing: Option<bool>,
     target: Option<asset_edit::SaveTarget>,
     mut edits: asset_edit::json::EditList,
 ) -> Result<SaveResult, String> {
     edits.allow_drift = allow_drift.unwrap_or(false);
+    edits.allow_missing = allow_missing.unwrap_or(false);
     if crate::game_status::should_block_for_game() {
         return Err(crate::game_status::game_running_error());
     }

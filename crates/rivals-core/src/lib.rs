@@ -15,6 +15,7 @@ pub mod mappings;
 pub mod mod_report;
 pub mod mod_search;
 pub mod mods;
+pub mod object_check;
 pub mod pak;
 pub mod pak_tweaks;
 pub mod paths;

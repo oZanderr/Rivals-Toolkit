@@ -57,6 +57,9 @@ pub struct RemovalPlan {
     pub importers: Vec<Importers>,
     /// Whether an import index answered for `public`. Without one the warning stays generic.
     pub index_available: bool,
+    /// Other packages that name this package by path without importing the removed exports, so
+    /// may point at one softly, once an import index has been consulted.
+    pub mentioned_by: Vec<String>,
 }
 
 /// The packages importing one removed export.
@@ -67,8 +70,50 @@ pub struct Importers {
 }
 
 /// The generic wording an index replaces with names, and the wording of the names it puts there.
-const PUBLIC_WARNING: &str = "may be imported by other packages";
-const IMPORTED_WARNING: &str = "is imported by";
+pub(crate) const PUBLIC_WARNING: &str = "may be imported by other packages";
+pub(crate) const IMPORTED_WARNING: &str = "is imported by";
+
+/// The packages that name the package holding `paths` by path but import none of `importers`:
+/// a soft reference to one of `paths` needs the name, so these are every package that may hold
+/// one.
+pub(crate) fn mentions_of(
+    paths: &[String],
+    importers: &[Importers],
+    lookup: impl Fn(&str) -> Vec<String>,
+) -> Vec<String> {
+    let packages: BTreeSet<&str> = paths
+        .iter()
+        .map(|path| path.split('.').next().unwrap_or(path))
+        .collect();
+    let imported: BTreeSet<&String> = importers
+        .iter()
+        .flat_map(|importers| &importers.packages)
+        .collect();
+    let mut found: Vec<String> = packages
+        .into_iter()
+        .flat_map(lookup)
+        .filter(|package| !imported.contains(package))
+        .collect();
+    found.sort();
+    found.dedup();
+    found
+}
+
+/// The warning for packages that may point at a path softly, naming a few.
+pub(crate) fn mentions_warning(mentioned_by: &[String], consequence: &str) -> String {
+    let shown: Vec<&str> = mentioned_by.iter().take(3).map(String::as_str).collect();
+    let more = mentioned_by.len().saturating_sub(shown.len());
+    format!(
+        "{} other package(s) name this package by path, so may point at it softly and {consequence}: {}{}",
+        mentioned_by.len(),
+        shown.join(", "),
+        if more > 0 {
+            format!(" and {more} more")
+        } else {
+            String::new()
+        }
+    )
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RemovedExport {
@@ -130,6 +175,18 @@ impl RemovalPlan {
             ));
         }
         self.index_available = true;
+    }
+
+    /// Names the packages that may point at a removed export softly: those naming its package by
+    /// path without importing it.
+    pub fn resolve_mentions(&mut self, lookup: impl Fn(&str) -> Vec<String>) {
+        self.mentioned_by = mentions_of(&self.public, &self.importers, lookup);
+        if !self.mentioned_by.is_empty() {
+            self.warnings.push(mentions_warning(
+                &self.mentioned_by,
+                "then resolve to nothing",
+            ));
+        }
     }
 }
 
@@ -298,6 +355,7 @@ pub fn plan_removal(parsed: &ParsedPackage, requested: &[u32]) -> Result<Removal
         public,
         importers: Vec::new(),
         index_available: false,
+        mentioned_by: Vec::new(),
     })
 }
 
@@ -606,19 +664,30 @@ fn label_at(parsed: &ParsedPackage, export: &ParsedExport, at: u64) -> Option<St
     (!labels.is_empty()).then(|| labels.join("."))
 }
 
-/// Soft references in this export naming a removed object, labelled by export and property.
-fn soft_references(export: &ParsedExport, removed_paths: &BTreeSet<String>) -> Vec<String> {
+/// Soft references in this export naming one of `paths` or an object inside one, labelled by
+/// export and property: soft object values, and strings that hold an object path, which is how
+/// some soft paths are written.
+pub(crate) fn soft_references(export: &ParsedExport, paths: &BTreeSet<String>) -> Vec<String> {
+    let names = |text: &str| {
+        let text = text.to_ascii_lowercase();
+        paths.iter().any(|path| {
+            let path = path.to_ascii_lowercase();
+            text == path || text.starts_with(&format!("{path}:"))
+        })
+    };
     let mut found = Vec::new();
     let mut visit = |label: String, value: &PropertyValue| {
-        if let PropertyValue::SoftObject { path } = value
-            && removed_paths
-                .iter()
-                .any(|removed| removed.eq_ignore_ascii_case(path))
-        {
+        let text = match value {
+            PropertyValue::SoftObject { path } => path.as_str(),
+            PropertyValue::Str { value } if value.starts_with('/') => value.as_str(),
+            _ => return,
+        };
+        if names(text) {
             found.push(format!("{}.{label}", export.object_name));
         }
     };
     walk_values(&export.properties, "", &mut visit);
+    walk_values(&export.defaults, "defaults", &mut visit);
     if let Some(table) = &export.data_table {
         for row in &table.rows {
             walk_values(&row.fields, &row.name, &mut visit);
@@ -880,6 +949,118 @@ mod tests {
             plan.warnings
         );
         assert!(plan.importers[0].packages.is_empty());
+    }
+
+    fn soft(parsed: &mut ParsedPackage, name: &str, value: PropertyValue) {
+        parsed.exports[1].properties.push(PropertyEntry {
+            name: name.into(),
+            element: None,
+            value,
+            span: Some((HEADER as u64 + 26, HEADER as u64 + 30)),
+            slot: None,
+        });
+    }
+
+    /// A soft path to an object inside the one going, or one written as a string, is still a
+    /// soft reference to it; and a package that only names this one by path is listed apart from
+    /// the ones importing it.
+    #[test]
+    fn soft_references_to_subobjects_and_in_strings_are_found_and_namers_listed() {
+        let mut parsed = three();
+        parsed.exports[2].object_flags = RF_PUBLIC;
+        soft(
+            &mut parsed,
+            "Inner",
+            PropertyValue::SoftObject {
+                path: "/game/test.sub:Part".into(),
+            },
+        );
+        soft(
+            &mut parsed,
+            "Written",
+            PropertyValue::Str {
+                value: "/Game/Test.Sub".into(),
+            },
+        );
+        soft(
+            &mut parsed,
+            "Other",
+            PropertyValue::Str {
+                value: "/Game/Test.Subtle".into(),
+            },
+        );
+        let mut plan = plan_removal(&parsed, &[2]).expect("plan");
+        let soft = plan
+            .warnings
+            .iter()
+            .find(|w| w.contains("soft reference"))
+            .expect("a soft warning");
+        assert!(
+            soft.contains("Owner.Inner") && soft.contains("Owner.Written"),
+            "{soft}"
+        );
+        assert!(!soft.contains("Owner.Other"), "{soft}");
+
+        plan.resolve_importers(|_| vec!["Marvel/Content/User.uasset".into()]);
+        plan.resolve_mentions(|package| {
+            assert_eq!(package, "/Game/Test");
+            vec![
+                "Marvel/Content/User.uasset".into(),
+                "Marvel/Content/Namer.uasset".into(),
+            ]
+        });
+        assert_eq!(plan.mentioned_by, vec!["Marvel/Content/Namer.uasset"]);
+        assert!(
+            plan.warnings
+                .iter()
+                .any(|w| w.contains("1 other package(s) name")),
+            "{:?}",
+            plan.warnings
+        );
+    }
+
+    /// A rename leaves whatever named the old path behind: a soft reference in the package is
+    /// warned about, and the export's importers get the generic warning an index then replaces.
+    #[test]
+    fn a_rename_warns_about_what_still_names_the_old_path() {
+        let mut parsed = three();
+        parsed.exports[2].object_flags = RF_PUBLIC;
+        soft(
+            &mut parsed,
+            "Soft",
+            PropertyValue::SoftObject {
+                path: "/Game/Test.Sub".into(),
+            },
+        );
+        let mut plan = crate::export_edit::plan_export_edits_with(
+            &parsed,
+            &[crate::export_edit::ExportEdit::Rename {
+                export: 2,
+                name: "Renamed".into(),
+            }],
+            None,
+            &[],
+        )
+        .expect("plan");
+        assert!(plan.blockers.is_empty(), "{:?}", plan.blockers);
+        assert!(
+            plan.warnings
+                .iter()
+                .any(|w| w.contains("old path") && w.contains("Owner.Soft")),
+            "{:?}",
+            plan.warnings
+        );
+        assert!(
+            plan.warnings.iter().any(|w| w.contains(PUBLIC_WARNING)),
+            "{:?}",
+            plan.warnings
+        );
+        plan.resolve_importers(|_| Vec::new());
+        assert!(
+            !plan.warnings.iter().any(|w| w.contains(PUBLIC_WARNING)),
+            "{:?}",
+            plan.warnings
+        );
     }
 
     #[test]

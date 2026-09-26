@@ -150,6 +150,12 @@ Imports of native objects the game registers only at runtime (its `NePatchUtilit
 which Blueprint mod loaders call) are not in the game's script objects table, so a bundled list names
 them; `--script-objects PATH` adds a text file of further object paths, one per line.
 
+A save that adds an import, retargets one or points an object property at a new path first looks the
+path up in the game and the enabled IoStore mods. One that points at nothing is refused, since the
+game would load it as nothing; pass `--allow-missing` when a mod loaded alongside provides it.
+`asset export-edit` likewise refuses a rename or a move while other packages or soft references may
+still name the old path, until `--accept-warnings`.
+
 `asset script-set` changes one literal constant inside a function's bytecode, addressed by the
 statement offset `asset script` prints and which literal in that statement, and only at the width
 the old value took: an `IntConst` can become another integer, a string another string of the same

@@ -128,12 +128,19 @@ pub struct ExportEditPlan {
     pub importers: Vec<crate::remove::Importers>,
     /// Whether an index answered for `public`. Without one the warning stays generic.
     pub index_available: bool,
+    /// Other packages naming this package by path without importing the moved exports, so may
+    /// point at one softly, once an import index has been consulted.
+    pub mentioned_by: Vec<String>,
 }
 
 impl ExportEditPlan {
     /// Replaces the generic hash warning with what an index knows: the packages importing each
     /// export whose hash moves, and nothing at all for one nothing imports.
     pub fn resolve_importers(&mut self, lookup: impl Fn(&str) -> Vec<String>) {
+        self.warnings.retain(|warning| {
+            !warning.contains(crate::remove::PUBLIC_WARNING)
+                && !warning.contains(crate::remove::IMPORTED_WARNING)
+        });
         self.importers = self
             .public
             .iter()
@@ -166,6 +173,18 @@ impl ExportEditPlan {
             ));
         }
         self.index_available = true;
+    }
+
+    /// Names the packages that may point at a moved export softly: those naming its package by
+    /// path without importing it.
+    pub fn resolve_mentions(&mut self, lookup: impl Fn(&str) -> Vec<String>) {
+        self.mentioned_by = crate::remove::mentions_of(&self.public, &self.importers, lookup);
+        if !self.mentioned_by.is_empty() {
+            self.warnings.push(crate::remove::mentions_warning(
+                &self.mentioned_by,
+                "stop finding it at its old path",
+            ));
+        }
     }
 }
 
@@ -436,6 +455,28 @@ pub fn plan_export_edits_with(
     plan.repathed.dedup();
     plan.public.sort();
     plan.public.dedup();
+    // Whatever still names an old path, here or elsewhere, stops finding the object.
+    let old: std::collections::BTreeSet<String> =
+        plan.repathed.iter().map(|(was, _)| was.clone()).collect();
+    let soft: Vec<String> = parsed
+        .exports
+        .iter()
+        .flat_map(|export| crate::remove::soft_references(export, &old))
+        .collect();
+    if !soft.is_empty() {
+        plan.warnings.push(format!(
+            "soft reference(s) still name the old path and will resolve to nothing: {}",
+            soft.join(", ")
+        ));
+    }
+    if !plan.public.is_empty() {
+        plan.warnings.push(format!(
+            "{} {}, which would stop finding {}",
+            plan.public.join(", "),
+            crate::remove::PUBLIC_WARNING,
+            if plan.public.len() == 1 { "it" } else { "them" }
+        ));
+    }
     Ok(plan)
 }
 

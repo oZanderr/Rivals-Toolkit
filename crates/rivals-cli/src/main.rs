@@ -75,6 +75,11 @@ struct Cli {
     #[arg(long, global = true)]
     layer: bool,
 
+    /// Save edits that point an import or an object reference at a path neither the game nor an
+    /// enabled mod has, for an asset something loaded alongside provides.
+    #[arg(long, global = true)]
+    allow_missing: bool,
+
     /// The language texts are shown in, as the game names it (`en`, `ja`, `zh-hans`, ...).
     /// Defaults to the app's setting, then English.
     #[arg(long, global = true, value_name = "CULTURE")]
@@ -1689,6 +1694,7 @@ fn asset_request<'a>(
             .or(app.asset_save_target)
             .unwrap_or_default(),
         layer: cli.layer,
+        allow_missing: cli.allow_missing,
     }
 }
 
@@ -1845,6 +1851,10 @@ struct ExportEditArgs {
     #[arg(long)]
     dry_run: bool,
 
+    /// Go ahead although the plan carries warnings, such as packages still naming the old path.
+    #[arg(long)]
+    accept_warnings: bool,
+
     /// Mod to write into. Defaults to the name the desktop app last saved into.
     #[arg(long, value_name = "NAME")]
     mod_name: Option<String>,
@@ -1934,6 +1944,12 @@ fn asset_export_edit(
         } else {
             Ok(())
         };
+    }
+    if !plan.warnings.is_empty() && !args.accept_warnings {
+        return Err(format!(
+            "these changes are not known to be safe:\n  {}\nPass --accept-warnings to go ahead, or --dry-run to see the whole plan.",
+            plan.warnings.join("\n  ")
+        ));
     }
     if !cli.force && rivals_core::game_status::should_block_for_game() {
         return Err(rivals_core::game_status::game_running_error());
@@ -2308,6 +2324,7 @@ fn asset_apply(
             replace: args.replace,
             layer: cli.layer,
             allow_drift: args.allow_drift,
+            allow_missing: cli.allow_missing,
             dry_run: args.dry_run,
             target: cli.target.map(Into::into).or(app.asset_save_target),
         },
