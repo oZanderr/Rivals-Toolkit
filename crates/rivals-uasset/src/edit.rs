@@ -4991,7 +4991,149 @@ pub fn verify_patch(
             }
         }
     }
+    verify_unique_keys(before, after, edits, applied)
+}
+
+/// A set or a map the save touched must not hold one key twice where it did not already: the
+/// loader keeps both, and which one a lookup finds is left to chance. A key repeats through a set
+/// element given another's value, or a field edited inside a struct key.
+fn verify_unique_keys(
+    before: &ParsedPackage,
+    after: &ParsedPackage,
+    edits: &PackageEdits,
+    applied: &[AppliedEdit],
+) -> Result<(), String> {
+    for (edit, done) in edits.values.iter().zip(applied) {
+        let Some(now) = keyed_container(
+            after,
+            done.offset_after,
+            &edit.expect_name,
+            edit.expect_element,
+        ) else {
+            continue;
+        };
+        let Some((first, second)) = repeated_key(&now.value) else {
+            continue;
+        };
+        if keyed_container(before, edit.offset, &edit.expect_name, edit.expect_element)
+            .is_some_and(|was| repeated_key(&was.value).is_some())
+        {
+            continue;
+        }
+        return Err(format!(
+            "{} would hold the same key twice, at {first} and {second}; a set or map keeps each \
+             key once",
+            now.label()
+        ));
+    }
     Ok(())
+}
+
+/// The set or map an edit decides a key of: the one it addresses, or the innermost one whose key
+/// holds the value it addresses.
+fn keyed_container<'a>(
+    parsed: &'a ParsedPackage,
+    offset: u64,
+    name: &str,
+    element: Option<u32>,
+) -> Option<&'a PropertyEntry> {
+    if let Some(entry) = find_at(parsed, offset, name, element)
+        && matches!(
+            entry.value,
+            PropertyValue::Set { .. } | PropertyValue::Map { .. }
+        )
+    {
+        return Some(entry);
+    }
+    parsed.exports.iter().find_map(|export| {
+        keyed_holder(&export.properties, offset, name, element).or_else(|| {
+            export.data_table.as_ref().and_then(|table| {
+                table
+                    .rows
+                    .iter()
+                    .find_map(|row| keyed_holder(&row.fields, offset, name, element))
+            })
+        })
+    })
+}
+
+fn keyed_holder<'a>(
+    entries: &'a [PropertyEntry],
+    offset: u64,
+    name: &str,
+    element: Option<u32>,
+) -> Option<&'a PropertyEntry> {
+    entries.iter().find_map(|entry| {
+        let keys: Vec<&PropertyValue> = match &entry.value {
+            PropertyValue::Set { items } => items.iter().collect(),
+            PropertyValue::Map { entries } => entries.iter().map(|pair| &pair.key).collect(),
+            _ => Vec::new(),
+        };
+        let inside = |value: &'a PropertyValue| keyed_holder_in(value, offset, name, element);
+        let deeper = match &entry.value {
+            PropertyValue::Struct { fields, .. } => keyed_holder(fields, offset, name, element),
+            PropertyValue::Array { items } | PropertyValue::Set { items } => {
+                items.iter().find_map(inside)
+            }
+            PropertyValue::Map { entries } => entries
+                .iter()
+                .find_map(|pair| inside(&pair.key).or_else(|| inside(&pair.value))),
+            _ => None,
+        };
+        deeper.or_else(|| {
+            keys.iter()
+                .any(|key| find_in_value(key, offset, name, element).is_some())
+                .then_some(entry)
+        })
+    })
+}
+
+fn keyed_holder_in<'a>(
+    value: &'a PropertyValue,
+    offset: u64,
+    name: &str,
+    element: Option<u32>,
+) -> Option<&'a PropertyEntry> {
+    match value {
+        PropertyValue::Struct { fields, .. } => keyed_holder(fields, offset, name, element),
+        PropertyValue::Array { items } | PropertyValue::Set { items } => items
+            .iter()
+            .find_map(|item| keyed_holder_in(item, offset, name, element)),
+        PropertyValue::Map { entries } => entries.iter().find_map(|pair| {
+            keyed_holder_in(&pair.key, offset, name, element)
+                .or_else(|| keyed_holder_in(&pair.value, offset, name, element))
+        }),
+        _ => None,
+    }
+}
+
+/// The first two positions holding the same key in a set or map.
+fn repeated_key(container: &PropertyValue) -> Option<(usize, usize)> {
+    let keys: Vec<&PropertyValue> = match container {
+        PropertyValue::Set { items } => items.iter().collect(),
+        PropertyValue::Map { entries } => entries.iter().map(|pair| &pair.key).collect(),
+        _ => return None,
+    };
+    (0..keys.len()).find_map(|first| {
+        (first + 1..keys.len())
+            .find(|&second| same_key(keys[first], keys[second]))
+            .map(|second| (first, second))
+    })
+}
+
+/// Whether two keys are the same key, wherever each sits: fields by name, floats exactly, the rest
+/// as they read.
+fn same_key(a: &PropertyValue, b: &PropertyValue) -> bool {
+    match (a, b) {
+        (PropertyValue::Float { value: x }, PropertyValue::Float { value: y }) => x == y,
+        (PropertyValue::Struct { fields: x, .. }, PropertyValue::Struct { fields: y, .. }) => {
+            x.len() == y.len()
+                && x.iter().zip(y).all(|(p, q)| {
+                    p.name == q.name && p.element == q.element && same_key(&p.value, &q.value)
+                })
+        }
+        _ => same_copy_value(a, b, &std::collections::BTreeMap::new()).is_ok(),
+    }
 }
 
 /// An add or a drop is only right if the container really holds the number of elements the edit
@@ -5614,12 +5756,17 @@ fn encode(value: &PropertyValue, text: &str, target: Target<'_>) -> Result<Vec<u
     {
         // An enum slot stores its underlying integer; a typed enumerator name becomes that first.
         let resolved;
-        let text = if enum_type.is_some() && text.trim().parse::<i64>().is_err() {
-            resolved =
-                enumerator_value(target.enums, enum_type.as_deref(), text.trim())?.to_string();
-            resolved.as_str()
-        } else {
-            text
+        let text = match text.trim().parse::<i64>() {
+            Err(_) if enum_type.is_some() => {
+                resolved =
+                    enumerator_value(target.enums, enum_type.as_deref(), text.trim())?.to_string();
+                resolved.as_str()
+            }
+            Ok(number) => {
+                check_enum_number(target.enums, enum_type.as_deref(), number)?;
+                text
+            }
+            Err(_) => text,
         };
         return encode_declared(declared, text, target);
     }
@@ -5632,9 +5779,12 @@ fn encode(value: &PropertyValue, text: &str, target: Target<'_>) -> Result<Vec<u
             };
             return Ok(encode_name(&name, &mut target.tables.names));
         }
-        if text.parse::<i64>().is_err() {
-            let number = enumerator_value(target.enums, enum_type.as_deref(), text)?;
-            return encode_scalar(value, &number.to_string(), target.width, target.declared);
+        match text.parse::<i64>() {
+            Ok(number) => check_enum_number(target.enums, enum_type.as_deref(), number)?,
+            Err(_) => {
+                let number = enumerator_value(target.enums, enum_type.as_deref(), text)?;
+                return encode_scalar(value, &number.to_string(), target.width, target.declared);
+            }
         }
     }
     match value {
@@ -5650,6 +5800,36 @@ fn encode(value: &PropertyValue, text: &str, target: Target<'_>) -> Result<Vec<u
         }
         _ => encode_scalar(value, text, target.width, target.declared),
     }
+}
+
+/// A number typed for an enum has to be one of its values, where the mappings know the enum:
+/// anything else is written as a value no enumerator stands for.
+fn check_enum_number(
+    mappings: Option<&Mappings>,
+    enum_type: Option<&str>,
+    number: i64,
+) -> Result<(), String> {
+    /// Enough of a long enum to show what its values look like.
+    const LISTED: usize = 12;
+    let (Some(mappings), Some(enum_type)) = (mappings, enum_type) else {
+        return Ok(());
+    };
+    let values = mappings.enumerators(enum_type);
+    if values.is_empty() || values.iter().any(|(value, _)| *value == number) {
+        return Ok(());
+    }
+    let mut listed: Vec<String> = values
+        .iter()
+        .take(LISTED)
+        .map(|(value, name)| format!("{name} ({value})"))
+        .collect();
+    if values.len() > LISTED {
+        listed.push(format!("and {} more", values.len() - LISTED));
+    }
+    Err(format!(
+        "{enum_type} has no value {number}; its values are {}",
+        listed.join(", ")
+    ))
 }
 
 /// The number behind an enumerator name, through the mappings; refused by name when unknown.

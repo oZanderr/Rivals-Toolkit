@@ -1085,3 +1085,69 @@ fn a_preview_reaches_a_field_three_structs_down() {
     let leaf = level(&level3, "Level3");
     assert!(is_absent(find(&leaf, "Leaf")), "{leaf:?}");
 }
+
+/// A set element given another's value would hold that key twice, which the check after the
+/// patch refuses; a new value of its own is fine.
+#[test]
+fn a_set_element_given_anothers_value_is_refused() {
+    let (asset, exports) = tagged_package();
+    let before = parse(&asset, &exports);
+    let names = find(top(&before), "Names");
+    let verified = |text: &str| {
+        let changes = PackageEdits {
+            values: vec![edit_of(
+                names,
+                EditOp::SetElement {
+                    index: 1,
+                    text: text.into(),
+                },
+            )],
+            ..Default::default()
+        };
+        let bundle = AssetBundle {
+            asset: &asset,
+            exports: &exports,
+        };
+        let patched = patch_package(&bundle, &before, &changes, None).expect("patch");
+        let after = parse(&patched.asset, &patched.exports);
+        verify_patch(&before, &after, &changes, &patched.applied)
+    };
+    let err = verified("Foo").expect_err("a repeated key");
+    assert!(err.contains("same key twice, at 0 and 1"), "{err}");
+    verified("Tag").expect("a key of its own");
+}
+
+/// A field edited inside a struct set element can make it equal another element, which is the
+/// same repeated key reached another way.
+#[test]
+fn a_struct_key_edited_into_another_is_refused() {
+    let (asset, exports) = holder_package();
+    let mappings = holder_mappings();
+    let (_, asset, exports) = apply_declared(&asset, &exports, Some(&mappings), |p| {
+        vec![edit_of(
+            find(holder(p), "Structs"),
+            EditOp::Insert {
+                index: 1,
+                key: None,
+            },
+        )]
+    })
+    .expect("a default element");
+    let second_x = |p: &ParsedPackage| match &find(holder(p), "Structs").value {
+        PropertyValue::Set { items } => match &items[1] {
+            PropertyValue::Struct { fields, .. } => find(fields, "X").clone(),
+            other => panic!("{other:?}"),
+        },
+        other => panic!("{other:?}"),
+    };
+    let Err(err) = apply_declared(&asset, &exports, Some(&mappings), |p| {
+        vec![edit_of(&second_x(p), set("7"))]
+    }) else {
+        panic!("a repeated key");
+    };
+    assert!(err.contains("same key twice"), "{err}");
+    apply_declared(&asset, &exports, Some(&mappings), |p| {
+        vec![edit_of(&second_x(p), set("8"))]
+    })
+    .expect("a key of its own");
+}

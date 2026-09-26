@@ -7006,6 +7006,73 @@ mod game_data_tests {
         }
     }
 
+    /// A number typed for an enum has to be one of its values, stored or unset: one no enumerator
+    /// stands for is refused with the values it could be, and a real one reads back by its name.
+    #[test]
+    fn an_enum_number_outside_its_values_is_refused() {
+        let Some(fixture) = Fixture::open(TEXTURE) else {
+            return;
+        };
+        let parsed = fixture.parse();
+        let properties = &export_at(&parsed, 0).properties;
+        let stored = find_field(properties, &|f| {
+            f.name == "CompressionSettings" && matches!(f.value, PropertyValue::Enum { .. })
+        })
+        .expect("a stored enum");
+        let unset = find_field(properties, &|f| {
+            matches!(
+                f.value,
+                PropertyValue::Unset {
+                    enum_type: Some(_),
+                    ..
+                }
+            )
+        })
+        .expect("an unset enum");
+        let set = |field: &PropertyEntry, text: &str| {
+            preview_edits(
+                &fixture.request_changes(PackageEdits {
+                    values: vec![edit_of(field, EditOp::Set { text: text.into() })],
+                    ..Default::default()
+                }),
+                Some(&fixture.schema),
+            )
+        };
+        for field in [stored, unset] {
+            let Err(error) = set(field, "9999") else {
+                panic!("{} took 9999", field.name);
+            };
+            assert!(error.contains("has no value 9999"), "{error}");
+        }
+
+        let enum_type = match &stored.value {
+            PropertyValue::Enum {
+                enum_type: Some(enum_type),
+                ..
+            } => enum_type.clone(),
+            other => panic!("{other:?}"),
+        };
+        let number = fixture
+            .schema
+            .enum_value(&enum_type, "TC_Default")
+            .expect("TC_Default");
+        let (_, reread) = fixture.apply(vec![edit_of(
+            stored,
+            EditOp::Set {
+                text: number.to_string(),
+            },
+        )]);
+        let after = find_field(&export_at(&reread, 0).properties, &|f| {
+            f.name == "CompressionSettings"
+        })
+        .expect("the field after");
+        assert!(
+            matches!(&after.value, PropertyValue::Enum { name: Some(n), .. } if n == "TC_Default"),
+            "{:?}",
+            after.value
+        );
+    }
+
     /// A map that already holds pairs grows by a pair under the key typed for it, written in the
     /// key's own kind, and the new pair reads back under that key.
     #[test]
