@@ -77,8 +77,8 @@ pub enum PropertyValue {
     Text {
         #[serde(skip_serializing_if = "Option::is_none")]
         value: Option<String>,
-        /// The pieces a formatted, dated or transformed text is built from, each editable on its
-        /// own where the text as a whole is not.
+        /// The pieces a transformed or string table text is built from, each editable on its own
+        /// where the text as a whole is not.
         #[serde(skip_serializing_if = "Vec::is_empty")]
         parts: Vec<PropertyEntry>,
     },

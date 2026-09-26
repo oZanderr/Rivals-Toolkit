@@ -1344,8 +1344,9 @@ fn read_count(cursor: &mut Cursor<'_>, what: &str) -> Result<usize, String> {
     Ok(count)
 }
 
-/// `ETextHistoryType` decides the payload. Only the shapes verified against real assets are
-/// decoded; the rest fail by name so the audit can rank what is worth adding.
+/// `ETextHistoryType` decides the payload. Only the histories Rivals' packages use are decoded:
+/// none, base, number, transform and string table. The rest fail by name so the audit can rank
+/// them if one ever appears.
 fn read_text(
     cursor: &mut Cursor<'_>,
     ctx: &Ctx<'_>,
@@ -1372,78 +1373,20 @@ fn read_text(
             let _key = cursor.read_string()?;
             Some(cursor.read_string()?)
         }
-        // NamedFormat, OrderedFormat and ArgumentFormat: the pattern text, then the arguments as a
-        // map by name, a plain list, or a list of name and value records. The three share one
-        // shape here, an ordered list without a name for the plain one.
-        1..=3 => {
-            let source = text_part(cursor, ctx, diagnostics, depth, "SourceFmt", &mut parts)?;
-            let count = cursor.read_i32()?;
-            if count < 0 || count as usize > cursor.remaining() {
-                return Err(cursor.err(format!("implausible text format argument count {count}")));
-            }
-            for index in 0..count {
-                let start = cursor.file_offset();
-                let mut fields = Vec::new();
-                if history != 2 {
-                    fields.push(spanned(cursor, "Name", string_value)?);
-                }
-                fields.push(format_argument_part(cursor, ctx, diagnostics, depth)?);
-                parts.push(PropertyEntry {
-                    name: "Arguments".to_string(),
-                    element: Some(index as u32),
-                    value: PropertyValue::Struct {
-                        name: "FormatArgument".to_string(),
-                        fields,
-                    },
-                    span: Some((start, cursor.file_offset())),
-                    slot: None,
-                });
-            }
-            source
-        }
-        // AsDate, AsTime and AsDateTime: the ticks, the style bytes the kind takes, the time zone
-        // and the culture.
-        7..=9 => {
-            let ticks = spanned(cursor, "SourceDateTime", |c| {
-                Ok(PropertyValue::Int {
-                    value: c.read_i64()?,
-                })
-            })?;
-            let shown = format!("{} of {}", history_name(history), ticks.value.summary());
-            parts.push(ticks);
-            if history != 8 {
-                parts.push(spanned(cursor, "DateStyle", byte_value)?);
-            }
-            if history != 7 {
-                parts.push(spanned(cursor, "TimeStyle", byte_value)?);
-            }
-            parts.push(spanned(cursor, "TimeZone", string_value)?);
-            parts.push(spanned(cursor, "TargetCulture", string_value)?);
-            Some(shown)
-        }
         10 => {
             let source = text_part(cursor, ctx, diagnostics, depth, "SourceText", &mut parts)?;
             parts.push(spanned(cursor, "TransformType", byte_value)?);
             source
         }
-        // AsNumber, AsPercent and AsCurrency share `FTextHistory_FormatNumber`: the source value,
-        // a full-word flag for the formatting options, the options, then the culture name.
-        4..=6 => {
-            let currency = if history == 6 {
-                Some(cursor.read_string()?)
-            } else {
-                None
-            };
+        // AsNumber, `FTextHistory_FormatNumber`: the source value, a full-word flag for the
+        // formatting options, the options, then the culture name.
+        4 => {
             let source = read_format_argument(cursor, ctx, diagnostics, depth + 1)?;
             if cursor.read_bool32()? {
                 cursor.skip(NUMBER_FORMATTING_OPTIONS_BYTES)?;
             }
             let _culture = cursor.read_string()?;
-            Some(match (history, currency) {
-                (5, _) => format!("{source} as percent"),
-                (_, Some(code)) => format!("{code} {source}"),
-                _ => source,
-            })
+            Some(source)
         }
         11 => {
             let table = spanned(cursor, "TableId", |c| {
@@ -1484,34 +1427,6 @@ fn text_part(
     };
     parts.push(part);
     Ok(shown)
-}
-
-/// `FFormatArgumentValue` as a part: the type byte stays out of the span, so an edit writes the
-/// value in the type the argument already has.
-fn format_argument_part(
-    cursor: &mut Cursor<'_>,
-    ctx: &Ctx<'_>,
-    diagnostics: &mut Diagnostics,
-    depth: u32,
-) -> Result<PropertyEntry, String> {
-    let kind = cursor.read_i8()?;
-    spanned(cursor, "Value", |c| match kind {
-        0 => Ok(PropertyValue::Int {
-            value: c.read_i64()?,
-        }),
-        1 => Ok(PropertyValue::UInt {
-            value: c.read_u64()?,
-        }),
-        2 => Ok(PropertyValue::Float {
-            value: f64::from(c.read_f32()?),
-        }),
-        3 => Ok(PropertyValue::Float {
-            value: c.read_f64()?,
-        }),
-        4 => read_text(c, ctx, diagnostics, depth + 1),
-        5 => byte_value(c),
-        other => Err(c.err(format!("unknown FText format argument type {other}"))),
-    })
 }
 
 fn string_value(cursor: &mut Cursor<'_>) -> Result<PropertyValue, String> {
@@ -2096,95 +2011,9 @@ mod tests {
         }
     }
 
-    /// The three format histories share one shape: the pattern, then the arguments, named for
-    /// the map and record forms and plain for the ordered one. Every value keeps its own span and
-    /// type, the type byte staying outside it.
+    /// The transform and string table histories expose their pieces as parts.
     #[test]
-    fn format_texts_read_their_pattern_and_typed_arguments_as_parts() {
-        let mut body = invariant("{N} items");
-        body.extend_from_slice(&1i32.to_le_bytes());
-        fstring(&mut body, "N");
-        body.push(0);
-        body.extend_from_slice(&5i64.to_le_bytes());
-        let data = text_bytes(1, &body);
-        let (value, consumed) = read_one(&PropertyInner::Text, &data).expect("named");
-        assert_eq!(consumed, data.len());
-        let (shown, parts) = parts_of(value);
-        assert_eq!(shown.as_deref(), Some("{N} items"));
-        assert_eq!(parts.len(), 2);
-        assert_eq!(parts[0].name, "SourceFmt");
-        assert_eq!(parts[0].span, Some((5, 5 + 4 + 1 + 4 + 4 + 10)));
-        assert_eq!(
-            (parts[1].name.as_str(), parts[1].element),
-            ("Arguments", Some(0))
-        );
-        let PropertyValue::Struct { fields, .. } = &parts[1].value else {
-            panic!("an argument record");
-        };
-        assert!(matches!(&fields[0].value, PropertyValue::Str { value } if value == "N"));
-        assert!(matches!(fields[1].value, PropertyValue::Int { value: 5 }));
-        let (start, end) = fields[1].span.expect("value span");
-        assert_eq!(end - start, 8, "the type byte stays outside the value");
-
-        let mut body = invariant("x");
-        body.extend_from_slice(&2i32.to_le_bytes());
-        body.push(3);
-        body.extend_from_slice(&2.5f64.to_le_bytes());
-        body.push(5);
-        body.push(1);
-        let data = text_bytes(2, &body);
-        let (value, consumed) = read_one(&PropertyInner::Text, &data).expect("ordered");
-        assert_eq!(consumed, data.len());
-        let (_, parts) = parts_of(value);
-        assert_eq!(parts.len(), 3);
-        let PropertyValue::Struct { fields, .. } = &parts[1].value else {
-            panic!("an argument record");
-        };
-        assert_eq!(fields.len(), 1, "an ordered argument has no name");
-        assert!(matches!(fields[0].value, PropertyValue::Float { value } if value == 2.5));
-        let PropertyValue::Struct { fields, .. } = &parts[2].value else {
-            panic!("an argument record");
-        };
-        assert!(matches!(fields[0].value, PropertyValue::Byte { value: 1 }));
-
-        let mut body = invariant("{A}");
-        body.extend_from_slice(&1i32.to_le_bytes());
-        fstring(&mut body, "A");
-        body.push(4);
-        body.extend_from_slice(&invariant("hi"));
-        let data = text_bytes(3, &body);
-        let (value, consumed) = read_one(&PropertyInner::Text, &data).expect("argument data");
-        assert_eq!(consumed, data.len());
-        let (_, parts) = parts_of(value);
-        let PropertyValue::Struct { fields, .. } = &parts[1].value else {
-            panic!("an argument record");
-        };
-        assert!(
-            matches!(&fields[1].value, PropertyValue::Text { value: Some(text), .. } if text == "hi")
-        );
-    }
-
-    /// A dated text is its ticks, the style bytes its kind takes, a time zone and a culture, each
-    /// a part; the transform and string table histories expose their pieces the same way.
-    #[test]
-    fn dated_transformed_and_table_texts_read_their_pieces_as_parts() {
-        for (history, styles) in [(7i8, 1usize), (8, 1), (9, 2)] {
-            let mut body = 638_000_000_000_000_000i64.to_le_bytes().to_vec();
-            body.extend(std::iter::repeat_n(2u8, styles));
-            fstring(&mut body, "UTC");
-            fstring(&mut body, "en");
-            let data = text_bytes(history, &body);
-            let (value, consumed) = read_one(&PropertyInner::Text, &data).expect("dated");
-            assert_eq!(consumed, data.len(), "history {history}");
-            let (shown, parts) = parts_of(value);
-            assert!(shown.is_some_and(|s| s.contains("638000000000000000")));
-            assert_eq!(parts.len(), 3 + styles);
-            assert_eq!(parts[0].name, "SourceDateTime");
-            assert!(
-                matches!(&parts[parts.len() - 1].value, PropertyValue::Str { value } if value == "en")
-            );
-        }
-
+    fn transformed_and_table_texts_read_their_pieces_as_parts() {
         let mut body = invariant("shout");
         body.push(2);
         let data = text_bytes(10, &body);
@@ -2290,8 +2119,16 @@ mod tests {
 
     #[test]
     fn unsupported_text_histories_are_named_so_the_audit_can_rank_them() {
-        assert_eq!(history_name(1), "NamedFormat");
-        assert_eq!(history_name(4), "AsNumber");
+        for (history, name) in [(1i8, "NamedFormat"), (5, "AsPercent"), (9, "AsDateTime")] {
+            let error = read_one(&PropertyInner::Text, &text_bytes(history, &[0; 16]))
+                .expect_err("not read");
+            assert!(
+                error.contains(&format!(
+                    "unsupported FText history type {history} ({name})"
+                )),
+                "{error}"
+            );
+        }
         assert_eq!(history_name(99), "unknown");
     }
 

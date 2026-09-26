@@ -6095,7 +6095,7 @@ fn encode_text(text: &str, was: &[u8]) -> Result<Vec<u8>, String> {
         }
         // AsNumber, AsPercent and AsCurrency: only the source value changes; the formatting
         // options and the culture are copied through.
-        4..=6 => return encode_formatted_number(text, was, history),
+        4 => return encode_formatted_number(text, was),
         other => {
             return Err(format!(
                 "text with history type {other} cannot be edited yet"
@@ -6106,23 +6106,11 @@ fn encode_text(text: &str, was: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 /// `FTextHistory_FormatNumber` holds the number it formats as a typed `FFormatArgumentValue`, so
-/// the typed text is parsed in that argument's own type and written over the value alone. A
-/// currency may be retyped as `CODE value`; a percent may keep its `as percent` suffix.
-fn encode_formatted_number(text: &str, was: &[u8], history: i8) -> Result<Vec<u8>, String> {
+/// the typed text is parsed in that argument's own type and written over the value alone.
+fn encode_formatted_number(text: &str, was: &[u8]) -> Result<Vec<u8>, String> {
     let mut out = was[..5].to_vec();
     let mut at = 5usize;
     let text = text.trim();
-    let mut text = text.strip_suffix("as percent").map_or(text, str::trim_end);
-    if history == 6 {
-        let code = take_string(was, &mut at)?;
-        match text.split_once(char::is_whitespace) {
-            Some((first, rest)) if first.parse::<f64>().is_err() => {
-                out.extend_from_slice(&encode_string(first));
-                text = rest.trim_start();
-            }
-            _ => out.extend_from_slice(code),
-        }
-    }
     let kind = *was
         .get(at)
         .ok_or("this text ends before its source value")? as i8;
@@ -6179,25 +6167,15 @@ fn parse_number<T: std::str::FromStr>(text: &str, wanted: &str) -> Result<T, Str
         .map_err(|_| format!("{text} is not {wanted}"))
 }
 
-/// A formatted number displays with its currency code or `as percent` around the value, so the
-/// value is compared on its own, as a number when both sides parse as one.
+/// A formatted number is compared as a number when both sides parse as one, so `3.0` reads back
+/// as the `3` it displays.
 fn formatted_number_reads_back(shown: &str, typed: &str) -> bool {
-    fn split(text: &str) -> (&str, &str) {
-        let text = text.trim();
-        let text = text.strip_suffix("as percent").map_or(text, str::trim_end);
-        match text.rsplit_once(char::is_whitespace) {
-            Some((code, value)) => (code.trim(), value),
-            None => ("", text),
-        }
-    }
-    let (shown_code, shown_value) = split(shown);
-    let (typed_code, typed_value) = split(typed);
-    let same_value = shown_value == typed_value
+    let (shown, typed) = (shown.trim(), typed.trim());
+    shown == typed
         || matches!(
-            (shown_value.parse::<f64>(), typed_value.parse::<f64>()),
+            (shown.parse::<f64>(), typed.parse::<f64>()),
             (Ok(a), Ok(b)) if a == b
-        );
-    same_value && (typed_code.is_empty() || typed_code == shown_code)
+        )
 }
 
 /// The bytes of one FString starting at `at`, advancing past it.
@@ -7057,14 +7035,11 @@ mod tests {
         assert_eq!(&out[9..], &encode_string("hello")[..]);
     }
 
-    /// `FTextHistory_FormatNumber` as UE writes it: flags, history, an optional currency code, the
-    /// argument's type byte and value, the options flag with its block, then the culture.
-    fn formatted_number(history: i8, code: Option<&str>, kind: i8, value: &[u8]) -> Vec<u8> {
+    /// `FTextHistory_FormatNumber` as UE writes it for AsNumber: flags, history, the argument's type
+    /// byte and value, the options flag with its block, then the culture.
+    fn formatted_number(kind: i8, value: &[u8]) -> Vec<u8> {
         let mut was = vec![0u8; 4];
-        was.push(history as u8);
-        if let Some(code) = code {
-            was.extend_from_slice(&encode_string(code));
-        }
+        was.push(4);
         was.push(kind as u8);
         was.extend_from_slice(value);
         was.extend_from_slice(&1u32.to_le_bytes());
@@ -7077,46 +7052,33 @@ mod tests {
     /// untouched, and the value is written in the argument's own type.
     #[test]
     fn editing_a_formatted_number_rewrites_only_its_source_value() {
-        let was = formatted_number(4, None, 3, &2.0f64.to_le_bytes());
+        let was = formatted_number(3, &2.0f64.to_le_bytes());
         let out = encode_text("3", &was).expect("encode");
-        assert_eq!(out, formatted_number(4, None, 3, &3.0f64.to_le_bytes()));
+        assert_eq!(out, formatted_number(3, &3.0f64.to_le_bytes()));
 
-        let was = formatted_number(4, None, 0, &(-4i64).to_le_bytes());
+        let was = formatted_number(0, &(-4i64).to_le_bytes());
         assert_eq!(
             encode_text("12", &was).expect("encode"),
-            formatted_number(4, None, 0, &12i64.to_le_bytes())
+            formatted_number(0, &12i64.to_le_bytes())
         );
         let error = encode_text("1.5", &was).expect_err("refused");
         assert!(error.contains("not a whole number"), "{error}");
 
-        let was = formatted_number(5, None, 2, &0.25f32.to_le_bytes());
+        let was = formatted_number(2, &0.25f32.to_le_bytes());
         assert_eq!(
-            encode_text("0.5 as percent", &was).expect("encode"),
-            formatted_number(5, None, 2, &0.5f32.to_le_bytes())
+            encode_text("0.5", &was).expect("encode"),
+            formatted_number(2, &0.5f32.to_le_bytes())
         );
 
-        let was = formatted_number(6, Some("USD"), 3, &9.0f64.to_le_bytes());
-        assert_eq!(
-            encode_text("EUR 10", &was).expect("encode"),
-            formatted_number(6, Some("EUR"), 3, &10.0f64.to_le_bytes())
-        );
-        assert_eq!(
-            encode_text("11", &was).expect("encode"),
-            formatted_number(6, Some("USD"), 3, &11.0f64.to_le_bytes())
-        );
-
-        let was = formatted_number(4, None, 4, &[]);
+        let was = formatted_number(4, &[]);
         let error = encode_text("3", &was).expect_err("refused");
         assert!(error.contains("formats another text"), "{error}");
     }
 
     #[test]
-    fn a_formatted_number_reads_back_around_its_decoration() {
+    fn a_formatted_number_reads_back_as_a_number() {
         assert!(formatted_number_reads_back("3", "3.0"));
-        assert!(formatted_number_reads_back("0.5 as percent", "0.5"));
-        assert!(formatted_number_reads_back("EUR 10", "EUR 10"));
-        assert!(formatted_number_reads_back("EUR 10", "10"));
-        assert!(!formatted_number_reads_back("USD 10", "EUR 10"));
+        assert!(formatted_number_reads_back(" 10 ", "10"));
         assert!(!formatted_number_reads_back("4", "3"));
     }
 
