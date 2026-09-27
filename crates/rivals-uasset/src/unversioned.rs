@@ -29,8 +29,8 @@ pub(crate) struct Fragment {
 /// A header as it was written, not merely what it decoded to.
 ///
 /// UE closes a fragment at each struct boundary of the inheritance chain, so a real header carries
-/// empty fragments, splits runs that are contiguous, and records a trailing skip past the last
-/// value. None of that survives in the item list, which means a header rebuilt from the items alone
+/// empty fragments between values, splits runs that are contiguous, and writes a struct storing
+/// nothing as a skip over its slots. It never ends a header that holds values on a skip. None of that survives in the item list, which means a header rebuilt from the items alone
 /// is shorter than the one it replaces even though it decodes identically. Keeping the fragments
 /// lets an edit re-emit the header byte for byte.
 #[derive(Debug, Clone)]
@@ -118,6 +118,16 @@ pub(crate) fn read_header(cursor: &mut Cursor<'_>) -> Result<UnversionedHeader, 
         }
     }
 
+    // UE's loader steps past a fragment with no values to reach the next, so one ending a header
+    // that holds values sends it past the fragments and the game crashes. Nothing the game ships
+    // has one; a package that does was written wrong.
+    if fragments.last().is_some_and(|last| last.value_num == 0)
+        && fragments.iter().any(|fragment| fragment.value_num > 0)
+    {
+        return Err(cursor.err(
+            "unversioned header ends on a fragment with no values, which the game's loader reads past",
+        ));
+    }
     let zero_bits: u32 = fragments
         .iter()
         .filter(|f| f.has_zeroes)
@@ -320,6 +330,7 @@ impl UnversionedHeader {
                     self.zero_bits.insert(bit, true);
                 }
                 self.insert_item(schema_index, is_zero);
+                self.trim_trailing_skips();
                 Ok(())
             }
             Placement::Beyond { covered, bit } => {
@@ -407,6 +418,27 @@ impl UnversionedHeader {
         self.tidy(fragment);
         self.remove_item(schema_index);
         Ok(())
+    }
+
+    /// Drops the fragments that only skip past the last value, and marks the one holding it last.
+    /// UE's loader steps over a fragment with no values to reach the next, so a header that ends on
+    /// one sends it past the end of the fragments; a struct stored from nothing starts as nothing
+    /// but a skip, which an insert would otherwise leave trailing. A header with no values keeps
+    /// its skip: that is how UE writes an empty struct, and the loader reads nothing from it.
+    fn trim_trailing_skips(&mut self) {
+        if self.items.is_empty() {
+            return;
+        }
+        while self
+            .fragments
+            .last()
+            .is_some_and(|last| last.value_num == 0)
+        {
+            self.fragments.pop();
+        }
+        if let Some(last) = self.fragments.last_mut() {
+            last.is_last = true;
+        }
     }
 
     /// A fragment left with no values is folded into its neighbour where the skip fits, and skips
@@ -888,6 +920,42 @@ mod tests {
         assert_eq!(zeroes(&again), [false, true, false, false]);
         assert_eq!(indices(&header), indices(&again));
         assert_eq!(zeroes(&header), zeroes(&again));
+    }
+
+    /// A struct stored from nothing starts as a skip over every slot. Values stored into it end the
+    /// header on the last of them, as UE writes one: its loader steps past a fragment with no values
+    /// to reach the next, so a header ending on one sends it past the end of the fragments.
+    #[test]
+    fn values_stored_into_an_empty_struct_end_the_header() {
+        let mut ending_on_a_skip = packed(1, false, 1, false).to_le_bytes().to_vec();
+        ending_on_a_skip.extend_from_slice(&packed(28, false, 0, true).to_le_bytes());
+        let err = read_header(&mut Cursor::new(&ending_on_a_skip, 0)).expect_err("refused");
+        assert!(err.contains("reads past"), "{err}");
+
+        let bytes = |fragments: &[u16]| -> Vec<u8> {
+            fragments.iter().flat_map(|f| f.to_le_bytes()).collect()
+        };
+        let mut header = read(&empty_header(59));
+        header.insert_value(1, false).expect("insert");
+        header.insert_value(30, false).expect("insert");
+        assert_eq!(
+            written(&header),
+            bytes(&[packed(1, false, 1, false), packed(28, false, 1, true)])
+        );
+
+        let mut header = read(&empty_header(300));
+        header.insert_value(5, false).expect("insert");
+        assert_eq!(written(&header), bytes(&[packed(5, false, 1, true)]));
+        header.insert_value(200, true).expect("insert");
+        let again = read(&written(&header));
+        assert_eq!(indices(&again), [5, 200]);
+        assert_eq!(zeroes(&again), [false, true]);
+        assert!(
+            again
+                .fragments
+                .last()
+                .is_some_and(|last| last.value_num > 0)
+        );
     }
 
     /// The class export of `CameraShake_101111` stores none of UClass's fourteen slots and reads
