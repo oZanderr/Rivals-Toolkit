@@ -36,8 +36,8 @@ mod value;
 mod write;
 
 pub use component::{
-    AddComponent, ComponentPlan, NodeParent, component_wiring, plan_component, property_owner,
-    verify_component,
+    AddComponent, ChangedProperty, ComponentPlan, NodeParent, changed_property_entries,
+    component_wiring, plan_component, verify_component,
 };
 pub use copy::{CopiedExport, CopyExport, CopyPlan, CopySource, plan_copy};
 pub use datatable::{DataTable, DataTableLayout, DataTableRow, RowSpan};

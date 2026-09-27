@@ -385,23 +385,89 @@ pub fn verify_component(parsed: &ParsedPackage, plan: &ComponentPlan) -> Result<
     problem.map_or(Ok(()), Err)
 }
 
-/// The class that declares `property` in the layout of `class`, by the name the mappings know it
-/// by: the class itself or one of its ancestors, and an object path for a class recovered from a
-/// Blueprint.
-pub fn property_owner(
+/// One entry of a component's changed property list: a property, which element of a static array
+/// it is, and the struct it is looked up in, `None` meaning the component's class.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangedProperty {
+    pub name: String,
+    pub index: u32,
+    pub scope: Option<String>,
+}
+
+/// How deep a struct's fields are listed inside one another.
+const MAX_LISTED_DEPTH: usize = 4;
+
+/// The entries the cooker writes to have a top-level property of a component class copied onto the
+/// components a Blueprint spawns. UE reads the list scope by scope: the component's class for
+/// the top level, whichever class declares the property, and a struct's own type for its fields,
+/// which follow it. `None` for a property the class lacks, a container, whose entries name the
+/// elements that changed, and a struct whose fields are not known.
+pub fn changed_property_entries(
     class_name: &str,
     class_path: Option<&str>,
     property: &str,
     element: u32,
     mappings: Option<&Mappings>,
     synth: Option<&Mappings>,
-) -> Option<String> {
+) -> Option<Vec<ChangedProperty>> {
     let schema = class_path
         .and_then(|path| synth.and_then(|m| m.class_schema(path, None)))
         .or_else(|| synth.and_then(|m| m.class_schema(class_name, None)))
         .or_else(|| mappings.and_then(|m| m.class_schema(class_name, None)))?;
-    schema
+    let slot = schema
         .iter()
-        .find(|slot| slot.property.name == property && slot.element == element)
-        .map(|slot| slot.owner.to_string())
+        .find(|slot| slot.property.name == property && slot.element == element)?;
+    let mut entries = vec![ChangedProperty {
+        name: property.to_string(),
+        index: element,
+        scope: None,
+    }];
+    match &slot.property.inner {
+        usmap::PropertyInner::Array { .. }
+        | usmap::PropertyInner::Set { .. }
+        | usmap::PropertyInner::Map { .. } => return None,
+        usmap::PropertyInner::Struct { name } => {
+            struct_fields(name, mappings, synth, 0, &mut entries)?;
+        }
+        _ => {}
+    }
+    Some(entries)
+}
+
+/// A struct's fields as list entries scoped to it, each nested struct's fields after its own
+/// entry. A container field is left out, which leaves it at the class default.
+fn struct_fields(
+    struct_name: &str,
+    mappings: Option<&Mappings>,
+    synth: Option<&Mappings>,
+    depth: usize,
+    entries: &mut Vec<ChangedProperty>,
+) -> Option<()> {
+    if depth > MAX_LISTED_DEPTH {
+        return None;
+    }
+    let schema = synth
+        .and_then(|m| m.schema(struct_name))
+        .or_else(|| mappings.and_then(|m| m.schema(struct_name)))?;
+    if schema.is_empty() {
+        return None;
+    }
+    for slot in schema.iter() {
+        match &slot.property.inner {
+            usmap::PropertyInner::Array { .. }
+            | usmap::PropertyInner::Set { .. }
+            | usmap::PropertyInner::Map { .. } => continue,
+            inner => {
+                entries.push(ChangedProperty {
+                    name: slot.property.name.clone(),
+                    index: slot.element,
+                    scope: Some(struct_name.to_string()),
+                });
+                if let usmap::PropertyInner::Struct { name } = inner {
+                    struct_fields(name, mappings, synth, depth + 1, entries)?;
+                }
+            }
+        }
+    }
+    Some(())
 }

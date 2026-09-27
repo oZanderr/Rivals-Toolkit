@@ -306,49 +306,73 @@ fn changed_property_edits(
             }
         }
     }
-    // What each node already lists, and where its list is.
-    let listing = |node: usize| -> Option<(rivals_uasset::PropertyEntry, Vec<(String, u32)>)> {
-        let data = entry_named(
-            &parsed.exports[node].properties,
-            "CookedComponentInstancingData",
-        )?;
-        let PropertyValue::Struct { fields, .. } = &data.value else {
-            return None;
+    // What each node already lists at the top level, and where its list is.
+    let listing =
+        |node: usize, scope: &str| -> Option<(rivals_uasset::PropertyEntry, Vec<(String, u32)>)> {
+            let data = entry_named(
+                &parsed.exports[node].properties,
+                "CookedComponentInstancingData",
+            )?;
+            let PropertyValue::Struct { fields, .. } = &data.value else {
+                return None;
+            };
+            if !entry_named(fields, "bHasValidCookedData")
+                .is_some_and(|entry| matches!(entry.value, PropertyValue::Bool { value: true }))
+            {
+                return None;
+            }
+            let list = entry_named(fields, "ChangedPropertyList")?.clone();
+            let held = match &list.value {
+                PropertyValue::Array { items } => items
+                    .iter()
+                    .filter_map(|item| {
+                        let PropertyValue::Struct { fields, .. } = item else {
+                            return None;
+                        };
+                        let name = match entry_named(fields, "PropertyName").map(|e| &e.value) {
+                            Some(PropertyValue::Name { value }) => value.clone(),
+                            _ => return None,
+                        };
+                        let index = match entry_named(fields, "ArrayIndex").map(|e| &e.value) {
+                            Some(PropertyValue::Int { value }) => *value as u32,
+                            _ => 0,
+                        };
+                        let top = match entry_named(fields, "PropertyScope").map(|e| &e.value) {
+                            Some(PropertyValue::Object {
+                                path: Some(path), ..
+                            }) => path.eq_ignore_ascii_case(scope),
+                            _ => false,
+                        };
+                        top.then_some((name, index))
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            Some((list, held))
         };
-        if !entry_named(fields, "bHasValidCookedData")
-            .is_some_and(|entry| matches!(entry.value, PropertyValue::Bool { value: true }))
-        {
-            return None;
-        }
-        let list = entry_named(fields, "ChangedPropertyList")?.clone();
-        let held = match &list.value {
-            PropertyValue::Array { items } => items
-                .iter()
-                .filter_map(|item| {
-                    let PropertyValue::Struct { fields, .. } = item else {
-                        return None;
-                    };
-                    let name = match entry_named(fields, "PropertyName").map(|e| &e.value) {
-                        Some(PropertyValue::Name { value }) => value.clone(),
-                        _ => return None,
-                    };
-                    let index = match entry_named(fields, "ArrayIndex").map(|e| &e.value) {
-                        Some(PropertyValue::Int { value }) => *value as u32,
-                        _ => 0,
-                    };
-                    Some((name, index))
-                })
-                .collect(),
-            _ => Vec::new(),
-        };
-        Some((list, held))
-    };
     let mut extended = changes.clone();
     let mut added = false;
     let mut synth: Option<Option<std::sync::Arc<Mappings>>> = None;
     let mut next: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
     for (node, name, element) in wanted {
-        let Some((list, held)) = listing(node) else {
+        let template = templates
+            .iter()
+            .find(|(_, owner)| *owner == node)
+            .map(|(template, _)| &parsed.exports[*template])
+            .ok_or("a template lost its node")?;
+        // The component's class, which the top-level entries are scoped to.
+        let class_path = parsed
+            .imports
+            .iter()
+            .find(|import| import.index == template.class_index)
+            .map(|import| import.path.clone())
+            .or_else(|| {
+                export_at(template.class_index)
+                    .and_then(|class| parsed.exports.get(class))
+                    .map(|class| class.path.clone())
+            })
+            .ok_or_else(|| format!("{} has no class to scope its list to", template.object_name))?;
+        let Some((list, held)) = listing(node, &class_path) else {
             continue;
         };
         if held
@@ -357,86 +381,80 @@ fn changed_property_edits(
         {
             continue;
         }
-        let template = templates
-            .iter()
-            .find(|(_, owner)| *owner == node)
-            .map(|(template, _)| &parsed.exports[*template])
-            .ok_or("a template lost its node")?;
-        let class_path = parsed
-            .imports
-            .iter()
-            .find(|import| import.index == template.class_index)
-            .map(|import| import.path.clone());
-        let mut owner = rivals_uasset::property_owner(
+        let mut entries = rivals_uasset::changed_property_entries(
             &template.class_name,
-            class_path.as_deref(),
+            Some(&class_path),
             &name,
             element,
             mappings,
             None,
         );
-        if owner.is_none() {
+        if entries.is_none() {
             let recovered = synth.get_or_insert_with(|| {
                 schema_synth::synthesised(&bundle_of(loaded), mappings, &source_of(request))
                     .ok()
                     .flatten()
             });
-            owner = rivals_uasset::property_owner(
+            entries = rivals_uasset::changed_property_entries(
                 &template.class_name,
-                class_path.as_deref(),
+                Some(&class_path),
                 &name,
                 element,
                 mappings,
                 recovered.as_deref(),
             );
         }
-        let owner = owner.ok_or_else(|| {
-            format!(
-                "which class declares {name} on {} is not known, and the component's changed \
-                 property list needs it",
-                template.object_name
-            )
-        })?;
-        let scope = property_scope(request, parsed, &owner)?;
+        // A container records which of its elements changed, which is not worked out here: it
+        // keeps the class default on spawned components, as it did before the save.
+        let Some(entries) = entries else {
+            continue;
+        };
+        let (offset, _) = list
+            .span
+            .ok_or("the changed property list has no recorded position")?;
         let count = match &list.value {
             PropertyValue::Array { items } => items.len(),
             _ => 0,
         };
-        let at = count + next.get(&node).copied().unwrap_or(0);
-        next.insert(node, next.get(&node).copied().unwrap_or(0) + 1);
-        let (offset, _) = list
-            .span
-            .ok_or("the changed property list has no recorded position")?;
-        extended.values.push(ValueEdit {
-            offset,
-            expect_name: list.name.clone(),
-            expect_element: list.element,
-            expect_kind: rivals_uasset::kind_of(&list.value),
-            op: EditOp::Insert {
-                index: at as u32,
-                key: None,
-            },
-        });
-        for (field, text) in [
-            ("PropertyName", name.clone()),
-            ("ArrayIndex", element.to_string()),
-            ("PropertyScope", scope),
-        ] {
-            extended.field_sets.push(rivals_uasset::FieldSet {
+        for entry in entries {
+            let scope = match &entry.scope {
+                None => class_path.clone(),
+                Some(name) => property_scope(request, parsed, name)?,
+            };
+            let at = count + next.get(&node).copied().unwrap_or(0);
+            *next.entry(node).or_default() += 1;
+            extended.values.push(ValueEdit {
                 offset,
                 expect_name: list.name.clone(),
                 expect_element: list.element,
-                path: vec![format!("[{at}]"), field.to_string()],
-                text,
+                expect_kind: rivals_uasset::kind_of(&list.value),
+                op: EditOp::Insert {
+                    index: at as u32,
+                    key: None,
+                },
             });
+            for (field, text) in [
+                ("PropertyName", entry.name.clone()),
+                ("ArrayIndex", entry.index.to_string()),
+                ("PropertyScope", scope),
+            ] {
+                extended.field_sets.push(rivals_uasset::FieldSet {
+                    offset,
+                    expect_name: list.name.clone(),
+                    expect_element: list.element,
+                    path: vec![format!("[{at}]"), field.to_string()],
+                    text,
+                });
+            }
         }
         added = true;
     }
     Ok(added.then_some(extended))
 }
 
-/// The object path of the class `owner` names, for a changed property's scope: a Blueprint class is
-/// already a path, and a native one is looked for in the modules the package imports from.
+/// The object path of the struct `owner` names, for a changed property's scope: one recovered from
+/// a Blueprint is already a path, and a native one is looked for in the modules the package imports
+/// from.
 fn property_scope(
     request: &AssetEditRequest<'_>,
     parsed: &rivals_uasset::ParsedPackage,
@@ -445,11 +463,10 @@ fn property_scope(
     if owner.starts_with('/') {
         return Ok(owner.to_string());
     }
-    if let Some(import) = parsed
-        .imports
-        .iter()
-        .find(|import| import.object_name == owner && import.class_name == "Class")
-    {
+    if let Some(import) = parsed.imports.iter().find(|import| {
+        import.object_name == owner
+            && matches!(import.class_name.as_str(), "Class" | "ScriptStruct")
+    }) {
         return Ok(import.path.clone());
     }
     let mut modules: Vec<&str> = parsed
@@ -4122,9 +4139,10 @@ mod game_data_tests {
         }
     }
 
-    /// Setting a template property its node's list lacks adds it to the list with the class that
-    /// declares it, since a cooked Blueprint copies only listed properties onto the components it
-    /// spawns; setting one the list holds adds nothing.
+    /// Setting a template property its node's list lacks adds it to the list, scoped to the
+    /// component's class as the cooker scopes it whichever class declares the property, since a
+    /// cooked Blueprint copies only listed properties onto the components it spawns. A struct brings
+    /// its fields, scoped to the struct. Setting one the list holds adds nothing.
     #[test]
     fn a_template_property_its_list_lacks_joins_the_list() {
         let Some(fixture) = Fixture::open(PARENT_CHAIN) else {
@@ -4147,7 +4165,41 @@ mod game_data_tests {
         let listed = changed_list(&after, "SCS_Node_2");
         assert_eq!(listed.len(), 2, "{listed:?}");
         assert!(listed[1].starts_with("LDMaxDrawDistance@0"), "{listed:?}");
-        assert!(listed[1].contains("PrimitiveComponent"), "{listed:?}");
+        assert!(
+            listed[1].ends_with("/Script/Engine.StaticMeshComponent"),
+            "{listed:?}"
+        );
+
+        let scale = nested(&template.properties, &["RelativeScale3D"]).clone();
+        let (offset, _) = scale.span.expect("a position");
+        let axis = |name: &str| rivals_uasset::FieldSet {
+            offset,
+            expect_name: scale.name.clone(),
+            expect_element: scale.element,
+            path: vec![name.to_string()],
+            text: "2".into(),
+        };
+        let (_, scaled) = fixture.apply_changes(PackageEdits {
+            field_sets: vec![axis("X"), axis("Y"), axis("Z")],
+            ..Default::default()
+        });
+        let listed = changed_list(&scaled, "SCS_Node_2");
+        assert_eq!(listed.len(), 5, "{listed:?}");
+        assert!(listed[1].starts_with("RelativeScale3D@0"), "{listed:?}");
+        assert!(
+            listed[1].ends_with("/Script/Engine.StaticMeshComponent"),
+            "{listed:?}"
+        );
+        for (at, axis) in ["X", "Y", "Z"].iter().enumerate() {
+            assert!(
+                listed[2 + at].starts_with(&format!("{axis}@0")),
+                "{listed:?}"
+            );
+            assert!(
+                listed[2 + at].ends_with("/Script/CoreUObject.Vector"),
+                "{listed:?}"
+            );
+        }
 
         let mesh = nested(&template.properties, &["StaticMesh"]).clone();
         let PropertyValue::Object {
@@ -4176,7 +4228,10 @@ mod game_data_tests {
         let listed = changed_list(&after, "SCS_Node_0");
         assert_eq!(listed.len(), 1, "{listed:?}");
         assert!(listed[0].starts_with("bHiddenInGame@0"), "{listed:?}");
-        assert!(listed[0].contains("SceneComponent"), "{listed:?}");
+        assert!(
+            listed[0].ends_with("/Script/Engine.SceneComponent"),
+            "{listed:?}"
+        );
     }
 
     /// Replacing the one cell that names a name leaves it unused, and a save dropping unused names
