@@ -351,3 +351,285 @@ pub(crate) fn duplicate_exports(
 fn export_of(index: i32) -> Option<u32> {
     (index > 0).then(|| (index - 1) as u32)
 }
+
+const RF_PUBLIC: u32 = 0x1;
+const RF_STANDALONE: u32 = 0x2;
+const RF_TRANSACTIONAL: u32 = 0x8;
+
+/// Characters an object name cannot hold.
+const INVALID_NAME: &[char] = &[
+    '"', '\'', ' ', ',', '/', '.', ':', '|', '&', '!', '~', '\n', '\r', '\t', '@', '#', '(', ')',
+    '{', '}', '[', ']', '=', ';', '^', '%', '$', '`', '\\', '?', '*', '<', '>',
+];
+
+/// An object of a class added to the package storing nothing, so it takes every value from its
+/// class until a following save sets some.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct AddExport {
+    /// The class, as an object path: `/Script/Engine.DataAsset`, or a Blueprint's
+    /// `/Game/Path/BP_Thing.BP_Thing_C`.
+    pub class: String,
+    /// The export it sits under, or none for an object at the top of the package.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outer: Option<u32>,
+    pub name: String,
+    /// The class's layout, when the caller recovered it from the class's own package.
+    #[serde(skip)]
+    pub layout: Option<ClassLayout>,
+}
+
+/// What an empty object of a class is made of.
+#[derive(Debug, Clone)]
+pub struct ClassLayout {
+    pub path: String,
+    /// The class default object, which an object of the class is created from.
+    pub template: String,
+    /// The slots the class's unversioned header covers.
+    pub slots: usize,
+    blueprint: bool,
+}
+
+impl ClassLayout {
+    /// The class the class object itself is of, for its import row.
+    fn class_of_class(&self) -> (String, String) {
+        if self.blueprint {
+            ("/Script/Engine".into(), "BlueprintGeneratedClass".into())
+        } else {
+            ("/Script/CoreUObject".into(), "Class".into())
+        }
+    }
+
+    fn package_and_name(&self) -> (String, String) {
+        let (package, name) = self.path.rsplit_once('.').unwrap_or(("", &self.path));
+        (package.to_string(), name.to_string())
+    }
+}
+
+/// What an empty object of the class at `path` takes, or why one cannot be made: a class whose
+/// objects write anything after their properties, which an empty one would lack, or a class
+/// nothing here knows. `synth` holds definitions recovered from the game for a Blueprint class.
+pub fn class_layout(
+    path: &str,
+    header: &FLegacyPackageHeader,
+    mappings: Option<&crate::mappings::Mappings>,
+    synth: Option<&crate::mappings::Mappings>,
+) -> Result<ClassLayout, String> {
+    let path = path.trim();
+    let (package, name) = path
+        .rsplit_once('.')
+        .filter(|(package, name)| {
+            package.starts_with('/') && !name.is_empty() && !name.contains(':')
+        })
+        .ok_or_else(|| {
+            format!(
+                "{path} is not a class path: it takes the form /Script/Module.Class, or \
+                 /Game/Path/BP_Thing.BP_Thing_C for a Blueprint"
+            )
+        })?;
+    if is_type_like(name) {
+        return Err(format!(
+            "{name} objects are types, whose layouts the toolkit only reads, so one cannot be made"
+        ));
+    }
+    let ctx = crate::props::Ctx {
+        mappings,
+        header,
+        fixups: None,
+        synth,
+        local: None,
+    };
+    let unknown = || {
+        format!(
+            "the toolkit does not know the class {path}, so it cannot tell what its objects hold"
+        )
+    };
+    let chain = ctx.ancestry_at(name, Some(path));
+    if chain.first().map(String::as_str) != Some("Object") {
+        return Err(unknown());
+    }
+    if let Some(table) = chain.iter().find(|step| {
+        matches!(
+            step.as_str(),
+            "DataTable" | "CompositeDataTable" | "StringTable" | "CurveTable"
+        )
+    }) {
+        return Err(format!(
+            "{name} is a {table}, which writes its contents after its properties"
+        ));
+    }
+    if let Some(kind) = crate::tails::payload_kind(&chain) {
+        return Err(format!(
+            "{name} objects carry {kind} after their properties, which an empty one would lack"
+        ));
+    }
+    // A class whose objects write a tail fails to read one from nothing.
+    let tailed = |steps: &[String]| {
+        !matches!(
+            crate::tails::read_class_tail(
+                steps,
+                &mut crate::reader::Cursor::new(&[], 0),
+                &ctx,
+                &mut crate::props::Diagnostics::default(),
+                &mut Vec::new(),
+            ),
+            Ok(crate::tails::TailOutcome::Consumed)
+        )
+    };
+    if tailed(&chain) {
+        let step = chain
+            .iter()
+            .find(|step| tailed(std::slice::from_ref(step)))
+            .map_or(name, String::as_str);
+        return Err(format!(
+            "{name} objects write more than their properties, as every {step} does, which an \
+             empty one would lack"
+        ));
+    }
+    let schema = ctx.class_schema_at(name, Some(path)).ok_or_else(unknown)?;
+    Ok(ClassLayout {
+        path: path.to_string(),
+        template: format!("{package}.Default__{name}"),
+        slots: schema.len(),
+        blueprint: !package.starts_with("/Script/"),
+    })
+}
+
+/// The pieces of an addition the writer applies.
+pub(crate) struct Addition {
+    pub names: FPackageNameMap,
+    pub imports: Vec<retoc::legacy_asset::FObjectImport>,
+    pub exports: Vec<FObjectExport>,
+    pub preload_dependencies: Vec<FPackageIndex>,
+    pub appended: Vec<u8>,
+    pub applied: Vec<AppliedEdit>,
+}
+
+/// Appends an empty object for each of `adds`: a property block storing nothing and no object
+/// guid, an import of its class and of the class default object it is made from, and the preload
+/// runs that have both loaded, and its outer created, before it is.
+pub(crate) fn add_exports(
+    parsed: &ParsedPackage,
+    header: &FLegacyPackageHeader,
+    adds: &[AddExport],
+    mappings: Option<&crate::mappings::Mappings>,
+) -> Result<Addition, String> {
+    let total = i64::from(header.summary.versioning_info.total_header_size);
+    let data_end = header
+        .exports
+        .iter()
+        .map(|export| export.serial_offset + export.serial_size)
+        .max()
+        .unwrap_or(total);
+    let mut tables = crate::header_edit::Tables {
+        names: header.name_map.clone(),
+        imports: header.imports.clone(),
+    };
+    let mut exports = header.exports.clone();
+    let mut preload_dependencies = header.preload_dependencies.clone();
+    let mut appended = Vec::new();
+    let mut applied = Vec::new();
+    let mut taken: Vec<(i32, String)> = parsed
+        .exports
+        .iter()
+        .map(|export| (export.outer_index, export.object_name.to_ascii_lowercase()))
+        .collect();
+    let tagged = !parsed.info.unversioned_properties;
+    for add in adds {
+        let name = add.name.trim();
+        if name.is_empty() || name.contains(INVALID_NAME) {
+            return Err(format!(
+                "{name:?} is not an object name: it cannot be empty or hold spaces, dots, colons, \
+                 slashes or quotes"
+            ));
+        }
+        let outer = match add.outer {
+            Some(outer) if (outer as usize) < parsed.exports.len() => {
+                FPackageIndex::create_export(outer)
+            }
+            Some(outer) => {
+                return Err(format!(
+                    "this package has {} exports, so there is no export {outer} to put {name} under",
+                    parsed.exports.len()
+                ));
+            }
+            None => FPackageIndex::create_null(),
+        };
+        let sibling = (outer.index, name.to_ascii_lowercase());
+        if taken.contains(&sibling) {
+            return Err(format!(
+                "something under the same outer is already named {name}"
+            ));
+        }
+        taken.push(sibling);
+        let layout = match &add.layout {
+            Some(layout) => layout.clone(),
+            None => class_layout(&add.class, header, mappings, None)?,
+        };
+        let (package, class_name) = layout.package_and_name();
+        let class = crate::header_edit::add_import(
+            &mut tables,
+            &layout.path,
+            Some(layout.class_of_class()),
+        )?;
+        let template = crate::header_edit::add_import(
+            &mut tables,
+            &layout.template,
+            Some((package, class_name)),
+        )?;
+        let mut bytes = if tagged {
+            let none = tables.names.store("None");
+            let mut bytes = none.index.to_le_bytes().to_vec();
+            bytes.extend_from_slice(&none.number.to_le_bytes());
+            bytes
+        } else {
+            crate::unversioned::empty_header(layout.slots)
+        };
+        // No object guid follows.
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        let root = add.outer.is_none();
+        let first = preload_dependencies.len() as i32;
+        preload_dependencies.push(FPackageIndex { index: class });
+        preload_dependencies.push(FPackageIndex { index: template });
+        if !root {
+            preload_dependencies.push(outer);
+        }
+        let entry = FObjectExport {
+            class_index: FPackageIndex { index: class },
+            super_index: FPackageIndex::create_null(),
+            template_index: FPackageIndex { index: template },
+            outer_index: outer,
+            object_name: tables.names.store(name),
+            object_flags: if root {
+                RF_PUBLIC | RF_STANDALONE | RF_TRANSACTIONAL
+            } else {
+                RF_TRANSACTIONAL
+            },
+            serial_size: bytes.len() as i64,
+            serial_offset: data_end + appended.len() as i64,
+            is_asset: root,
+            first_export_dependency_index: first,
+            serialize_before_create_dependencies: 2,
+            create_before_create_dependencies: i32::from(!root),
+            ..Default::default()
+        };
+        applied.push(AppliedEdit {
+            name: name.to_string(),
+            offset: data_end as u64,
+            offset_after: data_end as u64,
+            element: None,
+            elements_after: None,
+            before: "(none)".into(),
+            after: format!("an empty {} as export {}", layout.path, exports.len()),
+        });
+        appended.extend_from_slice(&bytes);
+        exports.push(entry);
+    }
+    Ok(Addition {
+        names: tables.names,
+        imports: tables.imports,
+        exports,
+        preload_dependencies,
+        appended,
+        applied,
+    })
+}

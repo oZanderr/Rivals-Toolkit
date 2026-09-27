@@ -153,6 +153,9 @@ enum AssetCmd {
     /// Drop every value an export stores so it inherits its class defaults, and write the result
     /// into a mod pak.
     ResetExport(ResetExportArgs),
+    /// Add an object of a class to the package, storing nothing so it takes every value from its
+    /// class, and write the result into a mod pak. Its values are set with `asset set` after.
+    AddExport(AddExportArgs),
     /// Write the asset, unchanged but for its name, under another package name: a new asset, or a
     /// replacement for the one at that path.
     SaveAs(SaveAsArgs),
@@ -463,6 +466,35 @@ struct ResetExportArgs {
     /// Export index to reset, as `asset info` prints it.
     #[arg(long, value_name = "N")]
     export: u32,
+
+    /// Mod pak to write into, created in `~mods` if it does not exist. Defaults to the name the
+    /// desktop app last saved into, then to `AssetEdits`.
+    #[arg(long, value_name = "NAME")]
+    mod_name: Option<String>,
+
+    /// Overwrite an edited copy of this asset that the mod pak already holds.
+    #[arg(long)]
+    replace: bool,
+}
+
+#[derive(Args)]
+struct AddExportArgs {
+    #[command(flatten)]
+    asset: AssetArgs,
+
+    /// The class, as an object path: `/Script/Module.Class`, or `/Game/Path/BP_Thing.BP_Thing_C`
+    /// for a Blueprint.
+    #[arg(long, value_name = "PATH")]
+    class: String,
+
+    /// The export to put it under, as `asset info` prints it. Omit for an object at the top of the
+    /// package.
+    #[arg(long, value_name = "N")]
+    outer: Option<u32>,
+
+    /// Its name, unique among what shares its outer.
+    #[arg(long, value_name = "NAME")]
+    name: String,
 
     /// Mod pak to write into, created in `~mods` if it does not exist. Defaults to the name the
     /// desktop app last saved into, then to `AssetEdits`.
@@ -1045,6 +1077,7 @@ fn run(cli: &Cli) -> Result<(), String> {
         Command::Asset(AssetCmd::Revert(a)) => asset_revert(cli, &app, a),
         Command::Asset(AssetCmd::ResetExport(a)) => asset_reset_export(cli, &app, a),
         Command::Asset(AssetCmd::SaveAs(a)) => asset_save_as(cli, &app, a),
+        Command::Asset(AssetCmd::AddExport(a)) => asset_add_export(cli, &app, a),
         Command::Asset(AssetCmd::RenamePackage(a)) => asset_rename_package(cli, &app, a),
         Command::Asset(AssetCmd::Row(a)) => asset_row(cli, &app, a),
         Command::Asset(AssetCmd::Strings(a)) => asset_strings(cli, &app, a),
@@ -2701,6 +2734,29 @@ fn asset_reset_export(
     let message = asset::reset_export(
         &asset_request(cli, app, &args.asset, &root),
         args.export,
+        mod_name_of(app, args.mod_name.as_deref()),
+        args.replace,
+    )?;
+    emit(cli, &message, || outln!("{message}"))
+}
+
+fn asset_add_export(
+    cli: &Cli,
+    app: &settings::AppSettings,
+    args: &AddExportArgs,
+) -> Result<(), String> {
+    if !cli.force && rivals_core::game_status::should_block_for_game() {
+        return Err(rivals_core::game_status::game_running_error());
+    }
+    let root = resolve::game_root(cli.game_root.as_deref(), app)?;
+    let message = asset::add_export(
+        &asset_request(cli, app, &args.asset, &root),
+        rivals_uasset::AddExport {
+            class: args.class.clone(),
+            outer: args.outer,
+            name: args.name.clone(),
+            layout: None,
+        },
         mod_name_of(app, args.mod_name.as_deref()),
         args.replace,
     )?;

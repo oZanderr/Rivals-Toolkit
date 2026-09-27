@@ -181,6 +181,8 @@ pub struct PackageEdits {
     pub reset_exports: Vec<u32>,
     /// Exports copied to the end of the table with their subobjects. See [`crate::plan_duplication`].
     pub duplicate_exports: Vec<DuplicateExport>,
+    /// Empty objects of a class added to the end of the table. A save of its own.
+    pub add_exports: Vec<crate::duplicate::AddExport>,
     /// Replacements for whole preload dependency runs. A save of its own: the runs sit in one
     /// shared table, so changing any of them rewrites all of them.
     pub dependencies: Vec<crate::dependency::DependencyEdit>,
@@ -556,6 +558,7 @@ impl PackageEdits {
         self.remove_exports.extend(other.remove_exports);
         self.reset_exports.extend(other.reset_exports);
         self.duplicate_exports.extend(other.duplicate_exports);
+        self.add_exports.extend(other.add_exports);
         self.dependencies.extend(other.dependencies);
         self.field_sets.extend(other.field_sets);
         self.compact_names |= other.compact_names;
@@ -580,6 +583,7 @@ impl PackageEdits {
             && self.remove_exports.is_empty()
             && self.reset_exports.is_empty()
             && self.duplicate_exports.is_empty()
+            && self.add_exports.is_empty()
             && self.exports.is_empty()
             && self.dependencies.is_empty()
             && self.field_sets.is_empty()
@@ -925,6 +929,47 @@ pub fn patch_package_with(
             );
         }
         return patch_name_compaction(bundle, parsed, &package);
+    }
+    if !edits.add_exports.is_empty() {
+        let alone = PackageEdits {
+            add_exports: Vec::new(),
+            save_as: None,
+            expect: Expected::default(),
+            allow_drift: false,
+            allow_missing: false,
+            ..edits.clone()
+        };
+        if !alone.is_empty() {
+            return Err(
+                "adding an object is a save of its own; save or discard the other edits first"
+                    .into(),
+            );
+        }
+        let addition =
+            crate::duplicate::add_exports(parsed, &package, &edits.add_exports, mappings)?;
+        let rewritten = rewrite(
+            bundle,
+            &[],
+            HeaderDraft {
+                names: Some(addition.names),
+                imports: Some(addition.imports),
+                exports: Some(addition.exports),
+                preload_dependencies: Some(addition.preload_dependencies),
+                appended: addition.appended,
+                ..Default::default()
+            },
+        )?;
+        check_inline_bulk(&AssetBundle {
+            asset: &rewritten.asset,
+            exports: &rewritten.exports,
+        })?;
+        return Ok(PatchedBundle {
+            asset: rewritten.asset,
+            exports: rewritten.exports,
+            applied: addition.applied,
+            bulk: None,
+            optional_bulk: None,
+        });
     }
     if !edits.dependencies.is_empty() {
         // The runs share one table addressed by one index per export, so changing any of them
@@ -4767,13 +4812,15 @@ pub fn verify_patch(
         crate::plan_duplication(before, &edits.duplicate_exports)?
     };
     let copies: usize = plans.iter().map(|plan| plan.members.len()).sum();
-    if kept.len() + copies != after.exports.len() {
+    let added = edits.add_exports.len();
+    if kept.len() + copies + added != after.exports.len() {
         return Err(format!(
             "the patched package has {} exports where {} were expected",
             after.exports.len(),
-            kept.len() + copies
+            kept.len() + copies + added
         ));
     }
+    verify_additions(before, after, edits)?;
     for plan in &plans {
         let remap: std::collections::BTreeMap<i32, i32> = plan
             .members
@@ -5061,6 +5108,58 @@ pub fn verify_patch(
         }
     }
     verify_unique_keys(before, after, edits, applied)
+}
+
+/// Each added object reads back at the end of the table as an object of its class, under its outer
+/// and with its name, storing nothing.
+fn verify_additions(
+    before: &ParsedPackage,
+    after: &ParsedPackage,
+    edits: &PackageEdits,
+) -> Result<(), String> {
+    for (at, add) in edits.add_exports.iter().enumerate() {
+        let made = after
+            .exports
+            .get(before.exports.len() + at)
+            .ok_or_else(|| format!("{} did not read back", add.name))?;
+        let class = after
+            .imports
+            .iter()
+            .find(|import| import.index == made.class_index)
+            .map(|import| import.path.as_str());
+        let outer = add.outer.map_or(0, |outer| outer as i32 + 1);
+        if made.object_name != add.name.trim()
+            || class != Some(add.class.trim())
+            || made.outer_index != outer
+        {
+            return Err(format!(
+                "the added {} reads as {} of class {} under {}",
+                add.name,
+                made.object_name,
+                class.unwrap_or("nothing"),
+                made.outer_index
+            ));
+        }
+        if !matches!(made.status, ExportStatus::Complete) {
+            return Err(format!(
+                "the added {} reads as {}, not complete",
+                add.name,
+                status_name(made)
+            ));
+        }
+        if let Some(stored) = made
+            .properties
+            .iter()
+            .find(|entry| !matches!(entry.value, PropertyValue::Unset { .. }))
+        {
+            return Err(format!(
+                "the added {} stores {}, where it should store nothing",
+                add.name,
+                stored.label()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Saves the package under the name `rename` gives it. Only the FName-backed paths follow; the

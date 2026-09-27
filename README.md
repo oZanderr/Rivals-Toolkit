@@ -164,6 +164,13 @@ keep their names, since bytecode calls them by name. `asset save-as` writes a co
 change, and `asset rename-package` moves a package a mod added to another path inside that mod. A
 level cannot be saved under another path, since its package name is written into its world.
 
+`asset add-export` adds an object of a class, under an export or at the top of the package, storing
+nothing so it takes every value from its class; its values are set with `asset set` afterwards. Only
+a class whose objects are a property block and nothing more can be added this way: an actor, a
+component, a texture, a mesh or a table writes more after its properties, and is refused. Whether a
+class is abstract is not recorded anywhere the toolkit reads, and the game will not create an
+object of an abstract class, so pick a concrete one.
+
 `asset script-set` changes one literal constant inside a function's bytecode, addressed by the
 statement offset `asset script` prints and which literal in that statement, and only at the width
 the old value took: an `IntConst` can become another integer, a string another string of the same
@@ -186,6 +193,7 @@ rivals-cli asset export-edit --container ... --entry ... --export 3 --rename New
 rivals-cli asset export-edit --container ... --entry ... --export 3 --class -32         # retype
 rivals-cli asset imports --container ... --entry ... --unused                           # tidy the table
 rivals-cli asset names   --container ... --entry ... --compact --mod-name MyMod         # drop unused names
+rivals-cli asset add-export --container ... --entry ... --class /Script/Module.Class --outer 0 --name MyThing --mod-name MyMod
 rivals-cli asset save-as --container ... --entry ... --to /Game/Mods/MyThing/DA_Copy --mod-name MyMod
 rivals-cli asset rename-package --container ~mods/MyMod_9999999_P.utoc --entry ... --to /Game/Mods/MyThing/DA_New
 rivals-cli asset deps    --container ... --entry ... --export 3                         # load order

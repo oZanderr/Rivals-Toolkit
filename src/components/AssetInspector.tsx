@@ -2921,6 +2921,7 @@ function PackageView({
   onDropImport,
   onCompactNames,
   onSaveAs,
+  onAddObject,
 }: {
   pkg: ParsedPackage;
   edits: AssetEdits;
@@ -2942,6 +2943,7 @@ function PackageView({
   onDropImport: (at: number) => void;
   onCompactNames: () => void;
   onSaveAs: () => void;
+  onAddObject: (outer: number | null) => void;
 }) {
   const adds = Object.entries(edits.importDrafts).filter(([key]) => key.startsWith("add:"));
   const payloadActions = (exp: ParsedExport): PayloadActions => {
@@ -3072,6 +3074,22 @@ function PackageView({
       <div className="border-b border-border">
         <div className="flex items-center gap-2 px-3 pt-3 pb-1">
           <span className="text-xs font-semibold text-foreground">Exports</span>
+          <Tip
+            content={
+              lock ??
+              "Add an object of a class at the top of the package, storing nothing so it takes every value from its class."
+            }
+          >
+            <Button
+              size="sm"
+              variant="outline"
+              className={cn("h-6 text-[11px]", !clipboard && "ml-auto")}
+              disabled={!!lock}
+              onClick={() => onAddObject(null)}
+            >
+              <Plus size={12} /> Add object…
+            </Button>
+          </Tip>
           {clipboard && (
             <Tip
               content={
@@ -3146,6 +3164,7 @@ function PackageView({
                         onDuplicate={() => onDuplicate(exp.index)}
                         onRename={() => onRename(exp.index)}
                         onMove={() => onMove(exp.index)}
+                        onAddUnder={() => onAddObject(exp.index)}
                         onFlags={() => onFlags(exp.index)}
                         onRetype={() => onRetype(exp.index)}
                         onDeps={() => onDeps(exp.index)}
@@ -3321,6 +3340,107 @@ function PackageView({
   );
 }
 
+/** Asks for the class and name of an object to add, under an export or at the top of the package.
+ *  The classes the package already names are offered first. */
+function AddObjectDialog({
+  pkg,
+  edits,
+  outer,
+  onClose,
+}: {
+  pkg: ParsedPackage;
+  edits: AssetEdits;
+  outer: number | null;
+  onClose: () => void;
+}) {
+  const classes = useMemo(
+    () =>
+      [
+        ...new Set(
+          pkg.imports
+            .filter(
+              (info) => info.class_name === "Class" || info.class_name.endsWith("GeneratedClass")
+            )
+            .map((info) => info.path)
+        ),
+      ].sort(),
+    [pkg]
+  );
+  const [classPath, setClassPath] = useState(classes[0] ?? "");
+  const [name, setName] = useState("");
+  const trimmedClass = classPath.trim();
+  const trimmedName = name.trim();
+  const validClass = /^\/[^.\s]+\.[^.:\s]+$/.test(trimmedClass);
+  const validName = /^[^\s"',/.:|&!~@#(){}[\]=;^%$`\\?*<>]+$/.test(trimmedName);
+  const siblings = pkg.exports.filter(
+    (exp) => exp.outer_index === (outer === null ? 0 : outer + 1)
+  );
+  const taken = siblings.some((exp) => exp.object_name.toLowerCase() === trimmedName.toLowerCase());
+  const check = usePathCheck(edits, validClass ? trimmedClass : undefined);
+  const missing = pathCheckText(check, trimmedClass);
+  const pak = previewContainerFilename(edits.modName, edits.saveTarget);
+  const under = outer === null ? pkg.package_name : pkg.exports[outer].path;
+  return (
+    <AlertDialog open onOpenChange={(open) => !open && onClose()}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Add an object</AlertDialogTitle>
+          <AlertDialogDescription>
+            Adds an object of a class under <span className="font-mono">{under}</span>, storing
+            nothing, so it takes every value from its class. Set its values afterwards like any
+            other. {pak ? `Writes the result into ${pak}.` : "Name a mod to save into first."}
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <div className="flex flex-col gap-3 text-xs">
+          <label className="flex flex-col gap-1">
+            <span className="text-muted-foreground">Class</span>
+            <Input
+              value={classPath}
+              onChange={(e) => setClassPath(e.target.value)}
+              list="add-object-classes"
+              placeholder="/Script/Module.Class"
+              className="h-8 font-mono text-xs"
+            />
+            <datalist id="add-object-classes">
+              {classes.map((path) => (
+                <option key={path} value={path} />
+              ))}
+            </datalist>
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-muted-foreground">Name</span>
+            <Input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              className="h-8 font-mono text-xs"
+            />
+          </label>
+          {taken && <p className="text-err">Something under it is already named {trimmedName}.</p>}
+          {missing && <p className="text-muted-foreground">{missing}</p>}
+        </div>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <AlertDialogAction
+            disabled={!validClass || !validName || taken || !pak || edits.saving}
+            onClick={() => {
+              onClose();
+              void edits.save({
+                structural: {
+                  addExports: [
+                    { class: trimmedClass, outer: outer ?? undefined, name: trimmedName },
+                  ],
+                },
+              });
+            }}
+          >
+            Add
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+
 /** Asks for the package name to save the asset under, and says what that name amounts to: a new
  *  asset, or a replacement for one already shipped. Unsaved changes go along with it. */
 function SaveAsDialog({
@@ -3451,6 +3571,7 @@ function ExportActions({
   onDuplicate,
   onRename,
   onMove,
+  onAddUnder,
   onFlags,
   onRetype,
   onDeps,
@@ -3464,6 +3585,7 @@ function ExportActions({
   onDuplicate: () => void;
   onRename: () => void;
   onMove: () => void;
+  onAddUnder: () => void;
   onFlags: () => void;
   onRetype: () => void;
   onDeps: () => void;
@@ -3523,6 +3645,24 @@ function ExportActions({
             }}
           >
             <ArrowLeftRight size={14} /> Move export…
+          </button>
+        </Tip>
+        <Tip
+          content={
+            lock ??
+            "Put a new object of a class beneath this one, storing nothing so it takes every value from its class."
+          }
+          side="right"
+        >
+          <button
+            className={cn(item, lock ? "cursor-not-allowed opacity-50" : "hover:bg-muted")}
+            disabled={!!lock}
+            onClick={() => {
+              setOpen(false);
+              onAddUnder();
+            }}
+          >
+            <Plus size={14} /> Add object under it…
           </button>
         </Tip>
         <Tip content={lock ?? "Change the flags the loader reads this object by."} side="right">
@@ -6447,6 +6587,7 @@ export default function AssetInspector({
   /// A removal or reset the user has asked about but not yet confirmed.
   const [ask, setAsk] = useState<StructuralAsk | null>(null);
   const [savingAs, setSavingAs] = useState(false);
+  const [addingObject, setAddingObject] = useState<{ outer: number | null } | null>(null);
   /// Progress of an import index build started from the removal dialog.
   const [indexing, setIndexing] = useState<{ current: number; total: number } | null>(null);
   /// Bumped after a save so the asset is read again from disk rather than shown from memory.
@@ -7064,6 +7205,7 @@ export default function AssetInspector({
                         error: null,
                       })
                     }
+                    onAddUnder={() => setAddingObject({ outer: active.index })}
                     onFlags={() => setAsk({ kind: "flags", index: active.index, set: 0, clear: 0 })}
                     onRetype={() =>
                       setAsk({
@@ -7394,6 +7536,7 @@ export default function AssetInspector({
                     onDropImport={askDropImport}
                     onCompactNames={askCompactNames}
                     onSaveAs={() => setSavingAs(true)}
+                    onAddObject={(outer) => setAddingObject({ outer })}
                   />
                 ) : active && effectiveView === "table" && active.data_table ? (
                   <DataTableGrid table={active.data_table} exportIndex={active.index} />
@@ -7567,6 +7710,15 @@ export default function AssetInspector({
 
           {pkg && savingAs && (
             <SaveAsDialog pkg={pkg} edits={edits} onClose={() => setSavingAs(false)} />
+          )}
+
+          {pkg && addingObject && (
+            <AddObjectDialog
+              pkg={pkg}
+              edits={edits}
+              outer={addingObject.outer}
+              onClose={() => setAddingObject(null)}
+            />
           )}
 
           {pkg && (

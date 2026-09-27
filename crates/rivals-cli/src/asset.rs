@@ -250,6 +250,24 @@ pub fn compact_names(
     )
 }
 
+/// Adds an empty object of a class to the package and writes the result into a mod pak.
+pub fn add_export(
+    request: &Request<'_>,
+    add: rivals_uasset::AddExport,
+    mod_name: &str,
+    replace: bool,
+) -> Result<String, String> {
+    write_edits(
+        request,
+        mod_name,
+        replace,
+        PackageEdits {
+            add_exports: vec![add],
+            ..Default::default()
+        },
+    )
+}
+
 /// Writes the asset, unchanged but for its name, under another package name.
 pub fn save_as(
     request: &Request<'_>,

@@ -52,6 +52,9 @@ pub struct EditList {
     /// Drop the names nothing in the package uses. A save of its own.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub compact_names: bool,
+    /// Empty objects of a class to add. A save of its own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub add_exports: Vec<rivals_uasset::AddExport>,
     /// Save the package under another name once the other edits are made.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub save_as: Option<rivals_uasset::SaveAs>,
@@ -178,6 +181,7 @@ impl EditList {
             dependencies: self.dependencies,
             field_sets: self.field_sets,
             compact_names: self.compact_names,
+            add_exports: self.add_exports,
             save_as: self.save_as,
             expect: self.expect,
             allow_drift: self.allow_drift,

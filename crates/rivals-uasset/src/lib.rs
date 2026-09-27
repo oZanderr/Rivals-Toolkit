@@ -37,7 +37,9 @@ mod write;
 pub use copy::{CopiedExport, CopyExport, CopyPlan, CopySource, plan_copy};
 pub use datatable::{DataTable, DataTableLayout, DataTableRow, RowSpan};
 pub use dependency::{DependencyEdit, DependencyPlan, Runs, plan_dependency_edits, runs_of};
-pub use duplicate::{DuplicatePlan, LevelSlot, plan_duplication};
+pub use duplicate::{
+    AddExport, ClassLayout, DuplicatePlan, LevelSlot, class_layout, plan_duplication,
+};
 pub use edit::{
     AppliedEdit, BulkEdit, DRIFT, DuplicateExport, EditOp, Expected, FieldSet, KeyEdit, KeyOp,
     NOT_STORED, PackageEdits, PatchedBundle, PayloadEdit, RowEdit, RowOp, ScriptConstEdit,

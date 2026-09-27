@@ -1314,3 +1314,89 @@ fn a_level_or_a_malformed_name_cannot_be_saved_as() {
         crate::identity::PathRename::plan(&parsed, &save_as("/Game/Mods/C")).expect_err("a level");
     assert!(err.contains("level"), "{err}");
 }
+
+/// A schema with one class of objects holding one number, rooted at `Object`.
+fn thing_mappings() -> Mappings {
+    use usmap::{Property, PropertyInner, Struct};
+    Mappings::from_structs(vec![
+        Struct {
+            name: "Object".into(),
+            super_struct: None,
+            properties: Vec::new(),
+        },
+        Struct {
+            name: "TestThing".into(),
+            super_struct: Some("Object".into()),
+            properties: vec![Property {
+                name: "Count".into(),
+                array_dim: 1,
+                index: 0,
+                inner: PropertyInner::Int,
+            }],
+        },
+    ])
+}
+
+fn add_thing(outer: Option<u32>, name: &str, class: &str) -> PackageEdits {
+    PackageEdits {
+        add_exports: vec![crate::duplicate::AddExport {
+            class: class.into(),
+            outer,
+            name: name.into(),
+            layout: None,
+        }],
+        ..Default::default()
+    }
+}
+
+/// An empty object of a class the schema knows reads back complete and storing nothing, under its
+/// outer, and takes a value with an ordinary edit in the next save.
+#[test]
+fn an_empty_object_of_a_class_is_added_and_takes_a_value_next() {
+    let mappings = thing_mappings();
+    let (asset, exports) = tagged_package();
+    let bundle = AssetBundle {
+        asset: &asset,
+        exports: &exports,
+    };
+    let before = parse_declared(&asset, &exports, Some(&mappings));
+    let changes = add_thing(Some(0), "Thing", "/Script/Test.TestThing");
+    let patched = patch_package(&bundle, &before, &changes, Some(&mappings)).expect("added");
+    let after = parse_declared(&patched.asset, &patched.exports, Some(&mappings));
+    verify_patch(&before, &after, &changes, &patched.applied).expect("verifies");
+    let thing = &after.exports[1];
+    assert_eq!(thing.path, "/Game/TestPackage.TestObject:Thing");
+    assert_eq!(thing.class_name, "TestThing");
+
+    let (next, ..) = apply_declared(&patched.asset, &patched.exports, Some(&mappings), |p| {
+        vec![edit_of(find(&p.exports[1].properties, "Count"), set("7"))]
+    })
+    .expect("a value is set on it");
+    assert!(matches!(
+        find(&next.exports[1].properties, "Count").value,
+        PropertyValue::Int { value: 7 }
+    ));
+}
+
+/// A class the schema does not know, a name its outer already holds and a bad name are refused.
+#[test]
+fn an_object_of_an_unknown_class_or_a_taken_name_is_refused() {
+    let mappings = thing_mappings();
+    let (asset, exports) = tagged_package();
+    let bundle = AssetBundle {
+        asset: &asset,
+        exports: &exports,
+    };
+    let before = parse_declared(&asset, &exports, Some(&mappings));
+    let refused = |changes: PackageEdits| {
+        patch_package(&bundle, &before, &changes, Some(&mappings))
+            .err()
+            .expect("refused")
+    };
+    let unknown = refused(add_thing(None, "Thing", "/Script/Test.Missing"));
+    assert!(unknown.contains("does not know"), "{unknown}");
+    let taken = refused(add_thing(None, "TestObject", "/Script/Test.TestThing"));
+    assert!(taken.contains("already named"), "{taken}");
+    let bad = refused(add_thing(None, "Two Words", "/Script/Test.TestThing"));
+    assert!(bad.contains("not an object name"), "{bad}");
+}

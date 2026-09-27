@@ -184,6 +184,25 @@ pub fn synthesised(
     Ok(synth_for(&first, mappings, source))
 }
 
+/// Definitions for the Blueprint class at `object_path`, recovered from its package and its
+/// parents', for laying out an object of it.
+pub fn class_synth(
+    object_path: &str,
+    mappings: Option<&Mappings>,
+    source: &PackageSource<'_>,
+) -> Option<Arc<Mappings>> {
+    let name = object_path.rsplit('.').next().unwrap_or(object_path);
+    synthesise(
+        &[MissingSchema {
+            name: name.to_string(),
+            object_path: object_path.to_string(),
+        }],
+        Vec::new(),
+        mappings,
+        source,
+    )
+}
+
 /// `own` are definitions the package being parsed carries itself, which need no loading but do
 /// make the result specific to that package.
 fn synthesise(

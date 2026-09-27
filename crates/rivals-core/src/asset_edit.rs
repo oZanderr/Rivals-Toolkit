@@ -60,6 +60,34 @@ pub fn preview_read_edits(
     if let Some(save_as) = &changes.save_as {
         return save_as_pass(request, mappings, loaded, parsed, save_as);
     }
+    // A Blueprint class is laid out from its own package, which only this side can read.
+    if changes.add_exports.iter().any(|add| add.layout.is_none()) {
+        let header = rivals_uasset::read_header(&bundle_of(&loaded))?;
+        let mut resolved = changes.clone();
+        for add in &mut resolved.add_exports {
+            let class = add.class.trim();
+            let synth = if class.starts_with("/Script/") {
+                None
+            } else {
+                schema_synth::class_synth(class, mappings, &source_of(request))
+            };
+            add.layout = Some(rivals_uasset::class_layout(
+                class,
+                &header,
+                mappings,
+                synth.as_deref(),
+            )?);
+        }
+        return preview_read_edits(
+            &AssetEditRequest {
+                changes: resolved,
+                ..*request
+            },
+            mappings,
+            loaded,
+            parsed,
+        );
+    }
     if changes.is_empty() {
         return Err("No changes to save".into());
     }
@@ -3564,6 +3592,84 @@ mod game_data_tests {
         );
         let err = asset::entry_for_package(&root, "/NoSuchMount/X/DA_Thing").expect_err("refused");
         assert!(err.contains("mounts nothing"), "{err}");
+    }
+
+    fn add_object(class: &str, outer: Option<u32>, name: &str) -> PackageEdits {
+        PackageEdits {
+            add_exports: vec![rivals_uasset::AddExport {
+                class: class.into(),
+                outer,
+                name: name.into(),
+                layout: None,
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// A second object of the data asset's own class is added beside it, reads back complete with
+    /// the class, the class default object and no outer, and stores nothing.
+    #[test]
+    fn an_empty_object_of_a_native_class_is_added_to_a_data_package() {
+        let Some(fixture) = Fixture::open(TITLES) else {
+            return;
+        };
+        let before = fixture.parse();
+        let class = before
+            .imports
+            .iter()
+            .find(|import| import.index == before.exports[0].class_index)
+            .expect("the class import")
+            .path
+            .clone();
+        let (_, after) = fixture.apply_changes(add_object(&class, None, "ExtraTitles"));
+        let made = after.exports.last().expect("the object");
+        assert_eq!(after.exports.len(), before.exports.len() + 1);
+        assert_eq!(
+            made.path,
+            format!("{}.ExtraTitles", before.info.package_name)
+        );
+        assert_eq!(made.class_index, before.exports[0].class_index);
+        assert_eq!(made.template_index, before.exports[0].template_index);
+        assert!(matches!(made.status, ExportStatus::Complete));
+    }
+
+    /// An object of a Blueprint class from another package is laid out from that package, and the
+    /// class and its default object become imports.
+    #[test]
+    fn an_empty_object_of_a_blueprint_class_is_laid_out_from_its_package() {
+        let Some(fixture) = Fixture::open(TITLES) else {
+            return;
+        };
+        const CLASS: &str =
+            "/Game/Marvel/AbilitySystem/1011/101111/CameraShake_101111.CameraShake_101111_C";
+        let (_, after) = fixture.apply_changes(add_object(CLASS, Some(0), "Shake"));
+        let made = after.exports.last().expect("the object");
+        assert_eq!(made.class_name, "CameraShake_101111_C");
+        assert!(matches!(made.status, ExportStatus::Complete));
+        assert!(after
+            .imports
+            .iter()
+            .any(|import| import.path
+                == "/Game/Marvel/AbilitySystem/1011/101111/CameraShake_101111.Default__CameraShake_101111_C"));
+    }
+
+    /// An actor writes more than its properties, and a texture carries its mips after them, so an
+    /// empty one of either is refused.
+    #[test]
+    fn an_empty_actor_or_texture_is_refused() {
+        let Some(fixture) = Fixture::open(TITLES) else {
+            return;
+        };
+        for (class, why) in [
+            ("/Script/Engine.Actor", "Actor"),
+            ("/Script/Engine.Texture2D", "after their properties"),
+        ] {
+            let request = fixture.request_changes(add_object(class, None, "Nope"));
+            let Err(refused) = preview_edits(&request, Some(&fixture.schema)) else {
+                panic!("an empty {class} was added");
+            };
+            assert!(refused.contains(why), "{refused}");
+        }
     }
 
     /// Replacing the one cell that names a name leaves it unused, and a save dropping unused names
