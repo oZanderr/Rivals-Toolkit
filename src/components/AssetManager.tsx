@@ -26,6 +26,7 @@ import {
   Package,
   PackageOpen,
   PackagePlus,
+  Pencil,
   RefreshCw,
   RotateCcw,
   Search,
@@ -195,6 +196,16 @@ interface Props {
   onOpenSettings?: () => void;
 }
 
+/** The package name a container entry is the package of: the project's content is `/Game/`, and a
+ *  plugin's is mounted under the plugin's name. */
+function packageOfEntry(entry: string): string {
+  const stem = entry.replace(/\.[^./]+$/, "");
+  if (stem.startsWith("Marvel/Content/")) return `/Game/${stem.slice("Marvel/Content/".length)}`;
+  if (stem.startsWith("Engine/Content/")) return `/Engine/${stem.slice("Engine/Content/".length)}`;
+  const plugin = /(?:^|\/)([^/]+)\/Content\/(.*)$/.exec(stem);
+  return plugin ? `/${plugin[1]}/${plugin[2]}` : `/${stem}`;
+}
+
 export function AssetManager({
   gamePath,
   gameRunning,
@@ -212,6 +223,7 @@ export function AssetManager({
   const [overviewOpen, setOverviewOpen] = useState(false);
   /// A package the user asked to take back out of the selected mod, awaiting confirmation.
   const [revertPrompt, setRevertPrompt] = useState<string | null>(null);
+  const [renamePrompt, setRenamePrompt] = useState<{ path: string; to: string } | null>(null);
   /// A mod pak to read the inspected entry from instead of the selected container: the copy a
   /// save just wrote.
   const [inspectFrom, setInspectFrom] = useState<string | null>(null);
@@ -487,6 +499,28 @@ export function AssetManager({
             : `${mod} does not carry ${path}`,
         outcome === "not_held" ? "err" : "ok"
       );
+      pakContentsCacheRef.current.delete(selectedPak);
+      emitModsChanged({
+        modsFolder: selectedPak.replace(/[\\/][^\\/]+$/, ""),
+        source: "AssetManager",
+      });
+      await listPaks();
+    } catch (e: unknown) {
+      showNotice(String(e), "err");
+    }
+  }
+
+  /** Moves a package the selected mod added to another path inside the same mod. */
+  async function renameEntry(path: string, to: string) {
+    if (!selectedPak) return;
+    try {
+      const message = await invoke<string>("rename_mod_package", {
+        gameRoot: gamePath,
+        container: selectedPak,
+        entry: path,
+        to,
+      });
+      showNotice(message, "ok");
       pakContentsCacheRef.current.delete(selectedPak);
       emitModsChanged({
         modsFolder: selectedPak.replace(/[\\/][^\\/]+$/, ""),
@@ -2067,6 +2101,21 @@ export function AssetManager({
                             Inspect Contents
                           </ContextMenuItem>
                         )}
+                        {!selectedIsVanilla &&
+                          /\.utoc$/i.test(selectedPak) &&
+                          /\.uasset$/i.test(entry.path) && (
+                            <ContextMenuItem
+                              onSelect={() =>
+                                setRenamePrompt({
+                                  path: entry.path,
+                                  to: packageOfEntry(entry.path),
+                                })
+                              }
+                            >
+                              <Pencil />
+                              Rename in This Mod…
+                            </ContextMenuItem>
+                          )}
                         {!selectedIsVanilla && /\.(uasset|umap)$/i.test(entry.path) && (
                           <ContextMenuItem destructive onSelect={() => setRevertPrompt(entry.path)}>
                             <RotateCcw />
@@ -2395,6 +2444,46 @@ export function AssetManager({
               }}
             >
               Revert
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={renamePrompt !== null}
+        onOpenChange={(open) => !open && setRenamePrompt(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Rename in this mod</AlertDialogTitle>
+            <AlertDialogDescription>
+              Moves <span className="font-mono">{renamePrompt?.path}</span> to another package name
+              inside {selectedPak.split(/[\\/]/).pop()}. Only a package the mod added can move;
+              anything still pointing at the old name finds nothing there.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <Input
+            value={renamePrompt?.to ?? ""}
+            onChange={(e) =>
+              setRenamePrompt((held) => (held ? { ...held, to: e.target.value } : held))
+            }
+            className="h-8 font-mono text-xs"
+          />
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={
+                !renamePrompt ||
+                !/^\/[^/.:\s]+(\/[^/.:\s]+)+$/.test(renamePrompt.to.trim()) ||
+                renamePrompt.to.trim() === packageOfEntry(renamePrompt.path)
+              }
+              onClick={() => {
+                const held = renamePrompt;
+                setRenamePrompt(null);
+                if (held) void renameEntry(held.path, held.to.trim());
+              }}
+            >
+              Rename
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

@@ -53,6 +53,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -2919,6 +2920,7 @@ function PackageView({
   onDeps,
   onDropImport,
   onCompactNames,
+  onSaveAs,
 }: {
   pkg: ParsedPackage;
   edits: AssetEdits;
@@ -2939,6 +2941,7 @@ function PackageView({
   onDeps: (index: number) => void;
   onDropImport: (at: number) => void;
   onCompactNames: () => void;
+  onSaveAs: () => void;
 }) {
   const adds = Object.entries(edits.importDrafts).filter(([key]) => key.startsWith("add:"));
   const payloadActions = (exp: ParsedExport): PayloadActions => {
@@ -2965,6 +2968,22 @@ function PackageView({
         {pkg.unversioned_properties ? ", unversioned properties" : ""}
         {" · "}
         {pkg.names.length} names, {pkg.imports.length} imports, {pkg.exports.length} exports
+        <Tip
+          content={
+            lock ??
+            "Write this asset under another package name: a new asset, or a replacement for the one at that path."
+          }
+        >
+          <Button
+            size="sm"
+            variant="outline"
+            className="float-right h-6 text-[11px]"
+            disabled={!!lock}
+            onClick={onSaveAs}
+          >
+            <Copy size={12} /> Save as a new asset…
+          </Button>
+        </Tip>
       </div>
 
       <div className="border-b border-border">
@@ -3299,6 +3318,91 @@ function PackageView({
         </div>
       </details>
     </div>
+  );
+}
+
+/** Asks for the package name to save the asset under, and says what that name amounts to: a new
+ *  asset, or a replacement for one already shipped. Unsaved changes go along with it. */
+function SaveAsDialog({
+  pkg,
+  edits,
+  onClose,
+}: {
+  pkg: ParsedPackage;
+  edits: AssetEdits;
+  onClose: () => void;
+}) {
+  const short = pkg.package_name.split("/").pop() ?? "Asset";
+  const [path, setPath] = useState(`/Game/Mods/${edits.modName.trim() || "MyMod"}/${short}`);
+  const [renameObjects, setRenameObjects] = useState(true);
+  const trimmed = path.trim();
+  const valid = /^\/[^/.:\s]+(\/[^/.:\s]+)+$/.test(trimmed);
+  const same = trimmed.toLowerCase() === pkg.package_name.toLowerCase();
+  const check = usePathCheck(edits, valid && !same ? trimmed : undefined);
+  const pak = previewContainerFilename(edits.modName, edits.saveTarget);
+  const note = !valid
+    ? "A package name takes the form /Game/Folder/Name, with no dots or spaces."
+    : same
+      ? "That is the name it already has."
+      : check?.found === "found"
+        ? `Something already ships ${trimmed}, so this replaces it in the game.`
+        : check?.found === "no_package"
+          ? "A new asset: nothing loads it until something points at it."
+          : null;
+  return (
+    <AlertDialog open onOpenChange={(open) => !open && onClose()}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Save as a new asset</AlertDialogTitle>
+          <AlertDialogDescription>
+            Writes {short} under another package name
+            {edits.count > 0
+              ? `, with the ${edits.count} unsaved change${edits.count === 1 ? "" : "s"}`
+              : ""}
+            . The paths inside it that name the asset itself follow the new name.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <div className="flex flex-col gap-3 text-xs">
+          <label className="flex flex-col gap-1">
+            <span className="text-muted-foreground">Package name</span>
+            <Input
+              value={path}
+              onChange={(e) => setPath(e.target.value)}
+              className="h-8 font-mono text-xs"
+            />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-muted-foreground">Mod</span>
+            <Input
+              value={edits.modName}
+              onChange={(e) => edits.setModName(e.target.value)}
+              placeholder="AssetEdits"
+              className="h-8 font-mono text-xs"
+            />
+          </label>
+          <label className="flex items-center gap-2">
+            <Checkbox
+              checked={renameObjects}
+              onCheckedChange={(checked) => setRenameObjects(checked === true)}
+            />
+            Rename the objects named after it: {short}, and a Blueprint's class and default object
+          </label>
+          {note && <p className="text-muted-foreground">{note}</p>}
+        </div>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <AlertDialogAction
+            disabled={!valid || same || !pak || edits.saving}
+            onClick={() => {
+              onClose();
+              void edits.save({ saveAs: { package: trimmed, rename_objects: renameObjects } });
+            }}
+          >
+            Save into {pak ?? "the mod"}
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   );
 }
 
@@ -6342,6 +6446,7 @@ export default function AssetInspector({
   const [pkg, setPkg] = useState<ParsedPackage | null>(null);
   /// A removal or reset the user has asked about but not yet confirmed.
   const [ask, setAsk] = useState<StructuralAsk | null>(null);
+  const [savingAs, setSavingAs] = useState(false);
   /// Progress of an import index build started from the removal dialog.
   const [indexing, setIndexing] = useState<{ current: number; total: number } | null>(null);
   /// Bumped after a save so the asset is read again from disk rather than shown from memory.
@@ -7288,6 +7393,7 @@ export default function AssetInspector({
                     }
                     onDropImport={askDropImport}
                     onCompactNames={askCompactNames}
+                    onSaveAs={() => setSavingAs(true)}
                   />
                 ) : active && effectiveView === "table" && active.data_table ? (
                   <DataTableGrid table={active.data_table} exportIndex={active.index} />
@@ -7458,6 +7564,10 @@ export default function AssetInspector({
               </AlertDialogFooter>
             </AlertDialogContent>
           </AlertDialog>
+
+          {pkg && savingAs && (
+            <SaveAsDialog pkg={pkg} edits={edits} onClose={() => setSavingAs(false)} />
+          )}
 
           {pkg && (
             <StructuralDialog

@@ -277,6 +277,51 @@ pub fn game_entry(game_root: &str, package_name: &str, disk_path: &Path) -> Resu
         })
 }
 
+/// The mount-relative path a package named `package_name` is saved under: where the game ships it
+/// when it does, else under its mount's content folder. A plugin's mount is placed by finding any
+/// package the game ships under it.
+pub fn entry_for_package(game_root: &str, package_name: &str) -> Result<String, String> {
+    let store = open_base_game_paks(&crate::paths::paks_dir(game_root), "").ok();
+    if let Some(path) = store
+        .as_deref()
+        .and_then(|store| package_path(store, package_name))
+    {
+        return Ok(path);
+    }
+    if let Some(relative) = mount_relative(package_name) {
+        return Ok(format!("{relative}.uasset"));
+    }
+    let (mount, rest) = package_name
+        .strip_prefix('/')
+        .and_then(|name| name.split_once('/'))
+        .ok_or_else(|| format!("{package_name} is not a package name"))?;
+    let store = store.ok_or("the game's containers could not be read to place the package")?;
+    let marker = format!("/{}/content/", mount.to_ascii_lowercase());
+    store
+        .packages()
+        .find_map(|package| {
+            let chunk =
+                FIoChunkId::from_package_id(package.id(), 0, EIoChunkType::ExportBundleData);
+            let path = store.chunk_path(chunk)?;
+            let path = path.strip_prefix(MOUNT_POINT).unwrap_or(&path);
+            let at = format!("/{}", path.to_ascii_lowercase()).find(&marker)?;
+            Some(format!("{}{rest}.uasset", &path[..at + marker.len() - 1]))
+        })
+        .ok_or_else(|| {
+            format!(
+                "{package_name} is under /{mount}/, where the game mounts nothing, so there is no \
+                 path to save it under. New content goes under /Game/."
+            )
+        })
+}
+
+/// Whether the base game, mods aside, ships a package by this name.
+pub fn base_game_ships(game_root: &str, package_name: &str) -> bool {
+    open_base_game_paks(&crate::paths::paks_dir(game_root), "")
+        .ok()
+        .is_some_and(|store| package_path(&*store, package_name).is_some())
+}
+
 /// `entry` as a path inside a container, refused when it could reach outside one: a drive, a root
 /// or a `..` would make joining it onto a folder land somewhere else on disk.
 pub fn contained_entry(entry: &str) -> Result<String, String> {

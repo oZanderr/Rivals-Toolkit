@@ -80,6 +80,16 @@ struct Cli {
     #[arg(long, global = true)]
     allow_missing: bool,
 
+    /// Save an asset write under this package name instead of the asset's own, such as
+    /// `/Game/Mods/MyThing/DA_Sword`: a new asset, or a replacement for the asset at that path.
+    #[arg(long = "as", global = true, value_name = "PACKAGE")]
+    save_as: Option<String>,
+
+    /// With `--as`, keep the names of the objects named after the package instead of renaming the
+    /// asset, and a Blueprint's class and default object, along with it.
+    #[arg(long, global = true)]
+    keep_object_names: bool,
+
     /// The language texts are shown in, as the game names it (`en`, `ja`, `zh-hans`, ...).
     /// Defaults to the app's setting, then English.
     #[arg(long, global = true, value_name = "CULTURE")]
@@ -143,6 +153,12 @@ enum AssetCmd {
     /// Drop every value an export stores so it inherits its class defaults, and write the result
     /// into a mod pak.
     ResetExport(ResetExportArgs),
+    /// Write the asset, unchanged but for its name, under another package name: a new asset, or a
+    /// replacement for the one at that path.
+    SaveAs(SaveAsArgs),
+    /// Move a package a mod added to another path inside the same mod. Read it from the mod's own
+    /// container.
+    RenamePackage(RenamePackageArgs),
     /// Copy an export and its subobjects to the end of the export table under a new name, and
     /// write the result into a mod pak.
     DuplicateExport(DuplicateExportArgs),
@@ -456,6 +472,35 @@ struct ResetExportArgs {
     /// Overwrite an edited copy of this asset that the mod pak already holds.
     #[arg(long)]
     replace: bool,
+}
+
+#[derive(Args)]
+struct SaveAsArgs {
+    #[command(flatten)]
+    asset: AssetArgs,
+
+    /// The package name to save it as, such as `/Game/Mods/MyThing/DA_Sword`.
+    #[arg(long, value_name = "PACKAGE")]
+    to: String,
+
+    /// Mod pak to write into, created in `~mods` if it does not exist. Defaults to the name the
+    /// desktop app last saved into, then to `AssetEdits`.
+    #[arg(long, value_name = "NAME")]
+    mod_name: Option<String>,
+
+    /// Overwrite a copy of the asset at that path that the mod pak already holds.
+    #[arg(long)]
+    replace: bool,
+}
+
+#[derive(Args)]
+struct RenamePackageArgs {
+    #[command(flatten)]
+    asset: AssetArgs,
+
+    /// The package name to move it to, such as `/Game/Mods/MyThing/DA_Sword`.
+    #[arg(long, value_name = "PACKAGE")]
+    to: String,
 }
 
 #[derive(Args)]
@@ -999,6 +1044,8 @@ fn run(cli: &Cli) -> Result<(), String> {
         Command::Asset(AssetCmd::RemoveExport(a)) => asset_remove_export(cli, &app, a),
         Command::Asset(AssetCmd::Revert(a)) => asset_revert(cli, &app, a),
         Command::Asset(AssetCmd::ResetExport(a)) => asset_reset_export(cli, &app, a),
+        Command::Asset(AssetCmd::SaveAs(a)) => asset_save_as(cli, &app, a),
+        Command::Asset(AssetCmd::RenamePackage(a)) => asset_rename_package(cli, &app, a),
         Command::Asset(AssetCmd::Row(a)) => asset_row(cli, &app, a),
         Command::Asset(AssetCmd::Strings(a)) => asset_strings(cli, &app, a),
         Command::Asset(AssetCmd::Keys(a)) => asset_keys(cli, &app, a),
@@ -1724,6 +1771,8 @@ fn asset_request<'a>(
             .unwrap_or_default(),
         layer: cli.layer,
         allow_missing: cli.allow_missing,
+        save_as: cli.save_as.as_deref(),
+        keep_object_names: cli.keep_object_names,
     }
 }
 
@@ -2655,6 +2704,33 @@ fn asset_reset_export(
         mod_name_of(app, args.mod_name.as_deref()),
         args.replace,
     )?;
+    emit(cli, &message, || outln!("{message}"))
+}
+
+fn asset_save_as(cli: &Cli, app: &settings::AppSettings, args: &SaveAsArgs) -> Result<(), String> {
+    if !cli.force && rivals_core::game_status::should_block_for_game() {
+        return Err(rivals_core::game_status::game_running_error());
+    }
+    let root = resolve::game_root(cli.game_root.as_deref(), app)?;
+    let message = asset::save_as(
+        &asset_request(cli, app, &args.asset, &root),
+        &args.to,
+        mod_name_of(app, args.mod_name.as_deref()),
+        args.replace,
+    )?;
+    emit(cli, &message, || outln!("{message}"))
+}
+
+fn asset_rename_package(
+    cli: &Cli,
+    app: &settings::AppSettings,
+    args: &RenamePackageArgs,
+) -> Result<(), String> {
+    if !cli.force && rivals_core::game_status::should_block_for_game() {
+        return Err(rivals_core::game_status::game_running_error());
+    }
+    let root = resolve::game_root(cli.game_root.as_deref(), app)?;
+    let message = asset::rename_package(&asset_request(cli, app, &args.asset, &root), &args.to)?;
     emit(cli, &message, || outln!("{message}"))
 }
 

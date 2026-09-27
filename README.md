@@ -156,6 +156,14 @@ game would load it as nothing; pass `--allow-missing` when a mod loaded alongsid
 `asset export-edit` likewise refuses a rename or a move while other packages or soft references may
 still name the old path, until `--accept-warnings`.
 
+A package's identity is its stored name, so any writing command can save under another one with
+`--as /Game/Mods/MyThing/DA_Copy`: a new asset, or a replacement for the asset at that path. The
+paths inside the package that name itself follow, and so do the objects named after it (the asset,
+and a Blueprint's class and default object) unless `--keep-object-names` says otherwise. Functions
+keep their names, since bytecode calls them by name. `asset save-as` writes a copy with no other
+change, and `asset rename-package` moves a package a mod added to another path inside that mod. A
+level cannot be saved under another path, since its package name is written into its world.
+
 `asset script-set` changes one literal constant inside a function's bytecode, addressed by the
 statement offset `asset script` prints and which literal in that statement, and only at the width
 the old value took: an `IntConst` can become another integer, a string another string of the same
@@ -178,6 +186,8 @@ rivals-cli asset export-edit --container ... --entry ... --export 3 --rename New
 rivals-cli asset export-edit --container ... --entry ... --export 3 --class -32         # retype
 rivals-cli asset imports --container ... --entry ... --unused                           # tidy the table
 rivals-cli asset names   --container ... --entry ... --compact --mod-name MyMod         # drop unused names
+rivals-cli asset save-as --container ... --entry ... --to /Game/Mods/MyThing/DA_Copy --mod-name MyMod
+rivals-cli asset rename-package --container ~mods/MyMod_9999999_P.utoc --entry ... --to /Game/Mods/MyThing/DA_New
 rivals-cli asset deps    --container ... --entry ... --export 3                         # load order
 rivals-cli asset script  --container ... --entry ... --export 26                        # disassembly
 rivals-cli asset script-set --container ... --entry ... --export 26 --statement 0x0664 --const 0 --value 1000 --mod-name MyMod

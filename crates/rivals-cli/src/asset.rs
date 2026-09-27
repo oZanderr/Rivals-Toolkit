@@ -29,6 +29,10 @@ pub struct Request<'a> {
     pub layer: bool,
     /// Save imports that point at nothing the game or an enabled mod has.
     pub allow_missing: bool,
+    /// Save writes under this package name instead of the asset's own.
+    pub save_as: Option<&'a str>,
+    /// With `save_as`, keep the names of the objects named after the package.
+    pub keep_object_names: bool,
 }
 
 fn source_of(container: &str) -> AssetSource {
@@ -87,6 +91,12 @@ fn edit_request<'a>(
     mut changes: PackageEdits,
 ) -> AssetEditRequest<'a> {
     changes.allow_missing |= request.allow_missing;
+    if changes.save_as.is_none() {
+        changes.save_as = request.save_as.map(|package| rivals_uasset::SaveAs {
+            package: package.to_string(),
+            rename_objects: !request.keep_object_names,
+        });
+    }
     AssetEditRequest {
         game_root: request.game_root,
         container: request.container,
@@ -238,6 +248,55 @@ pub fn compact_names(
             ..Default::default()
         },
     )
+}
+
+/// Writes the asset, unchanged but for its name, under another package name.
+pub fn save_as(
+    request: &Request<'_>,
+    to: &str,
+    mod_name: &str,
+    replace: bool,
+) -> Result<String, String> {
+    write_edits(
+        &Request {
+            save_as: Some(to),
+            ..*request
+        },
+        mod_name,
+        replace,
+        PackageEdits::default(),
+    )
+}
+
+/// Moves a package a mod added to another path inside that mod, the mod being the container it is
+/// read from.
+pub fn rename_package(request: &Request<'_>, to: &str) -> Result<String, String> {
+    let mod_name = Path::new(request.container)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|_| source_of(request.container) == AssetSource::Utoc)
+        .ok_or("read the package from the mod's own .utoc to rename it there")?;
+    let schema = mappings::resolve(request.usmap, request.configured_usmap)
+        .and_then(|path| mappings::load(&path))
+        .ok();
+    let changes = PackageEdits::default();
+    match asset_edit::rename_mod_package(
+        &edit_request(
+            &Request {
+                save_as: Some(to),
+                ..*request
+            },
+            mod_name,
+            changes,
+        ),
+        schema.as_deref(),
+        &asset_edit::SaveOptions::default(),
+    )? {
+        asset_edit::SaveOutcome::Written {
+            message, warnings, ..
+        } => Ok(with_warnings(message, &warnings)),
+        asset_edit::SaveOutcome::HoldsCopy { pak } => Err(format!("{pak} already holds {to}")),
+    }
 }
 
 /// Adds, copies, renames or removes a DataTable row and writes the result into a mod pak.

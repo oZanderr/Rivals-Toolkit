@@ -41,7 +41,7 @@ pub fn preview_edits(
     request: &AssetEditRequest<'_>,
     mappings: Option<&Mappings>,
 ) -> Result<(PatchedBundle, FSerializedAssetBundle), String> {
-    if request.changes.is_empty() {
+    if request.changes.is_empty() && request.changes.save_as.is_none() {
         return Err("No changes to save".into());
     }
     let (loaded, parsed) = read_package(request, mappings)?;
@@ -57,6 +57,9 @@ pub fn preview_read_edits(
     parsed: &rivals_uasset::ParsedPackage,
 ) -> Result<(PatchedBundle, FSerializedAssetBundle), String> {
     let changes = &request.changes;
+    if let Some(save_as) = &changes.save_as {
+        return save_as_pass(request, mappings, loaded, parsed, save_as);
+    }
     if changes.is_empty() {
         return Err("No changes to save".into());
     }
@@ -81,6 +84,102 @@ pub fn preview_read_edits(
         changes,
     )?;
     Ok((patched, loaded))
+}
+
+/// Makes the other edits, then saves the result under the name `save_as` gives as the last stage:
+/// the paths the package holds as names follow first, then the ones it holds as strings, and the
+/// whole is checked against the package as it was just before the rename.
+fn save_as_pass(
+    request: &AssetEditRequest<'_>,
+    mappings: Option<&Mappings>,
+    loaded: FSerializedAssetBundle,
+    parsed: &rivals_uasset::ParsedPackage,
+    save_as: &rivals_uasset::SaveAs,
+) -> Result<(PatchedBundle, FSerializedAssetBundle), String> {
+    let edits = PackageEdits {
+        save_as: None,
+        ..request.changes.clone()
+    };
+    let (mut patched, loaded, before) = if edits.is_empty() {
+        let unchanged = PatchedBundle {
+            asset: loaded.asset_file_buffer.clone(),
+            exports: loaded.exports_file_buffer.clone(),
+            applied: Vec::new(),
+            bulk: None,
+            optional_bulk: None,
+        };
+        (unchanged, loaded, parsed.clone())
+    } else {
+        let others = AssetEditRequest {
+            changes: edits,
+            ..*request
+        };
+        let (patched, loaded) = preview_read_edits(&others, mappings, loaded, parsed)?;
+        let before = reparse(request, mappings, &patched.asset, &patched.exports)?;
+        (patched, loaded, before)
+    };
+    let Some(rename) = rivals_uasset::PathRename::plan(&before, save_as)? else {
+        return Ok((patched, loaded));
+    };
+    let bundle = AssetBundle {
+        asset: &patched.asset,
+        exports: &patched.exports,
+    };
+    let mut current = rivals_uasset::patch_identity(&bundle, &before, &rename)?;
+    let mut after = reparse(request, mappings, &current.asset, &current.exports)?;
+    let strings = rivals_uasset::identity_value_edits(&after, &rename);
+    if !strings.is_empty() {
+        let changes = PackageEdits {
+            values: strings,
+            ..Default::default()
+        };
+        let sidecars = rivals_uasset::Sidecars {
+            bulk: patched
+                .bulk
+                .as_deref()
+                .or(loaded.bulk_data_buffer.as_deref()),
+            optional_bulk: patched
+                .optional_bulk
+                .as_deref()
+                .or(loaded.optional_bulk_data_buffer.as_deref()),
+        };
+        let bundle = AssetBundle {
+            asset: &current.asset,
+            exports: &current.exports,
+        };
+        let (edited, reread) = patch_pass(
+            &AssetEditRequest {
+                changes: changes.clone(),
+                ..*request
+            },
+            mappings,
+            &bundle,
+            sidecars,
+            &after,
+            &changes,
+        )?;
+        current = edited;
+        after = reread;
+    }
+    rivals_uasset::verify_identity(&before, &after, &rename)?;
+    patched.asset = current.asset;
+    patched.exports = current.exports;
+    Ok((patched, loaded))
+}
+
+/// The editor's parse of bytes a stage of a save produced.
+fn reparse(
+    request: &AssetEditRequest<'_>,
+    mappings: Option<&Mappings>,
+    asset: &[u8],
+    exports: &[u8],
+) -> Result<rivals_uasset::ParsedPackage, String> {
+    schema_synth::parse_package_opts(
+        &AssetBundle { asset, exports },
+        mappings,
+        &source_of(request),
+        editor_options(),
+    )
 }
 
 /// One patch, read back and checked before anything reaches disk: the decoder is the only honest
@@ -1093,7 +1192,10 @@ pub fn save_batch(
                         utoc.file_name().unwrap_or_default().to_string_lossy(),
                         placed_as(request, entry)
                     ),
-                    warnings: other_overrides(request.game_root, entry, utoc),
+                    warnings: with_save_as_note(
+                        request,
+                        other_overrides(request.game_root, entry, utoc),
+                    ),
                     pak: report.utoc.clone(),
                 }),
                 Err(reason) => Err(reason.clone()),
@@ -1129,7 +1231,7 @@ fn stage_one(
             loaded,
         } => (entry, *patched, *loaded),
     };
-    let shader_map_hashes = source_shader_maps(request, &patched.asset);
+    let shader_map_hashes = source_shader_maps(request, &loaded.asset_file_buffer);
     Ok(Staged::Ready {
         changes: patched.applied.len(),
         bytes: Box::new(crate::pak::iostore_out::PackageBytes {
@@ -1237,6 +1339,12 @@ fn layered_source(
 /// is named by where it sits on disk and a package can be named by its package name, and neither
 /// is a path inside a container.
 pub fn save_entry(request: &AssetEditRequest<'_>) -> Result<String, String> {
+    if let Some(save_as) = &request.changes.save_as {
+        return asset::contained_entry(&asset::entry_for_package(
+            request.game_root,
+            save_as.package.trim(),
+        )?);
+    }
     let entry = match request.kind {
         AssetSource::Loose => {
             let path = Path::new(request.entry);
@@ -1372,7 +1480,7 @@ fn write_patched(
             patched.applied.len(),
             placed_as(request, entry)
         ),
-        warnings: other_overrides(request.game_root, entry, &pak),
+        warnings: with_save_as_note(request, other_overrides(request.game_root, entry, &pak)),
         pak,
     })
 }
@@ -1386,7 +1494,7 @@ fn save_into_iostore(
     loaded: &FSerializedAssetBundle,
     options: &SaveOptions,
 ) -> Result<SaveOutcome, String> {
-    let shader_map_hashes = source_shader_maps(request, &patched.asset);
+    let shader_map_hashes = source_shader_maps(request, &loaded.asset_file_buffer);
     // A read earlier in this session may still hold the container open, and it is about to be
     // replaced underneath.
     crate::pak::containers::drop_cached_store();
@@ -1425,7 +1533,112 @@ fn save_into_iostore(
             patched.applied.len(),
             placed_as(request, entry)
         ),
-        warnings: other_overrides(request.game_root, entry, utoc),
+        warnings: with_save_as_note(request, other_overrides(request.game_root, entry, utoc)),
+        pak: report.utoc,
+    })
+}
+
+/// A save's warnings, and for a save under another name what that amounts to in game: a
+/// replacement for an asset the game ships, or a new one nothing loads until something points at
+/// it.
+fn with_save_as_note(request: &AssetEditRequest<'_>, mut warnings: Vec<String>) -> Vec<String> {
+    if let Some(save_as) = &request.changes.save_as {
+        let package = save_as.package.trim();
+        warnings.push(if asset::base_game_ships(request.game_root, package) {
+            format!("this replaces {package} in the game")
+        } else {
+            format!("{package} is a new asset, which nothing loads until something points at it")
+        });
+    }
+    warnings
+}
+
+/// Moves a package a mod added to another path inside the same mod, in one container rewrite: it
+/// is saved under the name `request.changes.save_as` gives and the old one taken out. A package the
+/// game ships is refused, since the mod only overrides it.
+pub fn rename_mod_package(
+    request: &AssetEditRequest<'_>,
+    mappings: Option<&Mappings>,
+    options: &SaveOptions,
+) -> Result<SaveOutcome, String> {
+    let save_as = request
+        .changes
+        .save_as
+        .as_ref()
+        .ok_or("say what to rename the package to")?;
+    let utoc = mod_pak_path(request.game_root, request.mod_name)?.with_extension("utoc");
+    let name = utoc
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let file_name = |path: &Path| {
+        path.file_name()
+            .map(|name| name.to_string_lossy().to_ascii_lowercase())
+    };
+    if file_name(Path::new(request.container)) != file_name(&utoc) {
+        return Err(format!(
+            "a package is renamed inside the mod that added it: read it from {name}"
+        ));
+    }
+    let (loaded, parsed) = read_package(request, mappings)?;
+    let old = parsed.info.package_name.clone();
+    let new = save_as.package.trim().to_string();
+    if asset::base_game_ships(request.game_root, &old) {
+        return Err(format!(
+            "the game ships {old}, which {name} only overrides, so it cannot be renamed there. \
+             Save it as a new asset instead."
+        ));
+    }
+    let entry = save_entry(request)?;
+    if !options.replace && crate::pak::iostore_out::utoc_holds_entry(&utoc, &entry)? {
+        return Err(format!("{name} already holds {new}"));
+    }
+    let (patched, loaded) = preview_read_edits(request, mappings, loaded, &parsed)?;
+    let shader_map_hashes = source_shader_maps(request, &loaded.asset_file_buffer);
+    crate::pak::containers::drop_cached_store();
+    let report = crate::pak::iostore_out::write_replacing_in_iostore(
+        &utoc,
+        crate::pak::iostore_out::PackageFiles {
+            entry: &entry,
+            asset: &patched.asset,
+            exports: &patched.exports,
+            bulk: patched
+                .bulk
+                .as_deref()
+                .or(loaded.bulk_data_buffer.as_deref()),
+            optional_bulk: patched
+                .optional_bulk
+                .as_deref()
+                .or(loaded.optional_bulk_data_buffer.as_deref()),
+            memory_mapped_bulk: loaded.memory_mapped_bulk_data_buffer.as_deref(),
+            shader_map_hashes,
+        },
+        &std::collections::HashSet::from([retoc::FPackageId::from_name(&old)]),
+        &options.iostore,
+    )?;
+    let mut warnings = Vec::new();
+    match crate::import_index::load(request.game_root) {
+        Ok(Some(index)) => {
+            let mut naming = index.importers_of(&old).packages;
+            naming.extend(index.mentions_of(&old));
+            naming.sort();
+            naming.dedup();
+            if !naming.is_empty() {
+                warnings.push(format!(
+                    "{} package(s) still name {old}, which is no longer there: {}",
+                    naming.len(),
+                    naming.join(", ")
+                ));
+            }
+        }
+        _ => warnings.push(format!(
+            "packages that still name {old} find nothing there now; build the import index to list them"
+        )),
+    }
+    Ok(SaveOutcome::Written {
+        message: format!("Renamed {old} to {new} in {name}"),
+        warnings,
         pak: report.utoc,
     })
 }
@@ -2390,6 +2603,10 @@ mod game_data_tests {
         "Marvel/Content/DT_Hero.uasset",
         "Marvel/Content/Marvel/Data/DataTable/GameMode/2206/Row.uasset",
         "Marvel/Content/A.uasset",
+        // Where the save-as tests expect new packages to land.
+        "Marvel/Content/Mods/ToolkitTest/MarvelHeroTitleData_Copy.uasset",
+        "Marvel/Content/Mods/X/DA_Thing.uasset",
+        "Marvel/Plugins/MarvelGAS/Content/Mods/X/DA_Thing.uasset",
     ];
 
     /// The files that pin a real game asset. A source scan cannot tell a fixture from an example,
@@ -3207,6 +3424,146 @@ mod game_data_tests {
                 .flat_map(|row| &row.fields)
                 .any(|f| matches!(&f.value, PropertyValue::Name { value } if value == wanted))
         );
+    }
+
+    fn save_as(package: &str) -> PackageEdits {
+        PackageEdits {
+            save_as: Some(rivals_uasset::SaveAs {
+                package: package.into(),
+                rename_objects: true,
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// A DataAsset saved under a new path reads back under the new name with the object renamed,
+    /// goes to the entry the name places it at, and converts to the package id the name makes.
+    #[test]
+    fn a_data_asset_saved_under_a_new_path_is_a_new_package() {
+        let Some(fixture) = Fixture::open(TITLES) else {
+            return;
+        };
+        const NEW: &str = "/Game/Mods/ToolkitTest/MarvelHeroTitleData_Copy";
+        let request = fixture.request_changes(save_as(NEW));
+        let (patched, _) = preview_edits(&request, Some(&fixture.schema)).expect("saved as");
+        let after = Fixture::parse_bundle(
+            &AssetBundle {
+                asset: &patched.asset,
+                exports: &patched.exports,
+            },
+            &fixture.schema,
+            &fixture.source(),
+        );
+        assert_eq!(after.info.package_name, NEW);
+        assert_eq!(after.exports[0].object_name, "MarvelHeroTitleData_Copy");
+        assert!(matches!(after.exports[0].status, ExportStatus::Complete));
+        let entry = save_entry(&request).expect("an entry");
+        assert_eq!(
+            entry,
+            "Marvel/Content/Mods/ToolkitTest/MarvelHeroTitleData_Copy.uasset"
+        );
+        let converted = retoc::zen_asset_conversion::build_zen_asset(
+            FSerializedAssetBundle {
+                asset_file_buffer: patched.asset.clone(),
+                exports_file_buffer: patched.exports.clone(),
+                bulk_data_buffer: None,
+                optional_bulk_data_buffer: None,
+                memory_mapped_bulk_data_buffer: None,
+            },
+            &std::collections::HashMap::new(),
+            retoc::UEPathBuf::from(format!("../../../{entry}")).as_ref(),
+            Some(retoc::version::EngineVersion::UE5_3.package_file_version()),
+            retoc::version::EngineVersion::UE5_3.container_header_version(),
+            false,
+            None,
+            None,
+            &retoc::logging::Log::no_log(),
+        )
+        .expect("converts");
+        assert_eq!(converted.package_id, retoc::FPackageId::from_name(NEW));
+        let notes = with_save_as_note(&request, Vec::new());
+        assert!(notes[0].contains("new asset"), "{notes:?}");
+    }
+
+    /// Saved as a path the game ships, a package goes to that asset's entry and replaces it.
+    #[test]
+    fn a_package_saved_over_another_asset_takes_its_place() {
+        let Some(fixture) = Fixture::open(TITLES) else {
+            return;
+        };
+        const OTHER: &str = "/Game/Marvel/Data/DataTable/MarvelHeroTable";
+        let request = fixture.request_changes(save_as(OTHER));
+        assert_eq!(save_entry(&request).expect("an entry"), DEFAULTS);
+        let (patched, _) = preview_edits(&request, Some(&fixture.schema)).expect("saved as");
+        let after = Fixture::parse_bundle(
+            &AssetBundle {
+                asset: &patched.asset,
+                exports: &patched.exports,
+            },
+            &fixture.schema,
+            &fixture.source(),
+        );
+        assert_eq!(after.exports[0].path, format!("{OTHER}.MarvelHeroTable"));
+        let notes = with_save_as_note(&request, Vec::new());
+        assert!(notes[0].contains("replaces"), "{notes:?}");
+    }
+
+    /// A Blueprint's class and class default object are renamed together, and a name ending in a
+    /// number, which an FName stores apart from its text, comes out whole.
+    #[test]
+    fn a_blueprint_saved_under_a_new_path_renames_its_class_and_default_object() {
+        let Some(fixture) = Fixture::open(SHAKE) else {
+            return;
+        };
+        let before = fixture.parse();
+        assert!(
+            before
+                .exports
+                .iter()
+                .any(|export| export.object_name == "CameraShake_101111_C")
+        );
+        const NEW: &str = "/Game/Mods/ToolkitTest/CameraShake_7";
+        let request = fixture.request_changes(save_as(NEW));
+        let (patched, _) = preview_edits(&request, Some(&fixture.schema)).expect("saved as");
+        let after = Fixture::parse_bundle(
+            &AssetBundle {
+                asset: &patched.asset,
+                exports: &patched.exports,
+            },
+            &fixture.schema,
+            &fixture.source(),
+        );
+        let class = after
+            .exports
+            .iter()
+            .find(|export| export.object_name == "CameraShake_7_C")
+            .expect("the class is renamed");
+        let default = after
+            .exports
+            .iter()
+            .find(|export| export.object_name == "Default__CameraShake_7_C")
+            .expect("the default object is renamed");
+        assert_eq!(default.class_index, class.index as i32 + 1);
+        assert_eq!(default.path, format!("{NEW}.Default__CameraShake_7_C"));
+    }
+
+    /// New content under `/Game/` goes under the project's content folder, and a plugin's under
+    /// wherever the game mounts that plugin.
+    #[test]
+    fn a_new_package_is_placed_under_its_mount() {
+        let Ok(root) = std::env::var("RIVALS_GAME_ROOT") else {
+            return;
+        };
+        assert_eq!(
+            asset::entry_for_package(&root, "/Game/Mods/X/DA_Thing").expect("placed"),
+            "Marvel/Content/Mods/X/DA_Thing.uasset"
+        );
+        assert_eq!(
+            asset::entry_for_package(&root, "/MarvelGAS/Mods/X/DA_Thing").expect("placed"),
+            "Marvel/Plugins/MarvelGAS/Content/Mods/X/DA_Thing.uasset"
+        );
+        let err = asset::entry_for_package(&root, "/NoSuchMount/X/DA_Thing").expect_err("refused");
+        assert!(err.contains("mounts nothing"), "{err}");
     }
 
     /// Replacing the one cell that names a name leaves it unused, and a save dropping unused names

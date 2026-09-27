@@ -246,6 +246,8 @@ pub struct HeaderDraft {
     /// Export data added right after the last export, in front of whatever trails it. The drafted
     /// export table may then be longer than the one read, by the entries that own these bytes.
     pub appended: Vec<u8>,
+    /// The name the package is stored under, which is what its IoStore id is made from.
+    pub package_name: Option<String>,
 }
 
 /// The `.uasset` and `.uexp` of a package after rewriting.
@@ -306,7 +308,11 @@ pub fn rewrite(
         preload_dependencies,
         data_resources,
         appended,
+        package_name,
     } = draft;
+    if let Some(name) = package_name {
+        header.summary.package_name = name;
+    }
 
     for pair in splices.windows(2) {
         if pair[1].start < pair[0].end {

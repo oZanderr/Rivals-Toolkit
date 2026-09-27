@@ -573,6 +573,64 @@ pub(crate) async fn revert_mod_asset(
     .map_err(|e| e.to_string())?
 }
 
+/// Moves a package a mod added to another path inside that mod, in one container rewrite. The
+/// message carries the save's warnings after it.
+#[tauri::command]
+pub(crate) async fn rename_mod_package(
+    state: State<'_, SettingsState>,
+    game_root: String,
+    container: String,
+    entry: String,
+    to: String,
+    rename_objects: Option<bool>,
+) -> Result<String, String> {
+    if crate::game_status::should_block_for_game() {
+        return Err(crate::game_status::game_running_error());
+    }
+    let usmap = configured_usmap(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let schema = mappings::resolve(None, usmap.as_deref())
+            .and_then(|path| mappings::load(&path))
+            .ok();
+        let mod_name = std::path::Path::new(&container)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .ok_or("the mod has no name")?
+            .to_string();
+        let outcome = asset_edit::rename_mod_package(
+            &AssetEditRequest {
+                game_root: &game_root,
+                container: &container,
+                entry: &entry,
+                kind: source_of(&container),
+                mod_name: &mod_name,
+                changes: PackageEdits {
+                    save_as: Some(rivals_uasset::SaveAs {
+                        package: to,
+                        rename_objects: rename_objects.unwrap_or(true),
+                    }),
+                    ..Default::default()
+                },
+            },
+            schema.as_deref(),
+            &asset_edit::SaveOptions::default(),
+        )?;
+        let pak = std::path::Path::new(&container).with_extension("pak");
+        crate::pak::invalidate_list_caches(&[&pak, &pak.with_extension("utoc")]);
+        match outcome {
+            asset_edit::SaveOutcome::Written {
+                message, warnings, ..
+            } => Ok(std::iter::once(message)
+                .chain(warnings)
+                .collect::<Vec<_>>()
+                .join(". ")),
+            asset_edit::SaveOutcome::HoldsCopy { pak } => Err(format!("{pak} already holds it")),
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// The mod's own edited copy of the inspected asset, when the mod already carries one, so the
 /// inspector can offer to open it and have edits build on it.
 #[tauri::command]

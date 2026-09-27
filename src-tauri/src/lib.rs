@@ -191,6 +191,7 @@ pub fn run() {
             asset_view::plan_export_removal,
             asset_view::plan_import_removal,
             asset_view::unused_names,
+            asset_view::rename_mod_package,
             asset_view::plan_export_edits,
             asset_view::plan_dependency_edits,
             asset_view::plan_export_copy,

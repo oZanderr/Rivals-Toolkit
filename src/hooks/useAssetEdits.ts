@@ -448,6 +448,7 @@ interface EditList {
   dependencies?: DependencyEdit[];
   field_sets?: FieldSet[];
   compact_names?: boolean;
+  save_as?: SaveAs;
   expect?: {
     exports?: Record<number, string>;
     values?: Record<string, string>;
@@ -556,8 +557,17 @@ export interface Structural {
   compactNames?: boolean;
 }
 
+/** A package name to save under instead of the asset's own. */
+export interface SaveAs {
+  package: string;
+  /** Rename the objects named after the package along with it. */
+  rename_objects: boolean;
+}
+
 export interface SaveOptions {
   replace?: boolean;
+  /** Save under another package name, as a new asset or over another. */
+  saveAs?: SaveAs;
   /** Save even though the asset no longer reads the way it did when the edits were made. */
   allowDrift?: boolean;
   /** Save imports that point at a path neither the game nor an enabled mod has. */
@@ -671,7 +681,7 @@ export interface AssetEdits {
   discard: () => void;
   /** Set when the mod already holds an edited copy of this asset and the save needs a go-ahead.
    *  Carries the structural change that was being saved, so the go-ahead can repeat it. */
-  pendingReplace: { pak: string; structural?: Structural } | null;
+  pendingReplace: { pak: string; structural?: Structural; saveAs?: SaveAs } | null;
   cancelReplace: () => void;
   /** Set when the asset no longer reads the way it did when the drafts were made. */
   pendingDrift: { message: string; structural?: Structural } | null;
@@ -703,7 +713,7 @@ interface Held {
   scope: string;
   drafts: Record<string, DraftRecord>;
   imports: Record<string, ImportDraft>;
-  pendingReplace: { pak: string; structural?: Structural } | null;
+  pendingReplace: { pak: string; structural?: Structural; saveAs?: SaveAs } | null;
   pendingDrift: { message: string; structural?: Structural } | null;
   pendingMissing: { message: string; options: SaveOptions } | null;
 }
@@ -896,6 +906,7 @@ export function useAssetEdits({
           : options?.allowDrift
             ? pendingDrift?.structural
             : undefined);
+      const saveAs = options?.saveAs ?? (options?.replace ? pendingReplace?.saveAs : undefined);
       const records = structural ? [] : Object.values(drafts);
       const cells = records.filter(
         (record) =>
@@ -915,7 +926,7 @@ export function useAssetEdits({
       const bulk = records.flatMap((record) => toBulkEdit(record) ?? []);
       const scripts = records.flatMap((record) => toScriptEdit(record) ?? []);
       const imports = structural ? [] : Object.values(importDrafts);
-      if (!structural && records.length === 0 && imports.length === 0) return;
+      if (!structural && !saveAs && records.length === 0 && imports.length === 0) return;
       const dropped = structural?.removeImports ?? [];
       const name = modName.trim();
       setSaving(true);
@@ -939,6 +950,7 @@ export function useAssetEdits({
           dependencies: structural?.dependencies ?? [],
           field_sets: fieldSets,
           compact_names: structural?.compactNames ?? false,
+          save_as: saveAs,
           expect: expectOf(
             [...cells, ...records.filter((record) => record.target.path)],
             exportPath,
@@ -958,11 +970,17 @@ export function useAssetEdits({
           edits: list,
         });
         if (result.outcome === "holds_copy") {
-          update(() => ({ pendingReplace: { pak: result.pak, structural } }));
+          update(() => ({ pendingReplace: { pak: result.pak, structural, saveAs } }));
           return;
         }
-        showNotice(withWarnings(result.message, result.warnings), "ok", result.pak);
-        setModCopy(result.pak);
+        // A copy saved under another name is not this asset's copy, so there is nothing to open
+        // or build on here.
+        showNotice(
+          withWarnings(result.message, result.warnings),
+          "ok",
+          saveAs ? undefined : result.pak
+        );
+        if (!saveAs) setModCopy(result.pak);
         update(() => ({
           drafts: EMPTY,
           imports: NO_IMPORTS,
@@ -987,7 +1005,7 @@ export function useAssetEdits({
         if (message.startsWith(MISSING)) {
           update(() => ({
             pendingDrift: null,
-            pendingMissing: { message, options: { ...options, structural } },
+            pendingMissing: { message, options: { ...options, structural, saveAs } },
           }));
           return;
         }

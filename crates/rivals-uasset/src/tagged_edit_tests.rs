@@ -1207,3 +1207,110 @@ fn names_nothing_uses_are_dropped_and_every_value_reads_the_same() {
     .expect("nothing left to drop");
     assert!(again.contains("every name"), "{again}");
 }
+
+/// The fixture as a package named `/Game/A` whose object is `A` and whose FName soft path points
+/// at that object, so saving it under another name has a path into itself of each kind to follow.
+fn self_referencing_package() -> (Vec<u8>, Vec<u8>) {
+    let (asset, exports) = tagged_package();
+    let bundle = AssetBundle {
+        asset: &asset,
+        exports: &exports,
+    };
+    let header = crate::package::read_header(&bundle).expect("header");
+    let mut names = header.name_map.clone();
+    let mut table = header.exports.clone();
+    table[0].object_name = names.store("A");
+    let named = crate::write::rewrite(
+        &bundle,
+        &[],
+        crate::write::HeaderDraft {
+            names: Some(names),
+            exports: Some(table),
+            package_name: Some("/Game/A".into()),
+            ..Default::default()
+        },
+    )
+    .expect("renamed");
+    let (_, asset, exports) = apply_to(&named.asset, &named.exports, |p| {
+        vec![edit_of(find(top(p), "Asset"), set("/Game/A.A"))]
+    });
+    (asset, exports)
+}
+
+/// Saving under another name moves the stored name, the object named after the package, a soft
+/// path the package holds to itself as names and one it holds as a string, and leaves a path into
+/// another package alone.
+#[test]
+fn a_package_saved_under_another_name_renames_the_paths_into_itself() {
+    let (asset, exports) = self_referencing_package();
+    let before = parse(&asset, &exports);
+    let save_as = crate::identity::SaveAs {
+        package: "/Game/Mods/C".into(),
+        rename_objects: true,
+    };
+    let rename = crate::identity::PathRename::plan(&before, &save_as)
+        .expect("plans")
+        .expect("a new name");
+    let bundle = AssetBundle {
+        asset: &asset,
+        exports: &exports,
+    };
+    let stage = crate::edit::patch_identity(&bundle, &before, &rename).expect("renamed");
+    let mid = parse(&stage.asset, &stage.exports);
+    let edits = PackageEdits {
+        values: crate::identity::identity_value_edits(&mid, &rename),
+        ..Default::default()
+    };
+    assert_eq!(
+        edits.values.len(),
+        1,
+        "only the string-backed soft path is left"
+    );
+    let staged = AssetBundle {
+        asset: &stage.asset,
+        exports: &stage.exports,
+    };
+    let patched = patch_package(&staged, &mid, &edits, None).expect("patch");
+    let after = parse(&patched.asset, &patched.exports);
+    verify_patch(&mid, &after, &edits, &patched.applied).expect("the strings verify");
+    crate::edit::verify_identity(&before, &after, &rename).expect("the rename verifies");
+
+    assert_eq!(after.info.package_name, "/Game/Mods/C");
+    assert_eq!(after.exports[0].path, "/Game/Mods/C.C");
+    let soft = |name: &str| match &find(top(&after), name).value {
+        PropertyValue::SoftObject { path } => path.clone(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(soft("Asset"), "/Game/Mods/C.C");
+    assert_eq!(soft("Path"), "/Game/Mods/C.B");
+
+    // Already that name: nothing to do.
+    let same = crate::identity::SaveAs {
+        package: "/Game/A".into(),
+        rename_objects: true,
+    };
+    assert!(
+        crate::identity::PathRename::plan(&before, &same)
+            .expect("plans")
+            .is_none()
+    );
+}
+
+/// A level names its package inside its world, and a name that is not a package path is refused.
+#[test]
+fn a_level_or_a_malformed_name_cannot_be_saved_as() {
+    let (asset, exports) = self_referencing_package();
+    let mut parsed = parse(&asset, &exports);
+    let save_as = |package: &str| crate::identity::SaveAs {
+        package: package.into(),
+        rename_objects: true,
+    };
+    for bad in ["Game/X", "/Game", "/Game/X.Y", "/Game/My Thing", "/Game/X/"] {
+        let err = crate::identity::PathRename::plan(&parsed, &save_as(bad)).expect_err(bad);
+        assert!(err.contains("not a package name"), "{err}");
+    }
+    parsed.exports[0].class_name = "World".into();
+    let err =
+        crate::identity::PathRename::plan(&parsed, &save_as("/Game/Mods/C")).expect_err("a level");
+    assert!(err.contains("level"), "{err}");
+}

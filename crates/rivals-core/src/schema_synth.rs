@@ -202,7 +202,14 @@ fn synthesise(
         return None;
     }
 
-    let scope = if own.is_empty() { "" } else { source.entry };
+    // The package's own definitions are named by its package name, which an edit can change while
+    // the entry it was read from stays the same.
+    let scope = if own.is_empty() {
+        String::new()
+    } else {
+        let names: Vec<&str> = own.iter().map(|definition| definition.name()).collect();
+        format!("{}\u{2}{}", source.entry, names.join("\u{2}"))
+    };
     let key = format!(
         "{}\u{1}{scope}\u{1}{}",
         source.container,

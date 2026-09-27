@@ -52,6 +52,9 @@ pub struct EditList {
     /// Drop the names nothing in the package uses. A save of its own.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub compact_names: bool,
+    /// Save the package under another name once the other edits are made.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub save_as: Option<rivals_uasset::SaveAs>,
     /// What the edits were written against. An edit file without it is applied unchecked.
     #[serde(default, skip_serializing_if = "rivals_uasset::Expected::is_empty")]
     pub expect: rivals_uasset::Expected,
@@ -175,6 +178,7 @@ impl EditList {
             dependencies: self.dependencies,
             field_sets: self.field_sets,
             compact_names: self.compact_names,
+            save_as: self.save_as,
             expect: self.expect,
             allow_drift: self.allow_drift,
             allow_missing: self.allow_missing,

@@ -188,6 +188,10 @@ pub struct PackageEdits {
     pub field_sets: Vec<FieldSet>,
     /// Drop the names nothing in the package uses. A save of its own: it renumbers every name.
     pub compact_names: bool,
+    /// Save the package under another name, once every other edit here has been made. Applied by
+    /// the caller that can read the package between the stages: see
+    /// `rivals_core::asset_edit::preview_edits`.
+    pub save_as: Option<crate::identity::SaveAs>,
     /// What the edits were written against, checked before anything is patched.
     pub expect: Expected,
     /// Patch even where the package no longer matches `expect`.
@@ -555,6 +559,9 @@ impl PackageEdits {
         self.dependencies.extend(other.dependencies);
         self.field_sets.extend(other.field_sets);
         self.compact_names |= other.compact_names;
+        if other.save_as.is_some() {
+            self.save_as = other.save_as;
+        }
         self.expect.merge(other.expect);
         self.allow_drift |= other.allow_drift;
         self.allow_missing |= other.allow_missing;
@@ -905,6 +912,7 @@ pub fn patch_package_with(
         // the map as it stands now.
         let alone = PackageEdits {
             compact_names: false,
+            save_as: None,
             expect: Expected::default(),
             allow_drift: false,
             allow_missing: false,
@@ -4838,6 +4846,7 @@ pub fn verify_patch(
             .map(|export| export.path.clone())
             .collect(),
         repathed: Vec::new(),
+        renames: Vec::new(),
         by_name: !before.info.unversioned_properties,
     };
     for edit in &edits.imports {
@@ -5052,6 +5061,108 @@ pub fn verify_patch(
         }
     }
     verify_unique_keys(before, after, edits, applied)
+}
+
+/// Saves the package under the name `rename` gives it. Only the FName-backed paths follow; the
+/// strings are edits of their own, from [`crate::identity_value_edits`] on the result.
+pub fn patch_identity(
+    bundle: &AssetBundle<'_>,
+    parsed: &ParsedPackage,
+    rename: &crate::identity::PathRename,
+) -> Result<PatchedBundle, String> {
+    header_round_trips(bundle)?;
+    check_inline_bulk(bundle)?;
+    crate::identity::rename_package(bundle, parsed, rename)
+}
+
+/// A package saved under another name reads as it did with every path into it renamed: the same
+/// imports, the same exports at their renamed paths, the same values and the same scripts.
+pub fn verify_identity(
+    before: &ParsedPackage,
+    after: &ParsedPackage,
+    rename: &crate::identity::PathRename,
+) -> Result<(), String> {
+    if after.info.package_name != rename.to {
+        return Err(format!(
+            "the package reads as {} after saving it as {}",
+            after.info.package_name, rename.to
+        ));
+    }
+    if before.imports.len() != after.imports.len() {
+        return Err("the import table changed length while renaming the package".into());
+    }
+    for (was, is) in before.imports.iter().zip(&after.imports) {
+        if was.path != is.path {
+            return Err(format!(
+                "import {} read {} and now reads {}",
+                was.index, was.path, is.path
+            ));
+        }
+    }
+    if before.exports.len() != after.exports.len() {
+        return Err("the export table changed length while renaming the package".into());
+    }
+    let excuses = Excuses {
+        renames: rename.pairs().to_vec(),
+        by_name: !before.info.unversioned_properties,
+        ..Default::default()
+    };
+    let no_edits = PackageEdits::default();
+    for (was, is) in before.exports.iter().zip(&after.exports) {
+        let wanted = rename.apply(&was.path).unwrap_or_else(|| was.path.clone());
+        if is.path != wanted {
+            return Err(format!(
+                "{} reads at {} rather than {wanted}",
+                was.path, is.path
+            ));
+        }
+        // An object of a class the package defines, such as a Blueprint's default object, is of the
+        // renamed class.
+        let class_renamed = was.class_index > 0
+            && rename
+                .object_name(&was.class_name)
+                .is_some_and(|now| now == is.class_name);
+        if (was.class_name != is.class_name && !class_renamed)
+            || status_name(was) != status_name(is)
+        {
+            return Err(format!(
+                "{} reads as a {} ({}) rather than a {} ({})",
+                is.path,
+                is.class_name,
+                status_name(is),
+                was.class_name,
+                status_name(was)
+            ));
+        }
+        same_entries(&was.properties, &is.properties, &[], &excuses, was.index)?;
+        same_entries(&was.defaults, &is.defaults, &[], &excuses, was.index)?;
+        match (&was.data_table, &is.data_table) {
+            (None, None) => {}
+            (Some(a), Some(b)) => verify_rows(was.index, a, b, &no_edits, &excuses)?,
+            _ => return Err(format!("{} stopped decoding as a DataTable", is.path)),
+        }
+        match (&was.string_table, &is.string_table) {
+            (None, None) => {}
+            (Some(a), Some(b)) => verify_strings(was.index, a, b, &no_edits)?,
+            _ => return Err(format!("{} stopped decoding as a StringTable", is.path)),
+        }
+        let script = |export: &ParsedExport| {
+            export
+                .script
+                .as_ref()
+                .map(|script| rename.apply_within(&kismet::render_script(script)))
+        };
+        if script(was) != script(is) {
+            return Err(format!("the bytecode of {} reads differently", is.path));
+        }
+    }
+    Ok(())
+}
+
+impl Excuses {
+    fn renamed(&self, text: &str) -> String {
+        crate::identity::rename_within(&self.renames, text)
+    }
 }
 
 /// Dropping names changes which index each name has and nothing else, so the tables, the scripts
@@ -5275,6 +5386,8 @@ struct Excuses {
     removed_paths: Vec<String>,
     /// Objects that kept their index but read at a new path, from a rename or a reparent.
     repathed: Vec<(String, String)>,
+    /// A package saved under another name: every path into it reads renamed. Old path to new.
+    renames: Vec<(String, String)>,
     /// A tagged block lists what it holds in the order it holds it and what it lacks after, so
     /// adding or taking out a tag moves entries: they are paired by name rather than by place.
     by_name: bool,
@@ -5289,9 +5402,11 @@ impl Excuses {
 
     /// Whether an object that read at `was` is expected to read at `is` now.
     fn moved(&self, was: &str, is: &str) -> bool {
-        self.repathed
-            .iter()
-            .any(|(from, to)| from == was && to == is)
+        (!self.renames.is_empty() && self.renamed(was) == self.renamed(is))
+            || self
+                .repathed
+                .iter()
+                .any(|(from, to)| from == was && to == is)
     }
 }
 
@@ -5767,7 +5882,12 @@ fn first_difference(
         }
         _ => {
             let (from, to) = (was.summary(), is.summary());
-            Ok((from != to).then_some((from, to)))
+            let differ = if excuses.renames.is_empty() {
+                from != to
+            } else {
+                excuses.renamed(&from) != excuses.renamed(&to)
+            };
+            Ok(differ.then_some((from, to)))
         }
     }
 }
