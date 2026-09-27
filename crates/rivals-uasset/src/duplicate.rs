@@ -222,14 +222,25 @@ pub(crate) struct Duplication {
 
 /// Turns the plans into table entries and bytes. A copy keeps everything its source declares; the
 /// root takes the new name, a subobject's outer becomes the copy of its outer, and every reference
-/// into the set, in the bytes and in the dependency runs, is pointed at the copies.
+/// into the set, in the bytes and in the dependency runs, is pointed at the copies. With `shared`,
+/// the plans are one set: a reference into any of them is pointed at its copy.
 pub(crate) fn duplicate_exports(
     parsed: &ParsedPackage,
     header: &FLegacyPackageHeader,
     exports_bytes: &[u8],
     names: &mut FPackageNameMap,
     plans: &[DuplicatePlan],
+    shared: bool,
 ) -> Result<Duplication, String> {
+    let everything: BTreeMap<u32, u32> = plans
+        .iter()
+        .flat_map(|plan| {
+            plan.members
+                .iter()
+                .copied()
+                .zip(plan.copies.iter().copied())
+        })
+        .collect();
     let total = i64::from(header.summary.versioning_info.total_header_size);
     let data_end = header
         .exports
@@ -242,12 +253,15 @@ pub(crate) fn duplicate_exports(
     let mut appended = Vec::new();
     let mut applied = Vec::new();
     for plan in plans {
-        let map: BTreeMap<u32, u32> = plan
-            .members
-            .iter()
-            .copied()
-            .zip(plan.copies.iter().copied())
-            .collect();
+        let map: BTreeMap<u32, u32> = if shared {
+            everything.clone()
+        } else {
+            plan.members
+                .iter()
+                .copied()
+                .zip(plan.copies.iter().copied())
+                .collect()
+        };
         let renumber = crate::renumber::Renumber::copying(map.clone());
         let remap = |index: FPackageIndex| -> FPackageIndex { renumber.remap(index) };
         for (&member, &copy) in plan.members.iter().zip(&plan.copies) {

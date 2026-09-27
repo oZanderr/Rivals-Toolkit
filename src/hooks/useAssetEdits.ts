@@ -449,6 +449,7 @@ interface EditList {
   field_sets?: FieldSet[];
   compact_names?: boolean;
   add_exports?: { class: string; outer?: number; name: string }[];
+  add_components?: { node: number; name: string }[];
   save_as?: SaveAs;
   expect?: {
     exports?: Record<number, string>;
@@ -558,6 +559,8 @@ export interface Structural {
   compactNames?: boolean;
   /** Empty objects of a class to add. */
   addExports?: { class: string; outer?: number; name: string }[];
+  /** Blueprint components to add by duplicating the one a construction script node builds. */
+  addComponents?: { node: number; name: string }[];
 }
 
 /** A package name to save under instead of the asset's own. */
@@ -954,6 +957,7 @@ export function useAssetEdits({
           field_sets: fieldSets,
           compact_names: structural?.compactNames ?? false,
           add_exports: structural?.addExports ?? [],
+          add_components: structural?.addComponents ?? [],
           save_as: saveAs,
           expect: expectOf(
             [...cells, ...records.filter((record) => record.target.path)],

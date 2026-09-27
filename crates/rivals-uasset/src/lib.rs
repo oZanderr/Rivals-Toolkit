@@ -1,6 +1,7 @@
 //! Decodes Unreal Engine 5 package export data into readable property trees using a .usmap schema.
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 
+mod component;
 mod copy;
 mod datatable;
 mod dependency;
@@ -34,6 +35,10 @@ mod ustruct;
 mod value;
 mod write;
 
+pub use component::{
+    AddComponent, ComponentPlan, NodeParent, component_wiring, plan_component, property_owner,
+    verify_component,
+};
 pub use copy::{CopiedExport, CopyExport, CopyPlan, CopySource, plan_copy};
 pub use datatable::{DataTable, DataTableLayout, DataTableRow, RowSpan};
 pub use dependency::{DependencyEdit, DependencyPlan, Runs, plan_dependency_edits, runs_of};

@@ -2922,6 +2922,7 @@ function PackageView({
   onCompactNames,
   onSaveAs,
   onAddObject,
+  onAddComponent,
 }: {
   pkg: ParsedPackage;
   edits: AssetEdits;
@@ -2944,6 +2945,7 @@ function PackageView({
   onCompactNames: () => void;
   onSaveAs: () => void;
   onAddObject: (outer: number | null) => void;
+  onAddComponent: (node: number) => void;
 }) {
   const adds = Object.entries(edits.importDrafts).filter(([key]) => key.startsWith("add:"));
   const payloadActions = (exp: ParsedExport): PayloadActions => {
@@ -3165,6 +3167,7 @@ function PackageView({
                         onRename={() => onRename(exp.index)}
                         onMove={() => onMove(exp.index)}
                         onAddUnder={() => onAddObject(exp.index)}
+                        onAddComponent={() => onAddComponent(exp.index)}
                         onFlags={() => onFlags(exp.index)}
                         onRetype={() => onRetype(exp.index)}
                         onDeps={() => onDeps(exp.index)}
@@ -3337,6 +3340,82 @@ function PackageView({
         </div>
       </details>
     </div>
+  );
+}
+
+/** Asks for the variable name of a component copied from the one a construction script node
+ *  builds. The copy is wired in beside the original. */
+function AddComponentDialog({
+  pkg,
+  edits,
+  node,
+  onClose,
+}: {
+  pkg: ParsedPackage;
+  edits: AssetEdits;
+  node: number;
+  onClose: () => void;
+}) {
+  const variableOf = (exp: ParsedExport) => {
+    const value = exp.properties.find((entry) => entry.name === "InternalVariableName")?.value;
+    return value?.kind === "name" ? value.value : null;
+  };
+  const original = variableOf(pkg.exports[node]) ?? "Component";
+  const taken = useMemo(
+    () =>
+      new Set(
+        pkg.exports
+          .filter((exp) => exp.class_name === "SCS_Node")
+          .map((exp) => variableOf(exp)?.toLowerCase())
+          .filter((name): name is string => !!name)
+      ),
+    [pkg]
+  );
+  const [name, setName] = useState(`${original}2`);
+  const trimmed = name.trim();
+  const valid = /^[A-Za-z_][A-Za-z0-9_]*$/.test(trimmed);
+  const clash = taken.has(trimmed.toLowerCase());
+  const pak = previewContainerFilename(edits.modName, edits.saveTarget);
+  return (
+    <AlertDialog open onOpenChange={(open) => !open && onClose()}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Duplicate {original}</AlertDialogTitle>
+          <AlertDialogDescription>
+            Copies the component {pkg.exports[node].object_name} builds, template and all, and hangs
+            the copy beside it. It appears on actors the game spawns from this Blueprint; actors
+            already placed in a map keep the components they were saved with.{" "}
+            {pak ? `Writes the result into ${pak}.` : "Name a mod to save into first."}
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <label className="flex flex-col gap-1 text-xs">
+          <span className="text-muted-foreground">Variable name</span>
+          <Input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            className="h-8 font-mono text-xs"
+          />
+        </label>
+        {!valid && (
+          <p className="text-xs text-muted-foreground">
+            Letters, digits and underscores, not starting with a digit.
+          </p>
+        )}
+        {clash && <p className="text-xs text-err">A component is already named {trimmed}.</p>}
+        <AlertDialogFooter>
+          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <AlertDialogAction
+            disabled={!valid || clash || !pak || edits.saving}
+            onClick={() => {
+              onClose();
+              void edits.save({ structural: { addComponents: [{ node, name: trimmed }] } });
+            }}
+          >
+            Duplicate
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   );
 }
 
@@ -3572,6 +3651,7 @@ function ExportActions({
   onRename,
   onMove,
   onAddUnder,
+  onAddComponent,
   onFlags,
   onRetype,
   onDeps,
@@ -3586,6 +3666,7 @@ function ExportActions({
   onRename: () => void;
   onMove: () => void;
   onAddUnder: () => void;
+  onAddComponent: () => void;
   onFlags: () => void;
   onRetype: () => void;
   onDeps: () => void;
@@ -3665,6 +3746,26 @@ function ExportActions({
             <Plus size={14} /> Add object under it…
           </button>
         </Tip>
+        {exp.class_name === "SCS_Node" && (
+          <Tip
+            content={
+              lock ??
+              "Add a component to the Blueprint by copying the one this node builds, under a variable name of its own."
+            }
+            side="right"
+          >
+            <button
+              className={cn(item, lock ? "cursor-not-allowed opacity-50" : "hover:bg-muted")}
+              disabled={!!lock}
+              onClick={() => {
+                setOpen(false);
+                onAddComponent();
+              }}
+            >
+              <Copy size={14} /> Duplicate component…
+            </button>
+          </Tip>
+        )}
         <Tip content={lock ?? "Change the flags the loader reads this object by."} side="right">
           <button
             className={cn(item, lock ? "cursor-not-allowed opacity-50" : "hover:bg-muted")}
@@ -6588,6 +6689,7 @@ export default function AssetInspector({
   const [ask, setAsk] = useState<StructuralAsk | null>(null);
   const [savingAs, setSavingAs] = useState(false);
   const [addingObject, setAddingObject] = useState<{ outer: number | null } | null>(null);
+  const [addingComponent, setAddingComponent] = useState<number | null>(null);
   /// Progress of an import index build started from the removal dialog.
   const [indexing, setIndexing] = useState<{ current: number; total: number } | null>(null);
   /// Bumped after a save so the asset is read again from disk rather than shown from memory.
@@ -7206,6 +7308,7 @@ export default function AssetInspector({
                       })
                     }
                     onAddUnder={() => setAddingObject({ outer: active.index })}
+                    onAddComponent={() => setAddingComponent(active.index)}
                     onFlags={() => setAsk({ kind: "flags", index: active.index, set: 0, clear: 0 })}
                     onRetype={() =>
                       setAsk({
@@ -7537,6 +7640,7 @@ export default function AssetInspector({
                     onCompactNames={askCompactNames}
                     onSaveAs={() => setSavingAs(true)}
                     onAddObject={(outer) => setAddingObject({ outer })}
+                    onAddComponent={(node) => setAddingComponent(node)}
                   />
                 ) : active && effectiveView === "table" && active.data_table ? (
                   <DataTableGrid table={active.data_table} exportIndex={active.index} />
@@ -7710,6 +7814,15 @@ export default function AssetInspector({
 
           {pkg && savingAs && (
             <SaveAsDialog pkg={pkg} edits={edits} onClose={() => setSavingAs(false)} />
+          )}
+
+          {pkg && addingComponent !== null && (
+            <AddComponentDialog
+              pkg={pkg}
+              edits={edits}
+              node={addingComponent}
+              onClose={() => setAddingComponent(null)}
+            />
           )}
 
           {pkg && addingObject && (

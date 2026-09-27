@@ -88,9 +88,34 @@ pub fn preview_read_edits(
             parsed,
         );
     }
+    if let Some(add) = changes.add_components.first() {
+        return component_pass(request, mappings, loaded, parsed, add);
+    }
     if changes.is_empty() {
         return Err("No changes to save".into());
     }
+    if let Some(listed) = changed_property_edits(request, mappings, &loaded, parsed)? {
+        return value_passes(
+            &AssetEditRequest {
+                changes: listed,
+                ..*request
+            },
+            mappings,
+            loaded,
+            parsed,
+        );
+    }
+    value_passes(request, mappings, loaded, parsed)
+}
+
+/// The value edits of a save, in as many reads of the package as they take.
+fn value_passes(
+    request: &AssetEditRequest<'_>,
+    mappings: Option<&Mappings>,
+    loaded: FSerializedAssetBundle,
+    parsed: &rivals_uasset::ParsedPackage,
+) -> Result<(PatchedBundle, FSerializedAssetBundle), String> {
+    let changes = &request.changes;
     if !changes.field_sets.is_empty()
         || changes
             .values
@@ -193,6 +218,312 @@ fn save_as_pass(
     patched.asset = current.asset;
     patched.exports = current.exports;
     Ok((patched, loaded))
+}
+
+fn entry_named<'a>(
+    entries: &'a [rivals_uasset::PropertyEntry],
+    name: &str,
+) -> Option<&'a rivals_uasset::PropertyEntry> {
+    entries.iter().find(|entry| entry.name == name)
+}
+
+fn export_at(index: i32) -> Option<usize> {
+    (index > 0).then(|| (index - 1) as usize)
+}
+
+/// The entries a save's edits to component templates need in their nodes' `ChangedPropertyList`.
+/// A Blueprint class with cooked component instancing data copies only the properties each node
+/// lists onto the components it spawns, so a template property the list lacks would keep the
+/// class default in game. `None` when the save needs none.
+fn changed_property_edits(
+    request: &AssetEditRequest<'_>,
+    mappings: Option<&Mappings>,
+    loaded: &FSerializedAssetBundle,
+    parsed: &rivals_uasset::ParsedPackage,
+) -> Result<Option<PackageEdits>, String> {
+    let changes = &request.changes;
+    // Each template a node of a cooked class builds, with the node.
+    let mut templates: Vec<(usize, usize)> = Vec::new();
+    for node in parsed
+        .exports
+        .iter()
+        .filter(|export| export.class_name == "SCS_Node")
+    {
+        let Some(PropertyValue::Object { index, .. }) =
+            entry_named(&node.properties, "ComponentTemplate").map(|entry| &entry.value)
+        else {
+            continue;
+        };
+        let class = export_at(node.outer_index)
+            .and_then(|script| parsed.exports.get(script))
+            .and_then(|script| export_at(script.outer_index))
+            .and_then(|class| parsed.exports.get(class));
+        let cooked = class
+            .and_then(|class| entry_named(&class.properties, "bHasCookedComponentInstancingData"))
+            .is_some_and(|entry| matches!(entry.value, PropertyValue::Bool { value: true }));
+        if let Some(template) = export_at(*index).filter(|_| cooked) {
+            templates.push((template, node.index as usize));
+        }
+    }
+    if templates.is_empty() {
+        return Ok(None);
+    }
+    // The top-level property each edit reaches on a template, by node.
+    let touched = changes
+        .values
+        .iter()
+        .filter(|edit| !matches!(edit.op, EditOp::Unset))
+        .map(|edit| (edit.offset, edit.expect_name.as_str(), edit.expect_element))
+        .chain(
+            changes
+                .field_sets
+                .iter()
+                .map(|set| (set.offset, set.expect_name.as_str(), set.expect_element)),
+        );
+    let mut wanted: Vec<(usize, String, u32)> = Vec::new();
+    for (offset, name, element) in touched {
+        for &(template, node) in &templates {
+            let properties = &parsed.exports[template].properties;
+            let top = properties
+                .iter()
+                .find(|entry| {
+                    entry.name == name
+                        && entry.element == element
+                        && entry.span.is_some_and(|(start, _)| start == offset)
+                })
+                .or_else(|| {
+                    properties.iter().find(|entry| {
+                        entry
+                            .span
+                            .is_some_and(|(start, end)| start <= offset && offset < end)
+                    })
+                });
+            if let Some(top) = top {
+                let key = (node, top.name.clone(), top.element.unwrap_or(0));
+                if !wanted.contains(&key) {
+                    wanted.push(key);
+                }
+            }
+        }
+    }
+    // What each node already lists, and where its list is.
+    let listing = |node: usize| -> Option<(rivals_uasset::PropertyEntry, Vec<(String, u32)>)> {
+        let data = entry_named(
+            &parsed.exports[node].properties,
+            "CookedComponentInstancingData",
+        )?;
+        let PropertyValue::Struct { fields, .. } = &data.value else {
+            return None;
+        };
+        if !entry_named(fields, "bHasValidCookedData")
+            .is_some_and(|entry| matches!(entry.value, PropertyValue::Bool { value: true }))
+        {
+            return None;
+        }
+        let list = entry_named(fields, "ChangedPropertyList")?.clone();
+        let held = match &list.value {
+            PropertyValue::Array { items } => items
+                .iter()
+                .filter_map(|item| {
+                    let PropertyValue::Struct { fields, .. } = item else {
+                        return None;
+                    };
+                    let name = match entry_named(fields, "PropertyName").map(|e| &e.value) {
+                        Some(PropertyValue::Name { value }) => value.clone(),
+                        _ => return None,
+                    };
+                    let index = match entry_named(fields, "ArrayIndex").map(|e| &e.value) {
+                        Some(PropertyValue::Int { value }) => *value as u32,
+                        _ => 0,
+                    };
+                    Some((name, index))
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        Some((list, held))
+    };
+    let mut extended = changes.clone();
+    let mut added = false;
+    let mut synth: Option<Option<std::sync::Arc<Mappings>>> = None;
+    let mut next: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
+    for (node, name, element) in wanted {
+        let Some((list, held)) = listing(node) else {
+            continue;
+        };
+        if held
+            .iter()
+            .any(|(listed, index)| listed.eq_ignore_ascii_case(&name) && *index == element)
+        {
+            continue;
+        }
+        let template = templates
+            .iter()
+            .find(|(_, owner)| *owner == node)
+            .map(|(template, _)| &parsed.exports[*template])
+            .ok_or("a template lost its node")?;
+        let class_path = parsed
+            .imports
+            .iter()
+            .find(|import| import.index == template.class_index)
+            .map(|import| import.path.clone());
+        let mut owner = rivals_uasset::property_owner(
+            &template.class_name,
+            class_path.as_deref(),
+            &name,
+            element,
+            mappings,
+            None,
+        );
+        if owner.is_none() {
+            let recovered = synth.get_or_insert_with(|| {
+                schema_synth::synthesised(&bundle_of(loaded), mappings, &source_of(request))
+                    .ok()
+                    .flatten()
+            });
+            owner = rivals_uasset::property_owner(
+                &template.class_name,
+                class_path.as_deref(),
+                &name,
+                element,
+                mappings,
+                recovered.as_deref(),
+            );
+        }
+        let owner = owner.ok_or_else(|| {
+            format!(
+                "which class declares {name} on {} is not known, and the component's changed \
+                 property list needs it",
+                template.object_name
+            )
+        })?;
+        let scope = property_scope(request, parsed, &owner)?;
+        let count = match &list.value {
+            PropertyValue::Array { items } => items.len(),
+            _ => 0,
+        };
+        let at = count + next.get(&node).copied().unwrap_or(0);
+        next.insert(node, next.get(&node).copied().unwrap_or(0) + 1);
+        let (offset, _) = list
+            .span
+            .ok_or("the changed property list has no recorded position")?;
+        extended.values.push(ValueEdit {
+            offset,
+            expect_name: list.name.clone(),
+            expect_element: list.element,
+            expect_kind: rivals_uasset::kind_of(&list.value),
+            op: EditOp::Insert {
+                index: at as u32,
+                key: None,
+            },
+        });
+        for (field, text) in [
+            ("PropertyName", name.clone()),
+            ("ArrayIndex", element.to_string()),
+            ("PropertyScope", scope),
+        ] {
+            extended.field_sets.push(rivals_uasset::FieldSet {
+                offset,
+                expect_name: list.name.clone(),
+                expect_element: list.element,
+                path: vec![format!("[{at}]"), field.to_string()],
+                text,
+            });
+        }
+        added = true;
+    }
+    Ok(added.then_some(extended))
+}
+
+/// The object path of the class `owner` names, for a changed property's scope: a Blueprint class is
+/// already a path, and a native one is looked for in the modules the package imports from.
+fn property_scope(
+    request: &AssetEditRequest<'_>,
+    parsed: &rivals_uasset::ParsedPackage,
+    owner: &str,
+) -> Result<String, String> {
+    if owner.starts_with('/') {
+        return Ok(owner.to_string());
+    }
+    if let Some(import) = parsed
+        .imports
+        .iter()
+        .find(|import| import.object_name == owner && import.class_name == "Class")
+    {
+        return Ok(import.path.clone());
+    }
+    let mut modules: Vec<&str> = parsed
+        .imports
+        .iter()
+        .map(|import| import.path.as_str())
+        .filter(|path| path.starts_with("/Script/") && !path.contains('.'))
+        .collect();
+    modules.extend(["/Script/Engine", "/Script/CoreUObject"]);
+    modules.dedup();
+    let candidates: Vec<String> = modules
+        .iter()
+        .map(|module| format!("{module}.{owner}"))
+        .collect();
+    crate::object_check::objects_exist(request.game_root, request.container, &candidates)
+        .into_iter()
+        .zip(candidates)
+        .find(|(found, _)| *found == crate::object_check::Existence::Found)
+        .map(|(_, path)| path)
+        .ok_or_else(|| {
+            format!(
+                "no module this package imports from declares {owner}, which the component's \
+                 changed property list has to name"
+            )
+        })
+}
+
+/// Adds a Blueprint component in two stages: the node and its template are copied as one set,
+/// then the copy is given its own variable name and guid and wired into the construction script
+/// with value edits on the result. Each stage is checked on its own, and the component as a whole
+/// at the end.
+fn component_pass(
+    request: &AssetEditRequest<'_>,
+    mappings: Option<&Mappings>,
+    loaded: FSerializedAssetBundle,
+    parsed: &rivals_uasset::ParsedPackage,
+    add: &rivals_uasset::AddComponent,
+) -> Result<(PatchedBundle, FSerializedAssetBundle), String> {
+    let plan = rivals_uasset::plan_component(parsed, add)?;
+    let sidecars = rivals_uasset::Sidecars {
+        bulk: loaded.bulk_data_buffer.as_deref(),
+        optional_bulk: loaded.optional_bulk_data_buffer.as_deref(),
+    };
+    let (copied, copy) = patch_pass(
+        request,
+        mappings,
+        &bundle_of(&loaded),
+        sidecars,
+        parsed,
+        &request.changes,
+    )?;
+    let wiring = rivals_uasset::component_wiring(&copy, &plan)?;
+    let staged = FSerializedAssetBundle {
+        asset_file_buffer: copied.asset.clone(),
+        exports_file_buffer: copied.exports.clone(),
+        bulk_data_buffer: loaded.bulk_data_buffer.clone(),
+        optional_bulk_data_buffer: loaded.optional_bulk_data_buffer.clone(),
+        memory_mapped_bulk_data_buffer: loaded.memory_mapped_bulk_data_buffer.clone(),
+    };
+    let (mut wired, _) = preview_read_edits(
+        &AssetEditRequest {
+            changes: wiring,
+            ..*request
+        },
+        mappings,
+        staged,
+        &copy,
+    )?;
+    let after = reparse(request, mappings, &wired.asset, &wired.exports)?;
+    rivals_uasset::verify_component(&after, &plan)?;
+    let mut applied = copied.applied;
+    applied.append(&mut wired.applied);
+    wired.applied = applied;
+    Ok((wired, loaded))
 }
 
 /// The editor's parse of bytes a stage of a save produced.
@@ -3670,6 +4001,182 @@ mod game_data_tests {
             };
             assert!(refused.contains(why), "{refused}");
         }
+    }
+
+    fn add_component(node: u32, name: &str) -> PackageEdits {
+        PackageEdits {
+            add_components: vec![rivals_uasset::AddComponent {
+                node,
+                name: name.into(),
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn objects(export: &rivals_uasset::ParsedExport, name: &str) -> Vec<String> {
+        match export
+            .properties
+            .iter()
+            .find(|entry| entry.name == name)
+            .map(|entry| &entry.value)
+        {
+            Some(PropertyValue::Array { items }) => items
+                .iter()
+                .filter_map(|item| match item {
+                    PropertyValue::Object { path, .. } => path.clone(),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Duplicating the static mesh component of a Blueprint copies its node and template as one
+    /// set: the new node builds the new template, which holds the original's mesh, has a name of
+    /// its own and no children, and is listed beside the original.
+    #[test]
+    fn a_component_is_added_to_a_blueprint_by_duplicating_one() {
+        let Some(fixture) = Fixture::open(PARENT_CHAIN) else {
+            return;
+        };
+        let before = fixture.parse();
+        let node = before
+            .exports
+            .iter()
+            .find(|export| export.object_name == "SCS_Node_2")
+            .expect("the static mesh node")
+            .index;
+        let (_, after) = fixture.apply_changes(add_component(node, "StaticMesh2"));
+        assert!(
+            after
+                .exports
+                .iter()
+                .all(|export| matches!(export.status, ExportStatus::Complete))
+        );
+        let find = |name: &str| {
+            after
+                .exports
+                .iter()
+                .find(|export| export.object_name == name)
+                .unwrap_or_else(|| panic!("no {name}"))
+        };
+        let copy = find("SCS_Node_7");
+        let template = find("StaticMesh2_GEN_VARIABLE");
+        let value = |export: &rivals_uasset::ParsedExport, name: &str| {
+            export
+                .properties
+                .iter()
+                .find(|entry| entry.name == name)
+                .map(|entry| entry.value.summary())
+                .unwrap_or_default()
+        };
+        assert_eq!(value(copy, "InternalVariableName"), "StaticMesh2");
+        assert!(value(copy, "ComponentTemplate").contains("StaticMesh2_GEN_VARIABLE"));
+        assert_eq!(
+            value(template, "StaticMesh"),
+            value(find("StaticMesh_GEN_VARIABLE"), "StaticMesh")
+        );
+        assert_ne!(
+            value(copy, "VariableGuid"),
+            value(find("SCS_Node_2"), "VariableGuid")
+        );
+        assert!(objects(copy, "ChildNodes").is_empty());
+        assert!(objects(find("SimpleConstructionScript_0"), "AllNodes").contains(&copy.path));
+        assert!(objects(find("SCS_Node_0"), "ChildNodes").contains(&copy.path));
+
+        let request = fixture.request_changes(add_component(node, "StaticMesh"));
+        let Err(taken) = preview_edits(&request, Some(&fixture.schema)) else {
+            panic!("a taken component name was accepted");
+        };
+        assert!(taken.contains("already has a component named"), "{taken}");
+    }
+
+    /// The properties a node's changed property list names, as `name@index scope`.
+    fn changed_list(parsed: &rivals_uasset::ParsedPackage, node: &str) -> Vec<String> {
+        let node = parsed
+            .exports
+            .iter()
+            .find(|export| export.object_name == node)
+            .expect("the node");
+        let data = nested(&node.properties, &["CookedComponentInstancingData"]);
+        let PropertyValue::Struct { fields, .. } = &data.value else {
+            panic!("{}", data.value.summary());
+        };
+        match &nested(fields, &["ChangedPropertyList"]).value {
+            PropertyValue::Array { items } => items
+                .iter()
+                .map(|item| {
+                    let PropertyValue::Struct { fields, .. } = item else {
+                        panic!("{}", item.summary());
+                    };
+                    let text = |name: &str| nested(fields, &[name]).value.summary();
+                    format!(
+                        "{}@{} {}",
+                        text("PropertyName"),
+                        text("ArrayIndex"),
+                        text("PropertyScope")
+                    )
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Setting a template property its node's list lacks adds it to the list with the class that
+    /// declares it, since a cooked Blueprint copies only listed properties onto the components it
+    /// spawns; setting one the list holds adds nothing.
+    #[test]
+    fn a_template_property_its_list_lacks_joins_the_list() {
+        let Some(fixture) = Fixture::open(PARENT_CHAIN) else {
+            return;
+        };
+        let before = fixture.parse();
+        assert_eq!(changed_list(&before, "SCS_Node_2").len(), 1);
+        let template = before
+            .exports
+            .iter()
+            .find(|export| export.object_name == "StaticMesh_GEN_VARIABLE")
+            .expect("the template");
+        let distance = nested(&template.properties, &["LDMaxDrawDistance"]).clone();
+        let (_, after) = fixture.apply(vec![edit_of(
+            &distance,
+            EditOp::Set {
+                text: "5000".into(),
+            },
+        )]);
+        let listed = changed_list(&after, "SCS_Node_2");
+        assert_eq!(listed.len(), 2, "{listed:?}");
+        assert!(listed[1].starts_with("LDMaxDrawDistance@0"), "{listed:?}");
+        assert!(listed[1].contains("PrimitiveComponent"), "{listed:?}");
+
+        let mesh = nested(&template.properties, &["StaticMesh"]).clone();
+        let PropertyValue::Object {
+            path: Some(path), ..
+        } = &mesh.value
+        else {
+            panic!("{}", mesh.value.summary());
+        };
+        let (_, same) = fixture.apply(vec![edit_of(&mesh, EditOp::Set { text: path.clone() })]);
+        assert_eq!(changed_list(&same, "SCS_Node_2").len(), 1);
+
+        // A node whose list stores nothing yet gains one.
+        assert!(changed_list(&before, "SCS_Node_0").is_empty());
+        let root = before
+            .exports
+            .iter()
+            .find(|export| export.object_name == "DefaultSceneRoot_GEN_VARIABLE")
+            .expect("the root template");
+        let hidden = nested(&root.properties, &["bHiddenInGame"]).clone();
+        let (_, after) = fixture.apply(vec![edit_of(
+            &hidden,
+            EditOp::Set {
+                text: "true".into(),
+            },
+        )]);
+        let listed = changed_list(&after, "SCS_Node_0");
+        assert_eq!(listed.len(), 1, "{listed:?}");
+        assert!(listed[0].starts_with("bHiddenInGame@0"), "{listed:?}");
+        assert!(listed[0].contains("SceneComponent"), "{listed:?}");
     }
 
     /// Replacing the one cell that names a name leaves it unused, and a save dropping unused names

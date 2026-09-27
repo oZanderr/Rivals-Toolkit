@@ -55,6 +55,9 @@ pub struct EditList {
     /// Empty objects of a class to add. A save of its own.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub add_exports: Vec<rivals_uasset::AddExport>,
+    /// Components to add to a Blueprint by duplicating one. A save of its own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub add_components: Vec<rivals_uasset::AddComponent>,
     /// Save the package under another name once the other edits are made.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub save_as: Option<rivals_uasset::SaveAs>,
@@ -182,6 +185,7 @@ impl EditList {
             field_sets: self.field_sets,
             compact_names: self.compact_names,
             add_exports: self.add_exports,
+            add_components: self.add_components,
             save_as: self.save_as,
             expect: self.expect,
             allow_drift: self.allow_drift,

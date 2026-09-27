@@ -268,6 +268,24 @@ pub fn add_export(
     )
 }
 
+/// Adds a component to a Blueprint by duplicating one and writes the result into a mod pak.
+pub fn add_component(
+    request: &Request<'_>,
+    add: rivals_uasset::AddComponent,
+    mod_name: &str,
+    replace: bool,
+) -> Result<String, String> {
+    write_edits(
+        request,
+        mod_name,
+        replace,
+        PackageEdits {
+            add_components: vec![add],
+            ..Default::default()
+        },
+    )
+}
+
 /// Writes the asset, unchanged but for its name, under another package name.
 pub fn save_as(
     request: &Request<'_>,

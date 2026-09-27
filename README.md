@@ -171,6 +171,16 @@ component, a texture, a mesh or a table writes more after its properties, and is
 class is abstract is not recorded anywhere the toolkit reads, and the game will not create an
 object of an abstract class, so pick a concrete one.
 
+`asset add-component` adds a component to a Blueprint by copying one its construction script
+already builds: `--node` is the `SCS_Node` export, and the copy gets its own template, variable name
+and guid, and hangs beside the original. It appears on actors the game spawns from the Blueprint;
+actors already placed in a map keep the components they were saved with. The class gains no
+variable for it, which UE only notes. Whenever a save sets a property on a component template, the
+property joins its node's changed property list, since a cooked Blueprint copies only the listed
+properties onto the components it spawns. Blueprint variables and functions cannot be added: a
+class's own properties come first in every object's layout, so a new one would shift every
+inherited value in every instance, and a function needs a bytecode compiler.
+
 `asset script-set` changes one literal constant inside a function's bytecode, addressed by the
 statement offset `asset script` prints and which literal in that statement, and only at the width
 the old value took: an `IntConst` can become another integer, a string another string of the same
@@ -194,6 +204,7 @@ rivals-cli asset export-edit --container ... --entry ... --export 3 --class -32 
 rivals-cli asset imports --container ... --entry ... --unused                           # tidy the table
 rivals-cli asset names   --container ... --entry ... --compact --mod-name MyMod         # drop unused names
 rivals-cli asset add-export --container ... --entry ... --class /Script/Module.Class --outer 0 --name MyThing --mod-name MyMod
+rivals-cli asset add-component --container ... --entry ... --node 5 --name StaticMesh2 --mod-name MyMod
 rivals-cli asset save-as --container ... --entry ... --to /Game/Mods/MyThing/DA_Copy --mod-name MyMod
 rivals-cli asset rename-package --container ~mods/MyMod_9999999_P.utoc --entry ... --to /Game/Mods/MyThing/DA_New
 rivals-cli asset deps    --container ... --entry ... --export 3                         # load order

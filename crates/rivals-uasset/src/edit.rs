@@ -183,6 +183,10 @@ pub struct PackageEdits {
     pub duplicate_exports: Vec<DuplicateExport>,
     /// Empty objects of a class added to the end of the table. A save of its own.
     pub add_exports: Vec<crate::duplicate::AddExport>,
+    /// Components added to a Blueprint by copying one its construction script builds. The copy
+    /// is this save; wiring it in takes value edits on the result, which the caller makes: see
+    /// `rivals_core::asset_edit::preview_edits`.
+    pub add_components: Vec<crate::component::AddComponent>,
     /// Replacements for whole preload dependency runs. A save of its own: the runs sit in one
     /// shared table, so changing any of them rewrites all of them.
     pub dependencies: Vec<crate::dependency::DependencyEdit>,
@@ -559,6 +563,7 @@ impl PackageEdits {
         self.reset_exports.extend(other.reset_exports);
         self.duplicate_exports.extend(other.duplicate_exports);
         self.add_exports.extend(other.add_exports);
+        self.add_components.extend(other.add_components);
         self.dependencies.extend(other.dependencies);
         self.field_sets.extend(other.field_sets);
         self.compact_names |= other.compact_names;
@@ -584,6 +589,7 @@ impl PackageEdits {
             && self.reset_exports.is_empty()
             && self.duplicate_exports.is_empty()
             && self.add_exports.is_empty()
+            && self.add_components.is_empty()
             && self.exports.is_empty()
             && self.dependencies.is_empty()
             && self.field_sets.is_empty()
@@ -929,6 +935,54 @@ pub fn patch_package_with(
             );
         }
         return patch_name_compaction(bundle, parsed, &package);
+    }
+    if !edits.add_components.is_empty() {
+        let alone = PackageEdits {
+            add_components: Vec::new(),
+            save_as: None,
+            expect: Expected::default(),
+            allow_drift: false,
+            allow_missing: false,
+            ..edits.clone()
+        };
+        if !alone.is_empty() || edits.add_components.len() > 1 {
+            return Err(
+                "adding a component is a save of its own, one component at a time; save or discard the other edits first"
+                    .into(),
+            );
+        }
+        let plan = crate::component::plan_component(parsed, &edits.add_components[0])?;
+        let mut names = package.name_map.clone();
+        let copies = crate::duplicate::duplicate_exports(
+            parsed,
+            &package,
+            bundle.exports,
+            &mut names,
+            &plan.plans,
+            true,
+        )?;
+        let rewritten = rewrite(
+            bundle,
+            &[],
+            HeaderDraft {
+                names: Some(names),
+                exports: Some(copies.exports),
+                preload_dependencies: Some(copies.preload_dependencies),
+                appended: copies.appended,
+                ..Default::default()
+            },
+        )?;
+        check_inline_bulk(&AssetBundle {
+            asset: &rewritten.asset,
+            exports: &rewritten.exports,
+        })?;
+        return Ok(PatchedBundle {
+            asset: rewritten.asset,
+            exports: rewritten.exports,
+            applied: copies.applied,
+            bulk: None,
+            optional_bulk: None,
+        });
     }
     if !edits.add_exports.is_empty() {
         let alone = PackageEdits {
@@ -2504,6 +2558,7 @@ fn patch_structure(
             bundle.exports,
             &mut names,
             &plans,
+            false,
         )?;
         let listed = list_in_levels(bundle, &plans)?;
         if let Some(dependencies) = link_dependencies(
@@ -4790,6 +4845,9 @@ pub fn verify_patch(
     if edits.compact_names {
         verify_name_compaction(before, after)?;
     }
+    if let Some(add) = edits.add_components.first() {
+        return verify_component_copies(before, after, add);
+    }
     let dropped_imports: Vec<i32> = edits
         .imports
         .iter()
@@ -5108,6 +5166,74 @@ pub fn verify_patch(
         }
     }
     verify_unique_keys(before, after, edits, applied)
+}
+
+/// The node and the template read back copied at the end of the table, as one set: each copy reads
+/// as its source does, with every reference into the set pointing at the copies.
+fn verify_component_copies(
+    before: &ParsedPackage,
+    after: &ParsedPackage,
+    add: &crate::component::AddComponent,
+) -> Result<(), String> {
+    let plan = crate::component::plan_component(before, add)?;
+    let remap: std::collections::BTreeMap<i32, i32> = plan
+        .plans
+        .iter()
+        .flat_map(|plan| plan.members.iter().zip(&plan.copies))
+        .map(|(&member, &copy)| (member as i32 + 1, copy as i32 + 1))
+        .collect();
+    let copied: usize = plan.plans.iter().map(|plan| plan.members.len()).sum();
+    if after.exports.len() != before.exports.len() + copied {
+        return Err(format!(
+            "the patched package has {} exports where {} were expected",
+            after.exports.len(),
+            before.exports.len() + copied
+        ));
+    }
+    for (was, is) in before.exports.iter().zip(&after.exports) {
+        same_entries(
+            &was.properties,
+            &is.properties,
+            &[],
+            &Excuses::default(),
+            was.index,
+        )?;
+    }
+    for copy_plan in &plan.plans {
+        for (&member, &copy) in copy_plan.members.iter().zip(&copy_plan.copies) {
+            let source = &before.exports[member as usize];
+            let made = after
+                .exports
+                .get(copy as usize)
+                .ok_or_else(|| format!("the copy of {} did not read back", source.path))?;
+            let name = if member == copy_plan.root {
+                copy_plan.name.as_str()
+            } else {
+                source.object_name.as_str()
+            };
+            let outer = remap
+                .get(&source.outer_index)
+                .copied()
+                .unwrap_or(source.outer_index);
+            if made.class_name != source.class_name
+                || status_name(made) != status_name(source)
+                || made.object_name != name
+                || made.outer_index != outer
+            {
+                return Err(format!(
+                    "the copy of {} reads as {} ({}, {}) under {}",
+                    source.path,
+                    made.object_name,
+                    made.class_name,
+                    status_name(made),
+                    made.outer_index
+                ));
+            }
+            same_copy(&source.properties, &made.properties, &remap)
+                .map_err(|e| format!("the copy of {}: {e}", source.path))?;
+        }
+    }
+    Ok(())
 }
 
 /// Each added object reads back at the end of the table as an object of its class, under its outer
@@ -8360,8 +8486,9 @@ mod tests {
         assert_eq!(plans[0].members, vec![0, 1]);
         assert_eq!(plans[0].copies, vec![2, 3]);
         let mut names = name_map();
-        let out = crate::duplicate::duplicate_exports(&parsed, &header, &data, &mut names, &plans)
-            .expect("duplicate");
+        let out =
+            crate::duplicate::duplicate_exports(&parsed, &header, &data, &mut names, &plans, false)
+                .expect("duplicate");
         assert_eq!(out.exports.len(), 4);
         let root = &out.exports[2];
         assert_eq!(
