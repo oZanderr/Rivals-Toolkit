@@ -268,41 +268,49 @@ fn changed_property_edits(
     if templates.is_empty() {
         return Ok(None);
     }
-    // The top-level property each edit reaches on a template, by node.
+    // The top-level property each edit reaches on a template, by node, with the fields below it
+    // that it reaches: none named means the whole property.
     let touched = changes
         .values
         .iter()
         .filter(|edit| !matches!(edit.op, EditOp::Unset))
-        .map(|edit| (edit.offset, edit.expect_name.as_str(), edit.expect_element))
-        .chain(
-            changes
-                .field_sets
-                .iter()
-                .map(|set| (set.offset, set.expect_name.as_str(), set.expect_element)),
-        );
-    let mut wanted: Vec<(usize, String, u32)> = Vec::new();
-    for (offset, name, element) in touched {
+        .map(|edit| {
+            (
+                edit.offset,
+                edit.expect_name.as_str(),
+                edit.expect_element,
+                &[][..],
+            )
+        })
+        .chain(changes.field_sets.iter().map(|set| {
+            (
+                set.offset,
+                set.expect_name.as_str(),
+                set.expect_element,
+                set.path.as_slice(),
+            )
+        }));
+    type Wanted = (usize, String, u32, Option<Vec<Vec<String>>>);
+    let mut wanted: Vec<Wanted> = Vec::new();
+    for (offset, name, element, further) in touched {
         for &(template, node) in &templates {
-            let properties = &parsed.exports[template].properties;
-            let top = properties
-                .iter()
-                .find(|entry| {
-                    entry.name == name
-                        && entry.element == element
-                        && entry.span.is_some_and(|(start, _)| start == offset)
-                })
-                .or_else(|| {
-                    properties.iter().find(|entry| {
-                        entry
-                            .span
-                            .is_some_and(|(start, end)| start <= offset && offset < end)
-                    })
-                });
-            if let Some(top) = top {
-                let key = (node, top.name.clone(), top.element.unwrap_or(0));
-                if !wanted.contains(&key) {
-                    wanted.push(key);
-                }
+            let Some(mut path) =
+                path_to(&parsed.exports[template].properties, offset, name, element)
+            else {
+                continue;
+            };
+            path.extend(further.iter().cloned());
+            let (top, top_element) = split_segment(&path[0]);
+            let below = (path.len() > 1).then(|| path[1..].to_vec());
+            match wanted
+                .iter_mut()
+                .find(|(n, name, element, _)| *n == node && *name == top && *element == top_element)
+            {
+                Some((_, _, _, fields)) => match (fields.as_mut(), below) {
+                    (Some(fields), Some(below)) => fields.push(below),
+                    _ => *fields = None,
+                },
+                None => wanted.push((node, top, top_element, below.map(|below| vec![below]))),
             }
         }
     }
@@ -354,7 +362,7 @@ fn changed_property_edits(
     let mut added = false;
     let mut synth: Option<Option<std::sync::Arc<Mappings>>> = None;
     let mut next: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
-    for (node, name, element) in wanted {
+    for (node, name, element, fields) in wanted {
         let template = templates
             .iter()
             .find(|(_, owner)| *owner == node)
@@ -386,6 +394,7 @@ fn changed_property_edits(
             Some(&class_path),
             &name,
             element,
+            fields.as_deref(),
             mappings,
             None,
         );
@@ -400,6 +409,7 @@ fn changed_property_edits(
                 Some(&class_path),
                 &name,
                 element,
+                fields.as_deref(),
                 mappings,
                 recovered.as_deref(),
             );
@@ -450,6 +460,49 @@ fn changed_property_edits(
         added = true;
     }
     Ok(added.then_some(extended))
+}
+
+/// The names from a top-level entry down to the one an edit addresses at `offset`: `Name`, or
+/// `Name[element]` for a static array. `None` when no entry here holds it.
+fn path_to(
+    entries: &[rivals_uasset::PropertyEntry],
+    offset: u64,
+    name: &str,
+    element: Option<u32>,
+) -> Option<Vec<String>> {
+    let label = |entry: &rivals_uasset::PropertyEntry| match entry.element {
+        Some(element) => format!("{}[{element}]", entry.name),
+        None => entry.name.clone(),
+    };
+    if let Some(entry) = entries.iter().find(|entry| {
+        entry.name == name
+            && entry.element == element
+            && entry.span.is_some_and(|(start, _)| start == offset)
+    }) {
+        return Some(vec![label(entry)]);
+    }
+    let entry = entries.iter().find(|entry| {
+        entry
+            .span
+            .is_some_and(|(start, end)| start <= offset && offset < end)
+    })?;
+    let below = match &entry.value {
+        PropertyValue::Struct { fields, .. } => path_to(fields, offset, name, element),
+        _ => None,
+    };
+    let mut path = vec![label(entry)];
+    path.extend(below.unwrap_or_default());
+    Some(path)
+}
+
+/// A path segment as the field and its element.
+fn split_segment(text: &str) -> (String, u32) {
+    match text.strip_suffix(']').and_then(|head| head.split_once('[')) {
+        Some((name, element)) if !name.is_empty() => {
+            (name.to_string(), element.parse().unwrap_or(0))
+        }
+        _ => (text.to_string(), 0),
+    }
 }
 
 /// The object path of the struct `owner` names, for a changed property's scope: one recovered from
@@ -4200,6 +4253,31 @@ mod game_data_tests {
                 "{listed:?}"
             );
         }
+
+        // One field of a large struct brings the struct and that field, not all of its fields.
+        let body = nested(&template.properties, &["BodyInstance"]).clone();
+        let (offset, _) = body.span.expect("a position");
+        let (_, collision) = fixture.apply_changes(PackageEdits {
+            field_sets: vec![rivals_uasset::FieldSet {
+                offset,
+                expect_name: body.name.clone(),
+                expect_element: body.element,
+                path: vec!["CollisionProfileName".into()],
+                text: "NoCollision".into(),
+            }],
+            ..Default::default()
+        });
+        let listed = changed_list(&collision, "SCS_Node_2");
+        assert_eq!(listed.len(), 3, "{listed:?}");
+        assert!(listed[1].starts_with("BodyInstance@0"), "{listed:?}");
+        assert!(
+            listed[2].starts_with("CollisionProfileName@0"),
+            "{listed:?}"
+        );
+        assert!(
+            listed[2].ends_with("/Script/Engine.BodyInstance"),
+            "{listed:?}"
+        );
 
         let mesh = nested(&template.properties, &["StaticMesh"]).clone();
         let PropertyValue::Object {

@@ -400,13 +400,16 @@ const MAX_LISTED_DEPTH: usize = 4;
 /// The entries the cooker writes to have a top-level property of a component class copied onto the
 /// components a Blueprint spawns. UE reads the list scope by scope: the component's class for
 /// the top level, whichever class declares the property, and a struct's own type for its fields,
-/// which follow it. `None` for a property the class lacks, a container, whose entries name the
-/// elements that changed, and a struct whose fields are not known.
+/// which follow it. Of a struct, `touched` names the fields that changed, as paths below the
+/// property (`Field`, or `Field[element]` for a static array); `None` lists them all. `None` for a
+/// property the class lacks, a container, whose entries name the elements that changed, and a
+/// struct whose fields are not known.
 pub fn changed_property_entries(
     class_name: &str,
     class_path: Option<&str>,
     property: &str,
     element: u32,
+    touched: Option<&[Vec<String>]>,
     mappings: Option<&Mappings>,
     synth: Option<&Mappings>,
 ) -> Option<Vec<ChangedProperty>> {
@@ -427,17 +430,27 @@ pub fn changed_property_entries(
         | usmap::PropertyInner::Set { .. }
         | usmap::PropertyInner::Map { .. } => return None,
         usmap::PropertyInner::Struct { name } => {
-            struct_fields(name, mappings, synth, 0, &mut entries)?;
+            struct_fields(name, touched, mappings, synth, 0, &mut entries)?;
         }
         _ => {}
     }
     Some(entries)
 }
 
-/// A struct's fields as list entries scoped to it, each nested struct's fields after its own
-/// entry. A container field is left out, which leaves it at the class default.
+/// A field path segment as the field and its element: `Name`, or `Name[2]` for a static array.
+fn segment(text: &str) -> (&str, u32) {
+    match text.strip_suffix(']').and_then(|head| head.split_once('[')) {
+        Some((name, element)) if !name.is_empty() => (name, element.parse().unwrap_or(0)),
+        _ => (text, 0),
+    }
+}
+
+/// A struct's fields as list entries scoped to it, each nested struct's fields after its own entry:
+/// those `touched` names, or every one. A container field is left out, which leaves it at the class
+/// default.
 fn struct_fields(
     struct_name: &str,
+    touched: Option<&[Vec<String>]>,
     mappings: Option<&Mappings>,
     synth: Option<&Mappings>,
     depth: usize,
@@ -453,6 +466,27 @@ fn struct_fields(
         return None;
     }
     for slot in schema.iter() {
+        let below: Option<Vec<Vec<String>>> = match touched {
+            None => None,
+            Some(paths) => {
+                let here: Vec<&Vec<String>> = paths
+                    .iter()
+                    .filter(|path| {
+                        path.first().is_some_and(|first| {
+                            segment(first) == (slot.property.name.as_str(), slot.element)
+                        })
+                    })
+                    .collect();
+                if here.is_empty() {
+                    continue;
+                }
+                if here.iter().any(|path| path.len() == 1) {
+                    None
+                } else {
+                    Some(here.iter().map(|path| path[1..].to_vec()).collect())
+                }
+            }
+        };
         match &slot.property.inner {
             usmap::PropertyInner::Array { .. }
             | usmap::PropertyInner::Set { .. }
@@ -464,7 +498,7 @@ fn struct_fields(
                     scope: Some(struct_name.to_string()),
                 });
                 if let usmap::PropertyInner::Struct { name } = inner {
-                    struct_fields(name, mappings, synth, depth + 1, entries)?;
+                    struct_fields(name, below.as_deref(), mappings, synth, depth + 1, entries)?;
                 }
             }
         }
