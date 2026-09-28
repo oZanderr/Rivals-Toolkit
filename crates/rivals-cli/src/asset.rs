@@ -2374,6 +2374,9 @@ pub struct AuditReport {
     /// into a package means re-emitting its headers, so anything but zero here blocks that.
     pub headers_checked: usize,
     pub headers_differing: usize,
+    /// How many headers took each shape the audit counts. One the game's data never takes is a
+    /// shape a save may not write.
+    pub header_shapes: Vec<Count>,
     /// Packages whose own header did not come back byte for byte when re-serialized. Editing
     /// re-emits that header, so anything but zero here is a package that cannot be written.
     pub packages_header_broken: usize,
@@ -2779,6 +2782,7 @@ struct Accumulator {
     stops: BTreeMap<String, usize>,
     stop_examples: BTreeMap<String, Vec<String>>,
     tokens: BTreeMap<String, usize>,
+    shapes: BTreeMap<String, usize>,
 }
 
 impl Accumulator {
@@ -2811,6 +2815,7 @@ impl Accumulator {
                 mappings_gaps: Vec::new(),
                 headers_checked: 0,
                 headers_differing: 0,
+                header_shapes: Vec::new(),
                 packages_header_broken: 0,
                 resources_separate: 0,
                 resources_inline: 0,
@@ -2851,6 +2856,7 @@ impl Accumulator {
             stops: BTreeMap::new(),
             stop_examples: BTreeMap::new(),
             tokens: BTreeMap::new(),
+            shapes: BTreeMap::new(),
         }
     }
 
@@ -2912,6 +2918,9 @@ impl Accumulator {
         }
         self.report.headers_checked += parsed.header_check.checked;
         self.report.headers_differing += parsed.header_check.differing;
+        for (shape, count) in &parsed.header_check.shapes {
+            *self.shapes.entry(shape.clone()).or_default() += count;
+        }
         for (kind, count) in &parsed.property_kinds {
             *self.kinds.entry((*kind).to_string()).or_default() += count;
         }
@@ -3027,6 +3036,7 @@ impl Accumulator {
             self.report.exact_percent = self.report.exports_complete as f64 * 100.0 / total;
         }
         self.report.property_kinds = rank_all(self.kinds);
+        self.report.header_shapes = rank_all(self.shapes);
         self.report.distinct_failure_causes = self.failures.len();
         self.report.failed_missing_from_mappings = self
             .failures
@@ -3292,6 +3302,7 @@ pub fn print_audit(report: &AuditReport, out: &mut impl FnMut(String)) {
             "package headers re-serialized: {} of {} did not round trip",
             report.packages_header_broken, report.packages_scanned
         ));
+        print_counts("unversioned header shapes", &report.header_shapes, out);
     }
     if report.resources_separate + report.resources_inline > 0 {
         out(format!(

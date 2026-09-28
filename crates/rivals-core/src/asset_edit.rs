@@ -7633,8 +7633,9 @@ mod game_data_tests {
 
         assert_eq!(
             patched.exports.len(),
-            fixture.loaded.exports_file_buffer.len() + 4 + 2,
-            "four bytes of float and one more header fragment"
+            fixture.loaded.exports_file_buffer.len() + 4 - 2,
+            "four bytes of float, and one fragment fewer: the slot fills the one skip between two \
+             runs of values, which join as UE writes them"
         );
         assert!(matches!(after.exports[at].status, ExportStatus::Complete));
         let value = nested(&after.exports[at].properties, &["OscillationBlendInTime"]);

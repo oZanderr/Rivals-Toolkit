@@ -249,6 +249,9 @@ rivals-cli asset sweep --container pakchunk0-Windows.utoc --filter CameraShake  
 
 Every writing command reads the vanilla asset, splices in the change, proves the result parses back
 the same way, and only then writes it into a mod container in `~mods` that overrides the original.
+Each property header a save writes is also the one the game's own header builder writes for the same
+values: `asset audit` counts the shapes headers take, and across 8.9 million of the game's headers
+none takes another, so a save that would write one is refused.
 Nothing in the game's own containers is touched. `--mod-name` picks the container and `--replace`
 overwrites a copy it already holds. The game loads packages only from IoStore, so writes go to a
 `.utoc` trio by default; `--target pak` writes a plain pak for tooling that converts it onward

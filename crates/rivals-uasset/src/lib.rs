@@ -80,7 +80,7 @@ pub use package::{
 };
 pub use props::{
     ContainerLayout, Diagnostics, HeaderFault, IndexRef, InstancedLayout, MapKeys, MissingSchema,
-    PREVIEW_DEPTH, TraceEntry, UndecodedPayload, UnsetSlot,
+    OddHeader, PREVIEW_DEPTH, TraceEntry, UndecodedPayload, UnsetSlot,
 };
 pub use remove::{ClearedReference, Importers, RemovalPlan, RemovedExport, plan_removal};
 pub use stringtable::{StringEntrySpan, StringTable, StringTableEntry, StringTableLayout};

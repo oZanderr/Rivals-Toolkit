@@ -18,7 +18,7 @@ pub(crate) struct HeaderItem {
     pub is_zero: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Fragment {
     skip: u32,
     has_zeroes: bool,
@@ -28,19 +28,17 @@ pub(crate) struct Fragment {
 
 /// A header as it was written, not merely what it decoded to.
 ///
-/// UE closes a fragment at each struct boundary of the inheritance chain, so a real header carries
-/// empty fragments between values, splits runs that are contiguous, and writes a struct storing
-/// nothing as a skip over its slots. It never ends a header that holds values on a skip. None of that survives in the item list, which means a header rebuilt from the items alone
-/// is shorter than the one it replaces even though it decodes identically. Keeping the fragments
-/// lets an edit re-emit the header byte for byte.
+/// Every header the game ships is the one UE's header builder writes for the values it holds, which
+/// an edit rebuilds the same way (see `normalize`). A header written by something else can take
+/// other shapes; keeping the fragments as read lets one nothing edits re-emit byte for byte.
 #[derive(Debug, Clone)]
 pub(crate) struct UnversionedHeader {
     fragments: Vec<Fragment>,
     pub items: Vec<HeaderItem>,
     /// One bit per value belonging to a fragment that declares zeroes, in stream order.
     zero_bits: Vec<bool>,
-    /// The mask exactly as it was read. The bits past the last value are undefined and are not
-    /// always zero, so re-packing from the flags alone can differ from the bytes that were there.
+    /// The mask exactly as it was read. The bits past the last value are undefined, and a header
+    /// written by something other than the game may have set them.
     zero_mask_bytes: Vec<u8>,
 }
 
@@ -106,6 +104,89 @@ const MAX_FRAGMENTS: usize = 8192;
 
 pub(crate) const SKIP_AT_END: &str = "unversioned header ends on a fragment with no values, which \
     the game's loader reads past. Saving the package again repairs it";
+
+/// A header holding values that ends on a fragment with no values.
+pub(crate) const SHAPE_ENDS_ON_SKIP: &str = "ends on a skip";
+/// A fragment that declares zeroes where none of its values is zero.
+pub(crate) const SHAPE_ZERO_FLAG_WITHOUT_ZERO: &str = "zero flag with no zero under it";
+/// A fragment with no values that declares zeroes.
+pub(crate) const SHAPE_ZERO_FLAG_ON_NOTHING: &str = "zero flag on a fragment with no values";
+/// A header holding no values written as more than one fragment.
+pub(crate) const SHAPE_EMPTY_OVER_FRAGMENTS: &str = "no values over several fragments";
+/// A fragment skipping and holding nothing, before the last.
+pub(crate) const SHAPE_EMPTY_FRAGMENT: &str = "empty fragment before the last";
+/// Bits set in the zero mask past the last one a value owns.
+pub(crate) const SHAPE_DIRTY_MASK_TAIL: &str = "bits set past the end of the zero mask";
+/// A fragment that only skips, before the last.
+pub(crate) const SHAPE_SKIP_BETWEEN: &str = "skip-only fragment before the last";
+/// A run of values split across two fragments with no skip between them.
+pub(crate) const SHAPE_SPLIT_RUN: &str = "run of values split with no skip";
+/// Fragments or a zero mask other than the ones UE's header builder writes for the same values.
+pub(crate) const SHAPE_NOT_BUILT: &str = "not the header UE builds from its values";
+
+/// The shapes no header the game ships takes, found by counting every shape over 8.9 million of its
+/// headers: a save that writes one writes something UE never would. A skip-only fragment before the
+/// last is the one shape they do take, where a run of skips reaches 127.
+pub(crate) const NEVER_WRITTEN: &[&str] = &[
+    SHAPE_ENDS_ON_SKIP,
+    SHAPE_ZERO_FLAG_WITHOUT_ZERO,
+    SHAPE_ZERO_FLAG_ON_NOTHING,
+    SHAPE_EMPTY_OVER_FRAGMENTS,
+    SHAPE_EMPTY_FRAGMENT,
+    SHAPE_DIRTY_MASK_TAIL,
+    SHAPE_SPLIT_RUN,
+    SHAPE_NOT_BUILT,
+];
+
+/// The fragments and zero mask UE's header builder writes for these values, which must not be empty.
+fn built(items: &[HeaderItem]) -> (Vec<Fragment>, Vec<bool>) {
+    let fresh = || Fragment {
+        skip: 0,
+        has_zeroes: false,
+        value_num: 0,
+        is_last: false,
+    };
+    // A fragment that turned out to hold no zero gives its bits back.
+    let close = |fragment: &Fragment, mask: &mut Vec<bool>| {
+        if !fragment.has_zeroes {
+            mask.truncate(mask.len() - fragment.value_num as usize);
+        }
+    };
+    let mut fragments = vec![fresh()];
+    let mut mask: Vec<bool> = Vec::new();
+    let mut slot = 0u32;
+    for item in items {
+        while slot < item.schema_index {
+            let last = fragments.last().copied().unwrap_or_else(fresh);
+            if last.value_num > 0 || last.skip == FRAGMENT_CAP {
+                close(&last, &mut mask);
+                fragments.push(fresh());
+            }
+            if let Some(last) = fragments.last_mut() {
+                last.skip += 1;
+            }
+            slot += 1;
+        }
+        let last = fragments.last().copied().unwrap_or_else(fresh);
+        if last.value_num == FRAGMENT_CAP {
+            close(&last, &mut mask);
+            fragments.push(fresh());
+        }
+        if let Some(last) = fragments.last_mut() {
+            last.value_num += 1;
+            last.has_zeroes |= item.is_zero;
+        }
+        mask.push(item.is_zero);
+        slot += 1;
+    }
+    if let Some(last) = fragments.last() {
+        close(last, &mut mask);
+    }
+    if let Some(last) = fragments.last_mut() {
+        last.is_last = true;
+    }
+    (fragments, mask)
+}
 
 fn ends_on_skip(fragments: &[Fragment]) -> bool {
     fragments.last().is_some_and(|last| last.value_num == 0)
@@ -187,11 +268,82 @@ impl UnversionedHeader {
         ends_on_skip(&self.fragments)
     }
 
+    /// Which of the shapes the audit counts this header takes.
+    pub(crate) fn shapes(&self) -> Vec<&'static str> {
+        let mut shapes = Vec::new();
+        if self.ends_on_skip() {
+            shapes.push(SHAPE_ENDS_ON_SKIP);
+        }
+        let mut bit = 0usize;
+        let (mut without_zero, mut on_nothing) = (false, false);
+        for fragment in &self.fragments {
+            if !fragment.has_zeroes {
+                continue;
+            }
+            let count = fragment.value_num as usize;
+            if count == 0 {
+                on_nothing = true;
+            } else if !self
+                .zero_bits
+                .get(bit..bit + count)
+                .is_some_and(|bits| bits.iter().any(|zero| *zero))
+            {
+                without_zero = true;
+            }
+            bit += count;
+        }
+        if without_zero {
+            shapes.push(SHAPE_ZERO_FLAG_WITHOUT_ZERO);
+        }
+        if on_nothing {
+            shapes.push(SHAPE_ZERO_FLAG_ON_NOTHING);
+        }
+        if self.items.is_empty() && self.fragments.len() > 1 {
+            shapes.push(SHAPE_EMPTY_OVER_FRAGMENTS);
+        }
+        if self.fragments[..self.fragments.len().saturating_sub(1)]
+            .iter()
+            .any(|fragment| fragment.skip == 0 && fragment.value_num == 0)
+        {
+            shapes.push(SHAPE_EMPTY_FRAGMENT);
+        }
+        let before_last = &self.fragments[..self.fragments.len().saturating_sub(1)];
+        if before_last
+            .iter()
+            .any(|fragment| fragment.skip > 0 && fragment.value_num == 0)
+        {
+            shapes.push(SHAPE_SKIP_BETWEEN);
+        }
+        if !self.items.is_empty()
+            && (self.fragments.clone(), self.zero_bits.clone()) != built(&self.items)
+        {
+            shapes.push(SHAPE_NOT_BUILT);
+        }
+        if self.fragments.windows(2).any(|pair| {
+            pair[0].value_num > 0
+                && pair[0].value_num < FRAGMENT_CAP
+                && pair[1].skip == 0
+                && pair[1].value_num > 0
+        }) {
+            shapes.push(SHAPE_SPLIT_RUN);
+        }
+        let tail_set = self
+            .zero_mask_bytes
+            .iter()
+            .enumerate()
+            .flat_map(|(at, byte)| (0..8).map(move |bit| (at * 8 + bit, byte >> bit & 1 == 1)))
+            .any(|(index, set)| set && index >= self.zero_bits.len());
+        if tail_set {
+            shapes.push(SHAPE_DIRTY_MASK_TAIL);
+        }
+        shapes
+    }
+
     /// The header as UE would have written it: the skips past the last value dropped. It decodes
     /// to the same values.
     pub(crate) fn repaired(&self) -> Result<Vec<u8>, String> {
         let mut header = self.clone();
-        header.trim_trailing_skips();
+        header.normalize();
         header.write()
     }
 
@@ -278,6 +430,7 @@ impl UnversionedHeader {
         if let Some(entry) = self.items.get_mut(item) {
             entry.is_zero = false;
         }
+        self.normalize();
         Ok(())
     }
 
@@ -300,6 +453,7 @@ impl UnversionedHeader {
         if let Some(entry) = self.items.get_mut(item) {
             entry.is_zero = true;
         }
+        self.normalize();
         Ok(())
     }
 
@@ -336,7 +490,7 @@ impl UnversionedHeader {
                 offset,
                 bit,
             } => {
-                let old = self.fragments[fragment].clone();
+                let old = self.fragments[fragment];
                 let rest = Fragment {
                     skip: old.skip - offset - 1,
                     has_zeroes: old.has_zeroes,
@@ -357,7 +511,7 @@ impl UnversionedHeader {
                     self.zero_bits.insert(bit, true);
                 }
                 self.insert_item(schema_index, is_zero);
-                self.trim_trailing_skips();
+                self.normalize();
                 Ok(())
             }
             Placement::Beyond { covered, bit } => {
@@ -384,6 +538,7 @@ impl UnversionedHeader {
                     self.zero_bits.insert(bit, true);
                 }
                 self.insert_item(schema_index, is_zero);
+                self.normalize();
                 Ok(())
             }
         }
@@ -400,7 +555,7 @@ impl UnversionedHeader {
         else {
             return Err("this property is not in the header".into());
         };
-        let old = self.fragments[fragment].clone();
+        let old = self.fragments[fragment];
         if old.has_zeroes {
             self.zero_bits.remove(bit + offset as usize);
         }
@@ -444,28 +599,35 @@ impl UnversionedHeader {
         }
         self.tidy(fragment);
         self.remove_item(schema_index);
+        self.normalize();
         Ok(())
     }
 
-    /// Drops the fragments that only skip past the last value, and marks the one holding it last.
-    /// UE's loader steps over a fragment with no values to reach the next, so a header that ends on
-    /// one sends it past the end of the fragments; a struct stored from nothing starts as nothing
-    /// but a skip, which an insert would otherwise leave trailing. A header with no values keeps
-    /// its skip: that is how UE writes an empty struct, and the loader reads nothing from it.
-    fn trim_trailing_skips(&mut self) {
-        if self.items.is_empty() {
-            return;
+    /// Writes the fragments the way UE's header builder does from the values they hold: slots taken
+    /// in order, a run of skips or values closed only where it reaches 127 or the other kind
+    /// follows, zeroes declared only by a fragment holding one, and the skips past the last value
+    /// dropped. A header holding nothing is one fragment. A header UE wrote comes back unchanged.
+    fn normalize(&mut self) {
+        let (fragments, zero_bits) = if self.items.is_empty() {
+            let skip = (self.covered_slots() as u32).min(FRAGMENT_CAP);
+            (
+                vec![Fragment {
+                    skip,
+                    has_zeroes: false,
+                    value_num: 0,
+                    is_last: true,
+                }],
+                Vec::new(),
+            )
+        } else {
+            built(&self.items)
+        };
+        if zero_bits.len() != self.zero_bits.len() {
+            // The bits moved, so the bytes they were read from no longer line up with them.
+            self.zero_mask_bytes.clear();
         }
-        while self
-            .fragments
-            .last()
-            .is_some_and(|last| last.value_num == 0)
-        {
-            self.fragments.pop();
-        }
-        if let Some(last) = self.fragments.last_mut() {
-            last.is_last = true;
-        }
+        self.fragments = fragments;
+        self.zero_bits = zero_bits;
     }
 
     /// A fragment left with no values is folded into its neighbour where the skip fits, and skips
@@ -519,17 +681,11 @@ impl UnversionedHeader {
     }
 }
 
-/// The header UE writes for a struct that stores none of its slots: the skip count in fragments of
-/// at most 127, the last one flagged, and no mask. This is how a struct is stored from nothing.
+/// The header UE writes for a struct that stores none of its slots: one fragment skipping as many
+/// of them as it can hold, flagged last, and no mask. This is how a struct is stored from nothing.
 pub(crate) fn empty_header(slots: usize) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut left = slots;
-    while left > FRAGMENT_CAP as usize {
-        out.extend_from_slice(&(FRAGMENT_CAP as u16).to_le_bytes());
-        left -= FRAGMENT_CAP as usize;
-    }
-    out.extend_from_slice(&(IS_LAST_MASK | left as u16).to_le_bytes());
-    out
+    let skip = slots.min(FRAGMENT_CAP as usize) as u16;
+    (IS_LAST_MASK | skip).to_le_bytes().to_vec()
 }
 
 /// The header for a struct that stores every slot as zero, which is how a zero struct keeps being
@@ -709,8 +865,9 @@ mod tests {
         assert_eq!(zeroes(&header), [false, false, false, true]);
     }
 
-    /// UE leaves the mask bits past the last value undefined, and in real packages they are not
-    /// always zero. Re-packing from the flags alone would quietly rewrite bytes no edit touched.
+    /// The mask bits past the last value are undefined, and a header written by something other
+    /// than the game may have set them. Re-packing from the flags alone would quietly rewrite
+    /// bytes no edit touched.
     #[test]
     fn the_undefined_tail_of_a_mask_survives_re_emission() {
         let mut data = packed(0, true, 3, true).to_le_bytes().to_vec();
@@ -734,8 +891,8 @@ mod tests {
         assert_eq!(written(&header)[2], 0b1111_0100);
     }
 
-    /// UE closes a fragment per struct in the inheritance chain, so empty fragments and split runs
-    /// are normal. Rebuilding from the items would drop them and rewrite bytes no edit touched.
+    /// A header written by something other than the game may carry empty fragments and split
+    /// runs. Rebuilding it from the items would drop them and rewrite bytes no edit touched.
     #[test]
     fn a_header_carrying_empty_fragments_is_re_emitted_exactly() {
         let mut data = packed(0, false, 0, false).to_le_bytes().to_vec();
@@ -746,6 +903,69 @@ mod tests {
         let header = read(&data);
         assert_eq!(header.items.len(), 48);
         assert_eq!(written(&header), data);
+    }
+
+    /// The audit counts these shapes over the game's packages to learn which ones UE never writes.
+    #[test]
+    fn a_header_names_the_shapes_it_takes() {
+        let mut data = packed(0, false, 0, false).to_le_bytes().to_vec();
+        data.extend_from_slice(&packed(2, true, 2, false).to_le_bytes());
+        data.extend_from_slice(&packed(1, true, 1, true).to_le_bytes());
+        data.push(0b1111_0100);
+        let shapes = read(&data).shapes();
+        assert!(shapes.contains(&SHAPE_EMPTY_FRAGMENT), "{shapes:?}");
+        assert!(shapes.contains(&SHAPE_ZERO_FLAG_WITHOUT_ZERO), "{shapes:?}");
+        assert!(shapes.contains(&SHAPE_DIRTY_MASK_TAIL), "{shapes:?}");
+        assert!(!shapes.contains(&SHAPE_ENDS_ON_SKIP), "{shapes:?}");
+
+        let mut spread = packed(127, false, 0, false).to_le_bytes().to_vec();
+        spread.extend_from_slice(&packed(40, false, 0, true).to_le_bytes());
+        assert!(read(&spread).shapes().contains(&SHAPE_EMPTY_OVER_FRAGMENTS));
+        assert!(read(&empty_header(300)).shapes().is_empty());
+        assert!(read(&empty_header(3)).shapes().is_empty());
+
+        let mut split = packed(1, false, 2, false).to_le_bytes().to_vec();
+        split.extend_from_slice(&packed(0, false, 1, true).to_le_bytes());
+        let shapes = read(&split).shapes();
+        assert!(shapes.contains(&SHAPE_SPLIT_RUN), "{shapes:?}");
+        assert!(shapes.contains(&SHAPE_NOT_BUILT), "{shapes:?}");
+    }
+
+    /// An edit leaves the header UE's builder would write for the values it ends up holding: a slot
+    /// stored beside a run joins it rather than splitting it, and storing a fragment's last zero
+    /// drops its mask.
+    #[test]
+    fn an_edited_header_is_the_one_ue_builds() {
+        let mut data = packed(0, false, 2, false).to_le_bytes().to_vec();
+        data.extend_from_slice(&packed(1, true, 2, true).to_le_bytes());
+        data.push(0b0000_0010);
+        let mut header = read(&data);
+        header.insert_value(2, false).expect("insert");
+        assert_eq!(
+            written(&header),
+            [
+                packed(0, true, 5, true).to_le_bytes().to_vec(),
+                vec![0b0001_0000]
+            ]
+            .concat()
+        );
+        header.store(4).expect("store");
+        assert_eq!(written(&header), packed(0, false, 5, true).to_le_bytes());
+        assert!(header.shapes().is_empty(), "{:?}", header.shapes());
+
+        let mut long = read(&empty_header(0));
+        for slot in 0..130 {
+            long.insert_value(slot, true).expect("insert");
+        }
+        let expected = [
+            packed(0, true, 127, false).to_le_bytes().to_vec(),
+            packed(0, true, 3, true).to_le_bytes().to_vec(),
+            vec![0xFF; 16],
+            vec![0b0000_0011, 0, 0, 0],
+        ]
+        .concat();
+        assert_eq!(written(&long), expected);
+        assert_eq!(zero_header(130).expect("zero header"), expected);
     }
 
     #[test]
@@ -923,7 +1143,6 @@ mod tests {
     #[test]
     fn inserting_then_removing_restores_the_original_bytes() {
         let mut data = packed(3, true, 2, false).to_le_bytes().to_vec();
-        data.extend_from_slice(&packed(0, false, 0, false).to_le_bytes());
         data.extend_from_slice(&packed(2, false, 1, true).to_le_bytes());
         data.push(0b0000_0010);
         for slot in [0u32, 1, 2, 6, 40, 300] {
@@ -1017,11 +1236,11 @@ mod tests {
     fn an_empty_header_is_the_skip_count_ue_writes() {
         assert_eq!(empty_header(14), [0x0E, 0x01]);
         assert_eq!(empty_header(0), [0x00, 0x01]);
-        assert_eq!(empty_header(300), [0x7F, 0x00, 0x7F, 0x00, 0x2E, 0x01]);
+        assert_eq!(empty_header(300), [0x7F, 0x01]);
         let header = read(&empty_header(300));
         assert!(header.items.is_empty());
-        assert!(matches!(header.place(299), Placement::Skipped { .. }));
-        assert!(matches!(header.place(300), Placement::Beyond { .. }));
+        assert!(matches!(header.place(126), Placement::Skipped { .. }));
+        assert!(matches!(header.place(127), Placement::Beyond { .. }));
     }
 
     #[test]

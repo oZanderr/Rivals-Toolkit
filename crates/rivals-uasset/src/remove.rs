@@ -808,6 +808,7 @@ mod tests {
             missing_schemas: Vec::new(),
             header_check: Default::default(),
             header_faults: Vec::new(),
+            odd_headers: Vec::new(),
             containers: Vec::new(),
             unset: Vec::new(),
             references,

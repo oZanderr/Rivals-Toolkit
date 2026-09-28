@@ -396,6 +396,17 @@ pub struct Diagnostics {
     pub lenient_headers: bool,
     /// Headers that end on a skip, which the game's loader reads past, with what replaces each.
     pub header_faults: Vec<HeaderFault>,
+    /// How many headers took each shape the audit counts, recorded with `check_headers`.
+    pub header_shapes: BTreeMap<&'static str, usize>,
+    /// Headers in a shape no header the game ships takes, other than ending on a skip.
+    pub odd_headers: Vec<OddHeader>,
+}
+
+/// A property header in a shape the game never writes, and where it sits.
+#[derive(Debug, Clone, Serialize)]
+pub struct OddHeader {
+    pub shape: &'static str,
+    pub at: u64,
 }
 
 /// A property header the game's loader reads past because it ends on a fragment with no values,
@@ -420,6 +431,7 @@ pub(crate) struct Marks {
     tag_bounds: usize,
     tagged_absent: usize,
     header_faults: usize,
+    odd_headers: usize,
 }
 
 impl Diagnostics {
@@ -434,6 +446,7 @@ impl Diagnostics {
             tag_bounds: self.tag_bounds.len(),
             tagged_absent: self.tagged_absent.len(),
             header_faults: self.header_faults.len(),
+            odd_headers: self.odd_headers.len(),
         }
     }
 
@@ -450,6 +463,7 @@ impl Diagnostics {
         self.tag_bounds.truncate(marks.tag_bounds);
         self.tagged_absent.truncate(marks.tagged_absent);
         self.header_faults.truncate(marks.header_faults);
+        self.odd_headers.truncate(marks.odd_headers);
     }
 }
 
@@ -472,6 +486,17 @@ pub(crate) fn read_property_block(
             len: (cursor.position() - header_start) as u32,
             repaired: header.repaired()?,
         });
+    }
+    for shape in header.shapes() {
+        if diagnostics.check_headers {
+            *diagnostics.header_shapes.entry(shape).or_default() += 1;
+        }
+        if shape != unversioned::SHAPE_ENDS_ON_SKIP && unversioned::NEVER_WRITTEN.contains(&shape) {
+            diagnostics.odd_headers.push(OddHeader {
+                shape,
+                at: header_at,
+            });
+        }
     }
     if diagnostics.check_headers {
         diagnostics.headers_checked += 1;

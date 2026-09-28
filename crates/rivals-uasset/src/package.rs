@@ -197,7 +197,8 @@ pub fn header_fault_warning(parsed: &ParsedPackage) -> Option<String> {
     let faults = parsed.header_faults.len();
     (faults > 0).then(|| {
         format!(
-            "{faults} property header(s) end on a skip, which the game's loader reads past and can              crash on; saving the package repairs them"
+            "{faults} property header(s) end on a skip, which the game's loader reads past and can \
+             crash on; saving the package repairs them"
         )
     })
 }
@@ -248,6 +249,9 @@ pub struct ParsedPackage {
     /// parse: a strict one fails the export instead. Saving the package repairs them.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub header_faults: Vec<crate::props::HeaderFault>,
+    /// Headers in a shape no header the game ships takes. A save may not add one.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub odd_headers: Vec<crate::props::OddHeader>,
     /// Where each container's elements sit. Needed only to edit one, so it is not serialized.
     #[serde(skip)]
     pub containers: Vec<crate::props::ContainerLayout>,
@@ -295,10 +299,13 @@ pub struct ParsedPackage {
 }
 
 /// How many unversioned headers were re-encoded, and how many did not come back byte for byte.
-#[derive(Debug, Clone, Copy, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct HeaderCheck {
     pub checked: usize,
     pub differing: usize,
+    /// How many headers took each shape the audit counts.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub shapes: std::collections::BTreeMap<String, usize>,
 }
 
 impl HeaderCheck {
@@ -587,8 +594,14 @@ fn parse_inner(
             header_check: HeaderCheck {
                 checked: diagnostics.headers_checked,
                 differing: diagnostics.headers_differing,
+                shapes: diagnostics
+                    .header_shapes
+                    .iter()
+                    .map(|(shape, count)| ((*shape).to_string(), *count))
+                    .collect(),
             },
             header_faults: diagnostics.header_faults,
+            odd_headers: diagnostics.odd_headers,
             containers: diagnostics.containers,
             unset: diagnostics.unset,
             references: diagnostics.references,

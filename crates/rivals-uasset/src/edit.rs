@@ -5489,7 +5489,8 @@ impl Excuses {
 }
 
 /// A save may not leave a property header that ends on a skip, which the game's loader reads past:
-/// none at all once they are repaired, and none the package did not already have otherwise.
+/// none at all once they are repaired, and none the package did not already have otherwise. Nor
+/// may it write a header in any other shape no header the game ships takes.
 pub(crate) fn check_header_faults(
     before: &ParsedPackage,
     after: &ParsedPackage,
@@ -5500,14 +5501,30 @@ pub(crate) fn check_header_faults(
     } else {
         before.header_faults.len()
     };
-    match after.header_faults.get(allowed) {
-        None => Ok(()),
-        Some(fault) => Err(format!(
+    if let Some(fault) = after.header_faults.get(allowed) {
+        return Err(format!(
             "the save would leave a property header ending on a skip at {:#X}, which the game's \
              loader reads past",
             fault.at
-        )),
+        ));
     }
+    for shape in crate::unversioned::NEVER_WRITTEN {
+        let of_shape = |parsed: &ParsedPackage| {
+            parsed
+                .odd_headers
+                .iter()
+                .filter(|odd| odd.shape == *shape)
+                .map(|odd| odd.at)
+                .collect::<Vec<u64>>()
+        };
+        let had = of_shape(before).len();
+        if let Some(at) = of_shape(after).get(had) {
+            return Err(format!(
+                "the save would write a property header the game never writes ({shape}) at {at:#X}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Dropping names changes which index each name has and nothing else, so the tables, the scripts
@@ -7183,6 +7200,7 @@ mod tests {
             missing_schemas: Vec::new(),
             header_check: Default::default(),
             header_faults: Vec::new(),
+            odd_headers: Vec::new(),
             containers: Vec::new(),
             unset: Vec::new(),
             references: Vec::new(),
