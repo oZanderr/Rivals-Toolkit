@@ -3903,7 +3903,7 @@ function ExportActions({
     <Popover open={open} onOpenChange={setOpen}>
       <Tip content="Export actions">
         <PopoverTrigger asChild>
-          <Button size="sm" variant="ghost" className="h-7 px-1.5">
+          <Button size="sm" variant="ghost" className="h-7 px-1.5" aria-label="Export actions">
             <MoreHorizontal size={14} />
           </Button>
         </PopoverTrigger>
