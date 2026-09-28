@@ -169,18 +169,12 @@ fn edit_passes(
     if changes.is_empty() {
         return Err("No changes to save".into());
     }
-    if let Some(listed) = changed_property_edits(request, mappings, &loaded, parsed)? {
-        return value_passes(
-            &AssetEditRequest {
-                changes: listed,
-                ..*request
-            },
-            mappings,
-            loaded,
-            parsed,
-        );
+    let touches = template_touches(changes, parsed);
+    let (patched, loaded) = value_passes(request, mappings, loaded, parsed)?;
+    if touches.is_empty() {
+        return Ok((patched, loaded));
     }
-    value_passes(request, mappings, loaded, parsed)
+    list_pass(request, mappings, patched, loaded, &touches)
 }
 
 /// The value edits of a save, in as many reads of the package as they take.
@@ -306,19 +300,31 @@ fn export_at(index: i32) -> Option<usize> {
     (index > 0).then(|| (index - 1) as usize)
 }
 
-/// The entries a save's edits to component templates need in their nodes' `ChangedPropertyList`.
-/// A Blueprint class with cooked component instancing data copies only the properties each node
-/// lists onto the components it spawns, so a template property the list lacks would keep the
-/// class default in game. `None` when the save needs none.
-fn changed_property_edits(
-    request: &AssetEditRequest<'_>,
-    mappings: Option<&Mappings>,
-    loaded: &FSerializedAssetBundle,
-    parsed: &rivals_uasset::ParsedPackage,
-) -> Result<Option<PackageEdits>, String> {
-    let changes = &request.changes;
-    // Each template a node of a cooked class builds, with the node.
-    let mut templates: Vec<(usize, usize)> = Vec::new();
+/// A top-level property of a component template that a save reaches, with the field paths below it
+/// that it reaches: `None` means the whole property.
+struct TemplateTouch {
+    template: usize,
+    name: String,
+    element: u32,
+    fields: Option<Vec<Vec<String>>>,
+}
+
+/// Where a component's changed property list lives: the construction script node that holds it,
+/// and the template it describes.
+struct ListOwner {
+    export: usize,
+    template: usize,
+}
+
+/// The components of a Blueprint class with cooked component instancing data, which copies only
+/// the properties each one's list names onto the components it spawns.
+fn list_owners(parsed: &rivals_uasset::ParsedPackage) -> Vec<ListOwner> {
+    let cooked = |class: Option<&rivals_uasset::ParsedExport>| {
+        class
+            .and_then(|class| entry_named(&class.properties, "bHasCookedComponentInstancingData"))
+            .is_some_and(|entry| matches!(entry.value, PropertyValue::Bool { value: true }))
+    };
+    let mut owners = Vec::new();
     for node in parsed
         .exports
         .iter()
@@ -333,19 +339,81 @@ fn changed_property_edits(
             .and_then(|script| parsed.exports.get(script))
             .and_then(|script| export_at(script.outer_index))
             .and_then(|class| parsed.exports.get(class));
-        let cooked = class
-            .and_then(|class| entry_named(&class.properties, "bHasCookedComponentInstancingData"))
-            .is_some_and(|entry| matches!(entry.value, PropertyValue::Bool { value: true }));
-        if let Some(template) = export_at(*index).filter(|_| cooked) {
-            templates.push((template, node.index as usize));
+        if let Some(template) = export_at(*index).filter(|_| cooked(class)) {
+            owners.push(ListOwner {
+                export: node.index as usize,
+                template,
+            });
         }
     }
+    owners
+}
+
+/// The list an owner holds, where its cooked data is valid.
+fn list_of<'p>(
+    parsed: &'p rivals_uasset::ParsedPackage,
+    owner: &ListOwner,
+) -> Option<&'p rivals_uasset::PropertyEntry> {
+    let data = entry_named(
+        &parsed.exports[owner.export].properties,
+        "CookedComponentInstancingData",
+    )?;
+    let PropertyValue::Struct { fields, .. } = &data.value else {
+        return None;
+    };
+    entry_named(fields, "bHasValidCookedData")
+        .filter(|entry| matches!(entry.value, PropertyValue::Bool { value: true }))?;
+    entry_named(fields, "ChangedPropertyList")
+}
+
+/// The entries a list holds, each with the object path it is scoped to.
+fn listed_entries(list: &rivals_uasset::PropertyEntry) -> Vec<rivals_uasset::ListEntry> {
+    let PropertyValue::Array { items } = &list.value else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .map(|item| {
+            let fields: &[rivals_uasset::PropertyEntry] = match item {
+                PropertyValue::Struct { fields, .. } => fields,
+                _ => &[],
+            };
+            let name = match entry_named(fields, "PropertyName").map(|e| &e.value) {
+                Some(PropertyValue::Name { value }) => value.clone(),
+                _ => "None".to_string(),
+            };
+            let index = match entry_named(fields, "ArrayIndex").map(|e| &e.value) {
+                Some(PropertyValue::Int { value }) => *value as u32,
+                _ => 0,
+            };
+            let scope = match entry_named(fields, "PropertyScope").map(|e| &e.value) {
+                Some(PropertyValue::Object {
+                    path: Some(path), ..
+                }) => path.clone(),
+                _ => String::new(),
+            };
+            rivals_uasset::ListEntry {
+                name,
+                index,
+                scope: rivals_uasset::ListScope::Path(scope),
+            }
+        })
+        .collect()
+}
+
+/// What a save's edits reach on the component templates it holds, by the top-level property.
+fn template_touches(
+    changes: &PackageEdits,
+    parsed: &rivals_uasset::ParsedPackage,
+) -> Vec<TemplateTouch> {
+    let templates: Vec<usize> = list_owners(parsed)
+        .iter()
+        .map(|owner| owner.template)
+        .collect();
     if templates.is_empty() {
-        return Ok(None);
+        return Vec::new();
     }
-    // The top-level property each edit reaches on a template, by node, with the fields below it
-    // that it reaches: none named means the whole property.
-    let touched = changes
+    let reached = changes
         .values
         .iter()
         .filter(|edit| !matches!(edit.op, EditOp::Unset))
@@ -365,10 +433,9 @@ fn changed_property_edits(
                 set.path.as_slice(),
             )
         }));
-    type Wanted = (usize, String, u32, Option<Vec<Vec<String>>>);
-    let mut wanted: Vec<Wanted> = Vec::new();
-    for (offset, name, element, further) in touched {
-        for &(template, node) in &templates {
+    let mut touches: Vec<TemplateTouch> = Vec::new();
+    for (offset, name, element, further) in reached {
+        for &template in &templates {
             let Some(mut path) =
                 path_to(&parsed.exports[template].properties, offset, name, element)
             else {
@@ -377,164 +444,227 @@ fn changed_property_edits(
             path.extend(further.iter().cloned());
             let (top, top_element) = split_segment(&path[0]);
             let below = (path.len() > 1).then(|| path[1..].to_vec());
-            match wanted
-                .iter_mut()
-                .find(|(n, name, element, _)| *n == node && *name == top && *element == top_element)
-            {
-                Some((_, _, _, fields)) => match (fields.as_mut(), below) {
+            match touches.iter_mut().find(|touch| {
+                touch.template == template && touch.name == top && touch.element == top_element
+            }) {
+                Some(touch) => match (touch.fields.as_mut(), below) {
                     (Some(fields), Some(below)) => fields.push(below),
-                    _ => *fields = None,
+                    _ => touch.fields = None,
                 },
-                None => wanted.push((node, top, top_element, below.map(|below| vec![below]))),
+                None => touches.push(TemplateTouch {
+                    template,
+                    name: top,
+                    element: top_element,
+                    fields: below.map(|below| vec![below]),
+                }),
             }
         }
     }
-    // What each node already lists at the top level, and where its list is.
-    let listing =
-        |node: usize, scope: &str| -> Option<(rivals_uasset::PropertyEntry, Vec<(String, u32)>)> {
-            let data = entry_named(
-                &parsed.exports[node].properties,
-                "CookedComponentInstancingData",
-            )?;
-            let PropertyValue::Struct { fields, .. } = &data.value else {
-                return None;
-            };
-            if !entry_named(fields, "bHasValidCookedData")
-                .is_some_and(|entry| matches!(entry.value, PropertyValue::Bool { value: true }))
-            {
-                return None;
-            }
-            let list = entry_named(fields, "ChangedPropertyList")?.clone();
-            let held = match &list.value {
-                PropertyValue::Array { items } => items
-                    .iter()
-                    .filter_map(|item| {
-                        let PropertyValue::Struct { fields, .. } = item else {
-                            return None;
-                        };
-                        let name = match entry_named(fields, "PropertyName").map(|e| &e.value) {
-                            Some(PropertyValue::Name { value }) => value.clone(),
-                            _ => return None,
-                        };
-                        let index = match entry_named(fields, "ArrayIndex").map(|e| &e.value) {
-                            Some(PropertyValue::Int { value }) => *value as u32,
-                            _ => 0,
-                        };
-                        let top = match entry_named(fields, "PropertyScope").map(|e| &e.value) {
-                            Some(PropertyValue::Object {
-                                path: Some(path), ..
-                            }) => path.eq_ignore_ascii_case(scope),
-                            _ => false,
-                        };
-                        top.then_some((name, index))
-                    })
-                    .collect(),
-                _ => Vec::new(),
-            };
-            Some((list, held))
-        };
-    let mut extended = changes.clone();
-    let mut added = false;
+    touches
+}
+
+/// The edits that bring each touched component's changed property list in step with its template
+/// as the save left it: what the save reached joins the list, a struct with the fields reached and
+/// an array with every element. `None` when every list already names it all.
+fn list_edits(
+    request: &AssetEditRequest<'_>,
+    mappings: Option<&Mappings>,
+    parsed: &rivals_uasset::ParsedPackage,
+    asset: &[u8],
+    exports: &[u8],
+    touches: &[TemplateTouch],
+) -> Result<Option<PackageEdits>, String> {
+    let mut out = PackageEdits::default();
     let mut synth: Option<Option<std::sync::Arc<Mappings>>> = None;
-    let mut next: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
-    for (node, name, element, fields) in wanted {
-        let template = templates
+    for owner in list_owners(parsed) {
+        let reached: Vec<&TemplateTouch> = touches
             .iter()
-            .find(|(_, owner)| *owner == node)
-            .map(|(template, _)| &parsed.exports[*template])
-            .ok_or("a template lost its node")?;
+            .filter(|touch| touch.template == owner.template)
+            .collect();
+        if reached.is_empty() {
+            continue;
+        }
+        let Some(list) = list_of(parsed, &owner) else {
+            continue;
+        };
+        let template = &parsed.exports[owner.template];
         // The component's class, which the top-level entries are scoped to.
-        let class_path = parsed
-            .imports
-            .iter()
-            .find(|import| import.index == template.class_index)
-            .map(|import| import.path.clone())
-            .or_else(|| {
-                export_at(template.class_index)
-                    .and_then(|class| parsed.exports.get(class))
-                    .map(|class| class.path.clone())
-            })
+        let class_path = component_class_path(parsed, template)
             .ok_or_else(|| format!("{} has no class to scope its list to", template.object_name))?;
-        let Some((list, held)) = listing(node, &class_path) else {
-            continue;
-        };
-        if held
-            .iter()
-            .any(|(listed, index)| listed.eq_ignore_ascii_case(&name) && *index == element)
-        {
-            continue;
-        }
-        let mut entries = rivals_uasset::changed_property_entries(
-            &template.class_name,
-            Some(&class_path),
-            &name,
-            element,
-            fields.as_deref(),
-            mappings,
-            None,
-        );
-        if entries.is_none() {
-            let recovered = synth.get_or_insert_with(|| {
-                schema_synth::synthesised(&bundle_of(loaded), mappings, &source_of(request))
-                    .ok()
-                    .flatten()
-            });
-            entries = rivals_uasset::changed_property_entries(
-                &template.class_name,
-                Some(&class_path),
-                &name,
-                element,
-                fields.as_deref(),
+        let old = listed_entries(list);
+        let build = |synth: Option<&Mappings>| -> Option<Vec<rivals_uasset::ListEntry>> {
+            let context = rivals_uasset::ListContext {
+                class_name: &template.class_name,
+                class_path: &class_path,
                 mappings,
-                recovered.as_deref(),
-            );
+                synth,
+            };
+            let mut tree = rivals_uasset::ChangedList::read(&old, &context);
+            for touch in &reached {
+                let value = template
+                    .properties
+                    .iter()
+                    .find(|entry| {
+                        entry.name == touch.name && entry.element.unwrap_or(0) == touch.element
+                    })
+                    .map(|entry| &entry.value);
+                tree.touch(
+                    &touch.name,
+                    touch.element,
+                    touch.fields.as_deref(),
+                    value,
+                    &context,
+                )?;
+            }
+            Some(tree.entries())
+        };
+        let mut new = build(None);
+        if new.is_none() {
+            let recovered = synth.get_or_insert_with(|| {
+                schema_synth::synthesised(
+                    &AssetBundle { asset, exports },
+                    mappings,
+                    &source_of(request),
+                )
+                .ok()
+                .flatten()
+            });
+            new = build(recovered.as_deref());
         }
-        // A container records which of its elements changed, which is not worked out here: it
-        // keeps the class default on spawned components, as it did before the save.
-        let Some(entries) = entries else {
+        // A struct whose fields are not known is left as the list has it.
+        let Some(new) = new else {
             continue;
         };
+        let resolve = |entry: &rivals_uasset::ListEntry| -> Result<(String, u32, String), String> {
+            let scope = match &entry.scope {
+                rivals_uasset::ListScope::Class => class_path.clone(),
+                rivals_uasset::ListScope::Struct(name) => property_scope(request, parsed, name)?,
+                rivals_uasset::ListScope::Path(path) => path.clone(),
+            };
+            Ok((entry.name.clone(), entry.index, scope))
+        };
+        let old: Vec<(String, u32, String)> = old.iter().map(resolve).collect::<Result<_, _>>()?;
+        let new: Vec<(String, u32, String)> = new.iter().map(resolve).collect::<Result<_, _>>()?;
+        if old == new {
+            continue;
+        }
         let (offset, _) = list
             .span
             .ok_or("the changed property list has no recorded position")?;
-        let count = match &list.value {
-            PropertyValue::Array { items } => items.len(),
-            _ => 0,
+        let field_set = |at: usize, field: &str, text: String| rivals_uasset::FieldSet {
+            offset,
+            expect_name: list.name.clone(),
+            expect_element: list.element,
+            path: vec![format!("[{at}]"), field.to_string()],
+            text,
         };
-        for entry in entries {
-            let scope = match &entry.scope {
-                None => class_path.clone(),
-                Some(name) => property_scope(request, parsed, name)?,
-            };
-            let at = count + next.get(&node).copied().unwrap_or(0);
-            *next.entry(node).or_default() += 1;
-            extended.values.push(ValueEdit {
-                offset,
-                expect_name: list.name.clone(),
-                expect_element: list.element,
-                expect_kind: rivals_uasset::kind_of(&list.value),
-                op: EditOp::Insert {
-                    index: at as u32,
-                    key: None,
-                },
-            });
-            for (field, text) in [
-                ("PropertyName", entry.name.clone()),
-                ("ArrayIndex", entry.index.to_string()),
-                ("PropertyScope", scope),
-            ] {
-                extended.field_sets.push(rivals_uasset::FieldSet {
-                    offset,
-                    expect_name: list.name.clone(),
-                    expect_element: list.element,
-                    path: vec![format!("[{at}]"), field.to_string()],
-                    text,
-                });
+        let container_edit = |op: EditOp| ValueEdit {
+            offset,
+            expect_name: list.name.clone(),
+            expect_element: list.element,
+            expect_kind: rivals_uasset::kind_of(&list.value),
+            op,
+        };
+        for (at, (was, now)) in old.iter().zip(&new).enumerate() {
+            if was.0 != now.0 {
+                out.field_sets
+                    .push(field_set(at, "PropertyName", now.0.clone()));
+            }
+            if was.1 != now.1 {
+                out.field_sets
+                    .push(field_set(at, "ArrayIndex", now.1.to_string()));
+            }
+            if !was.2.eq_ignore_ascii_case(&now.2) {
+                out.field_sets
+                    .push(field_set(at, "PropertyScope", now.2.clone()));
             }
         }
-        added = true;
+        for at in new.len()..old.len() {
+            out.values
+                .push(container_edit(EditOp::Remove { index: at as u32 }));
+        }
+        for (at, now) in new.iter().enumerate().skip(old.len()) {
+            out.values.push(container_edit(EditOp::Insert {
+                index: at as u32,
+                key: None,
+            }));
+            out.field_sets
+                .push(field_set(at, "PropertyName", now.0.clone()));
+            out.field_sets
+                .push(field_set(at, "ArrayIndex", now.1.to_string()));
+            out.field_sets
+                .push(field_set(at, "PropertyScope", now.2.clone()));
+        }
     }
-    Ok(added.then_some(extended))
+    Ok((!out.is_empty()).then_some(out))
+}
+
+/// Brings the changed property lists of the components a save reached in step with their
+/// templates, as one more stage on what the save wrote.
+fn list_pass(
+    request: &AssetEditRequest<'_>,
+    mappings: Option<&Mappings>,
+    patched: PatchedBundle,
+    loaded: FSerializedAssetBundle,
+    touches: &[TemplateTouch],
+) -> Result<(PatchedBundle, FSerializedAssetBundle), String> {
+    let after = reparse(request, mappings, &patched.asset, &patched.exports)?;
+    let Some(listed) = list_edits(
+        request,
+        mappings,
+        &after,
+        &patched.asset,
+        &patched.exports,
+        touches,
+    )?
+    else {
+        return Ok((patched, loaded));
+    };
+    let staged = FSerializedAssetBundle {
+        asset_file_buffer: patched.asset.clone(),
+        exports_file_buffer: patched.exports.clone(),
+        bulk_data_buffer: patched
+            .bulk
+            .clone()
+            .or_else(|| loaded.bulk_data_buffer.clone()),
+        optional_bulk_data_buffer: patched
+            .optional_bulk
+            .clone()
+            .or_else(|| loaded.optional_bulk_data_buffer.clone()),
+        memory_mapped_bulk_data_buffer: loaded.memory_mapped_bulk_data_buffer.clone(),
+    };
+    let (mut listing, _) = value_passes(
+        &AssetEditRequest {
+            changes: listed,
+            ..*request
+        },
+        mappings,
+        staged,
+        &after,
+    )?;
+    let mut applied = patched.applied;
+    applied.append(&mut listing.applied);
+    listing.applied = applied;
+    listing.bulk = listing.bulk.or(patched.bulk);
+    listing.optional_bulk = listing.optional_bulk.or(patched.optional_bulk);
+    Ok((listing, loaded))
+}
+
+/// The object path of the class a component template is an object of.
+fn component_class_path(
+    parsed: &rivals_uasset::ParsedPackage,
+    template: &rivals_uasset::ParsedExport,
+) -> Option<String> {
+    parsed
+        .imports
+        .iter()
+        .find(|import| import.index == template.class_index)
+        .map(|import| import.path.clone())
+        .or_else(|| {
+            export_at(template.class_index)
+                .and_then(|class| parsed.exports.get(class))
+                .map(|class| class.path.clone())
+        })
 }
 
 /// The names from a top-level entry down to the one an edit addresses at `offset`: `Name`, or
@@ -3203,6 +3333,10 @@ mod game_data_tests {
         "Marvel/Content/DT_Hero.uasset",
         "Marvel/Content/Marvel/Data/DataTable/GameMode/2206/Row.uasset",
         "Marvel/Content/A.uasset",
+        LISTED_CONTAINERS[0],
+        LISTED_CONTAINERS[1],
+        LISTED_CONTAINERS[2],
+        LISTED_CONTAINERS[3],
         // Where the save-as tests expect new packages to land.
         "Marvel/Content/Mods/ToolkitTest/MarvelHeroTitleData_Copy.uasset",
         "Marvel/Content/Mods/X/DA_Thing.uasset",
@@ -4361,6 +4495,276 @@ mod game_data_tests {
                 .collect(),
             _ => Vec::new(),
         }
+    }
+
+    /// Blueprints whose components' changed property lists name arrays, sets, maps and tag
+    /// containers.
+    const LISTED_CONTAINERS: [&str; 4] = [
+        "Marvel/Content/Marvel/Blueprints/LevelGameplay/M2201/Disco/BP_M2201_DiscoPortal.uasset",
+        "Marvel/Content/Marvel/Blueprints/LevelGameplay/M2201/Disco/M2201_DiscoLiveCameraBP.uasset",
+        "Marvel/Content/Marvel/Blueprints/LevelGameplay/M2208/M2208DataPlatform.uasset",
+        "Marvel/Content/Marvel/Blueprints/LevelGameplay/M2201/BP_PymInteractor.uasset",
+    ];
+
+    /// Applies `changes` to what an earlier save produced, as a save of a mod's own copy would.
+    fn apply_after(
+        fixture: &Fixture,
+        earlier: &PatchedBundle,
+        changes: PackageEdits,
+    ) -> (PatchedBundle, rivals_uasset::ParsedPackage) {
+        let staged = FSerializedAssetBundle {
+            asset_file_buffer: earlier.asset.clone(),
+            exports_file_buffer: earlier.exports.clone(),
+            bulk_data_buffer: fixture.loaded.bulk_data_buffer.clone(),
+            optional_bulk_data_buffer: fixture.loaded.optional_bulk_data_buffer.clone(),
+            memory_mapped_bulk_data_buffer: fixture.loaded.memory_mapped_bulk_data_buffer.clone(),
+        };
+        let parsed = schema_synth::parse_package_opts(
+            &AssetBundle {
+                asset: &earlier.asset,
+                exports: &earlier.exports,
+            },
+            Some(&fixture.schema),
+            &fixture.source(),
+            editor_options(),
+        )
+        .expect("parse the earlier save");
+        let (patched, _) = preview_read_edits(
+            &fixture.request_changes(changes),
+            Some(&fixture.schema),
+            staged,
+            &parsed,
+        )
+        .expect("the second save");
+        let after = Fixture::parse_bundle(
+            &AssetBundle {
+                asset: &patched.asset,
+                exports: &patched.exports,
+            },
+            &fixture.schema,
+            &fixture.source(),
+        );
+        (patched, after)
+    }
+
+    /// A component's changed property list reads into the tree UE builds from it, arrays and
+    /// structs nested under their entries, and flattens back to exactly the list it was.
+    #[test]
+    fn changed_lists_read_as_ue_reads_them_and_flatten_back() {
+        let mut lists = 0;
+        for entry in std::iter::once(PARENT_CHAIN).chain(LISTED_CONTAINERS) {
+            let Some(fixture) = Fixture::open(entry) else {
+                return;
+            };
+            let parsed = fixture.parse();
+            let synth = schema_synth::synthesised(
+                &fixture.bundle(),
+                Some(&fixture.schema),
+                &fixture.source(),
+            )
+            .ok()
+            .flatten();
+            for owner in list_owners(&parsed) {
+                let Some(list) = list_of(&parsed, &owner) else {
+                    continue;
+                };
+                let entries = listed_entries(list);
+                let template = &parsed.exports[owner.template];
+                let class_path = component_class_path(&parsed, template).expect("a class");
+                let context = rivals_uasset::ListContext {
+                    class_name: &template.class_name,
+                    class_path: &class_path,
+                    mappings: Some(&fixture.schema),
+                    synth: synth.as_deref(),
+                };
+                let tree = rivals_uasset::ChangedList::read(&entries, &context);
+                assert_eq!(tree.entries(), entries, "{entry} {}", template.object_name);
+                assert_eq!(
+                    tree.unplaced(),
+                    0,
+                    "{entry} {}: {entries:?}",
+                    template.object_name
+                );
+                lists += 1;
+            }
+        }
+        assert!(lists > 10, "{lists} lists");
+    }
+
+    /// An array joins the list with every element it holds after it, so the components a Blueprint
+    /// spawns copy the whole array whatever their class holds by default, and a shorter array lists
+    /// fewer.
+    #[test]
+    fn an_array_joins_the_list_with_every_element() {
+        let Some(fixture) = Fixture::open(PARENT_CHAIN) else {
+            return;
+        };
+        let before = fixture.parse();
+        assert_eq!(changed_list(&before, "SCS_Node_2").len(), 1);
+        let materials = nested(&mesh_template(&before).properties, &["OverrideMaterials"]).clone();
+        let insert = |index| edit_of(&materials, EditOp::Insert { index, key: None });
+        let (grown, after) = fixture.apply(vec![insert(0), insert(1)]);
+        let listed = changed_list(&after, "SCS_Node_2");
+        assert_eq!(listed.len(), 4, "{listed:?}");
+        for (at, element) in [(1, 0), (2, 0), (3, 1)] {
+            assert!(
+                listed[at].starts_with(&format!("OverrideMaterials@{element} ")),
+                "{listed:?}"
+            );
+            assert!(
+                listed[at].ends_with("/Script/Engine.StaticMeshComponent"),
+                "{listed:?}"
+            );
+        }
+
+        let held = nested(&mesh_template(&after).properties, &["OverrideMaterials"]).clone();
+        let (_, shrunk) = apply_after(
+            &fixture,
+            &grown,
+            PackageEdits {
+                values: vec![edit_of(&held, EditOp::Remove { index: 1 })],
+                ..Default::default()
+            },
+        );
+        let listed = changed_list(&shrunk, "SCS_Node_2");
+        assert_eq!(listed.len(), 3, "{listed:?}");
+        assert!(listed[2].starts_with("OverrideMaterials@0 "), "{listed:?}");
+    }
+
+    /// A tag container is listed as the cooker lists one: the container, its array, and each tag
+    /// with its name. A list that already names every tag is left as it is.
+    #[test]
+    fn a_tag_container_lists_each_tag() {
+        let Some(fixture) = Fixture::open(PARENT_CHAIN) else {
+            return;
+        };
+        let before = fixture.parse();
+        let listed = changed_list(&before, "SCS_Node_6");
+        let at = listed
+            .iter()
+            .position(|entry| entry.starts_with("IgnoreTag@0"))
+            .expect("the tags are listed");
+        let checker = before
+            .exports
+            .iter()
+            .find(|export| export.object_name == "LevelScopeCheckComponentBP_GEN_VARIABLE")
+            .expect("the check component");
+        let tags = nested(&checker.properties, &["IgnoreTag"]).clone();
+        let PropertyValue::Array { items } = &tags.value else {
+            panic!("{}", tags.value.summary());
+        };
+        let count = items.len();
+
+        let (_, renamed) = fixture.apply(vec![edit_of(
+            &tags,
+            EditOp::SetElement {
+                index: 0,
+                text: "Hero.Death".into(),
+            },
+        )]);
+        assert_eq!(changed_list(&renamed, "SCS_Node_6"), listed);
+
+        let (_, grown) = fixture.apply(vec![edit_of(
+            &tags,
+            EditOp::Insert {
+                index: count as u32,
+                key: None,
+            },
+        )]);
+        let now = changed_list(&grown, "SCS_Node_6");
+        assert_eq!(now.len(), listed.len() + 2, "{now:?}");
+        assert!(now[at + 1].starts_with("GameplayTags@0 "), "{now:?}");
+        let last = at + 2 + 2 * count;
+        assert!(
+            now[last].starts_with(&format!("GameplayTags@{count} ")),
+            "{now:?}"
+        );
+        assert!(now[last].ends_with("GameplayTagContainer"), "{now:?}");
+        assert!(now[last + 1].starts_with("TagName@0 "), "{now:?}");
+        assert!(now[last + 1].ends_with("GameplayTag"), "{now:?}");
+    }
+
+    /// A field set inside a struct the list already names joins that struct's entries, not the end
+    /// of the list, which UE would read as the component's own property.
+    #[test]
+    fn a_field_joins_a_struct_the_list_already_holds() {
+        let Some(fixture) = Fixture::open(PARENT_CHAIN) else {
+            return;
+        };
+        let body_set = |parsed: &rivals_uasset::ParsedPackage, field: &str, text: &str| {
+            let body = nested(&mesh_template(parsed).properties, &["BodyInstance"]).clone();
+            let (offset, _) = body.span.expect("a position");
+            PackageEdits {
+                field_sets: vec![rivals_uasset::FieldSet {
+                    offset,
+                    expect_name: body.name.clone(),
+                    expect_element: body.element,
+                    path: vec![field.to_string()],
+                    text: text.to_string(),
+                }],
+                ..Default::default()
+            }
+        };
+        let before = fixture.parse();
+        let (first, after) =
+            fixture.apply_changes(body_set(&before, "CollisionProfileName", "NoCollision"));
+        let distance = nested(&mesh_template(&after).properties, &["LDMaxDrawDistance"]).clone();
+        let (second, after) = apply_after(
+            &fixture,
+            &first,
+            PackageEdits {
+                values: vec![edit_of(
+                    &distance,
+                    EditOp::Set {
+                        text: "5000".into(),
+                    },
+                )],
+                ..Default::default()
+            },
+        );
+        let listed = changed_list(&after, "SCS_Node_2");
+        assert_eq!(listed.len(), 4, "{listed:?}");
+        assert!(listed[3].starts_with("LDMaxDrawDistance@0"), "{listed:?}");
+
+        let (_, again) = apply_after(
+            &fixture,
+            &second,
+            body_set(&after, "CollisionEnabled", "QueryOnly"),
+        );
+        let now = changed_list(&again, "SCS_Node_2");
+        assert_eq!(now.len(), 5, "{now:?}");
+        assert!(now[1].starts_with("BodyInstance@0"), "{now:?}");
+        assert!(now[2].starts_with("CollisionProfileName@0"), "{now:?}");
+        assert!(now[3].starts_with("CollisionEnabled@0"), "{now:?}");
+        assert!(now[3].ends_with("/Script/Engine.BodyInstance"), "{now:?}");
+        assert!(now[4].starts_with("LDMaxDrawDistance@0"), "{now:?}");
+    }
+
+    /// A set is listed as a single entry, with no elements after it: it is copied whole.
+    #[test]
+    fn a_set_is_listed_alone() {
+        let Some(fixture) = Fixture::open(LISTED_CONTAINERS[1]) else {
+            return;
+        };
+        let before = fixture.parse();
+        let owner = list_owners(&before)
+            .into_iter()
+            .find(|owner| {
+                entry_named(&before.exports[owner.template].properties, "ExcludeTags")
+                    .is_some_and(|entry| matches!(entry.value, PropertyValue::Set { .. }))
+            })
+            .expect("a component holding a set");
+        let node = before.exports[owner.export].object_name.clone();
+        let listed = changed_list(&before, &node);
+        let tags = nested(&before.exports[owner.template].properties, &["ExcludeTags"]).clone();
+        let (_, after) = fixture.apply(vec![edit_of(
+            &tags,
+            EditOp::Insert {
+                index: 0,
+                key: Some("RivalsToolkitProbe".into()),
+            },
+        )]);
+        assert_eq!(changed_list(&after, &node), listed);
     }
 
     /// A mod saved before headers stopped ending on a skip reads for repair, and repairing gives

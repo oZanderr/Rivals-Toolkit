@@ -385,57 +385,8 @@ pub fn verify_component(parsed: &ParsedPackage, plan: &ComponentPlan) -> Result<
     problem.map_or(Ok(()), Err)
 }
 
-/// One entry of a component's changed property list: a property, which element of a static array
-/// it is, and the struct it is looked up in, `None` meaning the component's class.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChangedProperty {
-    pub name: String,
-    pub index: u32,
-    pub scope: Option<String>,
-}
-
 /// How deep a struct's fields are listed inside one another.
 const MAX_LISTED_DEPTH: usize = 4;
-
-/// The entries the cooker writes to have a top-level property of a component class copied onto the
-/// components a Blueprint spawns. UE reads the list scope by scope: the component's class for
-/// the top level, whichever class declares the property, and a struct's own type for its fields,
-/// which follow it. Of a struct, `touched` names the fields that changed, as paths below the
-/// property (`Field`, or `Field[element]` for a static array); `None` lists them all. `None` for a
-/// property the class lacks, a container, whose entries name the elements that changed, and a
-/// struct whose fields are not known.
-pub fn changed_property_entries(
-    class_name: &str,
-    class_path: Option<&str>,
-    property: &str,
-    element: u32,
-    touched: Option<&[Vec<String>]>,
-    mappings: Option<&Mappings>,
-    synth: Option<&Mappings>,
-) -> Option<Vec<ChangedProperty>> {
-    let schema = class_path
-        .and_then(|path| synth.and_then(|m| m.class_schema(path, None)))
-        .or_else(|| synth.and_then(|m| m.class_schema(class_name, None)))
-        .or_else(|| mappings.and_then(|m| m.class_schema(class_name, None)))?;
-    let slot = schema
-        .iter()
-        .find(|slot| slot.property.name == property && slot.element == element)?;
-    let mut entries = vec![ChangedProperty {
-        name: property.to_string(),
-        index: element,
-        scope: None,
-    }];
-    match &slot.property.inner {
-        usmap::PropertyInner::Array { .. }
-        | usmap::PropertyInner::Set { .. }
-        | usmap::PropertyInner::Map { .. } => return None,
-        usmap::PropertyInner::Struct { name } => {
-            struct_fields(name, touched, mappings, synth, 0, &mut entries)?;
-        }
-        _ => {}
-    }
-    Some(entries)
-}
 
 /// A field path segment as the field and its element: `Name`, or `Name[2]` for a static array.
 fn segment(text: &str) -> (&str, u32) {
@@ -445,63 +396,437 @@ fn segment(text: &str) -> (&str, u32) {
     }
 }
 
-/// A struct's fields as list entries scoped to it, each nested struct's fields after its own entry:
-/// those `touched` names, or every one. A container field is left out, which leaves it at the class
-/// default.
-fn struct_fields(
-    struct_name: &str,
-    touched: Option<&[Vec<String>]>,
-    mappings: Option<&Mappings>,
-    synth: Option<&Mappings>,
+/// Where a changed property list entry is looked up: the component's class, a struct by name, or,
+/// for an entry read from a package, the object path it names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ListScope {
+    Class,
+    Struct(String),
+    Path(String),
+}
+
+/// One entry of a component's changed property list: a property, which element of a static array
+/// or of an array it is, and the class or struct it is looked up in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListEntry {
+    pub name: String,
+    pub index: u32,
+    pub scope: ListScope,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ListNode {
+    entry: ListEntry,
+    /// A struct's fields, or an array's elements, as the list names them after the entry.
+    children: Vec<ListNode>,
+}
+
+/// The class or struct entries are read against.
+#[derive(Debug, Clone)]
+enum Level {
+    Class,
+    Struct(String),
+}
+
+impl Level {
+    fn scope(&self) -> ListScope {
+        match self {
+            Level::Class => ListScope::Class,
+            Level::Struct(name) => ListScope::Struct(name.clone()),
+        }
+    }
+}
+
+/// What reading and extending a component's list needs: its class, by name and by path, and the
+/// layouts of the class and of the structs it holds.
+pub struct ListContext<'a> {
+    pub class_name: &'a str,
+    pub class_path: &'a str,
+    pub mappings: Option<&'a Mappings>,
+    pub synth: Option<&'a Mappings>,
+}
+
+impl ListContext<'_> {
+    fn schema(&self, level: &Level) -> Option<crate::mappings::Schema<'_>> {
+        match level {
+            Level::Class => self
+                .synth
+                .and_then(|m| m.class_schema(self.class_path, None))
+                .or_else(|| {
+                    self.synth
+                        .and_then(|m| m.class_schema(self.class_name, None))
+                })
+                .or_else(|| {
+                    self.mappings
+                        .and_then(|m| m.class_schema(self.class_name, None))
+                }),
+            Level::Struct(name) => self
+                .synth
+                .and_then(|m| m.schema(name))
+                .or_else(|| self.mappings.and_then(|m| m.schema(name))),
+        }
+    }
+
+    fn matches(&self, scope: &ListScope, level: &Level) -> bool {
+        match (scope, level) {
+            (ListScope::Class, Level::Class) => true,
+            (ListScope::Struct(a), Level::Struct(b)) => a.eq_ignore_ascii_case(b),
+            (ListScope::Path(path), Level::Class) => path.eq_ignore_ascii_case(self.class_path),
+            (ListScope::Path(path), Level::Struct(name)) => path
+                .rsplit(['.', ':'])
+                .next()
+                .unwrap_or(path)
+                .eq_ignore_ascii_case(name),
+            _ => false,
+        }
+    }
+}
+
+/// A component's changed property list as UE reads it: top-level entries in the component class's
+/// scope, a struct's fields after it in the struct's scope, and an array's elements after it,
+/// named after the array in its owner's scope, up to a `None` that closes them. Entries it cannot
+/// place are kept as they stand, so an untouched list flattens back to what it was.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangedList {
+    nodes: Vec<ListNode>,
+    rest: Vec<ListEntry>,
+}
+
+const LIST_NONE: &str = "None";
+
+impl ChangedList {
+    pub fn read(entries: &[ListEntry], ctx: &ListContext<'_>) -> Self {
+        let mut at = 0;
+        let nodes = read_scope(entries, &mut at, &Level::Class, ctx, 0);
+        Self {
+            nodes,
+            rest: entries[at..].to_vec(),
+        }
+    }
+
+    /// Entries left over past where UE stops reading the list, which nothing places.
+    pub fn unplaced(&self) -> usize {
+        self.rest.len()
+    }
+
+    pub fn entries(&self) -> Vec<ListEntry> {
+        let mut out = Vec::new();
+        flatten(&self.nodes, &mut out);
+        out.extend(self.rest.iter().cloned());
+        out
+    }
+
+    /// Lists what a save changed of the top-level property `property` (element `element` of a
+    /// static array), as the template now holds it: the property, the fields of a struct `fields`
+    /// names below it (`None` for all of them), and every element of an array. `None` for a
+    /// property the class lacks or a struct whose fields are not known.
+    pub fn touch(
+        &mut self,
+        property: &str,
+        element: u32,
+        fields: Option<&[Vec<String>]>,
+        value: Option<&PropertyValue>,
+        ctx: &ListContext<'_>,
+    ) -> Option<()> {
+        touch_in(
+            &mut self.nodes,
+            &Level::Class,
+            property,
+            element,
+            fields,
+            value,
+            ctx,
+            0,
+        )
+    }
+}
+
+fn flatten(nodes: &[ListNode], out: &mut Vec<ListEntry>) {
+    for node in nodes {
+        out.push(node.entry.clone());
+        flatten(&node.children, out);
+    }
+}
+
+fn read_scope(
+    entries: &[ListEntry],
+    at: &mut usize,
+    level: &Level,
+    ctx: &ListContext<'_>,
     depth: usize,
-    entries: &mut Vec<ChangedProperty>,
+) -> Vec<ListNode> {
+    let schema = ctx.schema(level);
+    let mut nodes = Vec::new();
+    while let Some(entry) = entries
+        .get(*at)
+        .filter(|entry| ctx.matches(&entry.scope, level))
+    {
+        let entry = entry.clone();
+        *at += 1;
+        let inner = schema.as_ref().and_then(|schema| {
+            schema
+                .iter()
+                .find(|slot| {
+                    slot.property.name.eq_ignore_ascii_case(&entry.name)
+                        && slot.element == entry.index
+                })
+                .map(|slot| slot.property.inner.clone())
+        });
+        let children = match inner {
+            Some(usmap::PropertyInner::Struct { name }) if depth < MAX_LISTED_DEPTH => {
+                read_scope(entries, at, &Level::Struct(name), ctx, depth + 1)
+            }
+            Some(usmap::PropertyInner::Array { inner }) => {
+                read_elements(entries, at, level, &entry.name, &inner, ctx, depth)
+            }
+            _ => Vec::new(),
+        };
+        nodes.push(ListNode { entry, children });
+    }
+    nodes
+}
+
+fn read_elements(
+    entries: &[ListEntry],
+    at: &mut usize,
+    owner: &Level,
+    array: &str,
+    inner: &usmap::PropertyInner,
+    ctx: &ListContext<'_>,
+    depth: usize,
+) -> Vec<ListNode> {
+    let mut nodes = Vec::new();
+    while let Some(entry) = entries.get(*at).filter(|entry| {
+        ctx.matches(&entry.scope, owner)
+            && (entry.name.eq_ignore_ascii_case(array) || entry.name == LIST_NONE)
+    }) {
+        let entry = entry.clone();
+        *at += 1;
+        if entry.name == LIST_NONE {
+            nodes.push(ListNode {
+                entry,
+                children: Vec::new(),
+            });
+            break;
+        }
+        let children = match inner {
+            usmap::PropertyInner::Struct { name } if depth < MAX_LISTED_DEPTH => {
+                read_scope(entries, at, &Level::Struct(name.clone()), ctx, depth + 1)
+            }
+            _ => Vec::new(),
+        };
+        nodes.push(ListNode { entry, children });
+    }
+    nodes
+}
+
+#[allow(clippy::too_many_arguments)]
+fn touch_in(
+    nodes: &mut Vec<ListNode>,
+    level: &Level,
+    property: &str,
+    element: u32,
+    fields: Option<&[Vec<String>]>,
+    value: Option<&PropertyValue>,
+    ctx: &ListContext<'_>,
+    depth: usize,
 ) -> Option<()> {
     if depth > MAX_LISTED_DEPTH {
         return None;
     }
-    let schema = synth
-        .and_then(|m| m.schema(struct_name))
-        .or_else(|| mappings.and_then(|m| m.schema(struct_name)))?;
-    if schema.is_empty() {
-        return None;
+    // A value the template inherits is the one its spawned components start with.
+    if inherited(value) {
+        return Some(());
     }
-    for slot in schema.iter() {
-        let below: Option<Vec<Vec<String>>> = match touched {
-            None => None,
-            Some(paths) => {
-                let here: Vec<&Vec<String>> = paths
-                    .iter()
-                    .filter(|path| {
-                        path.first().is_some_and(|first| {
-                            segment(first) == (slot.property.name.as_str(), slot.element)
-                        })
-                    })
-                    .collect();
-                if here.is_empty() {
-                    continue;
+    let inner = ctx
+        .schema(level)?
+        .iter()
+        .find(|slot| slot.property.name == property && slot.element == element)?
+        .property
+        .inner
+        .clone();
+    let at = match nodes.iter().position(|node| {
+        node.entry.name.eq_ignore_ascii_case(property) && node.entry.index == element
+    }) {
+        Some(at) => at,
+        None => {
+            nodes.push(ListNode {
+                entry: ListEntry {
+                    name: property.to_string(),
+                    index: element,
+                    scope: level.scope(),
+                },
+                children: Vec::new(),
+            });
+            nodes.len() - 1
+        }
+    };
+    match &inner {
+        usmap::PropertyInner::Struct { name } => {
+            let struct_level = Level::Struct(name.clone());
+            match fields {
+                None => {
+                    nodes[at].children = full_listing(name, value, ctx, depth + 1)?;
                 }
-                if here.iter().any(|path| path.len() == 1) {
-                    None
-                } else {
-                    Some(here.iter().map(|path| path[1..].to_vec()).collect())
-                }
-            }
-        };
-        match &slot.property.inner {
-            usmap::PropertyInner::Array { .. }
-            | usmap::PropertyInner::Set { .. }
-            | usmap::PropertyInner::Map { .. } => continue,
-            inner => {
-                entries.push(ChangedProperty {
-                    name: slot.property.name.clone(),
-                    index: slot.element,
-                    scope: Some(struct_name.to_string()),
-                });
-                if let usmap::PropertyInner::Struct { name } = inner {
-                    struct_fields(name, below.as_deref(), mappings, synth, depth + 1, entries)?;
+                Some(paths) => {
+                    for path in paths {
+                        let Some((first, below)) = path.split_first() else {
+                            continue;
+                        };
+                        let (field, field_element) = segment(first);
+                        let below = (!below.is_empty()).then(|| vec![below.to_vec()]);
+                        touch_in(
+                            &mut nodes[at].children,
+                            &struct_level,
+                            field,
+                            field_element,
+                            below.as_deref(),
+                            struct_field(value, field, field_element),
+                            ctx,
+                            depth + 1,
+                        )?;
+                    }
                 }
             }
         }
+        usmap::PropertyInner::Array { inner } => {
+            nodes[at].children = element_listing(level, property, inner, value, ctx, depth)?;
+        }
+        usmap::PropertyInner::Set { .. } | usmap::PropertyInner::Map { .. } => {
+            nodes[at].children.clear();
+        }
+        _ => {}
     }
     Some(())
+}
+
+/// A struct the reader decodes into a value of its own kind, as the fields the list names: a tag
+/// container is read as its tag names, and a tag as its name.
+fn natively_read(name: &str, value: Option<&PropertyValue>) -> Option<PropertyValue> {
+    let tag = |value: &PropertyValue| PropertyValue::Struct {
+        name: "GameplayTag".into(),
+        fields: vec![PropertyEntry {
+            name: "TagName".into(),
+            element: None,
+            value: value.clone(),
+            span: None,
+            slot: None,
+        }],
+    };
+    match (name, value?) {
+        ("GameplayTagContainer", PropertyValue::Array { items }) => Some(PropertyValue::Struct {
+            name: name.into(),
+            fields: vec![PropertyEntry {
+                name: "GameplayTags".into(),
+                element: None,
+                value: PropertyValue::Array {
+                    items: items.iter().map(tag).collect(),
+                },
+                span: None,
+                slot: None,
+            }],
+        }),
+        ("GameplayTag", value @ PropertyValue::Name { .. }) => Some(tag(value)),
+        _ => None,
+    }
+}
+
+/// Whether a value is one the object inherits rather than holds.
+fn inherited(value: Option<&PropertyValue>) -> bool {
+    matches!(value, None | Some(PropertyValue::Unset { .. }))
+}
+
+/// A field of a struct value, where it holds one.
+fn struct_field<'v>(
+    value: Option<&'v PropertyValue>,
+    field: &str,
+    element: u32,
+) -> Option<&'v PropertyValue> {
+    let fields = match value? {
+        PropertyValue::Struct { fields, .. } | PropertyValue::Default { fields, .. } => fields,
+        _ => return None,
+    };
+    fields
+        .iter()
+        .find(|entry| entry.name == field && entry.element.unwrap_or(0) == element)
+        .map(|entry| &entry.value)
+}
+
+/// Every field of the struct `name` that `value` holds, each nested struct's fields after its entry
+/// and each array's elements after its own. A field it inherits is left to the class default.
+fn full_listing(
+    name: &str,
+    value: Option<&PropertyValue>,
+    ctx: &ListContext<'_>,
+    depth: usize,
+) -> Option<Vec<ListNode>> {
+    if depth > MAX_LISTED_DEPTH {
+        return None;
+    }
+    let level = Level::Struct(name.to_string());
+    let schema = ctx.schema(&level)?;
+    if schema.is_empty() {
+        return None;
+    }
+    let native = natively_read(name, value);
+    let value = native.as_ref().or(value);
+    let mut nodes = Vec::new();
+    for slot in schema.iter() {
+        let field_value = struct_field(value, &slot.property.name, slot.element);
+        if inherited(field_value) && !matches!(value, Some(PropertyValue::Default { .. })) {
+            continue;
+        }
+        let children = match &slot.property.inner {
+            usmap::PropertyInner::Struct { name } => {
+                full_listing(name, field_value, ctx, depth + 1)?
+            }
+            usmap::PropertyInner::Array { inner } => {
+                element_listing(&level, &slot.property.name, inner, field_value, ctx, depth)?
+            }
+            _ => Vec::new(),
+        };
+        nodes.push(ListNode {
+            entry: ListEntry {
+                name: slot.property.name.clone(),
+                index: slot.element,
+                scope: level.scope(),
+            },
+            children,
+        });
+    }
+    Some(nodes)
+}
+
+/// Every element an array holds, named after the array in its owner's scope, each struct element's
+/// fields after it. Listing each one copies all of them whatever the class default holds.
+fn element_listing(
+    owner: &Level,
+    array: &str,
+    inner: &usmap::PropertyInner,
+    value: Option<&PropertyValue>,
+    ctx: &ListContext<'_>,
+    depth: usize,
+) -> Option<Vec<ListNode>> {
+    let items: &[PropertyValue] = match value {
+        Some(PropertyValue::Array { items }) => items,
+        _ => &[],
+    };
+    let mut nodes = Vec::new();
+    for (index, item) in items.iter().enumerate() {
+        let children = match inner {
+            usmap::PropertyInner::Struct { name } => {
+                full_listing(name, Some(item), ctx, depth + 1)?
+            }
+            _ => Vec::new(),
+        };
+        nodes.push(ListNode {
+            entry: ListEntry {
+                name: array.to_string(),
+                index: index as u32,
+                scope: owner.scope(),
+            },
+            children,
+        });
+    }
+    Some(nodes)
 }

@@ -36,7 +36,7 @@ mod value;
 mod write;
 
 pub use component::{
-    AddComponent, ChangedProperty, ComponentPlan, NodeParent, changed_property_entries,
+    AddComponent, ChangedList, ComponentPlan, ListContext, ListEntry, ListScope, NodeParent,
     component_wiring, plan_component, verify_component,
 };
 pub use copy::{CopiedExport, CopyExport, CopyPlan, CopySource, plan_copy};
