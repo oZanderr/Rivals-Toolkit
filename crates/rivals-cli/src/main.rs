@@ -72,6 +72,8 @@ struct Cli {
 
     /// Build on the mod's own copy of an asset where it already has one, instead of reading the
     /// source again. Edits must then be made against that copy, as `asset dump` of the mod shows it.
+    /// `--replace`, which starts again from the source, is refused alongside it unless the source
+    /// is the mod itself.
     #[arg(long, global = true)]
     layer: bool,
 

@@ -2023,6 +2023,7 @@ pub struct SaveOptions {
     /// Start again from the source, dropping whatever the mod's copy already carries.
     pub replace: bool,
     /// Build on the mod's copy when it already carries the asset: the edits were made against it.
+    /// With `replace` as well, the save is refused unless it reads the mod's own container.
     pub layer: bool,
     pub target: SaveTarget,
     pub iostore: crate::pak::iostore_out::IoStoreOptions,
@@ -2475,12 +2476,34 @@ fn destination_check(
         }
         _ => {}
     }
-    Ok(match options.target {
-        SaveTarget::Pak => pak.is_file() && holds_entry(&pak, entry)?,
-        SaveTarget::IoStore => {
-            utoc.is_file() && crate::pak::iostore_out::utoc_holds_entry(&utoc, entry)?
-        }
-    })
+    let (own, held) = match options.target {
+        SaveTarget::Pak => (&pak, pak.is_file() && holds_entry(&pak, entry)?),
+        SaveTarget::IoStore => (
+            &utoc,
+            utoc.is_file() && crate::pak::iostore_out::utoc_holds_entry(&utoc, entry)?,
+        ),
+    };
+    // Reading the mod's own container, building on its copy and starting again read the same bytes.
+    let file_name = |path: &Path| {
+        path.file_name()
+            .map(|name| name.to_string_lossy().to_ascii_lowercase())
+    };
+    if held
+        && options.layer
+        && options.replace
+        && file_name(Path::new(request.container)) != file_name(own)
+    {
+        return Err(format!(
+            "{name} already holds this asset, and the save was asked both to build on that copy and \
+             to start again from {}. Build on the copy to keep its earlier edits, or start again to \
+             drop them.",
+            Path::new(request.container)
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+        ));
+    }
+    Ok(held)
 }
 
 /// Which other installed IoStore mods carry `entry`, each said with whether its copy or the one
@@ -7000,6 +7023,63 @@ mod game_data_tests {
         assert!(
             matches!(fresh, PreviewOutcome::Verified { .. }),
             "{fresh:?}"
+        );
+    }
+
+    /// Building on the mod's copy and starting again from the game's are opposite answers to a mod
+    /// that holds the asset, so a save asking for both is refused rather than silently dropping
+    /// the copy's edits. Read from the mod's own container, the two are the same and it goes ahead.
+    #[test]
+    fn layering_and_replacing_a_held_copy_at_once_is_refused() {
+        let Some(fixture) = Fixture::open(DEFAULTS) else {
+            return;
+        };
+        let scratch = ScratchMod {
+            root: fixture.root.clone(),
+            name: "RivalsToolkitLayerReplaceProbe",
+        };
+        drop(ScratchMod {
+            root: fixture.root.clone(),
+            name: scratch.name,
+        });
+        let cell = row_ints(&fixture.parse(), 1).remove(0);
+        fn request<'a>(
+            fixture: &'a Fixture,
+            container: &'a str,
+            mod_name: &'a str,
+            cell: &PropertyEntry,
+        ) -> AssetEditRequest<'a> {
+            AssetEditRequest {
+                game_root: &fixture.root,
+                container,
+                entry: fixture.entry,
+                kind: AssetSource::Utoc,
+                mod_name,
+                changes: PackageEdits {
+                    values: vec![bump(cell, 3)],
+                    ..Default::default()
+                },
+            }
+        }
+        let game = request(&fixture, &fixture.container, scratch.name, &cell);
+        save_edits(&game, Some(&fixture.schema), &SaveOptions::default()).expect("first save");
+
+        let both = SaveOptions {
+            layer: true,
+            replace: true,
+            ..Default::default()
+        };
+        let refused = preview_save(&game, Some(&fixture.schema), &both)
+            .expect_err("the game's copy and the mod's are both asked for");
+        assert!(refused.contains("both to build on that copy"), "{refused}");
+
+        let own = scratch.container().to_string_lossy().into_owned();
+        let own = request(&fixture, &own, scratch.name, &cell);
+        let outcome = preview_save(&own, Some(&fixture.schema), &both)
+            .expect("the mod's own container is the copy either way");
+        assert!(
+            matches!(outcome, PreviewOutcome::Verified { .. }),
+            "{outcome:?}"
         );
     }
 
