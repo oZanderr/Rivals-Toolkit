@@ -1198,7 +1198,8 @@ pub fn patch_package_with(
     // Which applied edits act on which container, so each can be told its final element count.
     let mut counted: Vec<(usize, u64)> = Vec::new();
     // Containers with no bytes yet that this save has begun writing, and the count each will hold.
-    let mut absent_started: BTreeSet<u64> = BTreeSet::new();
+    // One shares its offset with whatever is stored next, so each is known by its slot as well.
+    let mut absent_started: BTreeSet<(u64, Option<(u64, u32)>)> = BTreeSet::new();
     // Tags added to each tagged block, keyed by where its `None` sits: the applied edit, the tag,
     // and where its value lands within everything added to that block.
     let mut tag_inserts: BTreeMap<u64, Vec<(usize, Vec<u8>, u64)>> = BTreeMap::new();
@@ -1557,7 +1558,8 @@ pub fn patch_package_with(
                                 && matches!(other.op, EditOp::Insert { .. })
                         })
                         .count();
-                    if absent_started.insert(start) {
+                    let slot = entry.slot.map(|slot| (slot.header_at, slot.schema_index));
+                    if absent_started.insert((start, slot)) {
                         let mut head = Vec::with_capacity(8);
                         if matches!(
                             entry.value,
