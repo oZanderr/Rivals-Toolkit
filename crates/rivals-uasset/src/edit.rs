@@ -107,6 +107,8 @@ pub struct PatchedBundle {
     pub bulk: Option<Vec<u8>>,
     /// The `.uptnl` after a bulk edit rewrote it.
     pub optional_bulk: Option<Vec<u8>>,
+    /// What the save could not do that the caller should hear about.
+    pub notes: Vec<String>,
 }
 
 /// The bulk data files read beside a package, for edits that replace a payload in one.
@@ -1006,6 +1008,7 @@ pub fn patch_package_with(
             applied: copies.applied,
             bulk: None,
             optional_bulk: None,
+            notes: Vec::new(),
         });
     }
     if !edits.add_exports.is_empty() {
@@ -1047,6 +1050,7 @@ pub fn patch_package_with(
             applied: addition.applied,
             bulk: None,
             optional_bulk: None,
+            notes: Vec::new(),
         });
     }
     if !edits.dependencies.is_empty() {
@@ -1918,6 +1922,7 @@ pub fn patch_package_with(
         applied,
         bulk: bulk_out.bulk,
         optional_bulk: bulk_out.optional_bulk,
+        notes: Vec::new(),
     })
 }
 
@@ -2451,6 +2456,7 @@ fn patch_dependencies(
             .collect(),
         bulk: None,
         optional_bulk: None,
+        notes: Vec::new(),
     })
 }
 
@@ -2493,6 +2499,7 @@ fn patch_export_edits(
         applied,
         bulk: None,
         optional_bulk: None,
+        notes: Vec::new(),
     })
 }
 
@@ -2528,6 +2535,7 @@ fn patch_import_removal(
         applied: removal.applied,
         bulk: None,
         optional_bulk: None,
+        notes: Vec::new(),
     })
 }
 
@@ -2599,6 +2607,7 @@ fn patch_header_repair(
         applied,
         bulk: None,
         optional_bulk: None,
+        notes: Vec::new(),
     })
 }
 
@@ -2629,6 +2638,7 @@ fn patch_name_compaction(
         applied: Vec::new(),
         bulk: None,
         optional_bulk: None,
+        notes: Vec::new(),
     })
 }
 
@@ -2684,6 +2694,7 @@ fn patch_structure(
             applied: copies.applied,
             bulk: None,
             optional_bulk: None,
+            notes: Vec::new(),
         });
     }
     for &index in &edits.reset_exports {
@@ -2723,6 +2734,7 @@ fn patch_structure(
         applied,
         bulk: None,
         optional_bulk: None,
+        notes: Vec::new(),
     })
 }
 
@@ -7152,6 +7164,54 @@ mod tests {
         };
         assert!(reads_back_as(&stored, " padded "));
         assert!(!reads_back_as(&stored, "padded"));
+    }
+
+    /// Saving under a new name points a map value that names the package at the new name. A map key
+    /// cannot be renamed in place, so one naming the package is reported rather than left silently.
+    #[test]
+    fn a_self_path_in_a_map_is_renamed_as_a_value_and_reported_as_a_key() {
+        let old = "/Game/Test.Test";
+        let map = PropertyEntry {
+            name: "Paths".into(),
+            element: None,
+            value: PropertyValue::Map {
+                entries: vec![crate::value::MapEntry {
+                    key: PropertyValue::Str { value: old.into() },
+                    value: PropertyValue::SoftObject { path: old.into() },
+                }],
+            },
+            span: Some((100, 140)),
+            slot: None,
+        };
+        let parsed = export_with(vec![map]);
+        let rename = crate::identity::PathRename::plan(
+            &parsed,
+            &crate::identity::SaveAs {
+                package: "/Game/Mods/Copy".into(),
+                rename_objects: false,
+            },
+        )
+        .expect("plan")
+        .expect("a rename");
+        let edits = crate::identity::identity_value_edits(&parsed, &rename);
+        assert!(
+            matches!(
+                &edits[..],
+                [ValueEdit {
+                    offset: 100,
+                    op: EditOp::SetElement { index: 0, text },
+                    ..
+                }] if text == "/Game/Mods/Copy.Test"
+            ),
+            "{edits:?}"
+        );
+        let notes = crate::identity::identity_leftovers(&parsed, &rename);
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.contains("map key /Game/Test.Test")),
+            "{notes:?}"
+        );
     }
 
     fn export_with(properties: Vec<PropertyEntry>) -> ParsedPackage {

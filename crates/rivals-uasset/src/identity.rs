@@ -10,7 +10,8 @@
 use retoc::legacy_asset::{FLegacyPackageHeader, FMinimalName, FObjectExport};
 use serde::{Deserialize, Serialize};
 
-use crate::edit::{EditOp, PatchedBundle, ValueEdit, kind_of};
+use crate::edit::{EditOp, PatchedBundle, ScriptConstEdit, ValueEdit, kind_of};
+use crate::package::ExportStatus;
 use crate::package::{AssetBundle, ParsedPackage, header_size, read_header};
 use crate::value::{PropertyEntry, PropertyValue};
 use crate::write::{HeaderDraft, Splice, check_inline_bulk, rewrite};
@@ -302,6 +303,7 @@ pub(crate) fn rename_package(
         applied: Vec::new(),
         bulk: None,
         optional_bulk: None,
+        notes: Vec::new(),
     })
 }
 
@@ -349,6 +351,24 @@ fn collect_edits(entries: &[PropertyEntry], rename: &PathRename, edits: &mut Vec
                 }
             }
             PropertyValue::Struct { fields, .. } => collect_edits(fields, rename, edits),
+            PropertyValue::Map { entries } => {
+                for (index, pair) in entries.iter().enumerate() {
+                    match &pair.value {
+                        PropertyValue::Struct { fields, .. } => {
+                            collect_edits(fields, rename, edits)
+                        }
+                        value => {
+                            if let Some(text) = path_text(value).and_then(|text| rename.apply(text))
+                            {
+                                edits.push(edit(EditOp::SetElement {
+                                    index: index as u32,
+                                    text,
+                                }));
+                            }
+                        }
+                    }
+                }
+            }
             PropertyValue::Array { items } | PropertyValue::Set { items } => {
                 for (index, item) in items.iter().enumerate() {
                     match item {
@@ -372,9 +392,137 @@ fn collect_edits(entries: &[PropertyEntry], rename: &PathRename, edits: &mut Vec
     }
 }
 
+/// The strings in bytecode that name the package, rewritten to name it by its new name where the
+/// new one is as long as the old: a string in bytecode cannot change length without moving every
+/// jump after it.
+pub fn identity_script_edits(parsed: &ParsedPackage, rename: &PathRename) -> Vec<ScriptConstEdit> {
+    let mut edits = Vec::new();
+    for (export, statement, slot, renamed) in script_strings(parsed, rename) {
+        if same_length(slot.kind, &slot.value, &renamed) {
+            edits.push(ScriptConstEdit {
+                export,
+                statement,
+                constant: slot.index,
+                value: renamed,
+            });
+        }
+    }
+    edits
+}
+
+/// What saving under the new name leaves naming the old one: a bytecode string of another length,
+/// a map key, and whatever a payload the reader does not follow holds.
+pub fn identity_leftovers(parsed: &ParsedPackage, rename: &PathRename) -> Vec<String> {
+    let mut notes = Vec::new();
+    for (export, statement, slot, renamed) in script_strings(parsed, rename) {
+        if !same_length(slot.kind, &slot.value, &renamed) {
+            notes.push(format!(
+                "{} still names {} in a string in its bytecode at {statement:#06X}: a bytecode                  string cannot change length",
+                parsed.exports[export as usize].object_name, rename.from
+            ));
+        }
+    }
+    for export in &parsed.exports {
+        let mut keys = Vec::new();
+        map_keys(&export.properties, rename, &mut keys);
+        map_keys(&export.defaults, rename, &mut keys);
+        for key in keys {
+            notes.push(format!(
+                "{} keeps the map key {key}, which names {}: a key cannot be renamed in place",
+                export.object_name, rename.from
+            ));
+        }
+        if let ExportStatus::Payload { kind, .. } = &export.status
+            && !export.names_complete
+        {
+            notes.push(format!(
+                "{} holds {kind}, which the reader does not follow, so a name of {} inside it is                  left as it was",
+                export.object_name, rename.from
+            ));
+        }
+    }
+    notes
+}
+
+/// Every string literal in the package's bytecode that names the package, with the export, the
+/// statement and the literal it sits in, and what it reads renamed.
+fn script_strings(
+    parsed: &ParsedPackage,
+    rename: &PathRename,
+) -> Vec<(u32, u32, crate::kismet::LiteralSlot, String)> {
+    let mut found = Vec::new();
+    for export in &parsed.exports {
+        let Some(script) = &export.script else {
+            continue;
+        };
+        for statement in &script.statements {
+            for slot in crate::kismet::literal_slots(&statement.expr) {
+                if !matches!(slot.kind, "StringConst" | "UnicodeStringConst") {
+                    continue;
+                }
+                let renamed = rename.apply_within(&slot.value);
+                if renamed != slot.value {
+                    found.push((export.index, statement.offset, slot, renamed));
+                }
+            }
+        }
+    }
+    found
+}
+
+fn same_length(kind: &str, was: &str, now: &str) -> bool {
+    if kind == "UnicodeStringConst" {
+        was.encode_utf16().count() == now.encode_utf16().count()
+    } else {
+        was.chars().count() == now.chars().count()
+    }
+}
+
+/// The keys of the maps in `entries` that name the package.
+fn map_keys(entries: &[PropertyEntry], rename: &PathRename, keys: &mut Vec<String>) {
+    for entry in entries {
+        match &entry.value {
+            PropertyValue::Map { entries: pairs } => {
+                for pair in pairs {
+                    if let Some(text) = path_text(&pair.key)
+                        && rename.apply(text).is_some()
+                    {
+                        keys.push(text.to_string());
+                    }
+                    if let PropertyValue::Struct { fields, .. } = &pair.value {
+                        map_keys(fields, rename, keys);
+                    }
+                }
+            }
+            PropertyValue::Struct { fields, .. } => map_keys(fields, rename, keys),
+            PropertyValue::Array { items } | PropertyValue::Set { items } => {
+                for item in items {
+                    if let PropertyValue::Struct { fields, .. } = item {
+                        map_keys(fields, rename, keys);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A bytecode string is rewritten only at its own length, counted in the unit it is stored in.
+    #[test]
+    fn a_bytecode_string_keeps_its_length() {
+        assert!(same_length("StringConst", "/Game/Aa.Aa", "/Game/Bb.Bb"));
+        assert!(!same_length("StringConst", "/Game/A.A", "/Game/Mods/B.B"));
+        assert!(same_length(
+            "UnicodeStringConst",
+            "/Game/\u{e9}.\u{e9}",
+            "/Game/e.e"
+        ));
+        assert!(!same_length("StringConst", "/Game/\u{1F600}", "/Game/xy"));
+    }
 
     #[test]
     fn a_path_is_renamed_where_it_stands_alone_and_not_inside_a_longer_one() {

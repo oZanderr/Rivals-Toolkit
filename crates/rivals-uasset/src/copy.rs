@@ -707,6 +707,7 @@ pub(crate) fn patch_copy(
         applied: copied.applied,
         bulk: None,
         optional_bulk: None,
+        notes: Vec::new(),
     })
 }
 

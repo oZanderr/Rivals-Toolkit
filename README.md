@@ -160,7 +160,9 @@ A package's identity is its stored name, so any writing command can save under a
 `--as /Game/Mods/MyThing/DA_Copy`: a new asset, or a replacement for the asset at that path. The
 paths inside the package that name itself follow, and so do the objects named after it (the asset,
 and a Blueprint's class and default object) unless `--keep-object-names` says otherwise. Functions
-keep their names, since bytecode calls them by name. `asset save-as` writes a copy with no other
+keep their names, since bytecode calls them by name. Paths in map values and bytecode strings
+follow too; a map key, a bytecode string that would change length, and a payload the reader does
+not follow keep the old path, and the save says which. `asset save-as` writes a copy with no other
 change, and `asset rename-package` moves a package a mod added to another path inside that mod. A
 level cannot be saved under another path, since its package name is written into its world.
 

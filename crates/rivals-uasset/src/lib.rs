@@ -58,7 +58,9 @@ pub use export_edit::{
 };
 pub use header_edit::{ImportEdit, ObjectPath, parse_object_path};
 pub use hex::{HexRow, ROW_BYTES, render as render_hex, rows as hex_rows};
-pub use identity::{PathRename, SaveAs, identity_value_edits};
+pub use identity::{
+    PathRename, SaveAs, identity_leftovers, identity_script_edits, identity_value_edits,
+};
 pub use import_remove::{
     ImportRemovalPlan, ImportUsage, RemovedImport, UnusedImport, import_usage, plan_import_removal,
     unused_imports,

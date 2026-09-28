@@ -79,6 +79,7 @@ fn repair_pass(
                 applied: Vec::new(),
                 bulk: None,
                 optional_bulk: None,
+                notes: Vec::new(),
             };
             (unchanged, loaded, parsed.clone())
         } else {
@@ -229,6 +230,7 @@ fn save_as_pass(
             applied: Vec::new(),
             bulk: None,
             optional_bulk: None,
+            notes: Vec::new(),
         };
         (unchanged, loaded, parsed.clone())
     } else {
@@ -250,9 +252,11 @@ fn save_as_pass(
     let mut current = rivals_uasset::patch_identity(&bundle, &before, &rename)?;
     let mut after = reparse(request, mappings, &current.asset, &current.exports)?;
     let strings = rivals_uasset::identity_value_edits(&after, &rename);
-    if !strings.is_empty() {
+    let scripts = rivals_uasset::identity_script_edits(&after, &rename);
+    if !strings.is_empty() || !scripts.is_empty() {
         let changes = PackageEdits {
             values: strings,
+            scripts,
             ..Default::default()
         };
         let sidecars = rivals_uasset::Sidecars {
@@ -286,6 +290,9 @@ fn save_as_pass(
     rivals_uasset::verify_identity(&before, &after, &rename)?;
     patched.asset = current.asset;
     patched.exports = current.exports;
+    patched
+        .notes
+        .extend(rivals_uasset::identity_leftovers(&after, &rename));
     Ok((patched, loaded))
 }
 
@@ -1835,15 +1842,22 @@ pub fn save_batch(
     }
     let mut outcomes: Vec<Option<Result<SaveOutcome, String>>> =
         requests.iter().map(|_| None).collect();
-    let mut staged: Vec<(usize, String, usize, crate::pak::iostore_out::PackageBytes)> = Vec::new();
+    let mut staged: Vec<(
+        usize,
+        String,
+        usize,
+        Vec<String>,
+        crate::pak::iostore_out::PackageBytes,
+    )> = Vec::new();
     for (index, request) in requests.iter().enumerate() {
         match stage_one(request, mappings, options) {
             Ok(Staged::Held(outcome)) => outcomes[index] = Some(Ok(outcome)),
             Ok(Staged::Ready {
                 entry,
                 changes,
+                notes,
                 bytes,
-            }) => staged.push((index, entry, changes, *bytes)),
+            }) => staged.push((index, entry, changes, notes, *bytes)),
             Err(reason) => outcomes[index] = Some(Err(reason)),
         }
     }
@@ -1852,7 +1866,7 @@ pub fn save_batch(
             let utoc = pak.with_extension("utoc");
             let mut bytes: Vec<Option<crate::pak::iostore_out::PackageBytes>> = staged
                 .iter_mut()
-                .map(|(_, _, _, package)| Some(std::mem::replace(package, empty_package())))
+                .map(|(_, _, _, _, package)| Some(std::mem::replace(package, empty_package())))
                 .collect();
             crate::pak::containers::drop_cached_store();
             let report = crate::pak::iostore_out::write_batch_into_iostore(
@@ -1863,7 +1877,7 @@ pub fn save_batch(
             )?;
             Ok((utoc, report))
         });
-        for (index, entry, changes, _) in &staged {
+        for (index, entry, changes, notes, _) in &staged {
             let request = &requests[*index];
             outcomes[*index] = Some(match &written {
                 Ok((utoc, report)) => Ok(SaveOutcome::Written {
@@ -1874,6 +1888,7 @@ pub fn save_batch(
                     ),
                     warnings: with_save_as_note(
                         request,
+                        notes,
                         other_overrides(request.game_root, entry, utoc),
                     ),
                     pak: report.utoc.clone(),
@@ -1894,6 +1909,7 @@ enum Staged {
     Ready {
         entry: String,
         changes: usize,
+        notes: Vec<String>,
         bytes: Box<crate::pak::iostore_out::PackageBytes>,
     },
 }
@@ -1914,6 +1930,7 @@ fn stage_one(
     let shader_map_hashes = source_shader_maps(request, &loaded.asset_file_buffer);
     Ok(Staged::Ready {
         changes: patched.applied.len(),
+        notes: patched.notes,
         bytes: Box::new(crate::pak::iostore_out::PackageBytes {
             entry: entry.clone(),
             asset: patched.asset,
@@ -2160,7 +2177,11 @@ fn write_patched(
             patched.applied.len(),
             placed_as(request, entry)
         ),
-        warnings: with_save_as_note(request, other_overrides(request.game_root, entry, &pak)),
+        warnings: with_save_as_note(
+            request,
+            &patched.notes,
+            other_overrides(request.game_root, entry, &pak),
+        ),
         pak,
     })
 }
@@ -2213,7 +2234,11 @@ fn save_into_iostore(
             patched.applied.len(),
             placed_as(request, entry)
         ),
-        warnings: with_save_as_note(request, other_overrides(request.game_root, entry, utoc)),
+        warnings: with_save_as_note(
+            request,
+            &patched.notes,
+            other_overrides(request.game_root, entry, utoc),
+        ),
         pak: report.utoc,
     })
 }
@@ -2221,7 +2246,12 @@ fn save_into_iostore(
 /// A save's warnings, and for a save under another name what that amounts to in game: a
 /// replacement for an asset the game ships, or a new one nothing loads until something points at
 /// it.
-fn with_save_as_note(request: &AssetEditRequest<'_>, mut warnings: Vec<String>) -> Vec<String> {
+fn with_save_as_note(
+    request: &AssetEditRequest<'_>,
+    notes: &[String],
+    mut warnings: Vec<String>,
+) -> Vec<String> {
+    warnings.extend(notes.iter().cloned());
     if let Some(save_as) = &request.changes.save_as {
         let package = save_as.package.trim();
         warnings.push(if asset::base_game_ships(request.game_root, package) {
@@ -2297,7 +2327,7 @@ pub fn rename_mod_package(
         &std::collections::HashSet::from([retoc::FPackageId::from_name(&old)]),
         &options.iostore,
     )?;
-    let mut warnings = Vec::new();
+    let mut warnings = patched.notes.clone();
     match crate::import_index::load(request.game_root) {
         Ok(Some(index)) => {
             let mut naming = index.importers_of(&old).packages;
@@ -4261,8 +4291,50 @@ mod game_data_tests {
         )
         .expect("converts");
         assert_eq!(converted.package_id, retoc::FPackageId::from_name(NEW));
-        let notes = with_save_as_note(&request, Vec::new());
+        let notes = with_save_as_note(&request, &[], Vec::new());
         assert!(notes[0].contains("new asset"), "{notes:?}");
+    }
+
+    /// A texture saved under a new path keeps its payload and the bulk data beside it, and says that
+    /// its payload, which the reader does not follow, was not searched for the old path.
+    #[test]
+    fn a_texture_saved_under_a_new_path_keeps_its_payload() {
+        let Some(fixture) = Fixture::open(TEXTURE) else {
+            return;
+        };
+        const NEW: &str = "/Game/Mods/ToolkitTest/T_SprayPaint_Copy";
+        let before = fixture.parse();
+        let request = fixture.request_changes(save_as(NEW));
+        let (patched, loaded) = preview_edits(&request, Some(&fixture.schema)).expect("saved as");
+        let after = Fixture::parse_bundle(
+            &AssetBundle {
+                asset: &patched.asset,
+                exports: &patched.exports,
+            },
+            &fixture.schema,
+            &fixture.source(),
+        );
+        assert_eq!(after.info.package_name, NEW);
+        assert_eq!(after.exports[0].object_name, "T_SprayPaint_Copy");
+        let payload = |parsed: &rivals_uasset::ParsedPackage| match &parsed.exports[0].status {
+            ExportStatus::Payload { payload_bytes, .. } => *payload_bytes,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(payload(&after), payload(&before));
+        assert_eq!(
+            format!("{:?}", after.resources),
+            format!("{:?}", before.resources)
+        );
+        assert!(patched.bulk.is_none(), "the bulk data is carried as it was");
+        assert_eq!(loaded.bulk_data_buffer, fixture.loaded.bulk_data_buffer);
+        assert!(
+            patched
+                .notes
+                .iter()
+                .any(|note| note.contains("does not follow")),
+            "{:?}",
+            patched.notes
+        );
     }
 
     /// Saved as a path the game ships, a package goes to that asset's entry and replaces it.
@@ -4284,7 +4356,7 @@ mod game_data_tests {
             &fixture.source(),
         );
         assert_eq!(after.exports[0].path, format!("{OTHER}.MarvelHeroTable"));
-        let notes = with_save_as_note(&request, Vec::new());
+        let notes = with_save_as_note(&request, &[], Vec::new());
         assert!(notes[0].contains("replaces"), "{notes:?}");
     }
 
