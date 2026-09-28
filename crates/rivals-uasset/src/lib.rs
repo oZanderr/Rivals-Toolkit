@@ -72,14 +72,15 @@ pub use mappings::{Mappings, Schema, SchemaFixups, SchemaSlot, kind_name};
 pub use names::unused_names;
 pub use package::{
     AppliedFixup, AssetBundle, ExportStatus, ImportInfo, PackageInfo, ParseOptions, ParsedExport,
-    ParsedPackage, TwinChoice, dotted_path, export_bytes, header_size, is_unresolved_import_name,
-    lost_import_warning, package_info, package_names, parse_package, parse_package_checked,
-    parse_package_opts, parse_package_probed, parse_package_traced, parse_package_traced_with,
-    parse_package_with, read_header, unresolved_import_note, unresolved_imports,
+    ParsedPackage, TwinChoice, dotted_path, export_bytes, header_fault_warning, header_size,
+    is_unresolved_import_name, lost_import_warning, package_info, package_names, parse_package,
+    parse_package_checked, parse_package_opts, parse_package_probed, parse_package_traced,
+    parse_package_traced_with, parse_package_with, read_header, unresolved_import_note,
+    unresolved_imports,
 };
 pub use props::{
-    ContainerLayout, Diagnostics, IndexRef, InstancedLayout, MapKeys, MissingSchema, PREVIEW_DEPTH,
-    TraceEntry, UndecodedPayload, UnsetSlot,
+    ContainerLayout, Diagnostics, HeaderFault, IndexRef, InstancedLayout, MapKeys, MissingSchema,
+    PREVIEW_DEPTH, TraceEntry, UndecodedPayload, UnsetSlot,
 };
 pub use remove::{ClearedReference, Importers, RemovalPlan, RemovedExport, plan_removal};
 pub use stringtable::{StringEntrySpan, StringTable, StringTableEntry, StringTableLayout};

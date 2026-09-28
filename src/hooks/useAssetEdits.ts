@@ -448,6 +448,7 @@ interface EditList {
   dependencies?: DependencyEdit[];
   field_sets?: FieldSet[];
   compact_names?: boolean;
+  repair_headers?: boolean;
   add_exports?: { class: string; outer?: number; name: string }[];
   add_components?: { node: number; name: string }[];
   save_as?: SaveAs;
@@ -557,6 +558,8 @@ export interface Structural {
   dependencies?: DependencyEdit[];
   /** Drop the names nothing in the package uses. */
   compactNames?: boolean;
+  /** Rewrite the property headers that end on a skip, which the game's loader reads past. */
+  repairHeaders?: boolean;
   /** Empty objects of a class to add. */
   addExports?: { class: string; outer?: number; name: string }[];
   /** Blueprint components to add by duplicating the one a construction script node builds. */
@@ -956,6 +959,7 @@ export function useAssetEdits({
           dependencies: structural?.dependencies ?? [],
           field_sets: fieldSets,
           compact_names: structural?.compactNames ?? false,
+          repair_headers: structural?.repairHeaders ?? false,
           add_exports: structural?.addExports ?? [],
           add_components: structural?.addComponents ?? [],
           save_as: saveAs,

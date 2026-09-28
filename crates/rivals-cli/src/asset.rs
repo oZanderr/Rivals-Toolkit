@@ -68,10 +68,14 @@ fn parse(request: &Request<'_>) -> Result<ParsedPackage, String> {
         },
         rivals_uasset::ParseOptions {
             declared_slots: request.declared,
+            lenient_headers: true,
             ..Default::default()
         },
     )?;
     if let Some(warning) = rivals_uasset::lost_import_warning(&parsed.imports) {
+        eprintln!("warning: {warning}");
+    }
+    if let Some(warning) = rivals_uasset::header_fault_warning(&parsed) {
         eprintln!("warning: {warning}");
     }
     Ok(parsed)
@@ -247,6 +251,30 @@ pub fn compact_names(
             compact_names: true,
             ..Default::default()
         },
+    )
+}
+
+/// Finds, and unless `dry_run` repairs in place, the property headers the packages of the mod
+/// `container` names end on a skip.
+pub fn repair_headers(
+    game_root: &str,
+    container: &str,
+    entry: Option<&str>,
+    usmap: Option<&str>,
+    configured_usmap: Option<&str>,
+    dry_run: bool,
+) -> Result<Vec<asset_edit::HeaderRepair>, String> {
+    let schema = mappings::resolve(usmap, configured_usmap)
+        .and_then(|path| mappings::load(&path))
+        .ok();
+    let utoc = asset_edit::json::resolve_container(container, Path::new("."), game_root)?;
+    asset_edit::repair_mod_headers(
+        game_root,
+        Path::new(&utoc),
+        schema.as_deref(),
+        entry,
+        dry_run,
+        &asset_edit::SaveOptions::default(),
     )
 }
 

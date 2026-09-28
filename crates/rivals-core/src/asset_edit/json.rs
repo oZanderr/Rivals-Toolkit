@@ -52,6 +52,10 @@ pub struct EditList {
     /// Drop the names nothing in the package uses. A save of its own.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub compact_names: bool,
+    /// Rewrite the property headers that end on a skip, which the game's loader reads past. Any
+    /// save of a package holding one does this on its own as well.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub repair_headers: bool,
     /// Empty objects of a class to add. A save of its own.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub add_exports: Vec<rivals_uasset::AddExport>,
@@ -102,6 +106,11 @@ impl EditList {
             && self.export_edits.is_empty()
             && self.dependencies.is_empty()
             && self.field_sets.is_empty()
+            && !self.compact_names
+            && !self.repair_headers
+            && self.add_exports.is_empty()
+            && self.add_components.is_empty()
+            && self.save_as.is_none()
     }
 
     /// Records what these edits find in `parsed`, the package they were written against, so applying
@@ -184,6 +193,7 @@ impl EditList {
             dependencies: self.dependencies,
             field_sets: self.field_sets,
             compact_names: self.compact_names,
+            repair_headers: self.repair_headers,
             add_exports: self.add_exports,
             add_components: self.add_components,
             save_as: self.save_as,

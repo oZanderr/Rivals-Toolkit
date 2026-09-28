@@ -35,6 +35,13 @@ interface PackageReport {
   kind: string;
   overrides_game: boolean;
   error?: string;
+  /** Property headers that end on a skip, which the game's loader reads past and can crash on. */
+  header_faults?: number;
+}
+
+interface HeaderRepair {
+  entry: string;
+  faults: number;
 }
 
 type ByPackage = Record<string, string[]>;
@@ -89,6 +96,7 @@ export function ModReportDialog({ gamePath, container, onClose, onRevert, onOpen
   const modName = container.split(/[\\/]/).pop() ?? container;
   const [report, setReport] = useState<ModReport | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [reads, setReads] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -102,7 +110,25 @@ export function ModReportDialog({ gamePath, container, onClose, onRevert, onOpen
     return () => {
       cancelled = true;
     };
-  }, [gamePath, container]);
+  }, [gamePath, container, reads]);
+
+  const [repairing, setRepairing] = useState(false);
+  const [repairNote, setRepairNote] = useState<string | null>(null);
+  const repair = () => {
+    setRepairing(true);
+    setRepairNote(null);
+    invoke<HeaderRepair[]>("repair_mod_headers", { gameRoot: gamePath, container })
+      .then((repaired) => {
+        const headers = repaired.reduce((sum, r) => sum + r.faults, 0);
+        setRepairNote(
+          `Repaired ${headers} header${headers === 1 ? "" : "s"} in ${repaired.length} package${repaired.length === 1 ? "" : "s"}.`
+        );
+        setReport(null);
+        setReads((n) => n + 1);
+      })
+      .catch((e: unknown) => setRepairNote(String(e)))
+      .finally(() => setRepairing(false));
+  };
 
   const [query, setQuery] = useState("");
   const [search, setSearch] = useState<{ query: string; result: SearchResult } | null>(null);
@@ -121,6 +147,7 @@ export function ModReportDialog({ gamePath, container, onClose, onRevert, onOpen
 
   const overrides = report?.packages.filter((p) => p.overrides_game) ?? [];
   const added = report?.packages.filter((p) => !p.overrides_game) ?? [];
+  const faulty = report?.packages.filter((p) => (p.header_faults ?? 0) > 0) ?? [];
 
   return (
     <AlertDialog open onOpenChange={(open) => !open && onClose()}>
@@ -165,8 +192,27 @@ export function ModReportDialog({ gamePath, container, onClose, onRevert, onOpen
           )}
           {error && <p className="text-err">{error}</p>}
           {!error && !report && <p className="text-muted-foreground">Reading the mod…</p>}
+          {repairNote && <p className="mb-2 text-muted-foreground">{repairNote}</p>}
           {report && !search && (
             <div className="flex flex-col gap-4">
+              {faulty.length > 0 && (
+                <section className="flex items-start gap-3">
+                  <p className="text-err">
+                    {faulty.length} package{faulty.length === 1 ? " holds" : "s hold"} property
+                    headers the game reads past, which can crash it. Repairing rewrites them the way
+                    the game writes them and changes nothing else.
+                  </p>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="shrink-0"
+                    disabled={repairing}
+                    onClick={repair}
+                  >
+                    {repairing ? "Repairing…" : "Repair"}
+                  </Button>
+                </section>
+              )}
               <PackageList
                 title={`Replaces game assets (${overrides.length})`}
                 packages={overrides}
@@ -280,9 +326,13 @@ function PackageList({
           <span
             className={cn(
               "w-32 shrink-0 truncate text-[11px]",
-              p.error ? "text-warn" : "text-muted-foreground"
+              p.header_faults ? "text-err" : p.error ? "text-warn" : "text-muted-foreground"
             )}
-            title={p.error}
+            title={
+              p.header_faults
+                ? `${p.header_faults} property header${p.header_faults === 1 ? "" : "s"} the game reads past`
+                : p.error
+            }
           >
             {p.kind}
           </span>

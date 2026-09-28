@@ -194,6 +194,9 @@ pub struct PackageEdits {
     pub field_sets: Vec<FieldSet>,
     /// Drop the names nothing in the package uses. A save of its own: it renumbers every name.
     pub compact_names: bool,
+    /// Rewrite the property headers that end on a skip, which the game's loader reads past, as UE
+    /// writes them. A save of its own, made on a package parsed with `lenient_headers`.
+    pub repair_headers: bool,
     /// Save the package under another name, once every other edit here has been made. Applied by
     /// the caller that can read the package between the stages: see
     /// `rivals_core::asset_edit::preview_edits`.
@@ -567,6 +570,7 @@ impl PackageEdits {
         self.dependencies.extend(other.dependencies);
         self.field_sets.extend(other.field_sets);
         self.compact_names |= other.compact_names;
+        self.repair_headers |= other.repair_headers;
         if other.save_as.is_some() {
             self.save_as = other.save_as;
         }
@@ -594,6 +598,7 @@ impl PackageEdits {
             && self.dependencies.is_empty()
             && self.field_sets.is_empty()
             && !self.compact_names
+            && !self.repair_headers
     }
 }
 
@@ -818,6 +823,7 @@ pub fn verify_copy(
     sources: &std::collections::BTreeMap<String, crate::copy::CopySource<'_>>,
     requests: &[crate::copy::CopyExport],
 ) -> Result<(), String> {
+    check_header_faults(before, after, false)?;
     let plan = crate::copy::plan_copy(before, sources, requests)?;
     crate::copy::verify_copy(after, sources, &plan, before.exports.len())?;
     // A level listing a copied actor reads one element longer, as the request asked. The list is
@@ -917,6 +923,24 @@ pub fn patch_package_with(
             _ => None,
         })
         .collect();
+    if edits.repair_headers {
+        // A repaired header is shorter, which moves everything after it.
+        let alone = PackageEdits {
+            repair_headers: false,
+            save_as: None,
+            expect: Expected::default(),
+            allow_drift: false,
+            allow_missing: false,
+            ..edits.clone()
+        };
+        if !alone.is_empty() {
+            return Err(
+                "repairing property headers is a save of its own; save or discard the other edits first"
+                    .into(),
+            );
+        }
+        return patch_header_repair(bundle, parsed);
+    }
     if edits.compact_names {
         // Every name after a dropped one moves down, and the other edits were addressed against
         // the map as it stands now.
@@ -2502,6 +2526,77 @@ fn patch_import_removal(
         asset: rewritten.asset,
         exports: rewritten.exports,
         applied: removal.applied,
+        bulk: None,
+        optional_bulk: None,
+    })
+}
+
+/// Rewrites every header that ends on a skip as UE writes it, dropping the skips past its last
+/// value. An instanced struct holding one has its length follow.
+fn patch_header_repair(
+    bundle: &AssetBundle<'_>,
+    parsed: &ParsedPackage,
+) -> Result<PatchedBundle, String> {
+    if parsed.header_faults.is_empty() {
+        return Err(
+            "no property header in this package ends on a skip, so there is nothing to repair"
+                .into(),
+        );
+    }
+    let base = header_size(bundle)?;
+    let mut faults: Vec<&crate::props::HeaderFault> = parsed.header_faults.iter().collect();
+    faults.sort_by_key(|fault| fault.at);
+    let mut splices: Vec<Splice> = faults
+        .iter()
+        .map(|fault| Splice {
+            start: fault.at,
+            end: fault.at + u64::from(fault.len),
+            bytes: fault.repaired.clone(),
+        })
+        .collect();
+    let mut shrunk = 0u64;
+    let applied = faults
+        .iter()
+        .map(|fault| {
+            let applied = AppliedEdit {
+                name: "property header".into(),
+                offset: fault.at,
+                offset_after: fault.at - shrunk,
+                element: None,
+                elements_after: None,
+                before: "ends on a skip".into(),
+                after: "ends on its last value".into(),
+            };
+            shrunk += u64::from(fault.len) - fault.repaired.len() as u64;
+            applied
+        })
+        .collect();
+    for (size_at, delta) in prefix_deltas(&parsed.instanced, &splices) {
+        let was = i32::from_le_bytes(
+            bytes_at(bundle, base, size_at, size_at + 4)?
+                .try_into()
+                .map_err(|_| "instanced struct length is not four bytes".to_string())?,
+        );
+        let now = i64::from(was)
+            .checked_add(delta)
+            .and_then(|now| i32::try_from(now).ok())
+            .ok_or("instanced struct length does not fit")?;
+        splices.push(Splice {
+            start: size_at,
+            end: size_at + 4,
+            bytes: now.to_le_bytes().to_vec(),
+        });
+    }
+    splices.sort_by_key(|splice| (splice.start, splice.end));
+    let rewritten = rewrite(bundle, &splices, HeaderDraft::default())?;
+    check_inline_bulk(&AssetBundle {
+        asset: &rewritten.asset,
+        exports: &rewritten.exports,
+    })?;
+    Ok(PatchedBundle {
+        asset: rewritten.asset,
+        exports: rewritten.exports,
+        applied,
         bulk: None,
         optional_bulk: None,
     })
@@ -4783,7 +4878,8 @@ fn with_block(
                     .ok_or("the property block header lies outside the package")?,
                 slot.header_at,
             );
-            let header = unversioned::read_header(&mut cursor)?;
+            // The parse already accepted this header; one ending on a skip is repaired later.
+            let header = unversioned::read_header_with(&mut cursor, true)?;
             let length = cursor.position();
             empty.insert((header, length))
         }
@@ -4829,6 +4925,7 @@ pub fn verify_patch(
     edits: &PackageEdits,
     applied: &[AppliedEdit],
 ) -> Result<(), String> {
+    check_header_faults(before, after, edits.repair_headers)?;
     let removed = if edits.remove_exports.is_empty() {
         Vec::new()
     } else {
@@ -5307,6 +5404,7 @@ pub fn verify_identity(
     after: &ParsedPackage,
     rename: &crate::identity::PathRename,
 ) -> Result<(), String> {
+    check_header_faults(before, after, false)?;
     if after.info.package_name != rename.to {
         return Err(format!(
             "the package reads as {} after saving it as {}",
@@ -5387,6 +5485,28 @@ pub fn verify_identity(
 impl Excuses {
     fn renamed(&self, text: &str) -> String {
         crate::identity::rename_within(&self.renames, text)
+    }
+}
+
+/// A save may not leave a property header that ends on a skip, which the game's loader reads past:
+/// none at all once they are repaired, and none the package did not already have otherwise.
+pub(crate) fn check_header_faults(
+    before: &ParsedPackage,
+    after: &ParsedPackage,
+    repairing: bool,
+) -> Result<(), String> {
+    let allowed = if repairing {
+        0
+    } else {
+        before.header_faults.len()
+    };
+    match after.header_faults.get(allowed) {
+        None => Ok(()),
+        Some(fault) => Err(format!(
+            "the save would leave a property header ending on a skip at {:#X}, which the game's \
+             loader reads past",
+            fault.at
+        )),
     }
 }
 
@@ -7062,6 +7182,7 @@ mod tests {
             schema_fixups: Vec::new(),
             missing_schemas: Vec::new(),
             header_check: Default::default(),
+            header_faults: Vec::new(),
             containers: Vec::new(),
             unset: Vec::new(),
             references: Vec::new(),
