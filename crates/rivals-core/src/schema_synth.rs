@@ -134,6 +134,26 @@ fn wanted_definitions(parsed: &ParsedPackage) -> (Vec<MissingSchema>, bool) {
             object_path: class.path.clone(),
         });
     }
+    // A Blueprint struct is defined by the package the import of it points into: one a property
+    // failed on, and, where the package's own classes are recovered, any it imports, since the
+    // first read stopped at the class before reaching them.
+    for import in parsed
+        .imports
+        .iter()
+        .filter(|import| import.class_name == "UserDefinedStruct")
+    {
+        let failed_on = parsed.unresolved_structs.contains(&import.object_name);
+        if (local || failed_on)
+            && !wanted
+                .iter()
+                .any(|missing| missing.object_path == import.path)
+        {
+            wanted.push(MissingSchema {
+                name: import.object_name.clone(),
+                object_path: import.path.clone(),
+            });
+        }
+    }
     (wanted, local)
 }
 
@@ -242,9 +262,11 @@ fn synthesise(
 
     // A Blueprint class names a Blueprint parent by path, and that parent's package has to join
     // too, up the chain until a native class the mappings know, or the chain never roots at Object.
+    // A Blueprint struct a loaded definition's properties use joins the same way.
     let mut definitions = own;
     let mut loaded: HashSet<String> = HashSet::new();
     let mut queue = entries.clone();
+    let mut structs: Vec<String> = Vec::new();
     for _ in 0..=MAX_PARENT_DEPTH {
         queue.retain(|entry| !loaded.contains(entry));
         queue.sort();
@@ -263,13 +285,17 @@ fn synthesise(
             if let Ok(found) = rivals_uasset::read_struct_definitions_pathed(&bundle, mappings) {
                 definitions.extend(found);
             }
+            structs.extend(struct_imports(&bundle));
         }
         let known: HashSet<&str> = definitions.iter().map(|d| d.name()).collect();
+        let used = std::mem::take(&mut structs);
         queue = definitions
             .iter()
             .filter_map(|d| d.super_struct())
             .filter(|parent| parent.starts_with('/') && !known.contains(parent))
-            .filter_map(|parent| defining_entry(parent, source))
+            .chain(used.iter().map(String::as_str))
+            .filter_map(|path| defining_entry(path, source))
+            .filter(|entry| !loaded.contains(entry))
             .collect();
         if queue.is_empty() {
             break;
@@ -291,6 +317,27 @@ fn synthesise(
 
 /// How many Blueprint parents deep a class chain is followed before giving up on rooting it.
 const MAX_PARENT_DEPTH: usize = 8;
+
+/// The Blueprint structs a package imports, by object path.
+fn struct_imports(bundle: &AssetBundle<'_>) -> Vec<String> {
+    let Ok(header) = rivals_uasset::read_header(bundle) else {
+        return Vec::new();
+    };
+    header
+        .imports
+        .iter()
+        .enumerate()
+        .filter(|(_, import)| {
+            header
+                .name_map
+                .get(import.class_name)
+                .is_ok_and(|name| name == "UserDefinedStruct")
+        })
+        .filter_map(|(at, _)| {
+            rivals_uasset::dotted_path(&header, retoc::zen::FPackageIndex::create_import(at as u32))
+        })
+        .collect()
+}
 
 /// Turns an object path into the package that holds it. UE's dotted form names the package before
 /// the dot; a slash-joined path is the package plus one object segment, since a row struct is always

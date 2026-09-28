@@ -3413,6 +3413,8 @@ mod game_data_tests {
         LISTED_CONTAINERS[2],
         LISTED_CONTAINERS[3],
         OVERRIDES,
+        STRUCT_HOLDER,
+        STRUCT_LEVEL,
         // Where the save-as tests expect new packages to land.
         "Marvel/Content/Mods/ToolkitTest/MarvelHeroTitleData_Copy.uasset",
         "Marvel/Content/Mods/X/DA_Thing.uasset",
@@ -4624,6 +4626,36 @@ mod game_data_tests {
         "Marvel/Content/Marvel/Blueprints/LevelGameplay/M2201/BP_PymInteractor.uasset",
         OVERRIDES,
     ];
+
+    /// A Blueprint whose default object holds a Blueprint struct, `PointParameters`, which only its
+    /// own package imports.
+    const STRUCT_HOLDER: &str = "Marvel/Content/Marvel/Blueprints/LevelGameplay/Common/ProcessControl/EnergyContestProcessController.uasset";
+
+    /// A level placing spline mesh actors, whose Blueprint class holds an array of a Blueprint
+    /// struct its own package imports.
+    const STRUCT_LEVEL: &str = "Marvel/Content/Marvel/Maps/Lobby/2011/Lobby_2011001406.umap";
+
+    /// A Blueprint struct is recovered from the package that defines it, whether the package being
+    /// read imports it for a class of its own or a class it uses imports it.
+    #[test]
+    fn blueprint_structs_a_recovered_class_uses_are_loaded() {
+        for entry in [STRUCT_HOLDER, STRUCT_LEVEL] {
+            let Some(fixture) = Fixture::open(entry) else {
+                return;
+            };
+            let parsed = fixture.parse();
+            let failed: Vec<String> = parsed
+                .exports
+                .iter()
+                .filter_map(|export| match &export.status {
+                    ExportStatus::Failed { reason } => Some(format!("{}: {reason}", export.index)),
+                    _ => None,
+                })
+                .collect();
+            assert!(failed.is_empty(), "{entry}: {failed:?}");
+            assert!(parsed.unresolved_structs.is_empty(), "{entry}");
+        }
+    }
 
     /// A Blueprint that overrides a component its parent adds, through the one override record its
     /// inherited component handler keeps.
