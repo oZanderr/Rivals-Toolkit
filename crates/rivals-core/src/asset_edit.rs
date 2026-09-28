@@ -56,82 +56,6 @@ pub fn preview_read_edits(
     loaded: FSerializedAssetBundle,
     parsed: &rivals_uasset::ParsedPackage,
 ) -> Result<(PatchedBundle, FSerializedAssetBundle), String> {
-    if request.changes.repair_headers || parsed.header_faults.is_empty() {
-        return edit_passes(request, mappings, loaded, parsed);
-    }
-    repair_pass(request, mappings, loaded, parsed)
-}
-
-/// Makes a save's edits, then repairs the property headers the package ends on a skip, which the
-/// game's loader reads past: a mod written before those were caught holds them, and the edits were
-/// addressed against the package as it reads now.
-fn repair_pass(
-    request: &AssetEditRequest<'_>,
-    mappings: Option<&Mappings>,
-    loaded: FSerializedAssetBundle,
-    parsed: &rivals_uasset::ParsedPackage,
-) -> Result<(PatchedBundle, FSerializedAssetBundle), String> {
-    let (mut patched, loaded, before) =
-        if request.changes.is_empty() && request.changes.save_as.is_none() {
-            let unchanged = PatchedBundle {
-                asset: loaded.asset_file_buffer.clone(),
-                exports: loaded.exports_file_buffer.clone(),
-                applied: Vec::new(),
-                bulk: None,
-                optional_bulk: None,
-                notes: Vec::new(),
-            };
-            (unchanged, loaded, parsed.clone())
-        } else {
-            let (patched, loaded) = edit_passes(request, mappings, loaded, parsed)?;
-            let before = reparse(request, mappings, &patched.asset, &patched.exports)?;
-            (patched, loaded, before)
-        };
-    if before.header_faults.is_empty() {
-        return Ok((patched, loaded));
-    }
-    let repair = PackageEdits {
-        repair_headers: true,
-        ..Default::default()
-    };
-    let sidecars = rivals_uasset::Sidecars {
-        bulk: patched
-            .bulk
-            .as_deref()
-            .or(loaded.bulk_data_buffer.as_deref()),
-        optional_bulk: patched
-            .optional_bulk
-            .as_deref()
-            .or(loaded.optional_bulk_data_buffer.as_deref()),
-    };
-    let bundle = AssetBundle {
-        asset: &patched.asset,
-        exports: &patched.exports,
-    };
-    let (mut repaired, _) = patch_pass(
-        &AssetEditRequest {
-            changes: repair.clone(),
-            ..*request
-        },
-        mappings,
-        &bundle,
-        sidecars,
-        &before,
-        &repair,
-    )?;
-    patched.asset = repaired.asset;
-    patched.exports = repaired.exports;
-    patched.applied.append(&mut repaired.applied);
-    Ok((patched, loaded))
-}
-
-/// The stages a save's edits take, on a package whose faulty headers are left to [`repair_pass`].
-fn edit_passes(
-    request: &AssetEditRequest<'_>,
-    mappings: Option<&Mappings>,
-    loaded: FSerializedAssetBundle,
-    parsed: &rivals_uasset::ParsedPackage,
-) -> Result<(PatchedBundle, FSerializedAssetBundle), String> {
     let changes = &request.changes;
     if let Some(save_as) = &changes.save_as {
         return save_as_pass(request, mappings, loaded, parsed, save_as);
@@ -154,7 +78,7 @@ fn edit_passes(
                 synth.as_deref(),
             )?);
         }
-        return edit_passes(
+        return preview_read_edits(
             &AssetEditRequest {
                 changes: resolved,
                 ..*request
@@ -251,7 +175,7 @@ fn save_as_pass(
             changes: edits,
             ..*request
         };
-        let (patched, loaded) = edit_passes(&others, mappings, loaded, parsed)?;
+        let (patched, loaded) = preview_read_edits(&others, mappings, loaded, parsed)?;
         let before = reparse(request, mappings, &patched.asset, &patched.exports)?;
         (patched, loaded, before)
     };
@@ -797,7 +721,7 @@ fn inherited_component_pass(
         }],
         ..Default::default()
     };
-    let (with_node, _) = edit_passes(
+    let (with_node, _) = preview_read_edits(
         &AssetEditRequest {
             changes: node,
             ..*request
@@ -808,7 +732,7 @@ fn inherited_component_pass(
     )?;
     let empty = reparse(request, mappings, &with_node.asset, &with_node.exports)?;
     let wiring = rivals_uasset::inherited_component_wiring(&empty, &plan)?;
-    let (mut done, _) = edit_passes(
+    let (mut done, _) = preview_read_edits(
         &AssetEditRequest {
             changes: wiring,
             ..*request
@@ -1067,7 +991,7 @@ fn component_pass(
         optional_bulk_data_buffer: loaded.optional_bulk_data_buffer.clone(),
         memory_mapped_bulk_data_buffer: loaded.memory_mapped_bulk_data_buffer.clone(),
     };
-    let (mut wired, _) = edit_passes(
+    let (mut wired, _) = preview_read_edits(
         &AssetEditRequest {
             changes: wiring,
             ..*request
@@ -1096,7 +1020,7 @@ fn component_removal_pass(
 ) -> Result<(PatchedBundle, FSerializedAssetBundle), String> {
     let plan = rivals_uasset::plan_component_removal(parsed, remove)?;
     let wiring = rivals_uasset::component_removal_wiring(parsed, &plan)?;
-    let (unhooked, loaded) = edit_passes(
+    let (unhooked, loaded) = preview_read_edits(
         &AssetEditRequest {
             changes: wiring,
             ..*request
@@ -1899,7 +1823,6 @@ fn source_of<'a>(request: &AssetEditRequest<'a>) -> PackageSource<'a> {
 fn editor_options() -> ParseOptions {
     ParseOptions {
         declared_slots: true,
-        lenient_headers: true,
         ..Default::default()
     }
 }
@@ -2796,101 +2719,6 @@ pub fn rename_mod_package(
         warnings,
         pak: report.utoc,
     })
-}
-
-/// A package in a mod holding property headers the game's loader reads past.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct HeaderRepair {
-    pub entry: String,
-    pub faults: usize,
-}
-
-/// Finds the packages in the IoStore mod at `utoc` holding property headers that end on a skip,
-/// which the game's loader reads past, and unless `dry_run` repairs them in place with one
-/// container rewrite. `only` limits it to one package. A package that does not read is passed over.
-pub fn repair_mod_headers(
-    game_root: &str,
-    utoc: &Path,
-    mappings: Option<&Mappings>,
-    only: Option<&str>,
-    dry_run: bool,
-    options: &SaveOptions,
-) -> Result<Vec<HeaderRepair>, String> {
-    let inside_mods = utoc
-        .canonicalize()
-        .ok()
-        .zip(mods_dir(game_root).canonicalize().ok())
-        .is_some_and(|(utoc, mods)| utoc.starts_with(mods));
-    if !inside_mods {
-        return Err(format!(
-            "{} is not a mod in ~mods, and only a mod is repaired in place",
-            utoc.display()
-        ));
-    }
-    let container = utoc.to_string_lossy().into_owned();
-    let (_, packages) = asset::list_packages(game_root, &container)?;
-    if let Some(only) = only
-        && !packages
-            .iter()
-            .any(|(_, entry)| entry.eq_ignore_ascii_case(only))
-    {
-        return Err(format!("{container} holds no package {only}"));
-    }
-    let mut found = Vec::new();
-    let mut staged = Vec::new();
-    for (_, entry) in &packages {
-        if only.is_some_and(|only| !only.eq_ignore_ascii_case(entry)) {
-            continue;
-        }
-        let request = AssetEditRequest {
-            game_root,
-            container: &container,
-            entry,
-            kind: AssetSource::Utoc,
-            mod_name: "",
-            changes: PackageEdits {
-                repair_headers: true,
-                ..Default::default()
-            },
-        };
-        let Ok((loaded, parsed)) = read_package(&request, mappings) else {
-            continue;
-        };
-        if parsed.header_faults.is_empty() {
-            continue;
-        }
-        found.push(HeaderRepair {
-            entry: entry.clone(),
-            faults: parsed.header_faults.len(),
-        });
-        if dry_run {
-            continue;
-        }
-        let (patched, loaded) = preview_read_edits(&request, mappings, loaded, &parsed)
-            .map_err(|e| format!("{entry}: {e}"))?;
-        let shader_map_hashes = source_shader_maps(&request, &loaded.asset_file_buffer);
-        staged.push(crate::pak::iostore_out::PackageBytes {
-            entry: entry.clone(),
-            asset: patched.asset,
-            exports: patched.exports,
-            bulk: patched.bulk.or(loaded.bulk_data_buffer),
-            optional_bulk: patched.optional_bulk.or(loaded.optional_bulk_data_buffer),
-            memory_mapped_bulk: loaded.memory_mapped_bulk_data_buffer,
-            shader_map_hashes,
-        });
-    }
-    if !staged.is_empty() {
-        let mut bytes: Vec<Option<crate::pak::iostore_out::PackageBytes>> =
-            staged.into_iter().map(Some).collect();
-        crate::pak::containers::drop_cached_store();
-        crate::pak::iostore_out::write_batch_into_iostore(
-            utoc,
-            bytes.len(),
-            |at| bytes.get_mut(at).and_then(Option::take),
-            &options.iostore,
-        )?;
-    }
-    Ok(found)
 }
 
 /// The other packages of the mod at `utoc` that name paths `rename` changes, pointed at the new
@@ -5867,154 +5695,79 @@ mod game_data_tests {
         assert_eq!(changed_list(&after, &node), listed);
     }
 
-    /// A mod saved before headers stopped ending on a skip reads for repair, and repairing gives
-    /// back what the save should have written. Any other save of it repairs it on the way.
+    /// The game's loader reads past a property header that ends on a skip, and no header the game
+    /// ships takes any other shape it never writes either. A package holding the first does not
+    /// read, so a save that wrote one fails its own read back; one holding another reads, and the
+    /// save that wrote it is refused.
     #[test]
-    fn a_header_ending_on_a_skip_is_repaired_by_any_save() {
+    fn a_header_the_game_never_writes_is_refused() {
         let Some(fixture) = Fixture::open(PARENT_CHAIN) else {
             return;
         };
-        let (stored, faulty, header_at) = faulty_terminal(&fixture);
-        let faulty_bundle = AssetBundle {
-            asset: &faulty.asset,
-            exports: &faulty.exports,
+        let (stored, header_at) = terminal_with_profile(&fixture);
+        let bundle = AssetBundle {
+            asset: &stored.asset,
+            exports: &stored.exports,
         };
-
-        let strict = rivals_uasset::parse_package(&faulty_bundle, Some(&fixture.schema))
-            .expect("strict parse");
-        let failed = mesh_template(&strict);
-        assert!(
-            matches!(&failed.status, rivals_uasset::ExportStatus::Failed { reason } if reason.contains("reads past")),
-            "{:?}",
-            failed.status
-        );
-        let lenient = schema_synth::parse_package_opts(
-            &faulty_bundle,
-            Some(&fixture.schema),
-            &fixture.source(),
-            editor_options(),
-        )
-        .expect("lenient parse");
-        assert_eq!(lenient.header_faults.len(), 1);
-        assert_eq!(lenient.header_faults[0].at, header_at);
-        assert!(
-            rivals_uasset::header_fault_warning(&lenient).is_some(),
-            "the dump and the inspector say so"
-        );
-        let staged = || FSerializedAssetBundle {
-            asset_file_buffer: faulty.asset.clone(),
-            exports_file_buffer: faulty.exports.clone(),
-            bulk_data_buffer: fixture.loaded.bulk_data_buffer.clone(),
-            optional_bulk_data_buffer: fixture.loaded.optional_bulk_data_buffer.clone(),
-            memory_mapped_bulk_data_buffer: fixture.loaded.memory_mapped_bulk_data_buffer.clone(),
-        };
-
-        let (repaired, _) = preview_read_edits(
-            &fixture.request_changes(PackageEdits {
-                repair_headers: true,
-                ..Default::default()
-            }),
-            Some(&fixture.schema),
-            staged(),
-            &lenient,
-        )
-        .expect("repair");
-        assert_eq!(repaired.applied.len(), 1);
-        assert_eq!(repaired.exports, stored.exports);
-        assert_eq!(repaired.asset, stored.asset);
-
-        let distance = nested(&mesh_template(&lenient).properties, &["LDMaxDrawDistance"]).clone();
-        let (edited, _) = preview_read_edits(
-            &fixture.request(vec![edit_of(
-                &distance,
-                EditOp::Set {
-                    text: "5000".into(),
-                },
-            )]),
-            Some(&fixture.schema),
-            staged(),
-            &lenient,
-        )
-        .expect("an edit of the faulty package");
-        let after = rivals_uasset::parse_package(
-            &AssetBundle {
-                asset: &edited.asset,
-                exports: &edited.exports,
-            },
-            Some(&fixture.schema),
-        )
-        .expect("strict parse of the edit");
-        let template = mesh_template(&after);
-        assert!(
-            matches!(template.status, rivals_uasset::ExportStatus::Complete),
-            "{:?}",
-            template.status
-        );
-        assert_eq!(
-            nested(&template.properties, &["LDMaxDrawDistance"])
-                .value
-                .summary(),
-            "5000.0"
-        );
-    }
-
-    /// A mod is repaired in place, every package in it that holds such a header; a container of the
-    /// game's own is not touched.
-    #[test]
-    fn a_mod_is_repaired_in_place() {
-        let Some(fixture) = Fixture::open(PARENT_CHAIN) else {
-            return;
-        };
-        let scratch = ScratchMod {
-            root: fixture.root.clone(),
-            name: "RivalsToolkitRepairProbe",
-        };
-        drop(ScratchMod {
-            root: fixture.root.clone(),
-            name: scratch.name,
-        });
-        let (_, faulty, _) = faulty_terminal(&fixture);
-        let utoc = scratch.container();
-        crate::pak::iostore_out::write_into_iostore(
-            &utoc,
-            crate::pak::iostore_out::PackageFiles {
-                entry: fixture.entry,
-                asset: &faulty.asset,
-                exports: &faulty.exports,
-                bulk: fixture.loaded.bulk_data_buffer.as_deref(),
-                optional_bulk: fixture.loaded.optional_bulk_data_buffer.as_deref(),
-                memory_mapped_bulk: fixture.loaded.memory_mapped_bulk_data_buffer.as_deref(),
-                shader_map_hashes: Vec::new(),
-            },
-            &Default::default(),
-        )
-        .expect("write the faulty package");
-
-        let repair = |utoc: &Path, dry_run: bool| {
-            repair_mod_headers(
-                &fixture.root,
-                utoc,
-                Some(&fixture.schema),
-                None,
-                dry_run,
-                &SaveOptions::default(),
+        let before = rivals_uasset::parse_package(&bundle, Some(&fixture.schema)).expect("parse");
+        let base = rivals_uasset::header_size(&bundle).expect("header size");
+        let fragment_at =
+            |at: usize| u16::from_le_bytes([stored.exports[at], stored.exports[at + 1]]);
+        let mut last = (header_at - base) as usize;
+        while fragment_at(last) & 0x0100 == 0 {
+            assert_eq!(
+                fragment_at(last) & 0x0080,
+                0,
+                "no zero flag before the last fragment"
+            );
+            last += 2;
+        }
+        let fragment = fragment_at(last);
+        let with = |bytes: Vec<u8>| {
+            let package = rivals_uasset::rewrite(
+                &bundle,
+                &[rivals_uasset::Splice {
+                    start: base + last as u64,
+                    end: base + last as u64 + 2,
+                    bytes,
+                }],
+                rivals_uasset::HeaderDraft::default(),
             )
+            .expect("inject");
+            rivals_uasset::parse_package(
+                &AssetBundle {
+                    asset: &package.asset,
+                    exports: &package.exports,
+                },
+                Some(&fixture.schema),
+            )
+            .expect("parse")
         };
-        let found = repair(&utoc, true).expect("look");
-        assert_eq!(found.len(), 1, "{found:?}");
-        assert_eq!(found[0].faults, 1);
-        repair(&utoc, false).expect("repair");
-        let after = read_back(&fixture, &utoc);
-        assert!(after.header_faults.is_empty());
+
+        let mut skip = (fragment & !0x0100).to_le_bytes().to_vec();
+        skip.extend_from_slice(&0x0100u16.to_le_bytes());
+        let ends_on_skip = mesh_template(&with(skip));
+        assert!(
+            matches!(&ends_on_skip.status, rivals_uasset::ExportStatus::Failed { reason } if reason.contains("reads past")),
+            "{:?}",
+            ends_on_skip.status
+        );
+
+        assert_eq!(
+            fragment & 0x0080,
+            0,
+            "the profile's fragment has no zero flag yet"
+        );
+        let mut flagged = (fragment | 0x0080).to_le_bytes().to_vec();
+        flagged.push(0);
+        let after = with(flagged);
         assert!(matches!(
             mesh_template(&after).status,
             rivals_uasset::ExportStatus::Complete
         ));
-        assert!(repair(&utoc, true).expect("look again").is_empty());
-        assert!(
-            repair(Path::new(&fixture.container), true).is_err(),
-            "the game's own containers are not repaired in place"
-        );
+        let refused = rivals_uasset::verify_patch(&before, &after, &PackageEdits::default(), &[])
+            .expect_err("a zero flag with no zero under it");
+        assert!(refused.contains("never writes"), "{refused}");
     }
 
     fn mesh_template(parsed: &rivals_uasset::ParsedPackage) -> rivals_uasset::ParsedExport {
@@ -6027,9 +5780,8 @@ mod game_data_tests {
     }
 
     /// The terminal Blueprint with its mesh template's `BodyInstance` stored to hold a collision
-    /// profile, as a save writes it, and as a save made before the header fix wrote it: one more
-    /// fragment after the last value, skipping nothing. With where that header sits.
-    fn faulty_terminal(fixture: &Fixture) -> (PatchedBundle, rivals_uasset::RewrittenPackage, u64) {
+    /// profile, as a save writes it, with where that struct's header sits.
+    fn terminal_with_profile(fixture: &Fixture) -> (PatchedBundle, u64) {
         let body = nested(
             &mesh_template(&fixture.parse()).properties,
             &["BodyInstance"],
@@ -6046,35 +5798,12 @@ mod game_data_tests {
             }],
             ..Default::default()
         });
-        let stored_bundle = AssetBundle {
-            asset: &stored.asset,
-            exports: &stored.exports,
-        };
         let profile = nested(
             &mesh_template(&parsed).properties,
             &["BodyInstance", "CollisionProfileName"],
         )
         .clone();
-        let header_at = profile.slot.expect("an unversioned slot").header_at;
-        let base = rivals_uasset::header_size(&stored_bundle).expect("header size");
-        let mut last = (header_at - base) as usize;
-        while u16::from_le_bytes([stored.exports[last], stored.exports[last + 1]]) & 0x0100 == 0 {
-            last += 2;
-        }
-        let fragment = u16::from_le_bytes([stored.exports[last], stored.exports[last + 1]]);
-        let mut bytes = (fragment & !0x0100).to_le_bytes().to_vec();
-        bytes.extend_from_slice(&0x0100u16.to_le_bytes());
-        let faulty = rivals_uasset::rewrite(
-            &stored_bundle,
-            &[rivals_uasset::Splice {
-                start: base + last as u64,
-                end: base + last as u64 + 2,
-                bytes,
-            }],
-            rivals_uasset::HeaderDraft::default(),
-        )
-        .expect("inject");
-        (stored, faulty, header_at)
+        (stored, profile.slot.expect("an unversioned slot").header_at)
     }
 
     /// Setting a template property its node's list lacks adds it to the list, scoped to the

@@ -51,13 +51,6 @@ pub struct PackageReport {
     /// Why the package's scripts and values could not be read, when they could not.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// Property headers that end on a skip, which the game's loader reads past and can crash on.
-    #[serde(skip_serializing_if = "is_zero")]
-    pub header_faults: usize,
-}
-
-fn is_zero(count: &usize) -> bool {
-    *count == 0
 }
 
 /// Reads every package `utoc_path` ships. Unversioned packages need `mappings` for their scripts
@@ -101,7 +94,6 @@ pub fn mod_report(
                     kind: "?".into(),
                     overrides_game,
                     error: Some(error),
-                    header_faults: 0,
                 });
                 continue;
             }
@@ -129,7 +121,6 @@ pub fn mod_report(
         add(&mut report.python_classes, path, python);
 
         let mut error = None;
-        let mut header_faults = 0;
         let stem = Path::new(path)
             .file_stem()
             .and_then(|s| s.to_str())
@@ -144,13 +135,9 @@ pub fn mod_report(
                 entry: path,
                 kind: AssetSource::Utoc,
             },
-            ParseOptions {
-                lenient_headers: true,
-                ..Default::default()
-            },
+            ParseOptions::default(),
         ) {
             Ok(parsed) => {
-                header_faults = parsed.header_faults.len();
                 let mut strings = Vec::new();
                 for export in &parsed.exports {
                     if let Some(script) = &export.script {
@@ -193,7 +180,6 @@ pub fn mod_report(
             kind: friendly_kind(&kind),
             overrides_game,
             error,
-            header_faults,
         });
     }
     report.packages.sort_by(|a, b| a.path.cmp(&b.path));

@@ -168,7 +168,6 @@ pub fn run() {
             asset_view::inspect_asset,
             asset_view::get_mod_report,
             asset_view::parent_components,
-            asset_view::repair_mod_headers,
             asset_view::mod_copy_of,
             asset_view::revert_mod_asset,
             asset_view::search_mod,

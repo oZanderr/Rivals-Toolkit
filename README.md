@@ -200,11 +200,6 @@ cannot be added: a
 class's own properties come first in every object's layout, so a new one would shift every
 inherited value in every instance, and a function needs a bytecode compiler.
 
-A mod saved by a toolkit version from before this was caught can hold a property header that ends
-on a skip, which the game's loader reads past and can crash on. Such a package still opens, with a
-warning, and any save of it repairs it; `asset repair --container <mod>` repairs every package in a
-mod at once, and the app's mod report flags them with a Repair button.
-
 `asset script-set` changes one literal constant inside a function's bytecode, addressed by the
 statement offset `asset script` prints and which literal in that statement, and only at the width
 the old value took: an `IntConst` can become another integer, a string another string of the same
@@ -233,7 +228,6 @@ rivals-cli asset remove-component --container ... --entry ... --node 18 --mod-na
 rivals-cli asset add-component --container ... --entry ... --from-parent StaticMesh --name StaticMeshCopy --mod-name MyMod
 rivals-cli asset save-as --container ... --entry ... --to /Game/Mods/MyThing/DA_Copy --mod-name MyMod
 rivals-cli asset rename-package --container ~mods/MyMod_9999999_P.utoc --entry ... --to /Game/Mods/MyThing/DA_New
-rivals-cli asset repair  --container MyMod_9999999_P.utoc --dry-run                   # headers the game reads past
 rivals-cli asset deps    --container ... --entry ... --export 3                         # load order
 rivals-cli asset script  --container ... --entry ... --export 26                        # disassembly
 rivals-cli asset script-set --container ... --entry ... --export 26 --statement 0x0664 --const 0 --value 1000 --mod-name MyMod
@@ -270,7 +264,7 @@ rivals-cli asset sweep --container pakchunk0-Windows.utoc --filter CameraShake  
 Every writing command reads the vanilla asset, splices in the change, proves the result parses back
 the same way, and only then writes it into a mod container in `~mods` that overrides the original.
 Each property header a save writes is also the one the game's own header builder writes for the same
-values: `asset audit` counts the shapes headers take, and across 8.9 million of the game's headers
+values: `asset audit` counts the shapes headers take, and across 87.6 million of the game's headers
 none takes another, so a save that would write one is refused.
 Nothing in the game's own containers is touched. `--mod-name` picks the container and `--replace`
 overwrites a copy it already holds. The game loads packages only from IoStore, so writes go to a

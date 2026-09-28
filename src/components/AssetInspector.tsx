@@ -376,8 +376,6 @@ interface ParsedPackage {
   dependencies?: DependencyRuns[];
   unresolved_structs: string[];
   schema_fixups?: AppliedFixup[];
-  /** Property headers that end on a skip, which the game's loader reads past. */
-  header_faults?: { at: number; len: number }[];
   resources: ResourceInfo[];
 }
 
@@ -7783,26 +7781,6 @@ export default function AssetInspector({
                     {pkg.schema_fixups.map((f) => `${f.struct_name}.${f.property}`).join(", ")},
                     which this build does not store. It was skipped so the rest of the asset reads
                     correctly.
-                  </div>
-                )}
-
-                {pkg.header_faults && pkg.header_faults.length > 0 && (
-                  <div className="flex shrink-0 items-center gap-3 border-b border-red-500/30 bg-red-500/10 px-3 py-2 text-[11px] text-red-300">
-                    <span>
-                      {pkg.header_faults.length} property header
-                      {pkg.header_faults.length === 1 ? " ends" : "s end"} on a skip, which the
-                      game&apos;s loader reads past and can crash on. Any save of this asset repairs
-                      them.
-                    </span>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="ml-auto h-6 shrink-0 px-2 text-[11px]"
-                      disabled={edits.saving || !!structuralLock}
-                      onClick={() => void edits.save({ structural: { repairHeaders: true } })}
-                    >
-                      Repair
-                    </Button>
                   </div>
                 )}
 

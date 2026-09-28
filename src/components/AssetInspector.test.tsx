@@ -277,14 +277,4 @@ describe("AssetInspector dialogs", () => {
     await waitFor(() => expect(mock.callsTo("save_asset_edits")).toHaveLength(2));
     expect(mock.callsTo("save_asset_edits")[1]).toMatchObject({ allowMissing: true });
   });
-
-  it("repairs headers the game's loader reads past", async () => {
-    mock = tauri(blueprint({ header_faults: [{ at: 120, len: 6 }] }));
-    installTauri(mock);
-    mount();
-    const user = userEvent.setup();
-    expect(await screen.findByText(/on a skip/)).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: "Repair" }));
-    await waitFor(() => expect(lastSave().repair_headers).toBe(true));
-  });
 });

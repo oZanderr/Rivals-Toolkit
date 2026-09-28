@@ -102,9 +102,6 @@ fn pack(fragment: &Fragment) -> Result<u16, String> {
 /// exceed this many fragments for any real struct.
 const MAX_FRAGMENTS: usize = 8192;
 
-pub(crate) const SKIP_AT_END: &str = "unversioned header ends on a fragment with no values, which \
-    the game's loader reads past. Saving the package again repairs it";
-
 /// A header holding values that ends on a fragment with no values.
 pub(crate) const SHAPE_ENDS_ON_SKIP: &str = "ends on a skip";
 /// A fragment that declares zeroes where none of its values is zero.
@@ -194,15 +191,6 @@ fn ends_on_skip(fragments: &[Fragment]) -> bool {
 }
 
 pub(crate) fn read_header(cursor: &mut Cursor<'_>) -> Result<UnversionedHeader, String> {
-    read_header_with(cursor, false)
-}
-
-/// [`read_header`], or with `lenient` a header that ends on a skip read as what it holds, for a
-/// caller that records it and repairs it.
-pub(crate) fn read_header_with(
-    cursor: &mut Cursor<'_>,
-    lenient: bool,
-) -> Result<UnversionedHeader, String> {
     let mut fragments = Vec::new();
     loop {
         let fragment = unpack(cursor.read_u16()?);
@@ -219,8 +207,10 @@ pub(crate) fn read_header_with(
     // UE's loader steps past a fragment with no values to reach the next, so one ending a header
     // that holds values sends it past the fragments and the game crashes. Nothing the game ships
     // has one; a package that does was written wrong.
-    if !lenient && ends_on_skip(&fragments) {
-        return Err(cursor.err(SKIP_AT_END));
+    if ends_on_skip(&fragments) {
+        return Err(cursor.err(
+            "unversioned header ends on a fragment with no values, which the game's loader reads past",
+        ));
     }
     let zero_bits: u32 = fragments
         .iter()
@@ -337,14 +327,6 @@ impl UnversionedHeader {
             shapes.push(SHAPE_DIRTY_MASK_TAIL);
         }
         shapes
-    }
-
-    /// The header as UE would have written it: the skips past the last value dropped. It decodes
-    /// to the same values.
-    pub(crate) fn repaired(&self) -> Result<Vec<u8>, String> {
-        let mut header = self.clone();
-        header.normalize();
-        header.write()
     }
 
     /// Re-emits the header. Identical to the bytes it was read from unless an edit changed it.
@@ -1171,34 +1153,11 @@ mod tests {
     /// A struct stored from nothing starts as a skip over every slot. Values stored into it end the
     /// header on the last of them, as UE writes one: its loader steps past a fragment with no values
     /// to reach the next, so a header ending on one sends it past the end of the fragments.
-    /// A mod written before that was caught holds such a header. It reads for repair, and the
-    /// repair drops the trailing skip and keeps the mask.
-    #[test]
-    fn a_header_ending_on_a_skip_reads_leniently_and_repairs_to_its_last_value() {
-        let mut data = packed(0, true, 2, false).to_le_bytes().to_vec();
-        data.extend_from_slice(&packed(2, false, 1, false).to_le_bytes());
-        data.extend_from_slice(&packed(5, false, 0, true).to_le_bytes());
-        data.push(0b1111_0010);
-        read_header(&mut Cursor::new(&data, 0)).expect_err("strict");
-        let header = read_header_with(&mut Cursor::new(&data, 0), true).expect("lenient");
-        assert!(header.ends_on_skip());
-        assert_eq!(indices(&header), [0, 1, 4]);
-        let repaired = header.repaired().expect("repaired");
-        let mut expected = packed(0, true, 2, false).to_le_bytes().to_vec();
-        expected.extend_from_slice(&packed(2, false, 1, true).to_le_bytes());
-        expected.push(0b1111_0010);
-        assert_eq!(repaired, expected);
-        let again = read(&repaired);
-        assert!(!again.ends_on_skip());
-        assert_eq!(indices(&again), [0, 1, 4]);
-        assert_eq!(zeroes(&again), [false, true, false]);
-
-        let empty = read(&empty_header(40));
-        assert!(!empty.ends_on_skip(), "a header holding nothing is a skip");
-    }
-
     #[test]
     fn values_stored_into_an_empty_struct_end_the_header() {
+        let empty = read(&empty_header(40));
+        assert!(!empty.ends_on_skip(), "a header holding nothing is a skip");
+
         let mut ending_on_a_skip = packed(1, false, 1, false).to_le_bytes().to_vec();
         ending_on_a_skip.extend_from_slice(&packed(28, false, 0, true).to_le_bytes());
         let err = read_header(&mut Cursor::new(&ending_on_a_skip, 0)).expect_err("refused");

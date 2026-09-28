@@ -391,14 +391,9 @@ pub struct Diagnostics {
     pub declared_slots: bool,
     pub headers_checked: usize,
     pub headers_differing: usize,
-    /// Read a header that ends on a skip as what it holds and record it in `header_faults`,
-    /// rather than failing the read.
-    pub lenient_headers: bool,
-    /// Headers that end on a skip, which the game's loader reads past, with what replaces each.
-    pub header_faults: Vec<HeaderFault>,
     /// How many headers took each shape the audit counts, recorded with `check_headers`.
     pub header_shapes: BTreeMap<&'static str, usize>,
-    /// Headers in a shape no header the game ships takes, other than ending on a skip.
+    /// Headers in a shape no header the game ships takes.
     pub odd_headers: Vec<OddHeader>,
 }
 
@@ -407,16 +402,6 @@ pub struct Diagnostics {
 pub struct OddHeader {
     pub shape: &'static str,
     pub at: u64,
-}
-
-/// A property header the game's loader reads past because it ends on a fragment with no values,
-/// with the bytes UE would have written in its place.
-#[derive(Debug, Clone, Serialize)]
-pub struct HeaderFault {
-    pub at: u64,
-    pub len: u32,
-    #[serde(skip)]
-    pub repaired: Vec<u8>,
 }
 
 /// How much of each layout list had been recorded at a point in the parse, so a read that turns
@@ -430,7 +415,6 @@ pub(crate) struct Marks {
     native_leaves: usize,
     tag_bounds: usize,
     tagged_absent: usize,
-    header_faults: usize,
     odd_headers: usize,
 }
 
@@ -445,7 +429,6 @@ impl Diagnostics {
             native_leaves: self.native_leaves.len(),
             tag_bounds: self.tag_bounds.len(),
             tagged_absent: self.tagged_absent.len(),
-            header_faults: self.header_faults.len(),
             odd_headers: self.odd_headers.len(),
         }
     }
@@ -462,7 +445,6 @@ impl Diagnostics {
         self.native_leaves.truncate(marks.native_leaves);
         self.tag_bounds.truncate(marks.tag_bounds);
         self.tagged_absent.truncate(marks.tagged_absent);
-        self.header_faults.truncate(marks.header_faults);
         self.odd_headers.truncate(marks.odd_headers);
     }
 }
@@ -479,19 +461,12 @@ pub(crate) fn read_property_block(
 ) -> Result<(), String> {
     let header_at = cursor.file_offset();
     let header_start = cursor.position();
-    let header = unversioned::read_header_with(cursor, diagnostics.lenient_headers)?;
-    if header.ends_on_skip() {
-        diagnostics.header_faults.push(HeaderFault {
-            at: header_at,
-            len: (cursor.position() - header_start) as u32,
-            repaired: header.repaired()?,
-        });
-    }
+    let header = unversioned::read_header(cursor)?;
     for shape in header.shapes() {
         if diagnostics.check_headers {
             *diagnostics.header_shapes.entry(shape).or_default() += 1;
         }
-        if shape != unversioned::SHAPE_ENDS_ON_SKIP && unversioned::NEVER_WRITTEN.contains(&shape) {
+        if unversioned::NEVER_WRITTEN.contains(&shape) {
             diagnostics.odd_headers.push(OddHeader {
                 shape,
                 at: header_at,

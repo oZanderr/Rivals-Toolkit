@@ -200,11 +200,9 @@ fn parse(
             entry,
             kind,
         },
-        // Inherited values are shown so they can be given one of their own, and a header the
-        // game reads past is read so that saving can repair it.
+        // Inherited values are shown so they can be given one of their own.
         rivals_uasset::ParseOptions {
             declared_slots: true,
-            lenient_headers: true,
             ..Default::default()
         },
     )
@@ -440,38 +438,6 @@ pub(crate) async fn get_mod_report(
             .and_then(|path| mappings::load(&path))
             .ok();
         rivals_core::mod_report::mod_report(&game_root, &utoc, schema.as_deref())
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-/// Repairs the property headers the packages of the mod `container` names end on a skip, which the
-/// game's loader reads past and can crash on, in one container rewrite.
-#[tauri::command]
-pub(crate) async fn repair_mod_headers(
-    state: State<'_, SettingsState>,
-    game_root: String,
-    container: String,
-) -> Result<Vec<asset_edit::HeaderRepair>, String> {
-    if crate::game_status::should_block_for_game() {
-        return Err(crate::game_status::game_running_error());
-    }
-    let usmap = configured_usmap(&state);
-    tauri::async_runtime::spawn_blocking(move || {
-        let utoc = mod_utoc(&container)?;
-        let schema = mappings::resolve(None, usmap.as_deref())
-            .and_then(|path| mappings::load(&path))
-            .ok();
-        let repaired = asset_edit::repair_mod_headers(
-            &game_root,
-            &utoc,
-            schema.as_deref(),
-            None,
-            false,
-            &Default::default(),
-        )?;
-        crate::pak::invalidate_list_caches(&[&utoc.with_extension("pak"), &utoc]);
-        Ok(repaired)
     })
     .await
     .map_err(|e| e.to_string())?

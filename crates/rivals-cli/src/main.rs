@@ -213,24 +213,6 @@ enum AssetCmd {
     Diagnose(DiagnoseArgs),
     /// Read Blueprint struct definitions out of packages and check them against the mappings.
     SynthCheck(AuditArgs),
-    /// Repair the property headers a mod's packages end on a skip, which the game's loader reads
-    /// past and can crash on. Any save of such a package repairs it as well.
-    Repair(RepairArgs),
-}
-
-#[derive(Args)]
-struct RepairArgs {
-    /// The mod's IoStore container: a path, or a file name in `~mods`.
-    #[arg(long, value_name = "PATH")]
-    container: String,
-
-    /// Only this package, such as `Marvel/Content/.../BP_Thing.uasset`.
-    #[arg(long, value_name = "PATH")]
-    entry: Option<String>,
-
-    /// List the packages that need repairing and write nothing.
-    #[arg(long)]
-    dry_run: bool,
 }
 
 #[derive(Args)]
@@ -1192,7 +1174,6 @@ fn run(cli: &Cli) -> Result<(), String> {
         Command::Asset(AssetCmd::Audit(a)) => asset_audit(cli, &app, a),
         Command::Asset(AssetCmd::Diagnose(a)) => asset_diagnose(cli, &app, a),
         Command::Asset(AssetCmd::SynthCheck(a)) => asset_synth_check(cli, &app, a),
-        Command::Asset(AssetCmd::Repair(a)) => asset_repair(cli, &app, a),
     }
 }
 
@@ -3327,33 +3308,6 @@ fn asset_synth_check(
     }
     emit(cli, &report, || {
         asset::print_synth_check(&report, &mut |line| outln!("{line}"));
-    })
-}
-
-fn asset_repair(cli: &Cli, app: &settings::AppSettings, args: &RepairArgs) -> Result<(), String> {
-    let root = resolve::game_root(cli.game_root.as_deref(), app)?;
-    if !args.dry_run && !cli.force && rivals_core::game_status::should_block_for_game() {
-        return Err(rivals_core::game_status::game_running_error());
-    }
-    let found = asset::repair_headers(
-        &root,
-        &args.container,
-        args.entry.as_deref(),
-        cli.usmap.as_deref(),
-        app.usmap_path.as_deref(),
-        args.dry_run,
-    )?;
-    emit(cli, &found, || {
-        for repair in &found {
-            outln!("{}  {} header(s)", repair.entry, repair.faults);
-        }
-        if found.is_empty() {
-            outln!("no property header in this mod ends on a skip");
-        } else if args.dry_run {
-            outln!("{} package(s) to repair", found.len());
-        } else {
-            outln!("repaired {} package(s)", found.len());
-        }
     })
 }
 

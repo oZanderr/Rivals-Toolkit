@@ -191,18 +191,6 @@ pub fn lost_import_warning(imports: &[ImportInfo]) -> Option<String> {
     })
 }
 
-/// What to say about a package holding property headers that end on a skip, found by a lenient
-/// parse: the game's loader reads past each one.
-pub fn header_fault_warning(parsed: &ParsedPackage) -> Option<String> {
-    let faults = parsed.header_faults.len();
-    (faults > 0).then(|| {
-        format!(
-            "{faults} property header(s) end on a skip, which the game's loader reads past and can \
-             crash on; saving the package repairs them"
-        )
-    })
-}
-
 /// One row of the import table, with its references resolved to a path.
 #[derive(Debug, Clone, Serialize)]
 pub struct ImportInfo {
@@ -245,10 +233,6 @@ pub struct ParsedPackage {
     /// Populated only when the caller asked for the header check.
     #[serde(skip_serializing_if = "HeaderCheck::is_empty")]
     pub header_check: HeaderCheck,
-    /// Headers that end on a skip, which the game's loader reads past. Found only by a lenient
-    /// parse: a strict one fails the export instead. Saving the package repairs them.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub header_faults: Vec<crate::props::HeaderFault>,
     /// Headers in a shape no header the game ships takes. A save may not add one.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub odd_headers: Vec<crate::props::OddHeader>,
@@ -456,9 +440,6 @@ pub struct ParseOptions {
     /// Leave a name the mappings file holds twice on its default entry even when an export fails
     /// under it. A caller that can recover a class from its own package tries that first.
     pub skip_twins: bool,
-    /// Read a header that ends on a skip, which the game's loader reads past, and record it in
-    /// `header_faults` rather than failing its export.
-    pub lenient_headers: bool,
 }
 
 fn parse_inner(
@@ -600,7 +581,6 @@ fn parse_inner(
                     .map(|(shape, count)| ((*shape).to_string(), *count))
                     .collect(),
             },
-            header_faults: diagnostics.header_faults,
             odd_headers: diagnostics.odd_headers,
             containers: diagnostics.containers,
             unset: diagnostics.unset,
@@ -762,7 +742,6 @@ fn parse_exports(
         trace: options.trace.then(Vec::new),
         check_headers: options.check_headers,
         declared_slots: options.declared_slots,
-        lenient_headers: options.lenient_headers,
         ..Default::default()
     };
     let exports = (0..header.exports.len())
