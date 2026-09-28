@@ -309,15 +309,19 @@ struct TemplateTouch {
     fields: Option<Vec<Vec<String>>>,
 }
 
-/// Where a component's changed property list lives: the construction script node that holds it,
-/// and the template it describes.
+/// Where a component's changed property list lives: the construction script node that holds it, or
+/// the inherited component handler and which of its override records, and the template it
+/// describes.
 struct ListOwner {
     export: usize,
+    record: Option<usize>,
     template: usize,
 }
 
 /// The components of a Blueprint class with cooked component instancing data, which copies only
-/// the properties each one's list names onto the components it spawns.
+/// the properties each one's list names onto the components it spawns: the ones its construction
+/// script adds, and the ones it inherits and overrides, whose records its inherited component
+/// handler keeps.
 fn list_owners(parsed: &rivals_uasset::ParsedPackage) -> Vec<ListOwner> {
     let cooked = |class: Option<&rivals_uasset::ParsedExport>| {
         class
@@ -342,8 +346,41 @@ fn list_owners(parsed: &rivals_uasset::ParsedPackage) -> Vec<ListOwner> {
         if let Some(template) = export_at(*index).filter(|_| cooked(class)) {
             owners.push(ListOwner {
                 export: node.index as usize,
+                record: None,
                 template,
             });
+        }
+    }
+    for handler in parsed
+        .exports
+        .iter()
+        .filter(|export| export.class_name == "InheritableComponentHandler")
+    {
+        let class = export_at(handler.outer_index).and_then(|class| parsed.exports.get(class));
+        if !cooked(class) {
+            continue;
+        }
+        let Some(PropertyValue::Array { items }) =
+            entry_named(&handler.properties, "Records").map(|entry| &entry.value)
+        else {
+            continue;
+        };
+        for (record, item) in items.iter().enumerate() {
+            let PropertyValue::Struct { fields, .. } = item else {
+                continue;
+            };
+            let Some(PropertyValue::Object { index, .. }) =
+                entry_named(fields, "ComponentTemplate").map(|entry| &entry.value)
+            else {
+                continue;
+            };
+            if let Some(template) = export_at(*index) {
+                owners.push(ListOwner {
+                    export: handler.index as usize,
+                    record: Some(record),
+                    template,
+                });
+            }
         }
     }
     owners
@@ -354,10 +391,18 @@ fn list_of<'p>(
     parsed: &'p rivals_uasset::ParsedPackage,
     owner: &ListOwner,
 ) -> Option<&'p rivals_uasset::PropertyEntry> {
-    let data = entry_named(
-        &parsed.exports[owner.export].properties,
-        "CookedComponentInstancingData",
-    )?;
+    let holder = &parsed.exports[owner.export].properties;
+    let fields: &[rivals_uasset::PropertyEntry] = match owner.record {
+        None => holder,
+        Some(record) => match &entry_named(holder, "Records")?.value {
+            PropertyValue::Array { items } => match items.get(record)? {
+                PropertyValue::Struct { fields, .. } => fields,
+                _ => return None,
+            },
+            _ => return None,
+        },
+    };
+    let data = entry_named(fields, "CookedComponentInstancingData")?;
     let PropertyValue::Struct { fields, .. } = &data.value else {
         return None;
     };
@@ -3337,6 +3382,7 @@ mod game_data_tests {
         LISTED_CONTAINERS[1],
         LISTED_CONTAINERS[2],
         LISTED_CONTAINERS[3],
+        OVERRIDES,
         // Where the save-as tests expect new packages to land.
         "Marvel/Content/Mods/ToolkitTest/MarvelHeroTitleData_Copy.uasset",
         "Marvel/Content/Mods/X/DA_Thing.uasset",
@@ -4499,12 +4545,74 @@ mod game_data_tests {
 
     /// Blueprints whose components' changed property lists name arrays, sets, maps and tag
     /// containers.
-    const LISTED_CONTAINERS: [&str; 4] = [
+    const LISTED_CONTAINERS: [&str; 5] = [
         "Marvel/Content/Marvel/Blueprints/LevelGameplay/M2201/Disco/BP_M2201_DiscoPortal.uasset",
         "Marvel/Content/Marvel/Blueprints/LevelGameplay/M2201/Disco/M2201_DiscoLiveCameraBP.uasset",
         "Marvel/Content/Marvel/Blueprints/LevelGameplay/M2208/M2208DataPlatform.uasset",
         "Marvel/Content/Marvel/Blueprints/LevelGameplay/M2201/BP_PymInteractor.uasset",
+        OVERRIDES,
     ];
+
+    /// A Blueprint that overrides a component its parent adds, through the one override record its
+    /// inherited component handler keeps.
+    const OVERRIDES: &str = "Marvel/Content/Marvel/Blueprints/LevelGameplay/M2211/BP_M2211ConditionalCharacterMovementBlocker.uasset";
+
+    /// The entries of an inherited component's override record, rendered as `changed_list` renders
+    /// a node's.
+    fn record_list(parsed: &rivals_uasset::ParsedPackage, record: usize) -> Vec<String> {
+        let owner = list_owners(parsed)
+            .into_iter()
+            .find(|owner| owner.record == Some(record))
+            .expect("the record");
+        let list = list_of(parsed, &owner).expect("the record's list");
+        let PropertyValue::Array { items } = &list.value else {
+            return Vec::new();
+        };
+        items
+            .iter()
+            .map(|item| {
+                let PropertyValue::Struct { fields, .. } = item else {
+                    panic!("{}", item.summary());
+                };
+                let text = |name: &str| nested(fields, &[name]).value.summary();
+                format!(
+                    "{}@{} {}",
+                    text("PropertyName"),
+                    text("ArrayIndex"),
+                    text("PropertyScope")
+                )
+            })
+            .collect()
+    }
+
+    /// A property set on an inherited component's override joins its record's changed property
+    /// list, scoped to the component's class, since the class copies only what that list names onto
+    /// the components it spawns. One the record lists already adds nothing.
+    #[test]
+    fn an_override_record_keeps_its_list_in_step() {
+        let Some(fixture) = Fixture::open(OVERRIDES) else {
+            return;
+        };
+        let before = fixture.parse();
+        let listed = record_list(&before, 0);
+        assert_eq!(listed.len(), 16, "{listed:?}");
+        let template = before
+            .exports
+            .iter()
+            .find(|export| export.object_name == "LevelScopeCheckComponentBP_GEN_VARIABLE")
+            .expect("the override");
+        let interval = nested(&template.properties, &["TimeInterval"]).clone();
+        let (_, after) =
+            fixture.apply(vec![edit_of(&interval, EditOp::Set { text: "0.5".into() })]);
+        let now = record_list(&after, 0);
+        assert_eq!(now.len(), 17, "{now:?}");
+        assert!(now[16].starts_with("TimeInterval@0 "), "{now:?}");
+        assert!(now[16].ends_with("LevelScopeCheckComponentBP_C"), "{now:?}");
+
+        let thickness = nested(&template.properties, &["LineThickness"]).clone();
+        let (_, same) = fixture.apply(vec![edit_of(&thickness, EditOp::Set { text: "3".into() })]);
+        assert_eq!(record_list(&same, 0), listed);
+    }
 
     /// Applies `changes` to what an earlier save produced, as a save of a mod's own copy would.
     fn apply_after(

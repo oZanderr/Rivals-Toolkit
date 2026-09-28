@@ -179,7 +179,8 @@ variable for it, which UE only notes. Whenever a save sets a property on a compo
 property joins its node's changed property list, since a cooked Blueprint copies only the listed
 properties onto the components it spawns: a struct with the fields the save changed, an array with
 every element it holds, and a set or map on its own, which is copied whole. A field changed inside
-a struct the list already names joins that struct's entries. Blueprint variables and functions
+a struct the list already names joins that struct's entries. A component a Blueprint inherits and
+overrides keeps the list in its override record in step the same way. Blueprint variables and functions
 cannot be added: a
 class's own properties come first in every object's layout, so a new one would shift every
 inherited value in every instance, and a function needs a bytecode compiler.
