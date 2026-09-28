@@ -21,6 +21,8 @@ pub(crate) struct MappingsStatus {
     pub enum_count: usize,
     /// Why no mappings could be used, so the UI can explain rather than just disable itself.
     pub error: Option<String>,
+    /// The mappings predate the game's newest patch.
+    pub warning: Option<String>,
 }
 
 fn configured_usmap(state: &State<'_, SettingsState>) -> Option<String> {
@@ -1039,6 +1041,7 @@ pub(crate) async fn get_mappings_status(
     state: State<'_, SettingsState>,
 ) -> Result<MappingsStatus, String> {
     let configured = configured_usmap(&state);
+    let game_root = state.lock().ok().and_then(|s| s.game_path.clone());
     tauri::async_runtime::spawn_blocking(move || {
         match mappings::resolve(None, configured.as_deref()) {
             Ok(path) => {
@@ -1050,6 +1053,9 @@ pub(crate) async fn get_mappings_status(
                     enum_count: status.enum_count,
                     error: (status.struct_count == 0)
                         .then(|| "the mappings file could not be parsed".to_string()),
+                    warning: game_root
+                        .as_deref()
+                        .and_then(|root| mappings::drift_warning(root, &path)),
                 }
             }
             Err(error) => MappingsStatus {
@@ -1058,6 +1064,7 @@ pub(crate) async fn get_mappings_status(
                 struct_count: 0,
                 enum_count: 0,
                 error: Some(error),
+                warning: None,
             },
         }
     })

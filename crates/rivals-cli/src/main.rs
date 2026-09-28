@@ -859,6 +859,11 @@ struct AuditArgs {
     #[arg(long, value_name = "PATH", conflicts_with = "dir")]
     container: Option<String>,
 
+    /// Walk every package the game loads, each from the container that wins: the newest patch
+    /// declares them all. Takes about an hour.
+    #[arg(long, conflicts_with_all = ["container", "dir"])]
+    all: bool,
+
     /// Folder of already-extracted .uasset files to walk instead of a container.
     #[arg(long, value_name = "DIR")]
     dir: Option<String>,
@@ -3290,7 +3295,13 @@ fn asset_audit(cli: &Cli, app: &settings::AppSettings, args: &AuditArgs) -> Resu
             eprint!("\r  {current}/{total} packages");
         }
     };
-    let report = match (&args.container, &args.dir) {
+    let root = resolve::game_root(cli.game_root.as_deref(), app);
+    let newest = match (&root, args.all) {
+        (Ok(root), true) => Some(asset::newest_patch(root)?),
+        (Err(e), true) => return Err(e.clone()),
+        _ => None,
+    };
+    let report = match (newest.as_ref().or(args.container.as_ref()), &args.dir) {
         (_, Some(dir)) => asset::audit_dir(
             dir,
             args.limit,

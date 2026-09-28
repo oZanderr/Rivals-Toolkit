@@ -419,6 +419,8 @@ interface MappingsStatus {
   struct_count: number;
   enum_count: number;
   error: string | null;
+  /** The mappings predate the game's newest patch. */
+  warning?: string | null;
 }
 
 type ViewMode = "table" | "strings" | "tree" | "json" | "bytes" | "script";

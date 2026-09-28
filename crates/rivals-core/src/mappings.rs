@@ -89,6 +89,42 @@ pub fn resolve(explicit: Option<&str>, configured: Option<&str>) -> Result<PathB
     ))
 }
 
+/// The game build a mappings file was dumped from, as its name carries it: the number after the
+/// engine version in `5.3.2-3870120+++depot_marvel+S10.0_release-Marvel.usmap`.
+pub fn mappings_build(path: &Path) -> Option<u64> {
+    let name = path.file_name()?.to_str()?;
+    let (_, after) = name.split_once('-')?;
+    let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
+/// The newest build the game's patch containers name, such as `Patch_-Windows_1.1.3892207_P.utoc`.
+pub fn game_build(game_root: &str) -> Option<u64> {
+    std::fs::read_dir(crate::paths::paks_dir(game_root))
+        .ok()?
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let version = name.strip_prefix("Patch_")?.strip_suffix("_P.utoc")?;
+            version.rsplit('.').next()?.parse::<u64>().ok()
+        })
+        .max()
+}
+
+/// What to say when the mappings were dumped from an older build than the game's newest patch: a
+/// class changed since then reads wrong, or not at all, until the mappings match.
+pub fn drift_warning(game_root: &str, mappings: &Path) -> Option<String> {
+    let dumped = mappings_build(mappings)?;
+    let game = game_build(game_root)?;
+    (dumped < game).then(|| {
+        format!(
+            "the mappings file is for build {dumped}, and the game has been patched to build \
+             {game}: a class changed since reads wrong or not at all until the mappings are for \
+             build {game}"
+        )
+    })
+}
+
 fn pick(path: &Path) -> Option<PathBuf> {
     if path.is_file() {
         return Some(path.to_path_buf());
@@ -122,6 +158,33 @@ fn modified_stamp(path: &Path) -> u64 {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mappings_older_than_the_newest_patch_are_reported() {
+        let root = scratch("drift");
+        let paks = crate::paths::paks_dir(&root.to_string_lossy());
+        std::fs::create_dir_all(&paks).expect("paks");
+        for name in [
+            "Patch_-Windows_1.1.3870120_P.utoc",
+            "Patch_-Windows_1.1.3892207_P.utoc",
+            "pakchunk0-Windows.utoc",
+        ] {
+            std::fs::write(paks.join(name), b"").expect("write");
+        }
+        let game = root.to_string_lossy().into_owned();
+        assert_eq!(game_build(&game), Some(3892207));
+        let old = Path::new("5.3.2-3870120+++depot_marvel+S10.0_release-Marvel.usmap");
+        assert_eq!(mappings_build(old), Some(3870120));
+        let warning = drift_warning(&game, old).expect("a warning");
+        assert!(
+            warning.contains("3870120") && warning.contains("3892207"),
+            "{warning}"
+        );
+        let current = Path::new("5.3.2-3892207+++depot_marvel+S10.0_release-Marvel.usmap");
+        assert!(drift_warning(&game, current).is_none());
+        assert!(drift_warning(&game, Path::new("Mappings.usmap")).is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let root =

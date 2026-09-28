@@ -92,6 +92,8 @@ interface MappingsStatus {
   struct_count: number;
   enum_count: number;
   error: string | null;
+  /** The mappings predate the game's newest patch. */
+  warning?: string | null;
 }
 
 /** Windows paths arrive with backslashes; the settings row only shows the file name. */
@@ -1121,6 +1123,11 @@ export function Settings({
                 ) : (
                   <span className="text-[11px] text-amber-400">
                     {mappings?.error ?? "Not set. Asset contents cannot be read."}
+                  </span>
+                )}
+                {mappings?.warning && (
+                  <span className="text-[11px] text-amber-400">
+                    Out of date: {mappings.warning}.
                   </span>
                 )}
               </div>

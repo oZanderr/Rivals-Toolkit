@@ -2329,6 +2329,9 @@ pub fn print_table(report: &TableReport, out: &mut impl FnMut(String)) {
 #[derive(Serialize)]
 pub struct AuditReport {
     pub container: String,
+    /// The mappings predate the game's newest patch, so a class changed since reads wrong.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mappings_warning: Option<String>,
     pub packages_scanned: usize,
     /// Exports left out because `--skip-blueprint` was passed and their class is generated.
     /// Counted rather than silently dropped, so the figures still say what was not looked at.
@@ -2724,6 +2727,7 @@ pub fn audit(
     let total = limit.map_or(packages.len(), |l| l.min(packages.len()));
 
     let mut acc = Accumulator::new(container.to_string(), skip_blueprint);
+    acc.report.mappings_warning = mappings::drift_warning(game_root, &path);
     let converter = asset::PackageConverter::new(&*store);
     for (index, (package_id, path)) in packages.iter().take(total).enumerate() {
         progress(index + 1, total);
@@ -2791,6 +2795,7 @@ impl Accumulator {
             skip_blueprint,
             report: AuditReport {
                 container: source,
+                mappings_warning: None,
                 packages_scanned: 0,
                 exports_blueprint_skipped: 0,
                 exports_total: 0,
@@ -3207,11 +3212,42 @@ fn short_reason(reason: &str) -> String {
         Some(index) if trimmed.starts_with("row ") => &trimmed[index + 3..],
         _ => trimmed,
     };
-    trimmed.chars().take(120).collect()
+    // A read inside a struct names the property path it was in before the cause, which would file
+    // one cause under as many names as there are paths to it.
+    let mut cause = trimmed;
+    while let Some((path, rest)) = cause.split_once(": ") {
+        if path.contains('.') && !path.contains(' ') {
+            cause = rest;
+        } else {
+            break;
+        }
+    }
+    cause.chars().take(120).collect()
+}
+
+/// The game's newest patch container, which declares every package the game loads. A read through
+/// it resolves each package from the container that wins, so walking it walks the game as it loads.
+pub fn newest_patch(game_root: &str) -> Result<String, String> {
+    let paks = rivals_core::paths::paks_dir(game_root);
+    std::fs::read_dir(&paks)
+        .map_err(|e| format!("read {}: {e}", paks.display()))?
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let version = name.strip_prefix("Patch_")?.strip_suffix("_P.utoc")?;
+            let build: u64 = version.rsplit('.').next()?.parse().ok()?;
+            Some((build, name))
+        })
+        .max()
+        .map(|(_, name)| name)
+        .ok_or_else(|| format!("{} holds no patch container", paks.display()))
 }
 
 pub fn print_audit(report: &AuditReport, out: &mut impl FnMut(String)) {
     out(format!("container   {}", report.container));
+    if let Some(warning) = &report.mappings_warning {
+        out(format!("warning     {warning}"));
+    }
     out(format!("packages    {}", report.packages_scanned));
     out(format!(
         "exports     {} total, {} exact, {} known payload, {} unexplained, {} failed",
@@ -3931,6 +3967,24 @@ mod tests {
         assert_eq!(
             short_reason("struct Foo has no native layout at offset 0x1234"),
             "struct Foo has no native layout"
+        );
+    }
+
+    /// A cause reached inside a struct is filed under the cause, not under each path to it, so it
+    /// groups whatever class it turned up in and still reads as a mappings gap.
+    #[test]
+    fn a_nested_cause_groups_under_itself() {
+        let deep = "/Game/A/Thing.Thing_C.Points: PointParameters.Order: struct PointParameters \
+                    has no native layout and no schema in the mappings file at offset 0x2F0A";
+        let cause = short_reason(deep);
+        assert_eq!(
+            cause,
+            "struct PointParameters has no native layout and no schema in the mappings file"
+        );
+        assert!(is_mappings_gap(&cause));
+        assert_eq!(
+            short_reason("parse package header: bad magic"),
+            "parse package header: bad magic"
         );
     }
 
