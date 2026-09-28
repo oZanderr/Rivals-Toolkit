@@ -451,6 +451,7 @@ interface EditList {
   repair_headers?: boolean;
   add_exports?: { class: string; outer?: number; name: string }[];
   add_components?: { node: number; name: string }[];
+  remove_components?: { node: number; with_children: boolean }[];
   save_as?: SaveAs;
   expect?: {
     exports?: Record<number, string>;
@@ -564,6 +565,8 @@ export interface Structural {
   addExports?: { class: string; outer?: number; name: string }[];
   /** Blueprint components to add by duplicating the one a construction script node builds. */
   addComponents?: { node: number; name: string }[];
+  /** Blueprint components to take out, by the construction script node that builds each. */
+  removeComponents?: { node: number; with_children: boolean }[];
 }
 
 /** A package name to save under instead of the asset's own. */
@@ -962,6 +965,7 @@ export function useAssetEdits({
           repair_headers: structural?.repairHeaders ?? false,
           add_exports: structural?.addExports ?? [],
           add_components: structural?.addComponents ?? [],
+          remove_components: structural?.removeComponents ?? [],
           save_as: saveAs,
           expect: expectOf(
             [...cells, ...records.filter((record) => record.target.path)],

@@ -36,8 +36,9 @@ mod value;
 mod write;
 
 pub use component::{
-    AddComponent, ChangedList, ComponentPlan, ListContext, ListEntry, ListScope, NodeParent,
-    component_wiring, plan_component, verify_component,
+    AddComponent, ChangedList, ComponentPlan, ComponentRemoval, ListContext, ListEntry, ListScope,
+    NodeParent, RemoveComponent, component_removal_wiring, component_wiring, plan_component,
+    plan_component_removal, verify_component, verify_component_removal,
 };
 pub use copy::{CopiedExport, CopyExport, CopyPlan, CopySource, plan_copy};
 pub use datatable::{DataTable, DataTableLayout, DataTableRow, RowSpan};

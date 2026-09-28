@@ -182,7 +182,12 @@ property joins its node's changed property list, since a cooked Blueprint copies
 properties onto the components it spawns: a struct with the fields the save changed, an array with
 every element it holds, and a set or map on its own, which is copied whole. A field changed inside
 a struct the list already names joins that struct's entries. A component a Blueprint inherits and
-overrides keeps the list in its override record in step the same way. Blueprint variables and functions
+overrides keeps the list in its override record in step the same way.
+
+`asset remove-component --node N` takes a component out of a Blueprint with its template. The
+components under it take its place, or go with it with `--with-children`; the scene root goes only
+with the components hanging from it. The class keeps the component's variable, which reads None, so
+the save names the functions that read it. Blueprint variables and functions
 cannot be added: a
 class's own properties come first in every object's layout, so a new one would shift every
 inherited value in every instance, and a function needs a bytecode compiler.
@@ -216,6 +221,7 @@ rivals-cli asset imports --container ... --entry ... --unused                   
 rivals-cli asset names   --container ... --entry ... --compact --mod-name MyMod         # drop unused names
 rivals-cli asset add-export --container ... --entry ... --class /Script/Module.Class --outer 0 --name MyThing --mod-name MyMod
 rivals-cli asset add-component --container ... --entry ... --node 5 --name StaticMesh2 --mod-name MyMod
+rivals-cli asset remove-component --container ... --entry ... --node 18 --mod-name MyMod
 rivals-cli asset save-as --container ... --entry ... --to /Game/Mods/MyThing/DA_Copy --mod-name MyMod
 rivals-cli asset rename-package --container ~mods/MyMod_9999999_P.utoc --entry ... --to /Game/Mods/MyThing/DA_New
 rivals-cli asset repair  --container MyMod_9999999_P.utoc --dry-run                   # headers the game reads past

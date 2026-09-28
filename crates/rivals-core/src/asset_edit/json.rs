@@ -62,6 +62,9 @@ pub struct EditList {
     /// Components to add to a Blueprint by duplicating one. A save of its own.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub add_components: Vec<rivals_uasset::AddComponent>,
+    /// Components to take out of a Blueprint. A save of its own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remove_components: Vec<rivals_uasset::RemoveComponent>,
     /// Save the package under another name once the other edits are made.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub save_as: Option<rivals_uasset::SaveAs>,
@@ -110,6 +113,7 @@ impl EditList {
             && !self.repair_headers
             && self.add_exports.is_empty()
             && self.add_components.is_empty()
+            && self.remove_components.is_empty()
             && self.save_as.is_none()
     }
 
@@ -196,6 +200,7 @@ impl EditList {
             repair_headers: self.repair_headers,
             add_exports: self.add_exports,
             add_components: self.add_components,
+            remove_components: self.remove_components,
             save_as: self.save_as,
             expect: self.expect,
             allow_drift: self.allow_drift,

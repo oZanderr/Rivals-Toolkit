@@ -159,6 +159,9 @@ enum AssetCmd {
     /// Add a component to a Blueprint by duplicating one its construction script builds, and write
     /// the result into a mod pak.
     AddComponent(AddComponentArgs),
+    /// Take a component out of a Blueprint: the construction script node that builds it and its
+    /// template. The components under it take its place, or go with it.
+    RemoveComponent(RemoveComponentArgs),
     /// Write the asset, unchanged but for its name, under another package name: a new asset, or a
     /// replacement for the one at that path.
     SaveAs(SaveAsArgs),
@@ -516,6 +519,30 @@ struct AddExportArgs {
     /// Its name, unique among what shares its outer.
     #[arg(long, value_name = "NAME")]
     name: String,
+
+    /// Mod pak to write into, created in `~mods` if it does not exist. Defaults to the name the
+    /// desktop app last saved into, then to `AssetEdits`.
+    #[arg(long, value_name = "NAME")]
+    mod_name: Option<String>,
+
+    /// Overwrite an edited copy of this asset that the mod pak already holds.
+    #[arg(long)]
+    replace: bool,
+}
+
+#[derive(Args)]
+struct RemoveComponentArgs {
+    #[command(flatten)]
+    asset: AssetArgs,
+
+    /// The construction script node that builds the component, as `asset info` prints its export
+    /// index (an `SCS_Node`).
+    #[arg(long, value_name = "N")]
+    node: u32,
+
+    /// Take the components under it too, rather than hang them where it was.
+    #[arg(long)]
+    with_children: bool,
 
     /// Mod pak to write into, created in `~mods` if it does not exist. Defaults to the name the
     /// desktop app last saved into, then to `AssetEdits`.
@@ -1129,6 +1156,7 @@ fn run(cli: &Cli) -> Result<(), String> {
         Command::Asset(AssetCmd::SaveAs(a)) => asset_save_as(cli, &app, a),
         Command::Asset(AssetCmd::AddExport(a)) => asset_add_export(cli, &app, a),
         Command::Asset(AssetCmd::AddComponent(a)) => asset_add_component(cli, &app, a),
+        Command::Asset(AssetCmd::RemoveComponent(a)) => asset_remove_component(cli, &app, a),
         Command::Asset(AssetCmd::RenamePackage(a)) => asset_rename_package(cli, &app, a),
         Command::Asset(AssetCmd::Row(a)) => asset_row(cli, &app, a),
         Command::Asset(AssetCmd::Strings(a)) => asset_strings(cli, &app, a),
@@ -2829,6 +2857,27 @@ fn asset_add_component(
         rivals_uasset::AddComponent {
             node: args.node,
             name: args.name.clone(),
+        },
+        mod_name_of(app, args.mod_name.as_deref()),
+        args.replace,
+    )?;
+    emit(cli, &message, || outln!("{message}"))
+}
+
+fn asset_remove_component(
+    cli: &Cli,
+    app: &settings::AppSettings,
+    args: &RemoveComponentArgs,
+) -> Result<(), String> {
+    if !cli.force && rivals_core::game_status::should_block_for_game() {
+        return Err(rivals_core::game_status::game_running_error());
+    }
+    let root = resolve::game_root(cli.game_root.as_deref(), app)?;
+    let message = asset::remove_component(
+        &asset_request(cli, app, &args.asset, &root),
+        rivals_uasset::RemoveComponent {
+            node: args.node,
+            with_children: args.with_children,
         },
         mod_name_of(app, args.mod_name.as_deref()),
         args.replace,

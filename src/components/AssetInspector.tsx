@@ -2927,6 +2927,7 @@ function PackageView({
   onSaveAs,
   onAddObject,
   onAddComponent,
+  onRemoveComponent,
 }: {
   pkg: ParsedPackage;
   edits: AssetEdits;
@@ -2950,6 +2951,7 @@ function PackageView({
   onSaveAs: () => void;
   onAddObject: (outer: number | null) => void;
   onAddComponent: (node: number) => void;
+  onRemoveComponent: (node: number) => void;
 }) {
   const adds = Object.entries(edits.importDrafts).filter(([key]) => key.startsWith("add:"));
   const payloadActions = (exp: ParsedExport): PayloadActions => {
@@ -3172,6 +3174,7 @@ function PackageView({
                         onMove={() => onMove(exp.index)}
                         onAddUnder={() => onAddObject(exp.index)}
                         onAddComponent={() => onAddComponent(exp.index)}
+                        onRemoveComponent={() => onRemoveComponent(exp.index)}
                         onFlags={() => onFlags(exp.index)}
                         onRetype={() => onRetype(exp.index)}
                         onDeps={() => onDeps(exp.index)}
@@ -3423,6 +3426,66 @@ function AddComponentDialog({
   );
 }
 
+/** Confirms taking out the component a construction script node builds, and whether the
+ *  components under it go with it or take its place. */
+function RemoveComponentDialog({
+  pkg,
+  edits,
+  node,
+  onClose,
+}: {
+  pkg: ParsedPackage;
+  edits: AssetEdits;
+  node: number;
+  onClose: () => void;
+}) {
+  const exp = pkg.exports[node];
+  const variable = exp.properties.find((entry) => entry.name === "InternalVariableName")?.value;
+  const name = variable?.kind === "name" ? variable.value : exp.object_name;
+  const children = exp.properties.find((entry) => entry.name === "ChildNodes")?.value;
+  const hasChildren = children?.kind === "array" && children.items.length > 0;
+  const [withChildren, setWithChildren] = useState(false);
+  const pak = previewContainerFilename(edits.modName, edits.saveTarget);
+  return (
+    <AlertDialog open onOpenChange={(open) => !open && onClose()}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Remove {name}</AlertDialogTitle>
+          <AlertDialogDescription>
+            Takes the component {exp.object_name} builds out of the Blueprint, with its template.
+            Actors the game spawns from it no longer get it; actors already placed in a map keep the
+            one they were saved with. The class keeps its variable, which reads None.{" "}
+            {pak ? `Writes the result into ${pak}.` : "Name a mod to save into first."}
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        {hasChildren && (
+          <label className="flex items-center gap-2 text-xs">
+            <Checkbox
+              checked={withChildren}
+              onCheckedChange={(checked) => setWithChildren(checked === true)}
+            />
+            Remove the components under it too, rather than hang them where it was
+          </label>
+        )}
+        <AlertDialogFooter>
+          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <AlertDialogAction
+            disabled={!pak || edits.saving}
+            onClick={() => {
+              onClose();
+              void edits.save({
+                structural: { removeComponents: [{ node, with_children: withChildren }] },
+              });
+            }}
+          >
+            Remove
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+
 /** Asks for the class and name of an object to add, under an export or at the top of the package.
  *  The classes the package already names are offered first. */
 function AddObjectDialog({
@@ -3656,6 +3719,7 @@ function ExportActions({
   onMove,
   onAddUnder,
   onAddComponent,
+  onRemoveComponent,
   onFlags,
   onRetype,
   onDeps,
@@ -3671,6 +3735,7 @@ function ExportActions({
   onMove: () => void;
   onAddUnder: () => void;
   onAddComponent: () => void;
+  onRemoveComponent: () => void;
   onFlags: () => void;
   onRetype: () => void;
   onDeps: () => void;
@@ -3767,6 +3832,26 @@ function ExportActions({
               }}
             >
               <Copy size={14} /> Duplicate component…
+            </button>
+          </Tip>
+        )}
+        {exp.class_name === "SCS_Node" && (
+          <Tip
+            content={
+              lock ??
+              "Take the component this node builds out of the Blueprint, with its template. The components under it take its place, or go with it."
+            }
+            side="right"
+          >
+            <button
+              className={cn(item, lock ? "cursor-not-allowed opacity-50" : "hover:bg-muted")}
+              disabled={!!lock}
+              onClick={() => {
+                setOpen(false);
+                onRemoveComponent();
+              }}
+            >
+              <Trash2 size={14} /> Remove component…
             </button>
           </Tip>
         )}
@@ -6694,6 +6779,7 @@ export default function AssetInspector({
   const [savingAs, setSavingAs] = useState(false);
   const [addingObject, setAddingObject] = useState<{ outer: number | null } | null>(null);
   const [addingComponent, setAddingComponent] = useState<number | null>(null);
+  const [removingComponent, setRemovingComponent] = useState<number | null>(null);
   /// Progress of an import index build started from the removal dialog.
   const [indexing, setIndexing] = useState<{ current: number; total: number } | null>(null);
   /// Bumped after a save so the asset is read again from disk rather than shown from memory.
@@ -7313,6 +7399,7 @@ export default function AssetInspector({
                     }
                     onAddUnder={() => setAddingObject({ outer: active.index })}
                     onAddComponent={() => setAddingComponent(active.index)}
+                    onRemoveComponent={() => setRemovingComponent(active.index)}
                     onFlags={() => setAsk({ kind: "flags", index: active.index, set: 0, clear: 0 })}
                     onRetype={() =>
                       setAsk({
@@ -7665,6 +7752,7 @@ export default function AssetInspector({
                     onSaveAs={() => setSavingAs(true)}
                     onAddObject={(outer) => setAddingObject({ outer })}
                     onAddComponent={(node) => setAddingComponent(node)}
+                    onRemoveComponent={(node) => setRemovingComponent(node)}
                   />
                 ) : active && effectiveView === "table" && active.data_table ? (
                   <DataTableGrid table={active.data_table} exportIndex={active.index} />
@@ -7846,6 +7934,15 @@ export default function AssetInspector({
               edits={edits}
               node={addingComponent}
               onClose={() => setAddingComponent(null)}
+            />
+          )}
+
+          {pkg && removingComponent !== null && (
+            <RemoveComponentDialog
+              pkg={pkg}
+              edits={edits}
+              node={removingComponent}
+              onClose={() => setRemovingComponent(null)}
             />
           )}
 

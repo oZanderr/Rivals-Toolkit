@@ -346,6 +346,287 @@ pub fn component_wiring(
     })
 }
 
+/// A component taken out of a Blueprint: the construction script node that builds it, and whether
+/// the components hanging under it go with it or take its place.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoveComponent {
+    pub node: u32,
+    #[serde(default)]
+    pub with_children: bool,
+}
+
+/// What removing a component takes out and where the components under it go.
+#[derive(Debug, Clone, Serialize)]
+pub struct ComponentRemoval {
+    /// The nodes that go, the one asked for first, then its subtree when it goes too.
+    pub nodes: Vec<u32>,
+    /// The templates those nodes build.
+    pub templates: Vec<u32>,
+    #[serde(skip)]
+    pub script: u32,
+    #[serde(skip)]
+    pub parent: NodeParent,
+    /// The nodes that hang where the removed one did, by package index.
+    #[serde(skip)]
+    pub children: Vec<i32>,
+    /// The variable names of the components that go.
+    pub variables: Vec<String>,
+    /// What the removal leaves that still names them.
+    pub warnings: Vec<String>,
+}
+
+/// The nodes under `node`, depth first, not counting `node` itself.
+fn subtree(parsed: &ParsedPackage, node: u32) -> Vec<u32> {
+    let mut out = Vec::new();
+    let mut stack = vec![node];
+    while let Some(at) = stack.pop() {
+        for child in objects_in(&parsed.exports[at as usize].properties, "ChildNodes")
+            .into_iter()
+            .filter_map(export_of)
+        {
+            if child != node && !out.contains(&child) && (child as usize) < parsed.exports.len() {
+                out.push(child);
+                stack.push(child);
+            }
+        }
+    }
+    out
+}
+
+/// Works out what removing the component `remove.node` builds takes out, refusing a node that is
+/// not one, and the script's scene root while components still hang under it: the actor's root
+/// would change under them.
+pub fn plan_component_removal(
+    parsed: &ParsedPackage,
+    remove: &RemoveComponent,
+) -> Result<ComponentRemoval, String> {
+    let node = parsed.exports.get(remove.node as usize).ok_or_else(|| {
+        format!(
+            "this package has {} exports, so there is no export {}",
+            parsed.exports.len(),
+            remove.node
+        )
+    })?;
+    if node.class_name != "SCS_Node" {
+        return Err(format!(
+            "{} is a {}, not a construction script node: pick the SCS_Node that builds the component",
+            node.object_name, node.class_name
+        ));
+    }
+    let script = export_of(node.outer_index)
+        .filter(|&script| parsed.exports[script as usize].class_name == "SimpleConstructionScript")
+        .ok_or_else(|| format!("{} sits in no construction script", node.object_name))?;
+    let script_export = &parsed.exports[script as usize];
+    let wanted = remove.node as i32 + 1;
+    let nodes = nodes_of(parsed, script);
+    let parent = nodes
+        .iter()
+        .find(|other| objects_in(&other.properties, "ChildNodes").contains(&wanted))
+        .map(|other| NodeParent::Node(other.index))
+        .or_else(|| {
+            objects_in(&script_export.properties, "RootNodes")
+                .contains(&wanted)
+                .then_some(NodeParent::Root)
+        })
+        .ok_or_else(|| {
+            format!(
+                "{} hangs from nothing in the construction script",
+                node.object_name
+            )
+        })?;
+    let children = objects_in(&node.properties, "ChildNodes");
+    let scene_root = object_in(&script_export.properties, "DefaultSceneRootNode") == Some(wanted)
+        || objects_in(&script_export.properties, "RootNodes").first() == Some(&wanted);
+    if scene_root && !children.is_empty() && !remove.with_children {
+        return Err(format!(
+            "{} is the scene root the other components hang from, so it goes only with them",
+            node.object_name
+        ));
+    }
+    let mut removed = vec![remove.node];
+    if remove.with_children {
+        removed.extend(subtree(parsed, remove.node));
+    }
+    let mut templates = Vec::new();
+    let mut variables = Vec::new();
+    for &at in &removed {
+        let export = &parsed.exports[at as usize];
+        if let Some(template) =
+            object_in(&export.properties, "ComponentTemplate").and_then(export_of)
+        {
+            templates.push(template);
+        }
+        if let Some(variable) = name_in(&export.properties, "InternalVariableName") {
+            variables.push(variable.to_string());
+        }
+    }
+    let mut warnings = Vec::new();
+    for export in &parsed.exports {
+        let Some(script) = &export.script else {
+            continue;
+        };
+        let text = crate::kismet::render_script(script);
+        for variable in &variables {
+            let named = text.match_indices(variable.as_str()).any(|(at, _)| {
+                let before = text[..at].chars().next_back();
+                let after = text[at + variable.len()..].chars().next();
+                let part = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+                !part(before) && !part(after)
+            });
+            if named {
+                warnings.push(format!(
+                    "{} reads {variable}, which is None once the component is gone",
+                    export.object_name
+                ));
+            }
+        }
+    }
+    warnings
+        .push("actors already placed in a map keep the component they were saved with".to_string());
+    Ok(ComponentRemoval {
+        nodes: removed,
+        templates,
+        script,
+        parent,
+        children: if remove.with_children {
+            Vec::new()
+        } else {
+            children
+        },
+        variables,
+        warnings,
+    })
+}
+
+/// The edits that unhook the removed nodes from the construction script before they go: out of
+/// `AllNodes` and the list they hang in, with the nodes under the removed one taking its place
+/// there unless they go too.
+pub fn component_removal_wiring(
+    parsed: &ParsedPackage,
+    plan: &ComponentRemoval,
+) -> Result<PackageEdits, String> {
+    let script = &parsed.exports[plan.script as usize];
+    let field = |export: &ParsedExport, name: &str| {
+        entry(&export.properties, name)
+            .cloned()
+            .ok_or_else(|| format!("{} has no {name}", export.object_name))
+    };
+    let mut values = Vec::new();
+    let mut sets = Vec::new();
+    let gone: Vec<i32> = plan.nodes.iter().map(|node| *node as i32 + 1).collect();
+    let all = field(script, "AllNodes")?;
+    for (index, item) in objects_in(&script.properties, "AllNodes")
+        .iter()
+        .enumerate()
+    {
+        if gone.contains(item) {
+            values.push(value_edit(
+                &all,
+                EditOp::Remove {
+                    index: index as u32,
+                },
+            )?);
+        }
+    }
+    let (holder, list) = match plan.parent {
+        NodeParent::Root => (script, "RootNodes"),
+        NodeParent::Node(parent) => (&parsed.exports[parent as usize], "ChildNodes"),
+    };
+    let hung = field(holder, list)?;
+    let listed = objects_in(&holder.properties, list);
+    let at = listed
+        .iter()
+        .position(|item| *item == gone[0])
+        .ok_or("the component is not in the list it hangs in")?;
+    values.push(value_edit(&hung, EditOp::Remove { index: at as u32 })?);
+    for (offset, child) in plan.children.iter().enumerate() {
+        let path = export_of(*child)
+            .and_then(|child| parsed.exports.get(child as usize))
+            .map(|child| child.path.clone())
+            .ok_or("a child node is not in the package")?;
+        let edit = value_edit(
+            &hung,
+            EditOp::Insert {
+                index: (at + offset) as u32,
+                key: None,
+            },
+        )?;
+        sets.push(FieldSet {
+            offset: edit.offset,
+            expect_name: edit.expect_name.clone(),
+            expect_element: edit.expect_element,
+            path: vec![format!("[{}]", at + offset)],
+            text: path,
+        });
+        values.push(edit);
+    }
+    if object_in(&script.properties, "DefaultSceneRootNode") == Some(gone[0]) {
+        values.push(value_edit(
+            &field(script, "DefaultSceneRootNode")?,
+            EditOp::Set {
+                text: "None".into(),
+            },
+        )?);
+    }
+    Ok(PackageEdits {
+        values,
+        field_sets: sets,
+        ..Default::default()
+    })
+}
+
+/// The removed component is gone: its nodes and templates are no longer in the package, and the
+/// nodes that hung under it hang where it did.
+pub fn verify_component_removal(
+    before: &ParsedPackage,
+    after: &ParsedPackage,
+    plan: &ComponentRemoval,
+) -> Result<(), String> {
+    let path_of = |at: u32| before.exports[at as usize].path.clone();
+    for gone in plan.nodes.iter().chain(&plan.templates) {
+        let path = path_of(*gone);
+        if after.exports.iter().any(|export| export.path == path) {
+            return Err(format!("{path} is still in the package"));
+        }
+    }
+    let script_path = before.exports[plan.script as usize].path.clone();
+    let script = after
+        .exports
+        .iter()
+        .find(|export| export.path == script_path)
+        .ok_or("the construction script is gone")?;
+    let holder = match plan.parent {
+        NodeParent::Root => script,
+        NodeParent::Node(parent) => {
+            let path = path_of(parent);
+            after
+                .exports
+                .iter()
+                .find(|export| export.path == path)
+                .ok_or("the node the component hung from is gone")?
+        }
+    };
+    let list = match plan.parent {
+        NodeParent::Root => "RootNodes",
+        NodeParent::Node(_) => "ChildNodes",
+    };
+    let hung: Vec<String> = objects_in(&holder.properties, list)
+        .into_iter()
+        .filter_map(export_of)
+        .filter_map(|at| after.exports.get(at as usize))
+        .map(|export| export.path.clone())
+        .collect();
+    for child in plan.children.iter().filter_map(|child| export_of(*child)) {
+        let path = path_of(child);
+        if !hung.contains(&path) {
+            return Err(format!(
+                "{path} does not hang where the removed component did"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// The added component reads as one: the new node names the new template under its variable name,
 /// holds no children, and is listed in `AllNodes` and beside the original.
 pub fn verify_component(parsed: &ParsedPackage, plan: &ComponentPlan) -> Result<(), String> {

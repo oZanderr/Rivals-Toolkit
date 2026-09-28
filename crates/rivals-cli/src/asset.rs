@@ -314,6 +314,24 @@ pub fn add_component(
     )
 }
 
+/// Takes a component out of a Blueprint and writes the result into a mod pak.
+pub fn remove_component(
+    request: &Request<'_>,
+    remove: rivals_uasset::RemoveComponent,
+    mod_name: &str,
+    replace: bool,
+) -> Result<String, String> {
+    write_edits(
+        request,
+        mod_name,
+        replace,
+        PackageEdits {
+            remove_components: vec![remove],
+            ..Default::default()
+        },
+    )
+}
+
 /// Writes the asset, unchanged but for its name, under another package name.
 pub fn save_as(
     request: &Request<'_>,

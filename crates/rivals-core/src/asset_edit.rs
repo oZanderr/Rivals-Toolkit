@@ -167,6 +167,9 @@ fn edit_passes(
     if let Some(add) = changes.add_components.first() {
         return component_pass(request, mappings, loaded, parsed, add);
     }
+    if let Some(remove) = changes.remove_components.first() {
+        return component_removal_pass(request, mappings, loaded, parsed, remove);
+    }
     if changes.is_empty() {
         return Err("No changes to save".into());
     }
@@ -851,6 +854,58 @@ fn component_pass(
     applied.append(&mut wired.applied);
     wired.applied = applied;
     Ok((wired, loaded))
+}
+
+/// Takes a component out of a Blueprint in two stages: its nodes are unhooked from the construction
+/// script with value edits, the nodes under it taking its place, then the nodes and their templates
+/// are removed. Each stage is checked on its own, and the removal as a whole at the end.
+fn component_removal_pass(
+    request: &AssetEditRequest<'_>,
+    mappings: Option<&Mappings>,
+    loaded: FSerializedAssetBundle,
+    parsed: &rivals_uasset::ParsedPackage,
+    remove: &rivals_uasset::RemoveComponent,
+) -> Result<(PatchedBundle, FSerializedAssetBundle), String> {
+    let plan = rivals_uasset::plan_component_removal(parsed, remove)?;
+    let wiring = rivals_uasset::component_removal_wiring(parsed, &plan)?;
+    let (unhooked, loaded) = edit_passes(
+        &AssetEditRequest {
+            changes: wiring,
+            ..*request
+        },
+        mappings,
+        loaded,
+        parsed,
+    )?;
+    let between = reparse(request, mappings, &unhooked.asset, &unhooked.exports)?;
+    let removal = PackageEdits {
+        remove_exports: plan.nodes.iter().chain(&plan.templates).copied().collect(),
+        ..Default::default()
+    };
+    let sidecars = rivals_uasset::Sidecars {
+        bulk: loaded.bulk_data_buffer.as_deref(),
+        optional_bulk: loaded.optional_bulk_data_buffer.as_deref(),
+    };
+    let (mut removed, after) = patch_pass(
+        &AssetEditRequest {
+            changes: removal.clone(),
+            ..*request
+        },
+        mappings,
+        &AssetBundle {
+            asset: &unhooked.asset,
+            exports: &unhooked.exports,
+        },
+        sidecars,
+        &between,
+        &removal,
+    )?;
+    rivals_uasset::verify_component_removal(&between, &after, &plan)?;
+    let mut applied = unhooked.applied;
+    applied.append(&mut removed.applied);
+    removed.applied = applied;
+    removed.notes = plan.warnings;
+    Ok((removed, loaded))
 }
 
 /// The editor's parse of bytes a stage of a save produced.
@@ -3415,6 +3470,7 @@ mod game_data_tests {
         OVERRIDES,
         STRUCT_HOLDER,
         STRUCT_LEVEL,
+        NESTED_COMPONENTS,
         // Where the save-as tests expect new packages to land.
         "Marvel/Content/Mods/ToolkitTest/MarvelHeroTitleData_Copy.uasset",
         "Marvel/Content/Mods/X/DA_Thing.uasset",
@@ -4655,6 +4711,143 @@ mod game_data_tests {
             assert!(failed.is_empty(), "{entry}: {failed:?}");
             assert!(parsed.unresolved_structs.is_empty(), "{entry}");
         }
+    }
+
+    /// A Blueprint whose `CylinderNS` component hangs under its root and has `BaseNS` under it.
+    const NESTED_COMPONENTS: &str =
+        "Marvel/Content/Marvel/Blueprints/LevelGameplay/Common/HealthPackSpawner.uasset";
+
+    /// The variable names of the components hanging in `list` of the export named `holder`.
+    fn hanging(parsed: &rivals_uasset::ParsedPackage, holder: &str, list: &str) -> Vec<String> {
+        let holder = parsed
+            .exports
+            .iter()
+            .find(|export| export.object_name == holder)
+            .expect("the holder");
+        let PropertyValue::Array { items } = &nested(&holder.properties, &[list]).value else {
+            return Vec::new();
+        };
+        items
+            .iter()
+            .filter_map(|item| match item {
+                PropertyValue::Object { index, .. } if *index > 0 => {
+                    let node = &parsed.exports[(*index - 1) as usize];
+                    Some(
+                        nested(&node.properties, &["InternalVariableName"])
+                            .value
+                            .summary(),
+                    )
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn node_named(parsed: &rivals_uasset::ParsedPackage, variable: &str) -> u32 {
+        parsed
+            .exports
+            .iter()
+            .find(|export| {
+                export.class_name == "SCS_Node"
+                    && entry_named(&export.properties, "InternalVariableName")
+                        .is_some_and(|entry| entry.value.summary() == variable)
+            })
+            .map(|export| export.index)
+            .expect("the node")
+    }
+
+    /// A component is taken out with its template, and the one under it hangs where it was.
+    #[test]
+    fn a_removed_component_leaves_its_children_where_it_hung() {
+        let Some(fixture) = Fixture::open(NESTED_COMPONENTS) else {
+            return;
+        };
+        let before = fixture.parse();
+        let cylinder = node_named(&before, "CylinderNS");
+        let request = fixture.request_changes(PackageEdits {
+            remove_components: vec![rivals_uasset::RemoveComponent {
+                node: cylinder,
+                with_children: false,
+            }],
+            ..Default::default()
+        });
+        let (patched, _) = preview_edits(&request, Some(&fixture.schema)).expect("removed");
+        let after = Fixture::parse_bundle(
+            &AssetBundle {
+                asset: &patched.asset,
+                exports: &patched.exports,
+            },
+            &fixture.schema,
+            &fixture.source(),
+        );
+        assert_eq!(after.exports.len(), before.exports.len() - 2);
+        assert!(
+            after
+                .exports
+                .iter()
+                .all(|export| !matches!(export.status, ExportStatus::Failed { .. }))
+        );
+        let under_root = hanging(&after, "SCS_Node_0", "ChildNodes");
+        assert!(
+            !under_root.contains(&"CylinderNS".to_string()),
+            "{under_root:?}"
+        );
+        assert!(under_root.contains(&"BaseNS".to_string()), "{under_root:?}");
+        let all = hanging(&after, "SimpleConstructionScript_0", "AllNodes");
+        assert_eq!(all.len(), 7, "{all:?}");
+        assert!(!all.contains(&"CylinderNS".to_string()), "{all:?}");
+        assert!(
+            !after
+                .exports
+                .iter()
+                .any(|export| export.object_name == "CylinderNS_GEN_VARIABLE")
+        );
+        assert!(
+            patched
+                .notes
+                .iter()
+                .any(|note| note.contains("placed in a map")),
+            "{:?}",
+            patched.notes
+        );
+    }
+
+    /// With its children, a component's whole subtree goes; the scene root goes only that way.
+    #[test]
+    fn a_removed_component_takes_its_children_when_asked() {
+        let Some(fixture) = Fixture::open(NESTED_COMPONENTS) else {
+            return;
+        };
+        let before = fixture.parse();
+        let remove = |variable: &str, with_children: bool| {
+            fixture.request_changes(PackageEdits {
+                remove_components: vec![rivals_uasset::RemoveComponent {
+                    node: node_named(&before, variable),
+                    with_children,
+                }],
+                ..Default::default()
+            })
+        };
+        let (patched, _) =
+            preview_edits(&remove("CylinderNS", true), Some(&fixture.schema)).expect("removed");
+        let after = Fixture::parse_bundle(
+            &AssetBundle {
+                asset: &patched.asset,
+                exports: &patched.exports,
+            },
+            &fixture.schema,
+            &fixture.source(),
+        );
+        assert_eq!(after.exports.len(), before.exports.len() - 4);
+        let all = hanging(&after, "SimpleConstructionScript_0", "AllNodes");
+        assert_eq!(all.len(), 6, "{all:?}");
+        assert!(!all.contains(&"BaseNS".to_string()), "{all:?}");
+
+        let Err(refused) = preview_edits(&remove("DefaultSceneRoot", false), Some(&fixture.schema))
+        else {
+            panic!("the scene root went without the components hanging from it");
+        };
+        assert!(refused.contains("scene root"), "{refused}");
     }
 
     /// A Blueprint that overrides a component its parent adds, through the one override record its

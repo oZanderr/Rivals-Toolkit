@@ -189,6 +189,10 @@ pub struct PackageEdits {
     /// is this save; wiring it in takes value edits on the result, which the caller makes: see
     /// `rivals_core::asset_edit::preview_edits`.
     pub add_components: Vec<crate::component::AddComponent>,
+    /// Components taken out of a Blueprint. Unhooking one is value edits and taking it out is a
+    /// removal, each a save of its own, which the caller makes in turn: see
+    /// `rivals_core::asset_edit::preview_edits`.
+    pub remove_components: Vec<crate::component::RemoveComponent>,
     /// Replacements for whole preload dependency runs. A save of its own: the runs sit in one
     /// shared table, so changing any of them rewrites all of them.
     pub dependencies: Vec<crate::dependency::DependencyEdit>,
@@ -569,6 +573,7 @@ impl PackageEdits {
         self.duplicate_exports.extend(other.duplicate_exports);
         self.add_exports.extend(other.add_exports);
         self.add_components.extend(other.add_components);
+        self.remove_components.extend(other.remove_components);
         self.dependencies.extend(other.dependencies);
         self.field_sets.extend(other.field_sets);
         self.compact_names |= other.compact_names;
@@ -596,6 +601,7 @@ impl PackageEdits {
             && self.duplicate_exports.is_empty()
             && self.add_exports.is_empty()
             && self.add_components.is_empty()
+            && self.remove_components.is_empty()
             && self.exports.is_empty()
             && self.dependencies.is_empty()
             && self.field_sets.is_empty()
@@ -961,6 +967,13 @@ pub fn patch_package_with(
             );
         }
         return patch_name_compaction(bundle, parsed, &package);
+    }
+    if !edits.remove_components.is_empty() {
+        return Err(
+            "removing a component takes more than one read of the package: save it through \
+             rivals_core::asset_edit"
+                .into(),
+        );
     }
     if !edits.add_components.is_empty() {
         let alone = PackageEdits {
