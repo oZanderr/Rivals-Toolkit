@@ -90,6 +90,11 @@ struct Cli {
     #[arg(long, global = true)]
     keep_object_names: bool,
 
+    /// When a rename or a move is saved into a mod, leave the mod's other packages naming the old
+    /// paths instead of pointing them at the new ones.
+    #[arg(long, global = true)]
+    keep_referencers: bool,
+
     /// The language texts are shown in, as the game names it (`en`, `ja`, `zh-hans`, ...).
     /// Defaults to the app's setting, then English.
     #[arg(long, global = true, value_name = "CULTURE")]
@@ -1895,6 +1900,7 @@ fn asset_request<'a>(
         allow_missing: cli.allow_missing,
         save_as: cli.save_as.as_deref(),
         keep_object_names: cli.keep_object_names,
+        keep_referencers: cli.keep_referencers,
     }
 }
 

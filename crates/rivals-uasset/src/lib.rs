@@ -52,7 +52,7 @@ pub use edit::{
     NOT_STORED, PackageEdits, PatchedBundle, PayloadEdit, RowEdit, RowOp, ScriptConstEdit,
     Sidecars, StringEdit, StringOp, ValueEdit, check_expectations, entry_named_at, expectations,
     kind_of, patch_identity, patch_package, patch_package_copy, patch_package_with, patch_values,
-    payload_lock, verify_copy, verify_identity, verify_patch,
+    payload_lock, verify_copy, verify_identity, verify_patch, verify_references,
 };
 pub use export_edit::{
     EDITABLE_FLAGS, ExportEdit, ExportEditPlan, flag_names, plan_export_edits,
@@ -62,6 +62,7 @@ pub use header_edit::{ImportEdit, ObjectPath, parse_object_path};
 pub use hex::{HexRow, ROW_BYTES, render as render_hex, rows as hex_rows};
 pub use identity::{
     PathRename, SaveAs, identity_leftovers, identity_script_edits, identity_value_edits,
+    names_renamed_paths, rename_references,
 };
 pub use import_remove::{
     ImportRemovalPlan, ImportUsage, RemovedImport, UnusedImport, import_usage, plan_import_removal,

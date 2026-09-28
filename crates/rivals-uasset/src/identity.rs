@@ -125,6 +125,26 @@ impl PathRename {
         }))
     }
 
+    /// The paths an edit of `package`'s export table moves, old to new, as a rename of paths inside
+    /// a package that keeps its own name. What other packages hold of them follows the same way.
+    pub fn of_paths(package: &str, repathed: &[(String, String)]) -> Self {
+        let last = |path: &str| path.rsplit(['.', ':']).next().unwrap_or(path).to_string();
+        let mut pairs: Vec<(String, String)> = repathed.to_vec();
+        pairs.sort_by_key(|(was, _)| std::cmp::Reverse(was.len()));
+        let object_names = repathed
+            .iter()
+            .map(|(was, now)| (last(was), last(now)))
+            .filter(|(was, now)| was != now)
+            .collect();
+        Self {
+            from: package.to_string(),
+            to: package.to_string(),
+            pairs,
+            objects: Vec::new(),
+            object_names,
+        }
+    }
+
     /// `text` renamed, when it is the package's path or a path inside it.
     pub fn apply(&self, text: &str) -> Option<String> {
         self.pairs.iter().find_map(|(was, now)| {
@@ -201,17 +221,17 @@ fn check_package_name(name: &str) -> Result<(), String> {
     }
 }
 
-/// Gives the package its new name: the stored name, every recorded FName that is a path into the
-/// package, the asset half of a soft path whose package half is this package, and the names of the
-/// renamed objects. Nothing moves; each name is rewritten at its own width.
-pub(crate) fn rename_package(
+/// A splice for each name the reader recorded in export data that is one of the renamed paths, or
+/// the asset half of a soft path whose package half is the renamed package, pointing it at the new
+/// name at its own width.
+fn name_splices(
     bundle: &AssetBundle<'_>,
     parsed: &ParsedPackage,
     rename: &PathRename,
-) -> Result<PatchedBundle, String> {
-    let package: FLegacyPackageHeader = read_header(bundle)?;
-    let total = header_size(bundle)?;
-    let mut names = package.name_map.clone();
+    package: &FLegacyPackageHeader,
+    total: u64,
+    names: &mut retoc::legacy_asset::FPackageNameMap,
+) -> Result<Vec<Splice>, String> {
     let mut offsets: Vec<u64> = parsed
         .exports
         .iter()
@@ -269,6 +289,21 @@ pub(crate) fn rename_package(
             });
         }
     }
+    Ok(splices)
+}
+
+/// Gives the package its new name: the stored name, every recorded FName that is a path into the
+/// package, the asset half of a soft path whose package half is this package, and the names of the
+/// renamed objects. Nothing moves; each name is rewritten at its own width.
+pub(crate) fn rename_package(
+    bundle: &AssetBundle<'_>,
+    parsed: &ParsedPackage,
+    rename: &PathRename,
+) -> Result<PatchedBundle, String> {
+    let package: FLegacyPackageHeader = read_header(bundle)?;
+    let total = header_size(bundle)?;
+    let mut names = package.name_map.clone();
+    let splices = name_splices(bundle, parsed, rename, &package, total, &mut names)?;
     let exports: Vec<FObjectExport> = package
         .exports
         .iter()
@@ -305,6 +340,86 @@ pub(crate) fn rename_package(
         optional_bulk: None,
         notes: Vec::new(),
     })
+}
+
+/// Points another package at the renamed paths: its imports of them take their new names in place,
+/// which keeps each one the object it was, a class included, and every name it holds of them follows
+/// as [`rename_package`] makes them follow. Its own name stays. An import whose object moved under
+/// another outer cannot be renamed in place, and comes back as a retarget to make after.
+pub fn rename_references(
+    bundle: &AssetBundle<'_>,
+    parsed: &ParsedPackage,
+    rename: &PathRename,
+) -> Result<(PatchedBundle, Vec<crate::header_edit::ImportEdit>), String> {
+    let package: FLegacyPackageHeader = read_header(bundle)?;
+    let total = header_size(bundle)?;
+    let mut names = package.name_map.clone();
+    let splices = name_splices(bundle, parsed, rename, &package, total, &mut names)?;
+    let parent =
+        |path: &str| -> Option<String> { path.rfind(['.', ':']).map(|at| path[..at].to_string()) };
+    let last = |path: &str| path.rsplit(['.', ':']).next().unwrap_or(path).to_string();
+    let mut imports = package.imports.clone();
+    let mut moves = Vec::new();
+    for (at, import) in parsed.imports.iter().enumerate() {
+        let Some(renamed) = rename.apply(&import.path) else {
+            continue;
+        };
+        let Some(entry) = imports.get_mut(at) else {
+            continue;
+        };
+        match parent(&import.path) {
+            None => entry.object_name = names.store(&renamed),
+            Some(outer) => {
+                let outer_now = rename.apply(&outer).unwrap_or(outer);
+                if parent(&renamed).is_some_and(|now| now.eq_ignore_ascii_case(&outer_now)) {
+                    entry.object_name = names.store(&last(&renamed));
+                } else {
+                    moves.push(crate::header_edit::ImportEdit::Retarget {
+                        import: at as u32,
+                        path: renamed,
+                        class: None,
+                    });
+                }
+            }
+        }
+    }
+    let rewritten = rewrite(
+        bundle,
+        &splices,
+        HeaderDraft {
+            names: Some(names),
+            imports: Some(imports),
+            ..Default::default()
+        },
+    )?;
+    check_inline_bulk(&AssetBundle {
+        asset: &rewritten.asset,
+        exports: &rewritten.exports,
+    })?;
+    Ok((
+        PatchedBundle {
+            asset: rewritten.asset,
+            exports: rewritten.exports,
+            applied: Vec::new(),
+            bulk: None,
+            optional_bulk: None,
+            notes: Vec::new(),
+        },
+        moves,
+    ))
+}
+
+/// Whether `parsed` may name any of the renamed paths: by an import, by a name that is one, or by
+/// naming the package they are in, as the package half of a soft path does.
+pub fn names_renamed_paths(parsed: &ParsedPackage, rename: &PathRename) -> bool {
+    parsed
+        .imports
+        .iter()
+        .any(|import| rename.apply(&import.path).is_some())
+        || parsed
+            .names
+            .iter()
+            .any(|name| rename.apply(name).is_some() || name.eq_ignore_ascii_case(&rename.from))
 }
 
 /// The value edits that point the paths the package writes as strings at its new name: plain

@@ -1972,6 +1972,9 @@ pub struct SaveOptions {
     pub layer: bool,
     pub target: SaveTarget,
     pub iostore: crate::pak::iostore_out::IoStoreOptions,
+    /// Leave the mod's other packages naming what a rename or a move changes, rather than point
+    /// them at the new paths.
+    pub keep_referencers: bool,
 }
 
 /// Patches, verifies, then writes the result into a mod that overrides the original.
@@ -2017,14 +2020,67 @@ pub fn save_edits(
     mappings: Option<&Mappings>,
     options: &SaveOptions,
 ) -> Result<SaveOutcome, String> {
-    match prepare(request, mappings, options)? {
-        Prepared::Held(pak) => Ok(SaveOutcome::HoldsCopy { pak }),
+    // What an export rename or move changes, planned on the package as the save reads it, so the
+    // mod's other packages can follow once it is written.
+    let repathed = if request.changes.exports.is_empty()
+        || options.keep_referencers
+        || options.target != SaveTarget::IoStore
+    {
+        Vec::new()
+    } else {
+        let parsed = match layered_read(request, options)? {
+            Some((container, entry, kind)) => {
+                read_package(
+                    &AssetEditRequest {
+                        container: &container,
+                        entry: &entry,
+                        kind,
+                        changes: PackageEdits::default(),
+                        ..*request
+                    },
+                    mappings,
+                )?
+                .1
+            }
+            None => read_package(request, mappings)?.1,
+        };
+        let plan = rivals_uasset::plan_export_edits(&parsed, &request.changes.exports, mappings)?;
+        vec![(parsed.info.package_name.clone(), plan.repathed)]
+    };
+    let outcome = match prepare(request, mappings, options)? {
+        Prepared::Held(pak) => return Ok(SaveOutcome::HoldsCopy { pak }),
         Prepared::Ready {
             entry,
             patched,
             loaded,
-        } => write_patched(request, &entry, &patched, &loaded, options),
+        } => {
+            let outcome = write_patched(request, &entry, &patched, &loaded, options)?;
+            (outcome, entry)
+        }
+    };
+    let (mut outcome, entry) = outcome;
+    for (package, paths) in repathed.into_iter().filter(|(_, paths)| !paths.is_empty()) {
+        let rename = rivals_uasset::PathRename::of_paths(&package, &paths);
+        let utoc = mod_pak_path(request.game_root, request.mod_name)?.with_extension("utoc");
+        let followed = retarget_in_mod(
+            request.game_root,
+            &utoc,
+            mappings,
+            &rename,
+            &[&entry],
+            options,
+        )?;
+        if let SaveOutcome::Written { warnings, .. } = &mut outcome
+            && !followed.is_empty()
+        {
+            warnings.push(format!(
+                "pointed {} other package(s) in the mod at the new paths: {}",
+                followed.len(),
+                followed.join(", ")
+            ));
+        }
     }
+    Ok(outcome)
 }
 
 /// A save up to the point of writing: where it goes, and the package patched and checked, read
@@ -2604,10 +2660,39 @@ pub fn rename_mod_package(
         &options.iostore,
     )?;
     let mut warnings = patched.notes.clone();
+    let mut followed: Vec<String> = Vec::new();
+    if !options.keep_referencers
+        && let Some(rename) = rivals_uasset::PathRename::plan(&parsed, save_as)?
+    {
+        followed = retarget_in_mod(
+            request.game_root,
+            &utoc,
+            mappings,
+            &rename,
+            &[request.entry, &entry],
+            options,
+        )?;
+        if !followed.is_empty() {
+            warnings.push(format!(
+                "pointed {} other package(s) in {name} at {new}: {}",
+                followed.len(),
+                followed.join(", ")
+            ));
+        }
+    }
+    let followed_names: Vec<String> = followed
+        .iter()
+        .filter_map(|entry| asset::package_name_of_entry(entry))
+        .collect();
     match crate::import_index::load(request.game_root) {
         Ok(Some(index)) => {
             let mut naming = index.importers_of(&old).packages;
             naming.extend(index.mentions_of(&old));
+            naming.retain(|package| {
+                !followed_names
+                    .iter()
+                    .any(|name| name.eq_ignore_ascii_case(package))
+            });
             naming.sort();
             naming.dedup();
             if !naming.is_empty() {
@@ -2722,6 +2807,120 @@ pub fn repair_mod_headers(
         )?;
     }
     Ok(found)
+}
+
+/// Points the other packages of the mod at `utoc` that name paths `rename` changes at the new ones,
+/// in one container rewrite, each checked on its own. `skip` names the entries the rename itself
+/// wrote. Returns the entries it changed.
+pub fn retarget_in_mod(
+    game_root: &str,
+    utoc: &Path,
+    mappings: Option<&Mappings>,
+    rename: &rivals_uasset::PathRename,
+    skip: &[&str],
+    options: &SaveOptions,
+) -> Result<Vec<String>, String> {
+    let container = utoc.to_string_lossy().into_owned();
+    let (_, packages) = asset::list_packages(game_root, &container)?;
+    let mut changed = Vec::new();
+    let mut staged_packages = Vec::new();
+    for (_, entry) in &packages {
+        if skip.iter().any(|skip| entry.eq_ignore_ascii_case(skip)) {
+            continue;
+        }
+        let request = AssetEditRequest {
+            game_root,
+            container: &container,
+            entry,
+            kind: AssetSource::Utoc,
+            mod_name: "",
+            changes: PackageEdits {
+                allow_missing: true,
+                ..Default::default()
+            },
+        };
+        let Ok((loaded, parsed)) = read_package(&request, mappings) else {
+            continue;
+        };
+        if !rivals_uasset::names_renamed_paths(&parsed, rename) {
+            continue;
+        }
+        let (patched, loaded) = retarget_pass(&request, mappings, loaded, &parsed, rename)
+            .map_err(|e| format!("{entry} names what was renamed, and following it failed: {e}"))?;
+        // A name the package holds but nothing in it uses leaves it as it was.
+        if patched.asset == loaded.asset_file_buffer
+            && patched.exports == loaded.exports_file_buffer
+        {
+            continue;
+        }
+        let shader_map_hashes = source_shader_maps(&request, &loaded.asset_file_buffer);
+        staged_packages.push(crate::pak::iostore_out::PackageBytes {
+            entry: entry.clone(),
+            asset: patched.asset,
+            exports: patched.exports,
+            bulk: patched.bulk.or(loaded.bulk_data_buffer),
+            optional_bulk: patched.optional_bulk.or(loaded.optional_bulk_data_buffer),
+            memory_mapped_bulk: loaded.memory_mapped_bulk_data_buffer,
+            shader_map_hashes,
+        });
+        changed.push(entry.clone());
+    }
+    if !staged_packages.is_empty() {
+        let mut bytes: Vec<Option<crate::pak::iostore_out::PackageBytes>> =
+            staged_packages.into_iter().map(Some).collect();
+        crate::pak::containers::drop_cached_store();
+        crate::pak::iostore_out::write_batch_into_iostore(
+            utoc,
+            bytes.len(),
+            |at| bytes.get_mut(at).and_then(Option::take),
+            &options.iostore,
+        )?;
+    }
+    Ok(changed)
+}
+
+/// Points one package at renamed paths: its imports and the names it holds in place, then the
+/// strings and bytecode strings that name them, then the imports of objects that moved under
+/// another outer, each stage checked.
+fn retarget_pass(
+    request: &AssetEditRequest<'_>,
+    mappings: Option<&Mappings>,
+    loaded: FSerializedAssetBundle,
+    parsed: &rivals_uasset::ParsedPackage,
+    rename: &rivals_uasset::PathRename,
+) -> Result<(PatchedBundle, FSerializedAssetBundle), String> {
+    let (renamed, moves) = rivals_uasset::rename_references(&bundle_of(&loaded), parsed, rename)?;
+    let after = reparse(request, mappings, &renamed.asset, &renamed.exports)?;
+    rivals_uasset::verify_references(parsed, &after, rename)?;
+    let follow = PackageEdits {
+        values: rivals_uasset::identity_value_edits(&after, rename),
+        scripts: rivals_uasset::identity_script_edits(&after, rename),
+        imports: moves,
+        allow_missing: true,
+        ..Default::default()
+    };
+    if follow.is_empty() {
+        return Ok((renamed, loaded));
+    }
+    let sidecars = rivals_uasset::Sidecars {
+        bulk: loaded.bulk_data_buffer.as_deref(),
+        optional_bulk: loaded.optional_bulk_data_buffer.as_deref(),
+    };
+    let (followed, _) = patch_pass(
+        &AssetEditRequest {
+            changes: follow.clone(),
+            ..*request
+        },
+        mappings,
+        &AssetBundle {
+            asset: &renamed.asset,
+            exports: &renamed.exports,
+        },
+        sidecars,
+        &after,
+        &follow,
+    )?;
+    Ok((followed, loaded))
 }
 
 /// The shader maps the package's source lists for it, which a material needs carried into the
@@ -3694,6 +3893,8 @@ mod game_data_tests {
         NESTED_COMPONENTS,
         // Where the save-as tests expect new packages to land.
         "Marvel/Content/Mods/ToolkitTest/MarvelHeroTitleData_Copy.uasset",
+        "Marvel/Content/Mods/ToolkitTest/RetargetClone.uasset",
+        "Marvel/Content/Mods/ToolkitTest/RetargetRenamed.uasset",
         "Marvel/Content/Mods/X/DA_Thing.uasset",
         "Marvel/Plugins/MarvelGAS/Content/Mods/X/DA_Thing.uasset",
     ];
@@ -6377,6 +6578,133 @@ mod game_data_tests {
                 let _ = fs::remove_file(pak.with_extension(extension));
             }
         }
+    }
+
+    /// Renaming a package a mod added, or an export in it, points the mod's other packages that name
+    /// it at the new path: here a table whose soft path names the renamed asset.
+    #[test]
+    fn a_rename_in_a_mod_is_followed_by_the_mod_s_other_packages() {
+        let (Some(titles), Some(strings)) = (Fixture::open(TITLES), Fixture::open(STRINGS)) else {
+            return;
+        };
+        let scratch = ScratchMod {
+            root: titles.root.clone(),
+            name: "RivalsToolkitRetargetProbe",
+        };
+        drop(ScratchMod {
+            root: titles.root.clone(),
+            name: scratch.name,
+        });
+        const CLONE: &str = "/Game/Mods/ToolkitTest/RetargetClone";
+        const RENAMED: &str = "/Game/Mods/ToolkitTest/RetargetRenamed";
+        let save = |request: AssetEditRequest<'_>, options: SaveOptions| match save_edits(
+            &request,
+            Some(&titles.schema),
+            &options,
+        )
+        .expect("save")
+        {
+            SaveOutcome::Written { warnings, .. } => warnings,
+            SaveOutcome::HoldsCopy { pak } => panic!("{pak} already holds it"),
+        };
+        save(
+            AssetEditRequest {
+                mod_name: scratch.name,
+                ..titles.request_changes(save_as(CLONE))
+            },
+            SaveOptions::default(),
+        );
+        let before = strings.parse();
+        let field = field_where(&before, "is a stored soft object path", |f| {
+            matches!(&f.value, PropertyValue::SoftObject { path } if !path.is_empty()) && stored(f)
+        });
+        save(
+            AssetEditRequest {
+                mod_name: scratch.name,
+                ..strings.request(vec![edit_of(
+                    &field,
+                    EditOp::Set {
+                        text: format!("{CLONE}.RetargetClone"),
+                    },
+                )])
+            },
+            SaveOptions::default(),
+        );
+
+        let utoc = scratch.container();
+        let container = utoc.to_string_lossy().into_owned();
+        let outcome = rename_mod_package(
+            &AssetEditRequest {
+                game_root: &titles.root,
+                container: &container,
+                entry: "Marvel/Content/Mods/ToolkitTest/RetargetClone.uasset",
+                kind: AssetSource::Utoc,
+                mod_name: scratch.name,
+                changes: save_as(RENAMED),
+            },
+            Some(&titles.schema),
+            &SaveOptions::default(),
+        )
+        .expect("rename");
+        let SaveOutcome::Written { warnings, .. } = outcome else {
+            panic!("the rename was not written");
+        };
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("pointed 1 other")),
+            "{warnings:?}"
+        );
+        let soft_paths = |parsed: &rivals_uasset::ParsedPackage| -> Vec<String> {
+            table_of(parsed)
+                .rows
+                .iter()
+                .flat_map(|row| &row.fields)
+                .filter_map(|f| match &f.value {
+                    PropertyValue::SoftObject { path } if path.contains("Retarget") => {
+                        Some(path.clone())
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let followed = read_back(&strings, &utoc);
+        assert_eq!(
+            soft_paths(&followed),
+            [format!("{RENAMED}.RetargetRenamed")]
+        );
+
+        // An export renamed in the mod's copy is followed the same way.
+        let renamed_entry = "Marvel/Content/Mods/ToolkitTest/RetargetRenamed.uasset";
+        let request = AssetEditRequest {
+            game_root: &titles.root,
+            container: &container,
+            entry: renamed_entry,
+            kind: AssetSource::Utoc,
+            mod_name: scratch.name,
+            changes: PackageEdits {
+                exports: vec![rivals_uasset::ExportEdit::Rename {
+                    export: 0,
+                    name: "RetargetObject".into(),
+                }],
+                ..Default::default()
+            },
+        };
+        let warnings = save(
+            request,
+            SaveOptions {
+                replace: true,
+                ..Default::default()
+            },
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("pointed 1 other")),
+            "{warnings:?}"
+        );
+        let followed = read_back(&strings, &utoc);
+        assert_eq!(soft_paths(&followed), [format!("{RENAMED}.RetargetObject")]);
     }
 
     /// A material's shader maps are listed in its container's header, not in the package, so the

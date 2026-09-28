@@ -5509,6 +5509,55 @@ pub fn verify_identity(
     Ok(())
 }
 
+/// A package pointed at renamed paths reads as it did but for them: its name, its exports and their
+/// values stay, and each import reads at its new path, or at its old one where it moved under
+/// another outer and is retargeted after.
+pub fn verify_references(
+    before: &ParsedPackage,
+    after: &ParsedPackage,
+    rename: &crate::identity::PathRename,
+) -> Result<(), String> {
+    check_header_faults(before, after, false)?;
+    if after.info.package_name != before.info.package_name {
+        return Err(format!(
+            "{} reads as {} after pointing it at renamed paths",
+            before.info.package_name, after.info.package_name
+        ));
+    }
+    if before.imports.len() != after.imports.len() || before.exports.len() != after.exports.len() {
+        return Err("the import or export table changed length while following a rename".into());
+    }
+    for (was, is) in before.imports.iter().zip(&after.imports) {
+        let wanted = rename.apply(&was.path);
+        if is.path != was.path && Some(&is.path) != wanted.as_ref() {
+            return Err(format!(
+                "import {} read {} and now reads {}",
+                was.index, was.path, is.path
+            ));
+        }
+    }
+    let excuses = Excuses {
+        renames: rename.pairs().to_vec(),
+        by_name: !before.info.unversioned_properties,
+        ..Default::default()
+    };
+    for (was, is) in before.exports.iter().zip(&after.exports) {
+        if was.path != is.path || status_name(was) != status_name(is) {
+            return Err(format!(
+                "{} reads as {} ({}) rather than {} ({})",
+                was.path,
+                is.path,
+                status_name(is),
+                was.path,
+                status_name(was)
+            ));
+        }
+        same_entries(&was.properties, &is.properties, &[], &excuses, was.index)?;
+        same_entries(&was.defaults, &is.defaults, &[], &excuses, was.index)?;
+    }
+    Ok(())
+}
+
 impl Excuses {
     fn renamed(&self, text: &str) -> String {
         crate::identity::rename_within(&self.renames, text)

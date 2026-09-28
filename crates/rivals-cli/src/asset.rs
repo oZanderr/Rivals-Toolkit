@@ -33,6 +33,8 @@ pub struct Request<'a> {
     pub save_as: Option<&'a str>,
     /// With `save_as`, keep the names of the objects named after the package.
     pub keep_object_names: bool,
+    /// Leave the mod's other packages naming what a rename or a move changes.
+    pub keep_referencers: bool,
 }
 
 fn source_of(container: &str) -> AssetSource {
@@ -372,7 +374,10 @@ pub fn rename_package(request: &Request<'_>, to: &str) -> Result<String, String>
             changes,
         ),
         schema.as_deref(),
-        &asset_edit::SaveOptions::default(),
+        &asset_edit::SaveOptions {
+            keep_referencers: request.keep_referencers,
+            ..Default::default()
+        },
     )? {
         asset_edit::SaveOutcome::Written {
             message, warnings, ..
@@ -639,6 +644,7 @@ fn write_edits(
             replace,
             layer: request.layer,
             target: request.target,
+            keep_referencers: request.keep_referencers,
             ..Default::default()
         },
     )? {
@@ -1688,6 +1694,7 @@ pub fn copy_export(
             replace,
             layer: request.layer,
             target: request.target,
+            keep_referencers: request.keep_referencers,
             ..Default::default()
         },
     )? {

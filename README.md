@@ -166,6 +166,11 @@ not follow keep the old path, and the save says which. `asset save-as` writes a 
 change, and `asset rename-package` moves a package a mod added to another path inside that mod. A
 level cannot be saved under another path, since its package name is written into its world.
 
+Renaming or moving a package or an export inside a mod also points the mod's other packages at the
+new path: the imports that name it are renamed in place, so a class stays the class it was, and the
+soft paths and strings follow. Packages outside the mod are only listed. `--keep-referencers`
+leaves the mod's other packages as they are.
+
 `asset add-export` adds an object of a class, under an export or at the top of the package, storing
 nothing so it takes every value from its class; its values are set with `asset set` afterwards. Only
 a class whose objects are a property block and nothing more can be added this way: an actor, a

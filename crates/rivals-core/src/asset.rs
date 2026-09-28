@@ -280,6 +280,23 @@ pub fn game_entry(game_root: &str, package_name: &str, disk_path: &Path) -> Resu
 /// The mount-relative path a package named `package_name` is saved under: where the game ships it
 /// when it does, else under its mount's content folder. A plugin's mount is placed by finding any
 /// package the game ships under it.
+/// The package name a container entry holds, such as `/Game/Mods/Thing` for
+/// `Marvel/Content/Mods/Thing.uasset`: `/Game` for the project's content, `/Engine` for the
+/// engine's, and a plugin's own mount for the content inside it.
+pub fn package_name_of_entry(entry: &str) -> Option<String> {
+    let entry = entry.replace('\\', "/");
+    let stem = entry
+        .strip_suffix(".uasset")
+        .or_else(|| entry.strip_suffix(".umap"))?;
+    let (before, rest) = stem.split_once("/Content/")?;
+    let mount = match before.rsplit('/').next()? {
+        "Marvel" if !before.contains("/Plugins/") => "Game",
+        "Engine" if !before.contains("/Plugins/") => "Engine",
+        plugin => plugin,
+    };
+    Some(format!("/{mount}/{rest}"))
+}
+
 pub fn entry_for_package(game_root: &str, package_name: &str) -> Result<String, String> {
     let store = open_base_game_paks(&crate::paths::paks_dir(game_root), "").ok();
     if let Some(path) = store
