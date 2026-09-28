@@ -36,9 +36,10 @@ mod value;
 mod write;
 
 pub use component::{
-    AddComponent, ChangedList, ComponentPlan, ComponentRemoval, ListContext, ListEntry, ListScope,
-    NodeParent, RemoveComponent, component_removal_wiring, component_wiring, plan_component,
-    plan_component_removal, verify_component, verify_component_removal,
+    AddComponent, ChangedList, ComponentPlan, ComponentRemoval, InheritedComponent, ListContext,
+    ListEntry, ListScope, NodeParent, RemoveComponent, component_removal_wiring, component_wiring,
+    inherited_component_wiring, plan_component, plan_component_removal, plan_inherited_component,
+    verify_component, verify_component_removal, verify_inherited_component,
 };
 pub use copy::{CopiedExport, CopyExport, CopyPlan, CopySource, plan_copy};
 pub use datatable::{DataTable, DataTableLayout, DataTableRow, RowSpan};

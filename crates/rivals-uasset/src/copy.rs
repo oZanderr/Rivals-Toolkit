@@ -126,12 +126,20 @@ pub fn plan_copy(
                 .push(format!("{name} is not a plain object name"));
         }
         let outer = crate::export_edit::outer_index(request.into_outer);
+        // A class owns the objects it is built from, such as a Blueprint's component templates, so
+        // one of those may go under a class as it sat under one where it came from.
+        let owned_by_class = usize::try_from(root.outer_index - 1)
+            .ok()
+            .and_then(|at| source.parsed.exports.get(at))
+            .is_some_and(|held| is_type_like(&held.class_name));
         if let Some(into) = request.into_outer {
             match dest.exports.get(into as usize) {
-                Some(held) if is_type_like(&held.class_name) => plan.blockers.push(format!(
-                    "{} is a {}, which does not own objects",
-                    held.path, held.class_name
-                )),
+                Some(held) if is_type_like(&held.class_name) && !owned_by_class => {
+                    plan.blockers.push(format!(
+                        "{} is a {}, which does not own objects",
+                        held.path, held.class_name
+                    ))
+                }
                 Some(_) => {}
                 None => plan.blockers.push(format!(
                     "the destination has no export {into} to put the copy under"

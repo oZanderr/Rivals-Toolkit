@@ -175,7 +175,10 @@ object of an abstract class, so pick a concrete one.
 
 `asset add-component` adds a component to a Blueprint by copying one its construction script
 already builds: `--node` is the `SCS_Node` export, and the copy gets its own template, variable name
-and guid, and hangs beside the original. It appears on actors the game spawns from the Blueprint;
+and guid, and hangs beside the original; `--with-children` copies the components under it too, each
+under the next free name after its own. `--from-parent VARIABLE` copies a component the parent
+Blueprint adds instead, as one of this Blueprint's own attached where the original is, with the
+parent's values rather than this Blueprint's overrides of them. It appears on actors the game spawns from the Blueprint;
 actors already placed in a map keep the components they were saved with. The class gains no
 variable for it, which UE only notes. Whenever a save sets a property on a component template, the
 property joins its node's changed property list, since a cooked Blueprint copies only the listed
@@ -222,6 +225,7 @@ rivals-cli asset names   --container ... --entry ... --compact --mod-name MyMod 
 rivals-cli asset add-export --container ... --entry ... --class /Script/Module.Class --outer 0 --name MyThing --mod-name MyMod
 rivals-cli asset add-component --container ... --entry ... --node 5 --name StaticMesh2 --mod-name MyMod
 rivals-cli asset remove-component --container ... --entry ... --node 18 --mod-name MyMod
+rivals-cli asset add-component --container ... --entry ... --from-parent StaticMesh --name StaticMeshCopy --mod-name MyMod
 rivals-cli asset save-as --container ... --entry ... --to /Game/Mods/MyThing/DA_Copy --mod-name MyMod
 rivals-cli asset rename-package --container ~mods/MyMod_9999999_P.utoc --entry ... --to /Game/Mods/MyThing/DA_New
 rivals-cli asset repair  --container MyMod_9999999_P.utoc --dry-run                   # headers the game reads past

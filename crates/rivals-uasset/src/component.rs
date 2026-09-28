@@ -15,11 +15,325 @@ use crate::package::{ParsedExport, ParsedPackage};
 use crate::value::{PropertyEntry, PropertyValue};
 
 /// A component added by duplicating the one construction script node `node` builds, under the
-/// variable name `name`.
+/// variable name `name`, and with `with_children` the components under it too.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AddComponent {
     pub node: u32,
     pub name: String,
+    #[serde(default)]
+    pub with_children: bool,
+    /// Copy the component of this variable name that the parent Blueprint adds, rather than one of
+    /// this Blueprint's own; `node` is then not read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_parent: Option<String>,
+}
+
+/// What copying a parent Blueprint's component into this one takes: the parent's node and template,
+/// and where the new node goes and what it is called.
+#[derive(Debug, Clone)]
+pub struct InheritedComponent {
+    pub source_node: u32,
+    pub source_template: u32,
+    pub script: u32,
+    pub class: u32,
+    pub node_name: String,
+    pub template_name: String,
+    pub variable: String,
+    /// The component class, by object path.
+    pub component_class: String,
+    /// The component of the parent's the copy attaches to, by variable name, the class that owns it
+    /// and whether that class is native.
+    pub attach_to: String,
+    pub attach_owner: String,
+    pub attach_native: bool,
+    pub socket: Option<String>,
+}
+
+/// Plans copying the component the parent Blueprint `parent` adds under the variable name `from`
+/// into `child`, as a component of the child's own named `name` and attached where the original
+/// is. Refused for the parent's scene root, and for a name the child or its parent already uses.
+pub fn plan_inherited_component(
+    child: &ParsedPackage,
+    parent: &ParsedPackage,
+    from: &str,
+    name: &str,
+) -> Result<InheritedComponent, String> {
+    let name = name.trim();
+    let identifier = name
+        .chars()
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if !identifier {
+        return Err(format!(
+            "{name:?} is not a variable name: letters, digits and underscores, not starting with a digit"
+        ));
+    }
+    let script_of = |package: &ParsedPackage| {
+        package
+            .exports
+            .iter()
+            .find(|export| export.class_name == "SimpleConstructionScript")
+            .map(|export| export.index)
+    };
+    let script = script_of(child)
+        .ok_or("this Blueprint has no construction script to add a component to")?;
+    let class = export_of(child.exports[script as usize].outer_index)
+        .ok_or("the construction script sits in no class")?;
+    let parent_script = script_of(parent).ok_or("the parent Blueprint adds no components")?;
+    let parent_nodes = nodes_of(parent, parent_script);
+    let source = parent_nodes
+        .iter()
+        .find(|node| {
+            name_in(&node.properties, "InternalVariableName")
+                .is_some_and(|variable| variable.eq_ignore_ascii_case(from))
+        })
+        .ok_or_else(|| format!("the parent Blueprint adds no component named {from}"))?;
+    let source_template = object_in(&source.properties, "ComponentTemplate")
+        .and_then(export_of)
+        .ok_or_else(|| format!("{from} builds no template in the parent's package"))?;
+    let template = &parent.exports[source_template as usize];
+    let component_class = parent
+        .imports
+        .iter()
+        .find(|import| import.index == template.class_index)
+        .map(|import| import.path.clone())
+        .or_else(|| {
+            export_of(template.class_index)
+                .and_then(|class| parent.exports.get(class as usize))
+                .map(|class| class.path.clone())
+        })
+        .ok_or_else(|| format!("{from}'s template has no class"))?;
+
+    // Where the original hangs in the parent: under another of its components, or at the root
+    // under the scene root, or, where it attaches to a component the parent inherits, there.
+    let wanted = source.index as i32 + 1;
+    let parent_class = export_of(parent.exports[parent_script as usize].outer_index)
+        .and_then(|class| parent.exports.get(class as usize))
+        .map(|class| class.object_name.clone())
+        .unwrap_or_default();
+    let variable_of = |at: i32| {
+        export_of(at)
+            .and_then(|node| parent.exports.get(node as usize))
+            .and_then(|node| name_in(&node.properties, "InternalVariableName"))
+            .map(str::to_string)
+    };
+    let script_export = &parent.exports[parent_script as usize];
+    let scene_root = object_in(&script_export.properties, "DefaultSceneRootNode").or_else(|| {
+        objects_in(&script_export.properties, "RootNodes")
+            .first()
+            .copied()
+    });
+    let (attach_to, attach_owner, attach_native) = if let Some(holder) = parent_nodes
+        .iter()
+        .find(|node| objects_in(&node.properties, "ChildNodes").contains(&wanted))
+    {
+        (
+            variable_of(holder.index as i32 + 1).unwrap_or_default(),
+            parent_class.clone(),
+            false,
+        )
+    } else if let Some(inherited) = name_in(&source.properties, "ParentComponentOrVariableName")
+        .filter(|inherited| !inherited.is_empty() && *inherited != "None")
+    {
+        (
+            inherited.to_string(),
+            name_in(&source.properties, "ParentComponentOwnerClassName")
+                .unwrap_or_default()
+                .to_string(),
+            matches!(
+                entry(&source.properties, "bIsParentComponentNative").map(|entry| &entry.value),
+                Some(PropertyValue::Bool { value: true })
+            ),
+        )
+    } else if scene_root == Some(wanted) {
+        return Err(format!(
+            "{from} is the parent's scene root, which every other component hangs from"
+        ));
+    } else {
+        (
+            scene_root.and_then(variable_of).unwrap_or_default(),
+            parent_class.clone(),
+            false,
+        )
+    };
+    if attach_to.is_empty() {
+        return Err(format!("where {from} hangs in the parent is not known"));
+    }
+
+    let taken = |package: &ParsedPackage, script: u32| {
+        nodes_of(package, script).iter().any(|node| {
+            name_in(&node.properties, "InternalVariableName")
+                .is_some_and(|variable| variable.eq_ignore_ascii_case(name))
+        }) || package.exports.iter().any(|export| {
+            export.struct_definition.as_ref().is_some_and(|definition| {
+                definition
+                    .properties
+                    .iter()
+                    .any(|property| property.name.eq_ignore_ascii_case(name))
+            })
+        })
+    };
+    if taken(child, script) || taken(parent, parent_script) {
+        return Err(format!(
+            "the Blueprint or its parent already has a component or variable named {name}"
+        ));
+    }
+    let template_name = format!("{name}_GEN_VARIABLE");
+    if child
+        .exports
+        .iter()
+        .any(|export| export.object_name.eq_ignore_ascii_case(&template_name))
+    {
+        return Err(format!(
+            "the package already holds an object named {template_name}"
+        ));
+    }
+    let next = nodes_of(child, script)
+        .iter()
+        .filter_map(|other| {
+            other
+                .object_name
+                .strip_prefix("SCS_Node_")?
+                .parse::<u32>()
+                .ok()
+        })
+        .max()
+        .map_or(0, |highest| highest + 1);
+    Ok(InheritedComponent {
+        source_node: source.index,
+        source_template,
+        script,
+        class,
+        node_name: format!("SCS_Node_{next}"),
+        template_name,
+        variable: name.to_string(),
+        component_class,
+        attach_to,
+        attach_owner,
+        attach_native,
+        socket: name_in(&source.properties, "AttachToName")
+            .filter(|socket| !socket.is_empty() && *socket != "None")
+            .map(str::to_string),
+    })
+}
+
+/// The edits that make the new node, added empty under the child's construction script, build the
+/// copied template as a component of the child's own, attached where the original is, and hang it
+/// among the script's roots. The node's changed property list is filled on its own after these.
+pub fn inherited_component_wiring(
+    parsed: &ParsedPackage,
+    plan: &InheritedComponent,
+) -> Result<PackageEdits, String> {
+    let node = copy_named(parsed, &plan.node_name)?;
+    let template = copy_named(parsed, &plan.template_name)?;
+    let field = |export: &ParsedExport, name: &str| {
+        entry(&export.properties, name)
+            .cloned()
+            .ok_or_else(|| format!("{} has no {name}", export.object_name))
+    };
+    let mut values = Vec::new();
+    let mut sets = Vec::new();
+    let mut set = |name: &str, text: String| -> Result<(), String> {
+        values.push(value_edit(&field(node, name)?, EditOp::Set { text })?);
+        Ok(())
+    };
+    set("ComponentClass", plan.component_class.clone())?;
+    set("ComponentTemplate", template.path.clone())?;
+    set("InternalVariableName", plan.variable.clone())?;
+    set(
+        "VariableGuid",
+        variable_guid(parsed, &plan.variable, &plan.template_name),
+    )?;
+    set("ParentComponentOrVariableName", plan.attach_to.clone())?;
+    set("ParentComponentOwnerClassName", plan.attach_owner.clone())?;
+    if plan.attach_native {
+        set("bIsParentComponentNative", "true".into())?;
+    }
+    if let Some(socket) = &plan.socket {
+        set("AttachToName", socket.clone())?;
+    }
+    let data = field(node, "CookedComponentInstancingData")?;
+    let (offset, _) = data
+        .span
+        .ok_or("the node's instancing data has no recorded position")?;
+    sets.push(FieldSet {
+        offset,
+        expect_name: data.name.clone(),
+        expect_element: data.element,
+        path: vec!["bHasValidCookedData".into()],
+        text: "true".into(),
+    });
+    let script = &parsed.exports[plan.script as usize];
+    append_object(
+        &field(script, "AllNodes")?,
+        &node.path,
+        &mut values,
+        &mut sets,
+    )?;
+    append_object(
+        &field(script, "RootNodes")?,
+        &node.path,
+        &mut values,
+        &mut sets,
+    )?;
+    Ok(PackageEdits {
+        values,
+        field_sets: sets,
+        ..Default::default()
+    })
+}
+
+/// The copied component reads as one of the child's own: its node builds the copied template under
+/// its variable name, attached where the original is, among the script's roots.
+pub fn verify_inherited_component(
+    parsed: &ParsedPackage,
+    plan: &InheritedComponent,
+) -> Result<(), String> {
+    let node = copy_named(parsed, &plan.node_name)?;
+    let template = copy_named(parsed, &plan.template_name)?;
+    let index = node.index as i32 + 1;
+    let script = &parsed.exports[plan.script as usize];
+    let problem = if name_in(&node.properties, "InternalVariableName")
+        != Some(plan.variable.as_str())
+    {
+        Some(format!(
+            "{} is not named {}",
+            node.object_name, plan.variable
+        ))
+    } else if object_in(&node.properties, "ComponentTemplate") != Some(template.index as i32 + 1) {
+        Some(format!(
+            "{} does not build {}",
+            node.object_name, template.object_name
+        ))
+    } else if name_in(&node.properties, "ParentComponentOrVariableName")
+        != Some(plan.attach_to.as_str())
+    {
+        Some(format!(
+            "{} does not attach to {}",
+            node.object_name, plan.attach_to
+        ))
+    } else if !objects_in(&script.properties, "RootNodes").contains(&index) {
+        Some(format!(
+            "{} is not among the script's roots",
+            node.object_name
+        ))
+    } else if !objects_in(&script.properties, "AllNodes").contains(&index) {
+        Some(format!("{} is not in AllNodes", node.object_name))
+    } else {
+        None
+    };
+    problem.map_or(Ok(()), Err)
+}
+
+/// A component under the duplicated one, copied with it.
+#[derive(Debug, Clone)]
+pub struct CopiedNode {
+    pub node: u32,
+    pub template: u32,
+    pub node_name: String,
+    pub template_name: String,
+    pub variable: String,
 }
 
 /// Where a node hangs in the construction script's tree.
@@ -41,6 +355,8 @@ pub struct ComponentPlan {
     pub template_name: String,
     pub variable: String,
     pub parent: NodeParent,
+    /// The components under the duplicated one, copied with it, depth first.
+    pub descendants: Vec<CopiedNode>,
     pub(crate) plans: Vec<DuplicatePlan>,
 }
 
@@ -148,15 +464,17 @@ pub fn plan_component(parsed: &ParsedPackage, add: &AddComponent) -> Result<Comp
     }
     let class = export_of(parsed.exports[script as usize].outer_index)
         .and_then(|class| parsed.exports.get(class as usize));
-    if class
+    let class_variables: Vec<String> = class
         .and_then(|class| class.struct_definition.as_ref())
-        .is_some_and(|definition| {
+        .map(|definition| {
             definition
                 .properties
                 .iter()
-                .any(|property| property.name.eq_ignore_ascii_case(name))
+                .map(|property| property.name.to_ascii_lowercase())
+                .collect()
         })
-    {
+        .unwrap_or_default();
+    if class_variables.contains(&name.to_ascii_lowercase()) {
         return Err(format!("the Blueprint already has a variable named {name}"));
     }
     let next = nodes
@@ -171,6 +489,52 @@ pub fn plan_component(parsed: &ParsedPackage, add: &AddComponent) -> Result<Comp
         .max()
         .map_or(0, |highest| highest + 1);
     let node_name = format!("SCS_Node_{next}");
+    // The components under it, each given the next free name after its own, as UE's editor names a
+    // duplicate: `StaticMesh1`, `StaticMesh2`.
+    let mut taken: Vec<String> = nodes
+        .iter()
+        .filter_map(|other| name_in(&other.properties, "InternalVariableName"))
+        .map(str::to_ascii_lowercase)
+        .chain(class_variables)
+        .collect();
+    taken.push(name.to_ascii_lowercase());
+    let objects: Vec<String> = parsed
+        .exports
+        .iter()
+        .map(|export| export.object_name.to_ascii_lowercase())
+        .collect();
+    let mut descendants = Vec::new();
+    if add.with_children {
+        for (offset, child) in subtree(parsed, add.node).into_iter().enumerate() {
+            let export = &parsed.exports[child as usize];
+            let child_template = object_in(&export.properties, "ComponentTemplate")
+                .and_then(export_of)
+                .ok_or_else(|| {
+                    format!(
+                        "{} builds no component template of this package",
+                        export.object_name
+                    )
+                })?;
+            let own = name_in(&export.properties, "InternalVariableName").unwrap_or("Component");
+            let base = own.trim_end_matches(|c: char| c.is_ascii_digit());
+            let base = if base.is_empty() { own } else { base };
+            let variable = (1u32..)
+                .map(|n| format!("{base}{n}"))
+                .find(|candidate| {
+                    let lower = candidate.to_ascii_lowercase();
+                    !taken.contains(&lower) && !objects.contains(&format!("{lower}_gen_variable"))
+                })
+                .unwrap_or_else(|| format!("{base}Copy"));
+            taken.push(variable.to_ascii_lowercase());
+            descendants.push(CopiedNode {
+                node: child,
+                template: child_template,
+                node_name: format!("SCS_Node_{}", next + 1 + offset as u32),
+                template_name: format!("{variable}_GEN_VARIABLE"),
+                variable,
+            });
+        }
+    }
     let wanted = add.node as i32 + 1;
     let parent = nodes
         .iter()
@@ -187,21 +551,31 @@ pub fn plan_component(parsed: &ParsedPackage, add: &AddComponent) -> Result<Comp
                 node.object_name
             )
         })?;
-    let plans = crate::plan_duplication(
-        parsed,
-        &[
-            DuplicateExport {
-                export: add.node,
-                name: node_name.clone(),
-                into_level: None,
-            },
-            DuplicateExport {
-                export: template,
-                name: template_name.clone(),
-                into_level: None,
-            },
-        ],
-    )?;
+    let mut roots = vec![
+        DuplicateExport {
+            export: add.node,
+            name: node_name.clone(),
+            into_level: None,
+        },
+        DuplicateExport {
+            export: template,
+            name: template_name.clone(),
+            into_level: None,
+        },
+    ];
+    for copied in &descendants {
+        roots.push(DuplicateExport {
+            export: copied.node,
+            name: copied.node_name.clone(),
+            into_level: None,
+        });
+        roots.push(DuplicateExport {
+            export: copied.template,
+            name: copied.template_name.clone(),
+            into_level: None,
+        });
+    }
+    let plans = crate::plan_duplication(parsed, &roots)?;
     Ok(ComponentPlan {
         node: add.node,
         template,
@@ -210,8 +584,18 @@ pub fn plan_component(parsed: &ParsedPackage, add: &AddComponent) -> Result<Comp
         template_name,
         variable: name.to_string(),
         parent,
+        descendants,
         plans,
     })
+}
+
+/// The copy of the object named `name` in a package the copy has landed in.
+fn copy_named<'a>(parsed: &'a ParsedPackage, name: &str) -> Result<&'a ParsedExport, String> {
+    parsed
+        .exports
+        .iter()
+        .find(|export| export.object_name == name)
+        .ok_or_else(|| format!("the copy {name} is not in the package"))
 }
 
 /// The copies of the node and the template in a package the copy has landed in.
@@ -219,24 +603,17 @@ fn copies<'a>(
     parsed: &'a ParsedPackage,
     plan: &ComponentPlan,
 ) -> Result<(&'a ParsedExport, &'a ParsedExport), String> {
-    let find = |name: &str| {
-        parsed
-            .exports
-            .iter()
-            .find(|export| export.object_name == name)
-            .ok_or_else(|| format!("the copy {name} is not in the package"))
-    };
-    Ok((find(&plan.node_name)?, find(&plan.template_name)?))
+    Ok((
+        copy_named(parsed, &plan.node_name)?,
+        copy_named(parsed, &plan.template_name)?,
+    ))
 }
 
-/// A guid for the new variable, made from the package, the name and the original's guid, so it is
+/// A guid for a new variable, made from the package, the name and the original's guid, so it is
 /// the same each time the same component is added and differs from every other.
-fn variable_guid(parsed: &ParsedPackage, plan: &ComponentPlan, original: &str) -> String {
+fn variable_guid(parsed: &ParsedPackage, variable: &str, original: &str) -> String {
     let fnv = |seed: u64| {
-        let text = format!(
-            "{}\u{1}{}\u{1}{original}",
-            parsed.info.package_name, plan.variable
-        );
+        let text = format!("{}\u{1}{variable}\u{1}{original}", parsed.info.package_name);
         text.bytes().fold(seed, |hash, byte| {
             (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01B3)
         })
@@ -305,35 +682,59 @@ pub fn component_wiring(
             .cloned()
             .ok_or_else(|| format!("{} has no {name}", export.object_name))
     };
-    values.push(value_edit(
-        &field(node, "InternalVariableName")?,
-        EditOp::Set {
-            text: plan.variable.clone(),
-        },
-    )?);
-    let guid = field(node, "VariableGuid")?;
-    let original = match &guid.value {
-        PropertyValue::Str { value } => value.clone(),
-        _ => String::new(),
+    let mut name_it = |copy: &ParsedExport, variable: &str| -> Result<(), String> {
+        values.push(value_edit(
+            &field(copy, "InternalVariableName")?,
+            EditOp::Set {
+                text: variable.to_string(),
+            },
+        )?);
+        let guid = field(copy, "VariableGuid")?;
+        let original = match &guid.value {
+            PropertyValue::Str { value } => value.clone(),
+            _ => String::new(),
+        };
+        values.push(value_edit(
+            &guid,
+            EditOp::Set {
+                text: variable_guid(parsed, variable, &original),
+            },
+        )?);
+        Ok(())
     };
-    values.push(value_edit(
-        &guid,
-        EditOp::Set {
-            text: variable_guid(parsed, plan, &original),
-        },
-    )?);
-    if let Some(children) = entry(&node.properties, "ChildNodes")
+    name_it(node, &plan.variable)?;
+    let mut copied = vec![node];
+    for descendant in &plan.descendants {
+        let copy = copy_named(parsed, &descendant.node_name)?;
+        name_it(copy, &descendant.variable)?;
+        copied.push(copy);
+    }
+    if plan.descendants.is_empty()
+        && let Some(children) = entry(&node.properties, "ChildNodes")
         && !objects_in(&node.properties, "ChildNodes").is_empty()
     {
         values.push(value_edit(children, EditOp::Unset)?);
     }
     let script = &parsed.exports[plan.script as usize];
-    append_object(
-        &field(script, "AllNodes")?,
-        &node.path,
-        &mut values,
-        &mut sets,
-    )?;
+    let all = field(script, "AllNodes")?;
+    let count = objects_in(&script.properties, "AllNodes").len();
+    for (offset, copy) in copied.iter().enumerate() {
+        let edit = value_edit(
+            &all,
+            EditOp::Insert {
+                index: (count + offset) as u32,
+                key: None,
+            },
+        )?;
+        sets.push(FieldSet {
+            offset: edit.offset,
+            expect_name: edit.expect_name.clone(),
+            expect_element: edit.expect_element,
+            path: vec![format!("[{}]", count + offset)],
+            text: copy.path.clone(),
+        });
+        values.push(edit);
+    }
     let (holder, list) = match plan.parent {
         NodeParent::Root => (script, "RootNodes"),
         NodeParent::Node(parent) => (&parsed.exports[parent as usize], "ChildNodes"),
@@ -344,6 +745,47 @@ pub fn component_wiring(
         field_sets: sets,
         ..Default::default()
     })
+}
+
+/// What is wrong with the copies of the components under the duplicated one, if anything: each is
+/// named, builds its own template, is in `AllNodes`, and hangs under the copy of its parent.
+fn descendant_problem(parsed: &ParsedPackage, plan: &ComponentPlan) -> Option<String> {
+    let all = objects_in(&parsed.exports[plan.script as usize].properties, "AllNodes");
+    for descendant in &plan.descendants {
+        let (Ok(node), Ok(template)) = (
+            copy_named(parsed, &descendant.node_name),
+            copy_named(parsed, &descendant.template_name),
+        ) else {
+            return Some(format!(
+                "the copy of {} is not in the package",
+                descendant.variable
+            ));
+        };
+        let index = node.index as i32 + 1;
+        if name_in(&node.properties, "InternalVariableName") != Some(descendant.variable.as_str()) {
+            return Some(format!(
+                "{} is not named {}",
+                node.object_name, descendant.variable
+            ));
+        }
+        if object_in(&node.properties, "ComponentTemplate") != Some(template.index as i32 + 1) {
+            return Some(format!(
+                "{} does not build {}",
+                node.object_name, template.object_name
+            ));
+        }
+        if !all.contains(&index) {
+            return Some(format!("{} is not in AllNodes", node.object_name));
+        }
+        let hung = parsed
+            .exports
+            .iter()
+            .any(|other| objects_in(&other.properties, "ChildNodes").contains(&index));
+        if !hung {
+            return Some(format!("{} hangs from nothing", node.object_name));
+        }
+    }
+    None
 }
 
 /// A component taken out of a Blueprint: the construction script node that builds it, and whether
@@ -644,12 +1086,15 @@ pub fn verify_component(parsed: &ParsedPackage, plan: &ComponentPlan) -> Result<
             "{} does not build {}",
             node.object_name, template.object_name
         ))
-    } else if !objects_in(&node.properties, "ChildNodes").is_empty() {
+    } else if plan.descendants.is_empty() && !objects_in(&node.properties, "ChildNodes").is_empty()
+    {
         Some(format!("{} kept the original's children", node.object_name))
     } else if !objects_in(&parsed.exports[plan.script as usize].properties, "AllNodes")
         .contains(&node_index)
     {
         Some(format!("{} is not in AllNodes", node.object_name))
+    } else if let Some(problem) = descendant_problem(parsed, plan) {
+        Some(problem)
     } else {
         let listed = match plan.parent {
             NodeParent::Root => objects_in(

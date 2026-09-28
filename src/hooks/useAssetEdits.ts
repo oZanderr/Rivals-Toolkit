@@ -450,7 +450,7 @@ interface EditList {
   compact_names?: boolean;
   repair_headers?: boolean;
   add_exports?: { class: string; outer?: number; name: string }[];
-  add_components?: { node: number; name: string }[];
+  add_components?: AddComponentEdit[];
   remove_components?: { node: number; with_children: boolean }[];
   save_as?: SaveAs;
   expect?: {
@@ -564,9 +564,18 @@ export interface Structural {
   /** Empty objects of a class to add. */
   addExports?: { class: string; outer?: number; name: string }[];
   /** Blueprint components to add by duplicating the one a construction script node builds. */
-  addComponents?: { node: number; name: string }[];
+  addComponents?: AddComponentEdit[];
   /** Blueprint components to take out, by the construction script node that builds each. */
   removeComponents?: { node: number; with_children: boolean }[];
+}
+
+/** A Blueprint component to add, by copying the one a construction script node builds or, with
+ *  `from_parent`, the one of that variable name the parent Blueprint adds. */
+export interface AddComponentEdit {
+  node: number;
+  name: string;
+  with_children?: boolean;
+  from_parent?: string;
 }
 
 /** A package name to save under instead of the asset's own. */

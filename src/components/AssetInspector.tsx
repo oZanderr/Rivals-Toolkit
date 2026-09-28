@@ -2928,6 +2928,7 @@ function PackageView({
   onAddObject,
   onAddComponent,
   onRemoveComponent,
+  onAddParentComponent,
 }: {
   pkg: ParsedPackage;
   edits: AssetEdits;
@@ -2952,6 +2953,7 @@ function PackageView({
   onAddObject: (outer: number | null) => void;
   onAddComponent: (node: number) => void;
   onRemoveComponent: (node: number) => void;
+  onAddParentComponent: () => void;
 }) {
   const adds = Object.entries(edits.importDrafts).filter(([key]) => key.startsWith("add:"));
   const payloadActions = (exp: ParsedExport): PayloadActions => {
@@ -3098,6 +3100,24 @@ function PackageView({
               <Plus size={12} /> Add object…
             </Button>
           </Tip>
+          {pkg.exports.some((exp) => exp.class_name === "SimpleConstructionScript") && (
+            <Tip
+              content={
+                lock ??
+                "Copy a component the parent Blueprint adds into this one, as a component of its own attached where the original is."
+              }
+            >
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-6 text-[11px]"
+                disabled={!!lock}
+                onClick={onAddParentComponent}
+              >
+                <Plus size={12} /> Add from parent…
+              </Button>
+            </Tip>
+          )}
           {clipboard && (
             <Tip
               content={
@@ -3379,6 +3399,9 @@ function AddComponentDialog({
     [pkg]
   );
   const [name, setName] = useState(`${original}2`);
+  const [withChildren, setWithChildren] = useState(false);
+  const children = pkg.exports[node].properties.find((entry) => entry.name === "ChildNodes")?.value;
+  const hasChildren = children?.kind === "array" && children.items.length > 0;
   const trimmed = name.trim();
   const valid = /^[A-Za-z_][A-Za-z0-9_]*$/.test(trimmed);
   const clash = taken.has(trimmed.toLowerCase());
@@ -3409,16 +3432,141 @@ function AddComponentDialog({
           </p>
         )}
         {clash && <p className="text-xs text-err">A component is already named {trimmed}.</p>}
+        {hasChildren && (
+          <label className="flex items-center gap-2 text-xs">
+            <Checkbox
+              checked={withChildren}
+              onCheckedChange={(checked) => setWithChildren(checked === true)}
+            />
+            Copy the components under it too, each under the next free name after its own
+          </label>
+        )}
         <AlertDialogFooter>
           <AlertDialogCancel>Cancel</AlertDialogCancel>
           <AlertDialogAction
             disabled={!valid || clash || !pak || edits.saving}
             onClick={() => {
               onClose();
-              void edits.save({ structural: { addComponents: [{ node, name: trimmed }] } });
+              void edits.save({
+                structural: {
+                  addComponents: [{ node, name: trimmed, with_children: withChildren }],
+                },
+              });
             }}
           >
             Duplicate
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+
+/** Asks which of the parent Blueprint's components to copy into this one, and under what variable
+ *  name. The copy attaches where the original is. */
+function ParentComponentDialog({
+  edits,
+  gamePath,
+  container,
+  entry,
+  onClose,
+}: {
+  edits: AssetEdits;
+  gamePath: string;
+  container: string;
+  entry: string;
+  onClose: () => void;
+}) {
+  const [components, setComponents] = useState<string[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [from, setFrom] = useState("");
+  const [name, setName] = useState("");
+  useEffect(() => {
+    let cancelled = false;
+    invoke<string[]>("parent_components", { gameRoot: gamePath, container, entry })
+      .then((found) => {
+        if (cancelled) return;
+        setComponents(found);
+        if (found.length > 0) {
+          setFrom(found[0]);
+          setName(`${found[0]}Copy`);
+        }
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) setError(String(e));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [gamePath, container, entry]);
+  const trimmed = name.trim();
+  const valid = /^[A-Za-z_][A-Za-z0-9_]*$/.test(trimmed);
+  const pak = previewContainerFilename(edits.modName, edits.saveTarget);
+  return (
+    <AlertDialog open onOpenChange={(open) => !open && onClose()}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Add a component from the parent</AlertDialogTitle>
+          <AlertDialogDescription>
+            Copies a component the parent Blueprint adds into this one as a component of its own,
+            template and all, attached where the original is. It takes the parent&apos;s values, not
+            this Blueprint&apos;s overrides of them.{" "}
+            {pak ? `Writes the result into ${pak}.` : "Name a mod to save into first."}
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        {error && <p className="text-xs text-err">{error}</p>}
+        {!error && !components && (
+          <p className="text-xs text-muted-foreground">Reading the parent…</p>
+        )}
+        {components && components.length === 0 && (
+          <p className="text-xs text-muted-foreground">The parent Blueprint adds no components.</p>
+        )}
+        {components && components.length > 0 && (
+          <>
+            <label className="flex flex-col gap-1 text-xs">
+              <span className="text-muted-foreground">Component</span>
+              <select
+                value={from}
+                onChange={(e) => {
+                  setFrom(e.target.value);
+                  setName(`${e.target.value}Copy`);
+                }}
+                className="h-8 rounded-md border border-input bg-transparent px-2 font-mono text-xs"
+              >
+                {components.map((component) => (
+                  <option key={component} value={component}>
+                    {component}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="flex flex-col gap-1 text-xs">
+              <span className="text-muted-foreground">Variable name</span>
+              <Input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                className="h-8 font-mono text-xs"
+              />
+            </label>
+            {!valid && (
+              <p className="text-xs text-muted-foreground">
+                Letters, digits and underscores, not starting with a digit.
+              </p>
+            )}
+          </>
+        )}
+        <AlertDialogFooter>
+          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <AlertDialogAction
+            disabled={!from || !valid || !pak || edits.saving}
+            onClick={() => {
+              onClose();
+              void edits.save({
+                structural: { addComponents: [{ node: 0, name: trimmed, from_parent: from }] },
+              });
+            }}
+          >
+            Add
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
@@ -6780,6 +6928,7 @@ export default function AssetInspector({
   const [addingObject, setAddingObject] = useState<{ outer: number | null } | null>(null);
   const [addingComponent, setAddingComponent] = useState<number | null>(null);
   const [removingComponent, setRemovingComponent] = useState<number | null>(null);
+  const [addingParentComponent, setAddingParentComponent] = useState(false);
   /// Progress of an import index build started from the removal dialog.
   const [indexing, setIndexing] = useState<{ current: number; total: number } | null>(null);
   /// Bumped after a save so the asset is read again from disk rather than shown from memory.
@@ -7753,6 +7902,7 @@ export default function AssetInspector({
                     onAddObject={(outer) => setAddingObject({ outer })}
                     onAddComponent={(node) => setAddingComponent(node)}
                     onRemoveComponent={(node) => setRemovingComponent(node)}
+                    onAddParentComponent={() => setAddingParentComponent(true)}
                   />
                 ) : active && effectiveView === "table" && active.data_table ? (
                   <DataTableGrid table={active.data_table} exportIndex={active.index} />
@@ -7934,6 +8084,16 @@ export default function AssetInspector({
               edits={edits}
               node={addingComponent}
               onClose={() => setAddingComponent(null)}
+            />
+          )}
+
+          {pkg && addingParentComponent && (
+            <ParentComponentDialog
+              edits={edits}
+              gamePath={gamePath}
+              container={container}
+              entry={entry}
+              onClose={() => setAddingParentComponent(false)}
             />
           )}
 

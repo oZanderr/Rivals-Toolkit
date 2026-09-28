@@ -165,6 +165,9 @@ fn edit_passes(
         );
     }
     if let Some(add) = changes.add_components.first() {
+        if add.from_parent.is_some() {
+            return inherited_component_pass(request, mappings, loaded, parsed, add);
+        }
         return component_pass(request, mappings, loaded, parsed, add);
     }
     if let Some(remove) = changes.remove_components.first() {
@@ -603,55 +606,273 @@ fn list_edits(
         if old == new {
             continue;
         }
-        let (offset, _) = list
-            .span
-            .ok_or("the changed property list has no recorded position")?;
-        let field_set = |at: usize, field: &str, text: String| rivals_uasset::FieldSet {
-            offset,
-            expect_name: list.name.clone(),
-            expect_element: list.element,
-            path: vec![format!("[{at}]"), field.to_string()],
-            text,
-        };
-        let container_edit = |op: EditOp| ValueEdit {
-            offset,
-            expect_name: list.name.clone(),
-            expect_element: list.element,
-            expect_kind: rivals_uasset::kind_of(&list.value),
-            op,
-        };
-        for (at, (was, now)) in old.iter().zip(&new).enumerate() {
-            if was.0 != now.0 {
-                out.field_sets
-                    .push(field_set(at, "PropertyName", now.0.clone()));
-            }
-            if was.1 != now.1 {
-                out.field_sets
-                    .push(field_set(at, "ArrayIndex", now.1.to_string()));
-            }
-            if !was.2.eq_ignore_ascii_case(&now.2) {
-                out.field_sets
-                    .push(field_set(at, "PropertyScope", now.2.clone()));
-            }
-        }
-        for at in new.len()..old.len() {
-            out.values
-                .push(container_edit(EditOp::Remove { index: at as u32 }));
-        }
-        for (at, now) in new.iter().enumerate().skip(old.len()) {
-            out.values.push(container_edit(EditOp::Insert {
-                index: at as u32,
-                key: None,
-            }));
+        list_diff(list, &old, &new, &mut out)?;
+    }
+    Ok((!out.is_empty()).then_some(out))
+}
+
+/// A list entry as it is written: the property's name, its element, and the path it is scoped to.
+type Listed = (String, u32, String);
+
+/// The edits that turn the changed property list `list`, holding `old`, into one holding `new`:
+/// entries changed in place where both have one, and the rest added or dropped at the end.
+fn list_diff(
+    list: &rivals_uasset::PropertyEntry,
+    old: &[Listed],
+    new: &[Listed],
+    out: &mut PackageEdits,
+) -> Result<(), String> {
+    let (offset, _) = list
+        .span
+        .ok_or("the changed property list has no recorded position")?;
+    let field_set = |at: usize, field: &str, text: String| rivals_uasset::FieldSet {
+        offset,
+        expect_name: list.name.clone(),
+        expect_element: list.element,
+        path: vec![format!("[{at}]"), field.to_string()],
+        text,
+    };
+    let container_edit = |op: EditOp| ValueEdit {
+        offset,
+        expect_name: list.name.clone(),
+        expect_element: list.element,
+        expect_kind: rivals_uasset::kind_of(&list.value),
+        op,
+    };
+    for (at, (was, now)) in old.iter().zip(new).enumerate() {
+        if was.0 != now.0 {
             out.field_sets
                 .push(field_set(at, "PropertyName", now.0.clone()));
+        }
+        if was.1 != now.1 {
             out.field_sets
                 .push(field_set(at, "ArrayIndex", now.1.to_string()));
+        }
+        if !was.2.eq_ignore_ascii_case(&now.2) {
             out.field_sets
                 .push(field_set(at, "PropertyScope", now.2.clone()));
         }
     }
-    Ok((!out.is_empty()).then_some(out))
+    for at in new.len()..old.len() {
+        out.values
+            .push(container_edit(EditOp::Remove { index: at as u32 }));
+    }
+    for (at, now) in new.iter().enumerate().skip(old.len()) {
+        out.values.push(container_edit(EditOp::Insert {
+            index: at as u32,
+            key: None,
+        }));
+        out.field_sets
+            .push(field_set(at, "PropertyName", now.0.clone()));
+        out.field_sets
+            .push(field_set(at, "ArrayIndex", now.1.to_string()));
+        out.field_sets
+            .push(field_set(at, "PropertyScope", now.2.clone()));
+    }
+    Ok(())
+}
+
+/// A package a stage of a save produced, with the sidecars the save started from where the stage
+/// left them as they were.
+fn staged(patched: &PatchedBundle, loaded: &FSerializedAssetBundle) -> FSerializedAssetBundle {
+    FSerializedAssetBundle {
+        asset_file_buffer: patched.asset.clone(),
+        exports_file_buffer: patched.exports.clone(),
+        bulk_data_buffer: patched
+            .bulk
+            .clone()
+            .or_else(|| loaded.bulk_data_buffer.clone()),
+        optional_bulk_data_buffer: patched
+            .optional_bulk
+            .clone()
+            .or_else(|| loaded.optional_bulk_data_buffer.clone()),
+        memory_mapped_bulk_data_buffer: loaded.memory_mapped_bulk_data_buffer.clone(),
+    }
+}
+
+/// The package of the Blueprint `parsed` is a child of, read from where `parsed` was, with its entry.
+fn read_parent(
+    request: &AssetEditRequest<'_>,
+    mappings: Option<&Mappings>,
+    parsed: &rivals_uasset::ParsedPackage,
+) -> Result<(String, FSerializedAssetBundle, rivals_uasset::ParsedPackage), String> {
+    let script = parsed
+        .exports
+        .iter()
+        .find(|export| export.class_name == "SimpleConstructionScript")
+        .ok_or("this Blueprint has no construction script to add a component to")?;
+    let parent_path = export_at(script.outer_index)
+        .and_then(|class| parsed.exports.get(class))
+        .and_then(|class| class.struct_definition.as_ref())
+        .and_then(|definition| definition.super_struct.clone())
+        .filter(|parent| parent.starts_with('/'))
+        .ok_or("the Blueprint's parent is a native class, whose components are in no package")?;
+    let parent_package = parent_path.split('.').next().unwrap_or(&parent_path);
+    let entry = asset::entry_for_package(request.game_root, parent_package)?;
+    let (loaded, parent) = read_package(
+        &AssetEditRequest {
+            entry: &entry,
+            changes: PackageEdits::default(),
+            ..*request
+        },
+        mappings,
+    )?;
+    Ok((entry, loaded, parent))
+}
+
+/// The components the parent Blueprint of the one a request names adds, by variable name, which
+/// one of its own can be copied from.
+pub fn parent_components(
+    request: &AssetEditRequest<'_>,
+    mappings: Option<&Mappings>,
+) -> Result<Vec<String>, String> {
+    let (_, parsed) = read_package(request, mappings)?;
+    let (_, _, parent) = read_parent(request, mappings, &parsed)?;
+    Ok(parent
+        .exports
+        .iter()
+        .filter(|export| export.class_name == "SCS_Node")
+        .filter_map(
+            |node| match entry_named(&node.properties, "InternalVariableName") {
+                Some(rivals_uasset::PropertyEntry {
+                    value: PropertyValue::Name { value },
+                    ..
+                }) => Some(value.clone()),
+                _ => None,
+            },
+        )
+        .collect())
+}
+
+/// Copies a component the parent Blueprint adds into this one, as a component of its own attached
+/// where the original is, in stages each checked on its own: the parent's template is copied under
+/// this class, an empty node is added to its construction script, the node is wired to build the
+/// copy among the script's roots, and its changed property list is filled as the parent's node has
+/// it.
+fn inherited_component_pass(
+    request: &AssetEditRequest<'_>,
+    mappings: Option<&Mappings>,
+    loaded: FSerializedAssetBundle,
+    parsed: &rivals_uasset::ParsedPackage,
+    add: &rivals_uasset::AddComponent,
+) -> Result<(PatchedBundle, FSerializedAssetBundle), String> {
+    let from = add.from_parent.as_deref().unwrap_or_default();
+    let (parent_entry, parent_loaded, parent) = read_parent(request, mappings, parsed)?;
+    let plan = rivals_uasset::plan_inherited_component(parsed, &parent, from, &add.name)?;
+
+    let header = rivals_uasset::read_header(&bundle_of(&parent_loaded))?;
+    let key = format!("{}::{parent_entry}", request.container);
+    let sources = std::collections::BTreeMap::from([(
+        key.clone(),
+        rivals_uasset::CopySource {
+            parsed: &parent,
+            header: &header,
+            exports: &parent_loaded.exports_file_buffer,
+        },
+    )]);
+    let copies = vec![rivals_uasset::CopyExport {
+        from: key,
+        export: plan.source_template,
+        into_outer: Some(plan.class),
+        name: plan.template_name.clone(),
+        into_level: None,
+    }];
+    let copied = rivals_uasset::patch_package_copy(&bundle_of(&loaded), parsed, &sources, &copies)?;
+    let with_copy = reparse(request, mappings, &copied.asset, &copied.exports)?;
+    rivals_uasset::verify_copy(parsed, &with_copy, &sources, &copies)?;
+
+    let node = PackageEdits {
+        add_exports: vec![rivals_uasset::AddExport {
+            class: "/Script/Engine.SCS_Node".into(),
+            outer: Some(plan.script),
+            name: plan.node_name.clone(),
+            layout: None,
+        }],
+        ..Default::default()
+    };
+    let (with_node, _) = edit_passes(
+        &AssetEditRequest {
+            changes: node,
+            ..*request
+        },
+        mappings,
+        staged(&copied, &loaded),
+        &with_copy,
+    )?;
+    let empty = reparse(request, mappings, &with_node.asset, &with_node.exports)?;
+    let wiring = rivals_uasset::inherited_component_wiring(&empty, &plan)?;
+    let (mut done, _) = edit_passes(
+        &AssetEditRequest {
+            changes: wiring,
+            ..*request
+        },
+        mappings,
+        staged(&with_node, &loaded),
+        &empty,
+    )?;
+
+    let mut applied = copied.applied;
+    applied.extend(with_node.applied);
+    let wired = reparse(request, mappings, &done.asset, &done.exports)?;
+    let listed: Vec<Listed> = list_of(
+        &parent,
+        &ListOwner {
+            export: plan.source_node as usize,
+            record: None,
+            template: plan.source_template as usize,
+        },
+    )
+    .map(listed_entries)
+    .unwrap_or_default()
+    .into_iter()
+    .map(|entry| match entry.scope {
+        rivals_uasset::ListScope::Path(path) => (entry.name, entry.index, path),
+        _ => (entry.name, entry.index, String::new()),
+    })
+    .collect();
+    let owner = wired
+        .exports
+        .iter()
+        .find(|export| export.object_name == plan.node_name)
+        .zip(
+            wired
+                .exports
+                .iter()
+                .find(|export| export.object_name == plan.template_name),
+        )
+        .map(|(node, template)| ListOwner {
+            export: node.index as usize,
+            record: None,
+            template: template.index as usize,
+        })
+        .ok_or("the new component did not read back")?;
+    if !listed.is_empty()
+        && let Some(list) = list_of(&wired, &owner)
+    {
+        let mut fill = PackageEdits::default();
+        list_diff(list, &[], &listed, &mut fill)?;
+        let (filled, _) = value_passes(
+            &AssetEditRequest {
+                changes: fill,
+                ..*request
+            },
+            mappings,
+            staged(&done, &loaded),
+            &wired,
+        )?;
+        applied.append(&mut done.applied);
+        done = filled;
+    }
+    let after = reparse(request, mappings, &done.asset, &done.exports)?;
+    rivals_uasset::verify_inherited_component(&after, &plan)?;
+    applied.append(&mut done.applied);
+    done.applied = applied;
+    done.notes.push(format!(
+        "{} is a copy of the parent's {from} as the parent sets it; this Blueprint's own override of \
+         {from}, if it has one, is not carried over",
+        plan.variable
+    ));
+    Ok((done, loaded))
 }
 
 /// Brings the changed property lists of the components a save reached in step with their
@@ -4559,6 +4780,8 @@ mod game_data_tests {
             add_components: vec![rivals_uasset::AddComponent {
                 node,
                 name: name.into(),
+                with_children: false,
+                from_parent: None,
             }],
             ..Default::default()
         }
@@ -4810,6 +5033,178 @@ mod game_data_tests {
             "{:?}",
             patched.notes
         );
+    }
+
+    /// A component duplicated with its children brings a copy of each, named after its own as UE's
+    /// editor names a duplicate, hanging under the copy of its parent.
+    #[test]
+    fn a_component_is_duplicated_with_its_children() {
+        let Some(fixture) = Fixture::open(NESTED_COMPONENTS) else {
+            return;
+        };
+        let before = fixture.parse();
+        let request = fixture.request_changes(PackageEdits {
+            add_components: vec![rivals_uasset::AddComponent {
+                node: node_named(&before, "CylinderNS"),
+                name: "CylinderCopy".into(),
+                with_children: true,
+                from_parent: None,
+            }],
+            ..Default::default()
+        });
+        let (patched, _) = preview_edits(&request, Some(&fixture.schema)).expect("duplicated");
+        let after = Fixture::parse_bundle(
+            &AssetBundle {
+                asset: &patched.asset,
+                exports: &patched.exports,
+            },
+            &fixture.schema,
+            &fixture.source(),
+        );
+        assert_eq!(after.exports.len(), before.exports.len() + 4);
+        assert!(
+            after
+                .exports
+                .iter()
+                .all(|export| !matches!(export.status, ExportStatus::Failed { .. }))
+        );
+        let all = hanging(&after, "SimpleConstructionScript_0", "AllNodes");
+        assert!(all.contains(&"CylinderCopy".to_string()), "{all:?}");
+        assert!(all.contains(&"BaseNS1".to_string()), "{all:?}");
+        let copy = &after.exports[node_named(&after, "CylinderCopy") as usize];
+        assert_eq!(
+            hanging(&after, &copy.object_name, "ChildNodes"),
+            ["BaseNS1"]
+        );
+        assert_eq!(
+            hanging(&after, "SCS_Node_8", "ChildNodes"),
+            ["BaseNS"],
+            "the original keeps its own child"
+        );
+        let under_root = hanging(&after, "SCS_Node_0", "ChildNodes");
+        assert!(
+            under_root.contains(&"CylinderCopy".to_string()),
+            "{under_root:?}"
+        );
+        assert!(
+            !under_root.contains(&"BaseNS1".to_string()),
+            "{under_root:?}"
+        );
+        assert!(
+            after
+                .exports
+                .iter()
+                .any(|export| export.object_name == "BaseNS1_GEN_VARIABLE")
+        );
+    }
+
+    /// A component the parent Blueprint adds is copied into this one as a component of its own,
+    /// attached where the original is, with the parent node's changed property list.
+    #[test]
+    fn a_parent_blueprint_s_component_is_copied_into_the_child() {
+        let Some(fixture) = Fixture::open(OVERRIDES) else {
+            return;
+        };
+        let before = fixture.parse();
+        let request = fixture.request_changes(PackageEdits {
+            add_components: vec![rivals_uasset::AddComponent {
+                node: 0,
+                name: "ScopeCheckCopy".into(),
+                with_children: false,
+                from_parent: Some("LevelScopeCheckComponentBP".into()),
+            }],
+            ..Default::default()
+        });
+        let (patched, _) = preview_edits(&request, Some(&fixture.schema)).expect("copied");
+        let after = Fixture::parse_bundle(
+            &AssetBundle {
+                asset: &patched.asset,
+                exports: &patched.exports,
+            },
+            &fixture.schema,
+            &fixture.source(),
+        );
+        assert!(after.exports.len() >= before.exports.len() + 2);
+        let failed: Vec<&str> = after
+            .exports
+            .iter()
+            .filter(|export| matches!(export.status, ExportStatus::Failed { .. }))
+            .map(|export| export.object_name.as_str())
+            .collect();
+        assert!(failed.is_empty(), "{failed:?}");
+        let node = &after.exports[node_named(&after, "ScopeCheckCopy") as usize];
+        assert!(
+            after
+                .exports
+                .iter()
+                .any(|export| export.object_name == "ScopeCheckCopy_GEN_VARIABLE")
+        );
+        assert_ne!(
+            nested(&node.properties, &["ParentComponentOrVariableName"])
+                .value
+                .summary(),
+            "None"
+        );
+        let roots = hanging(&after, "SimpleConstructionScript_0", "RootNodes");
+        assert!(roots.contains(&"ScopeCheckCopy".to_string()), "{roots:?}");
+        let listed = changed_list(&after, &node.object_name);
+        assert!(!listed.is_empty(), "the node lists what it copies");
+        assert!(
+            patched
+                .notes
+                .iter()
+                .any(|note| note.contains("not carried over")),
+            "{:?}",
+            patched.notes
+        );
+    }
+
+    /// Two containers an object stores nothing for yet sit at the same offset, and one save can
+    /// fill both: each brings its own count and joins the header.
+    #[test]
+    fn two_unset_arrays_of_one_object_are_filled_in_one_save() {
+        let Some(fixture) = Fixture::open(OVERRIDES) else {
+            return;
+        };
+        let before = fixture.parse();
+        let script = before
+            .exports
+            .iter()
+            .find(|export| export.class_name == "SimpleConstructionScript")
+            .expect("the construction script");
+        let node = before.exports[6].path.clone();
+        let mut changes = PackageEdits::default();
+        for list in ["AllNodes", "RootNodes"] {
+            let entry = nested(&script.properties, &[list]).clone();
+            assert_eq!(entry.value.summary(), "(not stored)");
+            let edit = edit_of(
+                &entry,
+                EditOp::Insert {
+                    index: 0,
+                    key: None,
+                },
+            );
+            changes.field_sets.push(rivals_uasset::FieldSet {
+                offset: edit.offset,
+                expect_name: edit.expect_name.clone(),
+                expect_element: edit.expect_element,
+                path: vec!["[0]".into()],
+                text: node.clone(),
+            });
+            changes.values.push(edit);
+        }
+        let (_, after) = fixture.apply_changes(changes);
+        let script = &after.exports[script.index as usize];
+        assert!(matches!(script.status, ExportStatus::Complete));
+        for list in ["AllNodes", "RootNodes"] {
+            let PropertyValue::Array { items } = &nested(&script.properties, &[list]).value else {
+                panic!("{list} is not an array");
+            };
+            assert!(
+                matches!(&items[..], [PropertyValue::Object { path: Some(path), .. }] if *path == node),
+                "{list}: {items:?}"
+            );
+        }
     }
 
     /// With its children, a component's whole subtree goes; the scene root goes only that way.

@@ -825,6 +825,36 @@ pub(crate) async fn plan_import_removal(
     .map_err(|e| e.to_string())?
 }
 
+/// The components the parent Blueprint adds, by variable name, which one of this Blueprint's own can
+/// be copied from. Nothing is written.
+#[tauri::command]
+pub(crate) async fn parent_components(
+    state: State<'_, SettingsState>,
+    game_root: String,
+    container: String,
+    entry: String,
+) -> Result<Vec<String>, String> {
+    let usmap = configured_usmap(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let schema = mappings::resolve(None, usmap.as_deref())
+            .and_then(|path| mappings::load(&path))
+            .ok();
+        asset_edit::parent_components(
+            &AssetEditRequest {
+                game_root: &game_root,
+                container: &container,
+                entry: &entry,
+                kind: source_of(&container),
+                mod_name: "",
+                changes: PackageEdits::default(),
+            },
+            schema.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// The names nothing in the package uses, which a save dropping unused names takes out. Refused
 /// with the reason where unread bytes may hold names nothing tracks. Nothing is written.
 #[tauri::command]

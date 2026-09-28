@@ -561,12 +561,21 @@ struct AddComponentArgs {
 
     /// The construction script node that builds the component to copy, as `asset info` prints its
     /// export index (an `SCS_Node`).
-    #[arg(long, value_name = "N")]
-    node: u32,
+    #[arg(long, value_name = "N", required_unless_present = "from_parent")]
+    node: Option<u32>,
+
+    /// Copy the component the parent Blueprint adds under this variable name instead, as a
+    /// component of this Blueprint's own attached where the original is.
+    #[arg(long, value_name = "VARIABLE", conflicts_with_all = ["node", "with_children"])]
+    from_parent: Option<String>,
 
     /// The new component's variable name.
     #[arg(long, value_name = "NAME")]
     name: String,
+
+    /// Copy the components under it too, each under the next free name after its own.
+    #[arg(long)]
+    with_children: bool,
 
     /// Mod pak to write into, created in `~mods` if it does not exist. Defaults to the name the
     /// desktop app last saved into, then to `AssetEdits`.
@@ -2855,8 +2864,10 @@ fn asset_add_component(
     let message = asset::add_component(
         &asset_request(cli, app, &args.asset, &root),
         rivals_uasset::AddComponent {
-            node: args.node,
+            node: args.node.unwrap_or_default(),
             name: args.name.clone(),
+            with_children: args.with_children,
+            from_parent: args.from_parent.clone(),
         },
         mod_name_of(app, args.mod_name.as_deref()),
         args.replace,
