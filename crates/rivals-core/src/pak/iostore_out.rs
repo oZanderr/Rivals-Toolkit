@@ -303,15 +303,22 @@ pub fn stage_batch_into_iostore(
     stage_container(utoc, count, produce, &HashSet::new(), options)
 }
 
-/// Writes `package` into the container and drops the packages in `dropped`, in one rewrite.
+/// Writes `package` and `others` into the container and drops the packages in `dropped`, in one
+/// rewrite.
 pub fn write_replacing_in_iostore(
     utoc: &Path,
     package: PackageFiles<'_>,
+    others: Vec<PackageBytes>,
     dropped: &HashSet<FPackageId>,
     options: &IoStoreOptions,
 ) -> Result<IoStoreReport, String> {
-    let mut once = Some(package.owned());
-    stage_container(utoc, 1, |_| once.take(), dropped, options)?
+    let mut packages: Vec<Option<PackageBytes>> = std::iter::once(package.owned())
+        .chain(others)
+        .map(Some)
+        .collect();
+    let count = packages.len();
+    let produce = |at: usize| packages.get_mut(at).and_then(Option::take);
+    stage_container(utoc, count, produce, dropped, options)?
         .ok_or_else(|| "no packages to write".to_string())?
         .commit()
 }

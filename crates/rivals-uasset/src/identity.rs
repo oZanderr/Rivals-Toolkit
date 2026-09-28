@@ -532,7 +532,8 @@ pub fn identity_leftovers(parsed: &ParsedPackage, rename: &PathRename) -> Vec<St
     for (export, statement, slot, renamed) in script_strings(parsed, rename) {
         if !same_length(slot.kind, &slot.value, &renamed) {
             notes.push(format!(
-                "{} still names {} in a string in its bytecode at {statement:#06X}: a bytecode                  string cannot change length",
+                "{} still names {} in a string in its bytecode at {statement:#06X}: a bytecode \
+                 string cannot change length",
                 parsed.exports[export as usize].object_name, rename.from
             ));
         }
@@ -551,7 +552,8 @@ pub fn identity_leftovers(parsed: &ParsedPackage, rename: &PathRename) -> Vec<St
             && !export.names_complete
         {
             notes.push(format!(
-                "{} holds {kind}, which the reader does not follow, so a name of {} inside it is                  left as it was",
+                "{} holds {kind}, which the reader does not follow, so a name of {} inside it is \
+                 left as it was",
                 export.object_name, rename.from
             ));
         }

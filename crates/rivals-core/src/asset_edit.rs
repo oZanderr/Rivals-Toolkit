@@ -2012,7 +2012,7 @@ pub fn save_copy(
         )?,
         None => preview_copy(request, mappings)?,
     };
-    write_patched(&into, &entry, &patched, &loaded, options)
+    write_patched(&into, &entry, &patched, &loaded, Vec::new(), options)
 }
 
 pub fn save_edits(
@@ -2021,7 +2021,7 @@ pub fn save_edits(
     options: &SaveOptions,
 ) -> Result<SaveOutcome, String> {
     // What an export rename or move changes, planned on the package as the save reads it, so the
-    // mod's other packages can follow once it is written.
+    // mod's other packages can follow in the same write.
     let repathed = if request.changes.exports.is_empty()
         || options.keep_referencers
         || options.target != SaveTarget::IoStore
@@ -2054,32 +2054,34 @@ pub fn save_edits(
             patched,
             loaded,
         } => {
-            let outcome = write_patched(request, &entry, &patched, &loaded, options)?;
-            (outcome, entry)
+            // Read before the write: once it is in, what they import of the old paths is gone.
+            let utoc = mod_pak_path(request.game_root, request.mod_name)?.with_extension("utoc");
+            let mut followers = Vec::new();
+            for (package, paths) in repathed.into_iter().filter(|(_, paths)| !paths.is_empty()) {
+                let rename = rivals_uasset::PathRename::of_paths(&package, &paths);
+                followers.extend(retarget_in_mod(
+                    request.game_root,
+                    &utoc,
+                    mappings,
+                    &rename,
+                    &[&entry],
+                )?);
+            }
+            let followed: Vec<String> = followers.iter().map(|p| p.entry.clone()).collect();
+            let mut outcome =
+                write_patched(request, &entry, &patched, &loaded, followers, options)?;
+            if let SaveOutcome::Written { warnings, .. } = &mut outcome
+                && !followed.is_empty()
+            {
+                warnings.push(format!(
+                    "pointed {} other package(s) in the mod at the new paths: {}",
+                    followed.len(),
+                    followed.join(", ")
+                ));
+            }
+            outcome
         }
     };
-    let (mut outcome, entry) = outcome;
-    for (package, paths) in repathed.into_iter().filter(|(_, paths)| !paths.is_empty()) {
-        let rename = rivals_uasset::PathRename::of_paths(&package, &paths);
-        let utoc = mod_pak_path(request.game_root, request.mod_name)?.with_extension("utoc");
-        let followed = retarget_in_mod(
-            request.game_root,
-            &utoc,
-            mappings,
-            &rename,
-            &[&entry],
-            options,
-        )?;
-        if let SaveOutcome::Written { warnings, .. } = &mut outcome
-            && !followed.is_empty()
-        {
-            warnings.push(format!(
-                "pointed {} other package(s) in the mod at the new paths: {}",
-                followed.len(),
-                followed.join(", ")
-            ));
-        }
-    }
     Ok(outcome)
 }
 
@@ -2462,12 +2464,14 @@ pub fn other_overrides(game_root: &str, entry: &str, own: &Path) -> Vec<String> 
         .collect()
 }
 
-/// The patched bundle onto disk, in whichever form the target asks for.
+/// The patched bundle onto disk, in whichever form the target asks for. `followers` are other
+/// packages of the mod written with it, into a container only.
 fn write_patched(
     request: &AssetEditRequest<'_>,
     entry: &str,
     patched: &PatchedBundle,
     loaded: &FSerializedAssetBundle,
+    followers: Vec<crate::pak::iostore_out::PackageBytes>,
     options: &SaveOptions,
 ) -> Result<SaveOutcome, String> {
     let pak = mod_pak_path(request.game_root, request.mod_name)?;
@@ -2478,7 +2482,7 @@ fn write_patched(
         .to_string_lossy()
         .into_owned();
     if options.target == SaveTarget::IoStore {
-        return save_into_iostore(request, entry, &utoc, patched, loaded, options);
+        return save_into_iostore(request, entry, &utoc, patched, loaded, followers, options);
     }
     write_into_pak(
         &pak,
@@ -2525,13 +2529,14 @@ fn save_into_iostore(
     utoc: &Path,
     patched: &PatchedBundle,
     loaded: &FSerializedAssetBundle,
+    followers: Vec<crate::pak::iostore_out::PackageBytes>,
     options: &SaveOptions,
 ) -> Result<SaveOutcome, String> {
     let shader_map_hashes = source_shader_maps(request, &loaded.asset_file_buffer);
     // A read earlier in this session may still hold the container open, and it is about to be
     // replaced underneath.
     crate::pak::containers::drop_cached_store();
-    let report = crate::pak::iostore_out::write_into_iostore(
+    let report = crate::pak::iostore_out::write_replacing_in_iostore(
         utoc,
         crate::pak::iostore_out::PackageFiles {
             entry,
@@ -2548,6 +2553,8 @@ fn save_into_iostore(
             memory_mapped_bulk: loaded.memory_mapped_bulk_data_buffer.as_deref(),
             shader_map_hashes,
         },
+        followers,
+        &std::collections::HashSet::new(),
         &options.iostore,
     )?;
     let name = utoc
@@ -2637,6 +2644,18 @@ pub fn rename_mod_package(
         return Err(format!("{name} already holds {new}"));
     }
     let (patched, loaded) = preview_read_edits(request, mappings, loaded, &parsed)?;
+    // Read before the write: once it is in, what they import of the old package is gone.
+    let followers = match rivals_uasset::PathRename::plan(&parsed, save_as)? {
+        Some(rename) if !options.keep_referencers => retarget_in_mod(
+            request.game_root,
+            &utoc,
+            mappings,
+            &rename,
+            &[request.entry, &entry],
+        )?,
+        _ => Vec::new(),
+    };
+    let followed: Vec<String> = followers.iter().map(|p| p.entry.clone()).collect();
     let shader_map_hashes = source_shader_maps(request, &loaded.asset_file_buffer);
     crate::pak::containers::drop_cached_store();
     let report = crate::pak::iostore_out::write_replacing_in_iostore(
@@ -2656,29 +2675,17 @@ pub fn rename_mod_package(
             memory_mapped_bulk: loaded.memory_mapped_bulk_data_buffer.as_deref(),
             shader_map_hashes,
         },
+        followers,
         &std::collections::HashSet::from([retoc::FPackageId::from_name(&old)]),
         &options.iostore,
     )?;
     let mut warnings = patched.notes.clone();
-    let mut followed: Vec<String> = Vec::new();
-    if !options.keep_referencers
-        && let Some(rename) = rivals_uasset::PathRename::plan(&parsed, save_as)?
-    {
-        followed = retarget_in_mod(
-            request.game_root,
-            &utoc,
-            mappings,
-            &rename,
-            &[request.entry, &entry],
-            options,
-        )?;
-        if !followed.is_empty() {
-            warnings.push(format!(
-                "pointed {} other package(s) in {name} at {new}: {}",
-                followed.len(),
-                followed.join(", ")
-            ));
-        }
+    if !followed.is_empty() {
+        warnings.push(format!(
+            "pointed {} other package(s) in {name} at {new}: {}",
+            followed.len(),
+            followed.join(", ")
+        ));
     }
     let followed_names: Vec<String> = followed
         .iter()
@@ -2809,20 +2816,22 @@ pub fn repair_mod_headers(
     Ok(found)
 }
 
-/// Points the other packages of the mod at `utoc` that name paths `rename` changes at the new ones,
-/// in one container rewrite, each checked on its own. `skip` names the entries the rename itself
-/// wrote. Returns the entries it changed.
+/// The other packages of the mod at `utoc` that name paths `rename` changes, pointed at the new
+/// ones and each checked on its own, for the rename's write to carry. Read before that write, since
+/// after it their imports of the old paths resolve to nothing. `skip` names the entries the rename
+/// itself writes.
 pub fn retarget_in_mod(
     game_root: &str,
     utoc: &Path,
     mappings: Option<&Mappings>,
     rename: &rivals_uasset::PathRename,
     skip: &[&str],
-    options: &SaveOptions,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<crate::pak::iostore_out::PackageBytes>, String> {
+    if !utoc.is_file() {
+        return Ok(Vec::new());
+    }
     let container = utoc.to_string_lossy().into_owned();
     let (_, packages) = asset::list_packages(game_root, &container)?;
-    let mut changed = Vec::new();
     let mut staged_packages = Vec::new();
     for (_, entry) in &packages {
         if skip.iter().any(|skip| entry.eq_ignore_ascii_case(skip)) {
@@ -2863,20 +2872,8 @@ pub fn retarget_in_mod(
             memory_mapped_bulk: loaded.memory_mapped_bulk_data_buffer,
             shader_map_hashes,
         });
-        changed.push(entry.clone());
     }
-    if !staged_packages.is_empty() {
-        let mut bytes: Vec<Option<crate::pak::iostore_out::PackageBytes>> =
-            staged_packages.into_iter().map(Some).collect();
-        crate::pak::containers::drop_cached_store();
-        crate::pak::iostore_out::write_batch_into_iostore(
-            utoc,
-            bytes.len(),
-            |at| bytes.get_mut(at).and_then(Option::take),
-            &options.iostore,
-        )?;
-    }
-    Ok(changed)
+    Ok(staged_packages)
 }
 
 /// Points one package at renamed paths: its imports and the names it holds in place, then the
@@ -6581,7 +6578,8 @@ mod game_data_tests {
     }
 
     /// Renaming a package a mod added, or an export in it, points the mod's other packages that name
-    /// it at the new path: here a table whose soft path names the renamed asset.
+    /// it at the new path: here a table whose soft path names the renamed asset, and an asset that
+    /// imports it.
     #[test]
     fn a_rename_in_a_mod_is_followed_by_the_mod_s_other_packages() {
         let (Some(titles), Some(strings)) = (Fixture::open(TITLES), Fixture::open(STRINGS)) else {
@@ -6630,6 +6628,31 @@ mod game_data_tests {
             },
             SaveOptions::default(),
         );
+        let (_, material) = material_import(&titles.parse());
+        save(
+            AssetEditRequest {
+                mod_name: scratch.name,
+                ..titles.request_changes(PackageEdits {
+                    imports: vec![ImportEdit::Retarget {
+                        import: (-material - 1) as u32,
+                        path: format!("{CLONE}.RetargetClone"),
+                        class: None,
+                    }],
+                    ..Default::default()
+                })
+            },
+            SaveOptions::default(),
+        );
+        let imported = |parsed: &rivals_uasset::ParsedPackage| -> Vec<String> {
+            let mut paths: Vec<String> = parsed
+                .imports
+                .iter()
+                .filter(|import| import.path.contains("Retarget"))
+                .map(|import| import.path.clone())
+                .collect();
+            paths.sort();
+            paths
+        };
 
         let utoc = scratch.container();
         let container = utoc.to_string_lossy().into_owned();
@@ -6652,7 +6675,7 @@ mod game_data_tests {
         assert!(
             warnings
                 .iter()
-                .any(|warning| warning.contains("pointed 1 other")),
+                .any(|warning| warning.contains("pointed 2 other")),
             "{warnings:?}"
         );
         let soft_paths = |parsed: &rivals_uasset::ParsedPackage| -> Vec<String> {
@@ -6672,6 +6695,10 @@ mod game_data_tests {
         assert_eq!(
             soft_paths(&followed),
             [format!("{RENAMED}.RetargetRenamed")]
+        );
+        assert_eq!(
+            imported(&read_back(&titles, &utoc)),
+            [RENAMED.to_string(), format!("{RENAMED}.RetargetRenamed")]
         );
 
         // An export renamed in the mod's copy is followed the same way.
@@ -6700,11 +6727,15 @@ mod game_data_tests {
         assert!(
             warnings
                 .iter()
-                .any(|warning| warning.contains("pointed 1 other")),
+                .any(|warning| warning.contains("pointed 2 other")),
             "{warnings:?}"
         );
         let followed = read_back(&strings, &utoc);
         assert_eq!(soft_paths(&followed), [format!("{RENAMED}.RetargetObject")]);
+        assert_eq!(
+            imported(&read_back(&titles, &utoc)),
+            [RENAMED.to_string(), format!("{RENAMED}.RetargetObject")]
+        );
     }
 
     /// A material's shader maps are listed in its container's header, not in the package, so the
