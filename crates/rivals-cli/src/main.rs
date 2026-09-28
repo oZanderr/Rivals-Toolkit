@@ -371,8 +371,9 @@ struct AssetSetArgs {
 
     /// `set` writes `--value`; `clear` flags the property as zero; `store` gives an unset struct,
     /// container or reference its empty form; `unset` drops it so the inherited value applies;
-    /// `set-element`, `insert` and `remove` act on the container element at `--index`. In a set
-    /// or a map, `insert` takes the new element's key from `--value`.
+    /// `set-element`, `insert` and `remove` act on the container element at `--index`. An array's
+    /// new element takes `--value` when one is given; in a set or a map, `insert` takes the new
+    /// element's key from it.
     #[arg(long, value_name = "OP", default_value = "set")]
     op: String,
 

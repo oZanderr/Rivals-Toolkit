@@ -3359,6 +3359,13 @@ fn insertion(
             ..
         }
     );
+    if !keyed && key.is_some_and(|text| !text.trim().is_empty()) {
+        return Err(format!(
+            "{} is an array, whose new element is a copy of the one beside it: give it a value \
+             of its own with a separate edit",
+            entry.label()
+        ));
+    }
     if layout.elements.is_empty() || keyed {
         let value = |names: &mut FPackageNameMap| {
             fresh_element(

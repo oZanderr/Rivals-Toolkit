@@ -191,6 +191,13 @@ fn value_passes(
     loaded: FSerializedAssetBundle,
     parsed: &rivals_uasset::ParsedPackage,
 ) -> Result<(PatchedBundle, FSerializedAssetBundle), String> {
+    if let Some(changes) = array_insert_values(parsed, &request.changes) {
+        let request = AssetEditRequest {
+            changes,
+            ..*request
+        };
+        return value_passes(&request, mappings, loaded, parsed);
+    }
     let changes = &request.changes;
     if !changes.field_sets.is_empty()
         || changes
@@ -1254,6 +1261,53 @@ fn element_segment(segment: &str) -> Option<Result<u32, String>> {
 
 /// An insert into a tagged container the package does not hold yet, which is stored in one round
 /// and takes the element in the next.
+/// The edits with each array insert that carries text split in two: an array's new element is a
+/// copy of the one beside it, so the text becomes a field set on that element, in the same save.
+/// `None` when there is nothing to split.
+fn array_insert_values(
+    parsed: &rivals_uasset::ParsedPackage,
+    changes: &PackageEdits,
+) -> Option<PackageEdits> {
+    let mut split: Option<PackageEdits> = None;
+    for (at, edit) in changes.values.iter().enumerate() {
+        let EditOp::Insert {
+            index,
+            key: Some(text),
+        } = &edit.op
+        else {
+            continue;
+        };
+        let Some(entry) = rivals_uasset::entry_named_at(
+            parsed,
+            edit.offset,
+            &edit.expect_name,
+            edit.expect_element,
+        ) else {
+            continue;
+        };
+        let held = match &entry.value {
+            PropertyValue::Array { items } => items.len(),
+            PropertyValue::Unset {
+                declared: "Array", ..
+            } => 0,
+            _ => continue,
+        };
+        let changes = split.get_or_insert_with(|| changes.clone());
+        changes.values[at].op = EditOp::Insert {
+            index: *index,
+            key: None,
+        };
+        changes.field_sets.push(rivals_uasset::FieldSet {
+            offset: edit.offset,
+            expect_name: edit.expect_name.clone(),
+            expect_element: edit.expect_element,
+            path: vec![format!("[{}]", (*index as usize).min(held))],
+            text: text.clone(),
+        });
+    }
+    split
+}
+
 fn inserts_into_absent(parsed: &rivals_uasset::ParsedPackage, edit: &ValueEdit) -> bool {
     !parsed.info.unversioned_properties
         && matches!(edit.op, EditOp::Insert { .. })
@@ -3574,6 +3628,31 @@ mod tests {
         let after = preview_sparse(|parsed| PackageEdits {
             values: vec![edit_at(parsed, "Counts", APPEND)],
             field_sets: vec![field_set_at(parsed, "Counts", &["[0]"], "9")],
+            ..Default::default()
+        })
+        .expect("saved");
+        let PropertyValue::Array { items } = &field(holder_of(&after), "Counts").value else {
+            panic!("Counts is stored");
+        };
+        assert_eq!(
+            items.iter().map(PropertyValue::summary).collect::<Vec<_>>(),
+            ["9"]
+        );
+    }
+
+    /// An insert into an array that carries text gives the new element that value, as the command
+    /// line's `--value` asks, rather than dropping it.
+    #[test]
+    fn an_array_insert_carrying_text_sets_the_new_element() {
+        let after = preview_sparse(|parsed| PackageEdits {
+            values: vec![edit_at(
+                parsed,
+                "Counts",
+                EditOp::Insert {
+                    index: 0,
+                    key: Some("9".into()),
+                },
+            )],
             ..Default::default()
         })
         .expect("saved");
