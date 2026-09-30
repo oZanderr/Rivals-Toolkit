@@ -14,7 +14,7 @@ use retoc::{
     EIoChunkType, EIoStoreTocVersion, FIoChunkId, FIoChunkIdRaw, FPackageId, FSFileWriter, UEPath,
 };
 
-use crate::pak::containers::{open_base_game_paks, open_target_only};
+use crate::pak::containers::{open_store_for, open_target_only};
 
 const MOUNT_POINT: &str = "../../../";
 
@@ -64,7 +64,10 @@ fn resolve_target_packages(
 ) -> Result<(Arc<dyn IoStoreTrait>, PackageList), String> {
     let wanted = target_paths(utoc_path)?;
     let stem = container_stem(utoc_path)?;
-    let store = open_base_game_paks(&crate::paths::paks_dir(game_root), &stem)?;
+    let (store, _) = open_store_for(
+        &crate::paths::paks_dir(game_root),
+        &utoc_path.to_string_lossy(),
+    )?;
     let target = store
         .child_containers()
         .find(|c| c.container_name() == stem)

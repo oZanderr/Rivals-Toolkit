@@ -64,12 +64,11 @@ pub fn object_exists(game_root: &str, container: &str, path: &str) -> Existence 
 /// enabled mods. A path without an object part names a package, which only has to be there.
 pub fn objects_exist(game_root: &str, container: &str, paths: &[String]) -> Vec<Existence> {
     let is_utoc = container.to_ascii_lowercase().ends_with(".utoc");
-    let target = Path::new(container)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .filter(|_| is_utoc)
-        .unwrap_or("pakchunk0-Windows")
-        .to_string();
+    let target = if is_utoc {
+        container.to_string()
+    } else {
+        "pakchunk0-Windows".to_string()
+    };
     let mut stores = Stores {
         paks: paks_dir(game_root),
         target,
@@ -134,7 +133,8 @@ impl Stores {
         let (paks, target) = (&self.paks, &self.target);
         self.base
             .get_or_insert_with(|| {
-                open_base_game_paks(paks, target)
+                crate::pak::containers::open_store_for(paks, target)
+                    .map(|(store, _)| store)
                     .map_err(|e| format!("the game's containers could not be read: {e}"))
             })
             .clone()

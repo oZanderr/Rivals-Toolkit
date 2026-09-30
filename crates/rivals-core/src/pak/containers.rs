@@ -93,11 +93,72 @@ pub fn open_base_game_paks(
     paks_dir: &Path,
     target_container: &str,
 ) -> Result<Arc<dyn IoStoreTrait>, String> {
-    let target = target_container.to_string();
+    open_store(paks_dir, target_container, None)
+}
+
+/// The base store opened around `container`, and the name its target goes by in it. A bare name,
+/// or a path under `paks_dir`, is found by name there; a container file anywhere else is opened as
+/// that file, and a container of the same name under `paks_dir` is kept out so it cannot stand in.
+pub fn open_store_for(
+    paks_dir: &Path,
+    container: &str,
+) -> Result<(Arc<dyn IoStoreTrait>, String), String> {
+    let stem = Path::new(container)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or("invalid .utoc path")?
+        .to_string();
+    let store = match external_container(paks_dir, container)? {
+        Some(file) => open_store(paks_dir, &stem, Some(&file))?,
+        None => open_store(paks_dir, &stem, None)?,
+    };
+    Ok((store, stem))
+}
+
+/// Where a container given as a path lives, when that is outside `paks_dir` and so no lookup by
+/// name there would reach it. `None` for a bare name or a path under `paks_dir`; an error for a path
+/// that names no file.
+pub fn external_container(paks_dir: &Path, container: &str) -> Result<Option<PathBuf>, String> {
+    let path = Path::new(container);
+    if path.components().count() <= 1 {
+        return Ok(None);
+    }
+    if !path.is_file() {
+        return Err(format!("{container} does not exist"));
+    }
+    let file = path
+        .canonicalize()
+        .map_err(|e| format!("{container}: {e}"))?;
+    let under = paks_dir
+        .canonicalize()
+        .is_ok_and(|dir| file.starts_with(&dir));
+    Ok((!under).then_some(file))
+}
+
+/// The store: `target` and the base game from `paks_dir`, or with `external`, the base game from
+/// there and that one file in place of anything named like it.
+fn open_store(
+    paks_dir: &Path,
+    target: &str,
+    external: Option<&Path>,
+) -> Result<Arc<dyn IoStoreTrait>, String> {
+    let target = target.to_string();
     let undecryptable = undecryptable_container_stems(paks_dir);
     let mods = mod_container_stems(paks_dir);
-    let admits = move |name: &str| admits_container(name, &target, &undecryptable, &mods);
-    let key = store_key(paks_dir, &admits);
+    let outside = external.is_some();
+    let admits = move |name: &str| {
+        if outside {
+            name != target && admits_container(name, "", &undecryptable, &mods)
+        } else {
+            admits_container(name, &target, &undecryptable, &mods)
+        }
+    };
+    let mut key = store_key(paks_dir, &admits);
+    let extra: Vec<PathBuf> = external.map(Path::to_path_buf).into_iter().collect();
+    for file in &extra {
+        let meta = std::fs::metadata(file).map_err(|e| format!("{}: {e}", file.display()))?;
+        key.push((file.clone(), meta.len(), meta.modified().ok()));
+    }
     if let Some((cached, store)) = BASE_STORE
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -107,8 +168,13 @@ pub fn open_base_game_paks(
         return Ok(Arc::clone(store));
     }
     let store: Arc<dyn IoStoreTrait> = Arc::from(
-        retoc::iostore::open_filtered(paks_dir, super::profile::make_config()?, admits)
-            .map_err(|e| e.to_string())?,
+        retoc::iostore::open_filtered_with(
+            paks_dir,
+            super::profile::make_config()?,
+            admits,
+            &extra,
+        )
+        .map_err(|e| e.to_string())?,
     );
     *BASE_STORE.lock().unwrap_or_else(PoisonError::into_inner) = Some((key, Arc::clone(&store)));
     Ok(store)
@@ -186,6 +252,35 @@ mod tests {
         header[0..16].copy_from_slice(b"-==--==--==--==-");
         std::fs::create_dir_all(path.parent().expect("parent")).expect("create dir");
         std::fs::write(path, &header).expect("write stub utoc");
+    }
+
+    /// A container named by a path outside the game's Paks folder is that file, however many
+    /// containers of its name the folder holds; one under the folder, or a bare name, is looked up
+    /// by name; and a path to nothing is an error rather than a lookup that finds something else.
+    #[test]
+    fn a_container_path_outside_the_game_names_that_file() {
+        let base = std::env::temp_dir().join(format!("rivals-external-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let paks_dir = base.join("root").join("Paks");
+        let inside = paks_dir.join("~mods").join("Galacta_9999999_P.utoc");
+        let outside = base.join("elsewhere").join("Galacta_9999999_P.utoc");
+        write_stub_utoc(&inside);
+        write_stub_utoc(&outside);
+
+        let found = external_container(&paks_dir, &outside.to_string_lossy()).expect("a file");
+        assert_eq!(found, Some(outside.canonicalize().expect("canonical")));
+        assert_eq!(
+            external_container(&paks_dir, &inside.to_string_lossy()).expect("a file"),
+            None
+        );
+        assert_eq!(
+            external_container(&paks_dir, "Galacta_9999999_P.utoc").expect("a name"),
+            None
+        );
+        let missing = base.join("elsewhere").join("Missing_9999999_P.utoc");
+        let error = external_container(&paks_dir, &missing.to_string_lossy()).expect_err("nothing");
+        assert!(error.contains("does not exist"), "{error}");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// Patches carry the game's revisions and sort above the chunks they supersede, so they belong

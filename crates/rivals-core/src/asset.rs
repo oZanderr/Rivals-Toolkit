@@ -10,7 +10,7 @@ use retoc::legacy_asset::FSerializedAssetBundle;
 use retoc::version::EngineVersion;
 use retoc::{EIoChunkType, FIoChunkId, FileWriterTrait, UEPath};
 
-use crate::pak::containers::{MOUNT_POINT, open_base_game_paks};
+use crate::pak::containers::{MOUNT_POINT, open_base_game_paks, open_store_for};
 use crate::pak::crypto::open_pak;
 
 const ENGINE_VERSION: EngineVersion = EngineVersion::UE5_3;
@@ -186,12 +186,9 @@ fn load_from_utoc(
     utoc_path: &str,
     entry: &str,
 ) -> Result<FSerializedAssetBundle, String> {
-    let container_name = Path::new(utoc_path)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .ok_or("invalid .utoc path")?;
     let paks_dir = crate::paths::paks_dir(game_root);
-    let store = open_base_game_paks(&paks_dir, container_name)?;
+    let (store, container_name) = open_store_for(&paks_dir, utoc_path)?;
+    let container_name = container_name.as_str();
 
     let target = store
         .child_containers()
@@ -380,15 +377,15 @@ pub fn shader_map_hashes(
     container: Option<&str>,
     package_name: &str,
 ) -> Vec<retoc::FSHAHash> {
-    let open_as = container
-        .and_then(|path| Path::new(path).file_stem())
-        .and_then(|stem| stem.to_str())
-        .unwrap_or_default();
-    open_base_game_paks(&crate::paths::paks_dir(game_root), open_as)
-        .ok()
-        .and_then(|store| store.package_store_entry(package_id(package_name)))
-        .map(|entry| entry.shader_map_hashes)
-        .unwrap_or_default()
+    let paks_dir = crate::paths::paks_dir(game_root);
+    match container {
+        Some(container) => open_store_for(&paks_dir, container).map(|(store, _)| store),
+        None => open_base_game_paks(&paks_dir, ""),
+    }
+    .ok()
+    .and_then(|store| store.package_store_entry(package_id(package_name)))
+    .map(|entry| entry.shader_map_hashes)
+    .unwrap_or_default()
 }
 
 /// `/Game` is the project content directory and `/Engine` the engine's, matching how container
@@ -450,7 +447,7 @@ pub fn list_packages_via(
     };
     let container_name = name_of(utoc_path)?;
     let paks_dir = crate::paths::paks_dir(game_root);
-    let store = open_base_game_paks(&paks_dir, &name_of(open_as)?)?;
+    let (store, _) = open_store_for(&paks_dir, open_as)?;
 
     let packages = {
         let target = store
