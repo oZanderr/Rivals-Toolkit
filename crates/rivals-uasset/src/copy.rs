@@ -59,6 +59,9 @@ pub struct CopyPlan {
     /// Where each request's copy is listed as an actor, when it asked to be.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub listed: Vec<crate::duplicate::LevelSlot>,
+    /// The imports the copy adds for what it names that the destination did not import yet. Only
+    /// known once the references are rewritten, so a plan fills it by making the copy in memory.
+    pub imports: Vec<String>,
 }
 
 /// One export the copy brings across, and where it lands.

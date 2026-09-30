@@ -112,38 +112,11 @@ fn edit_request<'a>(
 /// Writes new values into an asset and ships the result as a mod pak that overrides it.
 pub fn set(
     request: &Request<'_>,
-    edits: Vec<rivals_uasset::ValueEdit>,
+    changes: PackageEdits,
     mod_name: &str,
     replace: bool,
 ) -> Result<String, String> {
-    write_edits(
-        request,
-        mod_name,
-        replace,
-        PackageEdits {
-            values: edits,
-            ..Default::default()
-        },
-    )
-}
-
-/// Sets a field inside a struct that may store nothing yet, storing it on the way, and writes the
-/// result into a mod pak.
-pub fn set_field(
-    request: &Request<'_>,
-    field: rivals_uasset::FieldSet,
-    mod_name: &str,
-    replace: bool,
-) -> Result<String, String> {
-    write_edits(
-        request,
-        mod_name,
-        replace,
-        PackageEdits {
-            field_sets: vec![field],
-            ..Default::default()
-        },
-    )
+    write_edits(request, mod_name, replace, changes)
 }
 
 /// Points an import at another object, or adds one, and writes the result into a mod pak.
@@ -162,6 +135,65 @@ pub fn import_edit(
             ..Default::default()
         },
     )
+}
+
+/// What `import_edit` would save, patched and verified in memory without writing anything.
+pub fn preview_import_edit(
+    request: &Request<'_>,
+    edit: rivals_uasset::ImportEdit,
+    mod_name: &str,
+    replace: bool,
+) -> Result<EditPreview, String> {
+    preview_edits(
+        request,
+        mod_name,
+        replace,
+        PackageEdits {
+            imports: vec![edit],
+            ..Default::default()
+        },
+    )
+}
+
+/// What a save of `changes` would do, patched and verified in memory the way the save would be:
+/// the changes it makes, and the notes it would carry, such as fields filled from an archetype or
+/// imports a retarget leaves behind.
+pub fn preview_edits(
+    request: &Request<'_>,
+    mod_name: &str,
+    replace: bool,
+    changes: PackageEdits,
+) -> Result<EditPreview, String> {
+    let schema = mappings::resolve(request.usmap, request.configured_usmap)
+        .and_then(|path| mappings::load(&path))
+        .ok();
+    let outcome = asset_edit::preview_save(
+        &edit_request(request, mod_name, changes),
+        schema.as_deref(),
+        &asset_edit::SaveOptions {
+            replace,
+            layer: request.layer,
+            target: request.target,
+            keep_referencers: request.keep_referencers,
+            ..Default::default()
+        },
+    )?;
+    match outcome {
+        asset_edit::PreviewOutcome::Verified { applied, notes, .. } => {
+            Ok(EditPreview { applied, notes })
+        }
+        asset_edit::PreviewOutcome::HoldsCopy { pak } => Err(format!(
+            "{pak} already holds an edited copy of {}; pass --layer to build on it or --replace to start over",
+            request.entry
+        )),
+    }
+}
+
+/// What an edit would change, for a dry run.
+#[derive(Serialize)]
+pub struct EditPreview {
+    pub applied: Vec<rivals_uasset::AppliedEdit>,
+    pub notes: Vec<String>,
 }
 
 /// What removing `exports` would do, without writing anything.
@@ -1653,6 +1685,9 @@ pub fn print_copy_plan(plan: &rivals_uasset::CopyPlan, out: &mut impl FnMut(Stri
             copy.class_name,
             if copy.requested { "" } else { ", subobject" }
         ));
+    }
+    for import in &plan.imports {
+        out(format!("import   {import}"));
     }
     for warning in &plan.warnings {
         out(format!("warning: {warning}"));

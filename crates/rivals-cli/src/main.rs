@@ -400,6 +400,10 @@ struct AssetSetArgs {
     /// command refuses, because the copy's earlier edits would be lost.
     #[arg(long)]
     replace: bool,
+
+    /// Report what the save would change, checked the way the save checks it, and write nothing.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Args)]
@@ -421,7 +425,7 @@ struct ImportArgs {
     #[arg(long, value_name = "N", conflicts_with_all = ["index", "path"])]
     remove: Vec<i32>,
 
-    /// Report what removing would do, and write nothing.
+    /// Report what the retarget, add or removal would do, and write nothing.
     #[arg(long)]
     dry_run: bool,
 
@@ -2557,59 +2561,66 @@ fn asset_apply(
 }
 
 fn asset_set(cli: &Cli, app: &settings::AppSettings, args: &AssetSetArgs) -> Result<(), String> {
-    if !cli.force && rivals_core::game_status::should_block_for_game() {
+    if !args.dry_run && !cli.force && rivals_core::game_status::should_block_for_game() {
         return Err(rivals_core::game_status::game_running_error());
     }
     let root = resolve::game_root(cli.game_root.as_deref(), app)?;
-    let mod_name = args
-        .mod_name
-        .as_deref()
-        .or(app.asset_mod_name.as_deref())
-        .unwrap_or(DEFAULT_MOD_NAME);
-    if let Some(field) = &args.field {
-        let message = asset::set_field(
-            &asset_request(cli, app, &args.asset, &root),
-            rivals_uasset::FieldSet {
+    let request = asset_request(cli, app, &args.asset, &root);
+    let mod_name = mod_name_of(app, args.mod_name.as_deref());
+    let changes = match &args.field {
+        Some(field) => rivals_uasset::PackageEdits {
+            field_sets: vec![rivals_uasset::FieldSet {
                 offset: args.offset,
                 expect_name: args.name.clone(),
                 expect_element: args.element,
                 path: field.split('.').map(str::to_string).collect(),
                 text: args.value.clone(),
-            },
-            mod_name,
-            args.replace,
-        )?;
-        return emit(cli, &message, || outln!("{message}"));
+            }],
+            ..Default::default()
+        },
+        None => rivals_uasset::PackageEdits {
+            values: vec![rivals_uasset::ValueEdit {
+                offset: args.offset,
+                expect_name: args.name.clone(),
+                expect_element: args.element,
+                expect_kind: args.kind.clone(),
+                op: match (args.op.as_str(), args.index) {
+                    ("clear", _) => rivals_uasset::EditOp::Clear,
+                    ("store", _) => rivals_uasset::EditOp::Store,
+                    ("unset", _) => rivals_uasset::EditOp::Unset,
+                    ("set-element", Some(index)) => rivals_uasset::EditOp::SetElement {
+                        index,
+                        text: args.value.clone(),
+                    },
+                    ("insert", Some(index)) => rivals_uasset::EditOp::Insert {
+                        index,
+                        key: (!args.value.is_empty()).then(|| args.value.clone()),
+                    },
+                    ("remove", Some(index)) => rivals_uasset::EditOp::Remove { index },
+                    _ => rivals_uasset::EditOp::Set {
+                        text: args.value.clone(),
+                    },
+                },
+            }],
+            ..Default::default()
+        },
+    };
+    if args.dry_run {
+        let preview = asset::preview_edits(&request, mod_name, args.replace, changes)?;
+        return emit(cli, &preview, || print_edit_preview(&preview));
     }
-    let message = asset::set(
-        &asset_request(cli, app, &args.asset, &root),
-        vec![rivals_uasset::ValueEdit {
-            offset: args.offset,
-            expect_name: args.name.clone(),
-            expect_element: args.element,
-            expect_kind: args.kind.clone(),
-            op: match (args.op.as_str(), args.index) {
-                ("clear", _) => rivals_uasset::EditOp::Clear,
-                ("store", _) => rivals_uasset::EditOp::Store,
-                ("unset", _) => rivals_uasset::EditOp::Unset,
-                ("set-element", Some(index)) => rivals_uasset::EditOp::SetElement {
-                    index,
-                    text: args.value.clone(),
-                },
-                ("insert", Some(index)) => rivals_uasset::EditOp::Insert {
-                    index,
-                    key: (!args.value.is_empty()).then(|| args.value.clone()),
-                },
-                ("remove", Some(index)) => rivals_uasset::EditOp::Remove { index },
-                _ => rivals_uasset::EditOp::Set {
-                    text: args.value.clone(),
-                },
-            },
-        }],
-        mod_name,
-        args.replace,
-    )?;
+    let message = asset::set(&request, changes, mod_name, args.replace)?;
     emit(cli, &message, || outln!("{message}"))
+}
+
+/// A dry run's report: every change the save would make, then its notes.
+fn print_edit_preview(preview: &asset::EditPreview) {
+    for done in &preview.applied {
+        outln!("would set {}: {} -> {}", done.name, done.before, done.after);
+    }
+    for note in &preview.notes {
+        outln!("note: {note}");
+    }
 }
 
 fn asset_sweep(cli: &Cli, app: &settings::AppSettings, args: &SweepArgs) -> Result<(), String> {
@@ -2664,7 +2675,7 @@ fn asset_sweep(cli: &Cli, app: &settings::AppSettings, args: &SweepArgs) -> Resu
 }
 
 fn asset_import(cli: &Cli, app: &settings::AppSettings, args: &ImportArgs) -> Result<(), String> {
-    if !cli.force && rivals_core::game_status::should_block_for_game() {
+    if !args.dry_run && !cli.force && rivals_core::game_status::should_block_for_game() {
         return Err(rivals_core::game_status::game_running_error());
     }
     let root = resolve::game_root(cli.game_root.as_deref(), app)?;
@@ -2725,15 +2736,12 @@ fn asset_import(cli: &Cli, app: &settings::AppSettings, args: &ImportArgs) -> Re
             }
         }
     };
-    let message = asset::import_edit(
-        &request,
-        edit,
-        args.mod_name
-            .as_deref()
-            .or(app.asset_mod_name.as_deref())
-            .unwrap_or(DEFAULT_MOD_NAME),
-        args.replace,
-    )?;
+    let mod_name = mod_name_of(app, args.mod_name.as_deref());
+    if args.dry_run {
+        let preview = asset::preview_import_edit(&request, edit, mod_name, args.replace)?;
+        return emit(cli, &preview, || print_edit_preview(&preview));
+    }
+    let message = asset::import_edit(&request, edit, mod_name, args.replace)?;
     emit(cli, &message, || outln!("{message}"))
 }
 
@@ -3668,6 +3676,52 @@ mod parse_tests {
             &["--export", "1", "--sbs", "a,-2"],
         ];
         assert!(Cli::try_parse_from(bad.concat()).is_err());
+    }
+
+    /// A dry run is there to be asked for on a value edit and on a retarget, the two edits people
+    /// most want to see before they land, and a value starting with a minus does not swallow it.
+    #[test]
+    fn value_edits_and_retargets_take_a_dry_run() {
+        let set = [
+            &["set"][..],
+            &PACKAGE,
+            &[
+                "--offset",
+                "8",
+                "--kind",
+                "int",
+                "--name",
+                "N",
+                "--value",
+                "-5",
+                "--dry-run",
+            ],
+        ];
+        match asset(&set.concat()) {
+            AssetCmd::Set(args) => {
+                assert_eq!(args.value, "-5");
+                assert!(args.dry_run);
+            }
+            _ => panic!("not set"),
+        }
+        let retarget = [
+            &["import"][..],
+            &PACKAGE,
+            &[
+                "--index",
+                "-40",
+                "--path",
+                "/Engine/BasicShapes/Cone.Cone",
+                "--dry-run",
+            ],
+        ];
+        match asset(&retarget.concat()) {
+            AssetCmd::Import(args) => {
+                assert_eq!(args.index, Some(-40));
+                assert!(args.dry_run);
+            }
+            _ => panic!("not import"),
+        }
     }
 
     #[test]

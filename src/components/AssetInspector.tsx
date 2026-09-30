@@ -310,6 +310,8 @@ interface CopyPlan {
     index: number;
     requested: boolean;
   }[];
+  /** Imports the copy adds for what it names that this package did not import yet. */
+  imports: string[];
 }
 
 /** What `plan_dependency_edits` reports before the load order is changed. */
@@ -5006,6 +5008,22 @@ function PasteForm({
                     {copy.requested ? "" : ", subobject"}
                   </span>
                 </div>
+              </Tip>
+            ))}
+          </div>
+        </div>
+      )}
+      {plan && plan.imports.length > 0 && (
+        <div>
+          <p className="mb-1 text-xs text-muted-foreground">
+            {plan.imports.length === 1
+              ? "Adds one import for what it names:"
+              : `Adds ${plan.imports.length} imports for what it names:`}
+          </p>
+          <div className={list}>
+            {plan.imports.map((path) => (
+              <Tip key={path} content={path}>
+                <div className="truncate">{path.split("/").pop()}</div>
               </Tip>
             ))}
           </div>

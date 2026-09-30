@@ -1992,8 +1992,40 @@ pub fn plan_copy(
         mod_name: request.mod_name,
         changes: PackageEdits::default(),
     };
-    let (_, parsed) = read_package(&into, mappings)?;
-    rivals_uasset::plan_copy(&parsed, &sources, &request.copies)
+    let (loaded, parsed) = read_package(&into, mappings)?;
+    let mut plan = rivals_uasset::plan_copy(&parsed, &sources, &request.copies)?;
+    if !plan.blockers.is_empty() {
+        return Ok(plan);
+    }
+    // Which imports the copy adds is only known once its references are rewritten, so it is made
+    // in memory and checked the way a save would, and whatever would stop the save stops the plan.
+    let made =
+        rivals_uasset::patch_package_copy(&bundle_of(&loaded), &parsed, &sources, &request.copies)
+            .and_then(|patched| {
+                let after = schema_synth::parse_package_opts(
+                    &AssetBundle {
+                        asset: &patched.asset,
+                        exports: &patched.exports,
+                    },
+                    mappings,
+                    &source_of(&into),
+                    editor_options(),
+                )?;
+                rivals_uasset::verify_copy(&parsed, &after, &sources, &request.copies)?;
+                Ok(after)
+            });
+    match made {
+        Ok(after) => {
+            plan.imports = after
+                .imports
+                .iter()
+                .skip(parsed.imports.len())
+                .map(|import| import.path.clone())
+                .collect();
+        }
+        Err(reason) => plan.blockers.push(reason),
+    }
+    Ok(plan)
 }
 
 /// What dropping the requested imports would do: which rows go, which references are cleared, and
@@ -3929,6 +3961,9 @@ mod game_data_tests {
     /// Black Widow's weapon cue: the batons on her back are the static mesh components
     /// `UnEquipedStickL`/`UnEquipedStickR`, each with its own mesh import.
     const WEAPON_CUE: &str = "Marvel/Content/Marvel/Characters/1033/1033001/Cues/WeaponCue/Cue_Weapon_Loop_103311_BP.uasset";
+    /// The same cue for one of her skins: a Blueprint of its own, whose batons use the skin's
+    /// meshes, which the default cue does not import.
+    const SKIN_WEAPON_CUE: &str = "Marvel/Content/Marvel/Characters/1033/1033500/Cues/WeaponCue/Cue_Weapon_Loop_103311_BP.uasset";
     /// Deadpool's upgraded shield cue, a child Blueprint whose `Toy` override template inherits from
     /// the parent cue's template in another package.
     const SHIELD_CUE: &str = "Marvel/Content/Marvel/Characters/1057/1057001/Cues/105747/Cue_Summoner_Loop_10574701_BP.uasset";
@@ -4069,6 +4104,7 @@ mod game_data_tests {
     const ALL_FIXTURES: &[(&str, &str)] = &[
         ("PAK_ROUND_TRIP", PAK_ROUND_TRIP),
         ("WEAPON_CUE", WEAPON_CUE),
+        ("SKIN_WEAPON_CUE", SKIN_WEAPON_CUE),
         ("SHIELD_CUE", SHIELD_CUE),
         ("SYNTH_ROW_TABLE", SYNTH_ROW_TABLE),
         ("BATCH_SHAKE_HIT", BATCH_SHAKE_HIT),
@@ -8309,6 +8345,87 @@ mod game_data_tests {
             assert_eq!(was.path, is.path);
             assert_eq!(was.class_name, is.class_name);
         }
+    }
+
+    /// A copy's plan names the imports it adds, which only the copy itself can tell: the skin's
+    /// baton brings its mesh and that mesh's package, and nothing of the skin's Blueprint, whose
+    /// place as the outer the destination's own class takes.
+    #[test]
+    fn a_copy_plan_lists_the_imports_it_adds() {
+        let Some(fixture) = Fixture::open(WEAPON_CUE) else {
+            return;
+        };
+        let skin = SKIN_WEAPON_CUE;
+        let source = CopyFrom {
+            container: fixture.container.clone(),
+            entry: skin.to_string(),
+        };
+        let from = asset::load_bundle(&fixture.root, &fixture.container, skin, AssetSource::Utoc)
+            .expect("load the skin's cue");
+        let from_parsed = Fixture::parse_bundle(
+            &AssetBundle {
+                asset: &from.asset_file_buffer,
+                exports: &from.exports_file_buffer,
+            },
+            &fixture.schema,
+            &PackageSource {
+                game_root: &fixture.root,
+                container: &fixture.container,
+                entry: skin,
+                kind: AssetSource::Utoc,
+            },
+        );
+        let baton = from_parsed
+            .exports
+            .iter()
+            .find(|export| export.object_name == "UnEquipedStickR_GEN_VARIABLE")
+            .expect("the skin's right baton")
+            .index;
+        let before = fixture.parse();
+        let class = before
+            .exports
+            .iter()
+            .find(|export| export.class_name == "BlueprintGeneratedClass")
+            .expect("the cue's class")
+            .index;
+        let request = CopyRequest {
+            game_root: &fixture.root,
+            container: &fixture.container,
+            entry: fixture.entry,
+            kind: AssetSource::Utoc,
+            mod_name: "unused, a plan writes nothing",
+            sources: vec![source.clone()],
+            copies: vec![rivals_uasset::CopyExport {
+                from: source.key(),
+                export: baton,
+                into_outer: Some(class),
+                name: "ProbeSkinStickR_GEN_VARIABLE".to_string(),
+                into_level: None,
+            }],
+        };
+        let plan = plan_copy(&request, Some(&fixture.schema)).expect("plan");
+        assert!(plan.blockers.is_empty(), "{:?}", plan.blockers);
+        let mesh =
+            "/Game/Marvel/Characters/1033/1033500/Weapons/Stick_R/Meshes/SM_WP_1033500_Stick_R";
+        assert!(
+            plan.imports.iter().any(|path| path == mesh),
+            "{:?}",
+            plan.imports
+        );
+        assert!(
+            plan.imports
+                .iter()
+                .any(|path| *path == format!("{mesh}.SM_WP_1033500_Stick_R")),
+            "{:?}",
+            plan.imports
+        );
+        assert!(
+            plan.imports
+                .iter()
+                .all(|path| !path.contains("1033500/Cues")),
+            "{:?}",
+            plan.imports
+        );
     }
 
     /// A copy that would land on a name the destination already uses is refused, since the two
