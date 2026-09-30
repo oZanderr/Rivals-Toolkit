@@ -278,3 +278,61 @@ describe("AssetInspector dialogs", () => {
     expect(mock.callsTo("save_asset_edits")[1]).toMatchObject({ allowMissing: true });
   });
 });
+
+const MENU_TABLE = "/Game/UI/Menu_ST.Menu_ST";
+
+/** One export holding a string table text, which opens straight into its property tree. */
+function labelPackage() {
+  return {
+    package_name: PACKAGE,
+    cooked: true,
+    unversioned_properties: true,
+    name_count: 0,
+    import_count: 0,
+    export_count: 1,
+    names: [],
+    imports: [],
+    exports: [
+      exp(0, "Settings", "SettingsData", [
+        {
+          name: "Label",
+          span: [40, 72],
+          value: {
+            kind: "text",
+            value: `${MENU_TABLE}:Play`,
+            display: "Play now",
+            parts: [
+              { name: "TableId", span: [45, 53], value: { kind: "name", value: MENU_TABLE } },
+              { name: "Key", span: [53, 72], value: { kind: "str", value: "Play" } },
+            ],
+          },
+        },
+      ]),
+    ],
+    unresolved_structs: [],
+    resources: [],
+  };
+}
+
+describe("AssetInspector text edits", () => {
+  it("retypes a string table text as a whole, starting from its literal", async () => {
+    mock = tauri(labelPackage());
+    installTauri(mock);
+    mount();
+    const user = userEvent.setup();
+    await user.click(await screen.findByText("Play now"));
+    const input = await screen.findByDisplayValue(`LOCTABLE("${MENU_TABLE}", "Play")`);
+    await user.clear(input);
+    await user.type(input, 'INVTEXT("Hi"){Enter}');
+    await user.click(await screen.findByRole("button", { name: /Save as mod/ }));
+    await waitFor(() =>
+      expect(lastSave().values).toEqual([
+        { offset: 40, name: "Label", kind: "text", op: "set", text: 'INVTEXT("Hi")' },
+      ])
+    );
+    // The drift check holds the text to the literal it was retyped from.
+    expect(lastSave().expect).toMatchObject({
+      values: { "40": `LOCTABLE("${MENU_TABLE}", "Play")` },
+    });
+  });
+});

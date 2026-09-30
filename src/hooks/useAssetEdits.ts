@@ -12,6 +12,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 import type { PropertyEntry, PropertyValue } from "@/components/AssetInspector";
 import { emitModsChanged } from "@/lib/modsEvents";
+import { textLiteral } from "@/lib/textLiteral";
 
 /**
  * A queued change. Sending a value back to its default is not the same as emptying it, and a
@@ -89,8 +90,9 @@ function valueText(value: PropertyValue | undefined): string | undefined {
       return value.value;
     case "soft_object":
       return value.path;
+    // A text built from parts is compared as the literal that spells it, as the backend does.
     case "text":
-      return value.parts?.length ? undefined : value.value;
+      return value.parts?.length ? (textLiteral(value) ?? undefined) : value.value;
     case "object":
       return value.path ?? String(value.index);
     case "bool":

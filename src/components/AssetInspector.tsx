@@ -99,6 +99,7 @@ import {
 import { useExportClipboard, type ExportClipboard } from "@/hooks/useExportClipboard";
 import { useSaveHotkeys } from "@/hooks/useSaveHotkeys";
 import { previewContainerFilename } from "@/lib/pakName";
+import { textLiteral } from "@/lib/textLiteral";
 import { cn } from "@/lib/utils";
 
 export type PropertyValue =
@@ -833,6 +834,21 @@ function rowLock(row: TreeRow, session: EditSession): string | null {
     return "This payload did not decode, so its bytes are kept exactly as they are.";
   }
   if (value.kind === "struct") return "Edit the fields inside.";
+  // A text typed whole replaces its parts, so the two cannot both change in one save.
+  const wholeText = row.within.find(
+    (key) => key !== row.pending && session.drafts[key]?.draft.op === "set"
+  );
+  if (wholeText) {
+    return `The whole text ${session.drafts[wholeText].target.name} is being retyped; discard that to edit one of its parts.`;
+  }
+  if (
+    value.kind === "text" &&
+    value.parts?.length &&
+    row.target &&
+    hasDraftsWithin(session, draftKey(row.target))
+  ) {
+    return "One of this text's parts is being edited; discard that to retype the whole text.";
+  }
   if (!row.target) return row.reason;
   if (CONTAINER_KINDS.has(value.kind)) return "Right click to add or drop an element.";
   if (!EDITABLE_KINDS.has(value.kind)) return `${value.kind} values cannot be edited yet.`;
@@ -2452,22 +2468,27 @@ function editText(value: PropertyValue): string {
     // be pointed at, so the path is what a person can sensibly retype.
     case "object":
       return value.path ?? String(value.index);
-    // Shown as the game shows it, but written as the source it stores.
+    // Shown as the game shows it, but written as the source it stores. A text built from parts
+    // is typed as the literal that spells it, which says what kind of text it is.
     case "text":
-      return value.value ?? "";
+      return value.parts?.length ? (textLiteral(value) ?? value.value ?? "") : (value.value ?? "");
     default:
       return summarise(value);
   }
 }
 
+/** How a text built from parts can be typed, which the hover on one says. */
+const TEXT_FORMS =
+  'Type LOCTABLE("Table", "Key") to show another string table entry, INVTEXT("Text") or plain text to show fixed text in every language, NSLOCTEXT("Namespace", "Key", "Source") for a localized text, or LOCGEN_TOUPPER(...) / LOCGEN_TOLOWER(...) around one. Plain text over a table entry stops following the table.';
+
 /** What a text row says on hover: what the game shows it from, and what an edit does to it. */
 function textHint(value: PropertyValue): string | null {
   if (value.kind !== "text") return null;
   if (value.namespace !== undefined && value.key !== undefined && value.key !== "") {
-    return `Source: ${value.value ?? ""} · Key: ${value.namespace}/${value.key} · An edit shows as typed in every language; the translations for this key stop applying.`;
+    return `Source: ${value.value ?? ""} · Key: ${value.namespace}/${value.key} · An edit shows as typed in every language; the translations for this key stop applying. Type NSLOCTEXT("Namespace", "Key", "Source") to give it another key.`;
   }
-  if (value.display !== undefined && (value.parts?.length ?? 0) > 0) {
-    return `Shows string table entry ${value.value ?? ""}. Edit that table's entry to change the text.`;
+  if ((value.parts?.length ?? 0) > 0) {
+    return `Shows ${value.display ?? value.value ?? ""}. ${TEXT_FORMS}`;
   }
   return null;
 }
@@ -2513,9 +2534,6 @@ function editableReason(field: PropertyEntry | undefined): string | null {
   if (field.value.kind === "unset") return unsetReason(field.value.declared);
   if (field.value.kind === "default" && field.value.declared) {
     return unsetReason(field.value.declared);
-  }
-  if (field.value.kind === "text" && field.value.parts?.length) {
-    return "This text is built from the parts below; edit one of them.";
   }
   if (CONTAINER_KINDS.has(field.value.kind)) {
     return "Right click to add or drop an element.";
