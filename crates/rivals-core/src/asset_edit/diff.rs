@@ -362,9 +362,63 @@ fn diff_value(
             }
         }
         PropertyValue::Text { parts, value, .. } if !parts.is_empty() => {
-            let _ = value;
-            if let Some(items) = edited.get("parts").and_then(Json::as_array) {
+            let edits_before = out.edits.values.len();
+            let edited_parts = edited.get("parts").and_then(Json::as_array);
+            if let Some(items) = edited_parts {
                 diff_entries(parts, items, export, &label, out);
+            }
+            let Some(now) = edited
+                .get("value")
+                .and_then(Json::as_str)
+                .filter(|now| Some(*now) != value.as_deref())
+            else {
+                return;
+            };
+            // A changed value is the whole text typed again; changed parts already say the same
+            // thing when the value is what they read as, and anything else is two answers.
+            if out.edits.values.len() > edits_before {
+                if edited_parts
+                    .and_then(|items| parts_read_as(items))
+                    .as_deref()
+                    != Some(now)
+                {
+                    out.notes.push(format!(
+                        "{label}: both the text and its parts changed, and they disagree; the part \
+                         edits are kept"
+                    ));
+                }
+                return;
+            }
+            push_text_edit(entry, &label, now.to_string(), out);
+        }
+        // A localized text whose namespace or key changed is a text with another identity, which
+        // only its literal can spell.
+        PropertyValue::Text {
+            namespace: Some(namespace),
+            key: Some(key),
+            value,
+            ..
+        } => {
+            let field = |name: &str| edited.get(name).and_then(Json::as_str);
+            let now_namespace = field("namespace").unwrap_or(namespace);
+            let now_key = field("key").unwrap_or(key);
+            let now_value = field("value").map(str::to_string).or_else(|| value.clone());
+            if now_namespace != namespace || now_key != key {
+                let literal = rivals_uasset::text_literal::TextLiteral::Localized {
+                    namespace: now_namespace.to_string(),
+                    key: now_key.to_string(),
+                    source: now_value.unwrap_or_default(),
+                };
+                push_text_edit(
+                    entry,
+                    &label,
+                    rivals_uasset::text_literal::format(&literal),
+                    out,
+                );
+            } else if now_value != *value
+                && let Some(now_value) = now_value
+            {
+                push_text_edit(entry, &label, now_value, out);
             }
         }
         PropertyValue::Array { items } | PropertyValue::Set { items } => {
@@ -451,6 +505,41 @@ fn diff_value(
             }
         }
     }
+}
+
+/// A text typed again as a whole, at the text's own offset.
+fn push_text_edit(entry: &PropertyEntry, label: &str, text: String, out: &mut DiffOutcome) {
+    let Some((offset, _)) = entry.span else {
+        out.notes.push(format!(
+            "{label}: the reader recorded no offset for it, so it cannot be addressed"
+        ));
+        return;
+    };
+    out.edits.values.push(ValueEdit {
+        offset,
+        expect_name: entry.name.clone(),
+        expect_element: entry.element,
+        expect_kind: kind_of(&entry.value),
+        op: EditOp::Set { text },
+    });
+}
+
+/// What a text reads as from its edited parts: a string table entry's `Table:Key`, or a
+/// transformed text's source.
+fn parts_read_as(parts: &[Json]) -> Option<String> {
+    let part = |name: &str| {
+        parts
+            .iter()
+            .find(|part| part.get("name").and_then(Json::as_str) == Some(name))
+            .and_then(|part| part.get("value"))
+    };
+    if let (Some(table), Some(key)) = (part("TableId"), part("Key")) {
+        return Some(format!("{}:{}", text_of(table)?, text_of(key)?));
+    }
+    part("SourceText")?
+        .get("value")
+        .and_then(Json::as_str)
+        .map(str::to_string)
 }
 
 /// A value whose kind changed. Only the moves between stored, defaulted and unset are edits; the
@@ -1416,6 +1505,109 @@ mod tests {
 
     /// A delegate is bound by the loader rather than stored as text, so a changed one is reported
     /// and not written.
+    const TABLE: &str = "/Game/UI/Menu_ST.Menu_ST";
+
+    fn table_text(key: &str) -> PropertyEntry {
+        let part = |name: &str, value: PropertyValue, at: u64| PropertyEntry {
+            name: name.into(),
+            element: None,
+            span: Some((at, at + 8)),
+            value,
+            slot: None,
+        };
+        PropertyEntry {
+            name: "Label".into(),
+            element: None,
+            span: Some((0x40, 0x60)),
+            value: PropertyValue::Text {
+                value: Some(format!("{TABLE}:{key}")),
+                parts: vec![
+                    part(
+                        "TableId",
+                        PropertyValue::Name {
+                            value: TABLE.into(),
+                        },
+                        0x45,
+                    ),
+                    part("Key", PropertyValue::Str { value: key.into() }, 0x4D),
+                ],
+                namespace: None,
+                key: None,
+                display: None,
+            },
+            slot: None,
+        }
+    }
+
+    fn table_json(value: &str, key: &str) -> Json {
+        json!({"kind": "text", "value": value, "parts": [
+            {"name": "TableId", "value": {"kind": "name", "value": TABLE}},
+            {"name": "Key", "value": {"kind": "str", "value": key}},
+        ]})
+    }
+
+    /// A string table text whose value was typed again is set whole at its own offset, so the
+    /// encoder can repoint it or give it fixed text.
+    #[test]
+    fn a_table_text_s_changed_value_is_set_whole() {
+        let out = one(table_text("Play"), table_json("Fixed label", "Play"));
+        let edit = value(&out);
+        assert_eq!(edit.offset, 0x40);
+        assert_eq!(edit.expect_kind, "text");
+        assert!(matches!(&edit.op, EditOp::Set { text } if text == "Fixed label"));
+    }
+
+    /// Parts and a value that say the same thing leave the part edits alone; ones that disagree
+    /// keep the part edits and say so.
+    #[test]
+    fn a_table_text_s_parts_and_value_are_reconciled() {
+        let agree = one(
+            table_text("Play"),
+            table_json(&format!("{TABLE}:Quit"), "Quit"),
+        );
+        let edit = value(&agree);
+        assert_eq!(edit.offset, 0x4D);
+        assert!(agree.notes.is_empty(), "{:?}", agree.notes);
+
+        let disagree = one(table_text("Play"), table_json("Something else", "Quit"));
+        assert_eq!(value(&disagree).offset, 0x4D);
+        assert!(
+            disagree.notes.iter().any(|note| note.contains("disagree")),
+            "{:?}",
+            disagree.notes
+        );
+    }
+
+    /// A localized text given another namespace or key is a text with another identity, set as
+    /// its literal; a changed source alone stays a plain edit.
+    #[test]
+    fn a_localized_text_s_new_key_is_set_as_its_literal() {
+        let localized = entry(
+            "Title",
+            PropertyValue::Text {
+                value: Some("Play".into()),
+                parts: Vec::new(),
+                namespace: Some("Menu".into()),
+                key: Some("Play".into()),
+                display: None,
+            },
+            0x10,
+        );
+        let out = one(
+            localized.clone(),
+            json!({"kind": "text", "value": "Play", "namespace": "Menu", "key": "Start"}),
+        );
+        assert!(matches!(
+            &value(&out).op,
+            EditOp::Set { text } if text == r#"NSLOCTEXT("Menu", "Start", "Play")"#
+        ));
+        let out = one(
+            localized,
+            json!({"kind": "text", "value": "Go", "namespace": "Menu", "key": "Play"}),
+        );
+        assert!(matches!(&value(&out).op, EditOp::Set { text } if text == "Go"));
+    }
+
     #[test]
     fn a_changed_delegate_is_a_note() {
         let out = one(
