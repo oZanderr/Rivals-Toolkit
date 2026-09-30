@@ -5,6 +5,8 @@
 //! public export hashes are that path lowercased. Anything that moves a hash is reported rather
 //! than done quietly, because the packages importing it have no way to follow.
 
+use std::collections::BTreeSet;
+
 use retoc::legacy_asset::{FLegacyPackageHeader, FObjectExport, FPackageNameMap};
 use retoc::zen::FPackageIndex;
 use serde::{Deserialize, Serialize};
@@ -233,16 +235,6 @@ fn descends_from(parsed: &ParsedPackage, index: u32, ancestor: u32) -> bool {
     false
 }
 
-/// Every export under `index`, itself included, so a rename can report what it repaths.
-fn subtree(parsed: &ParsedPackage, index: u32) -> Vec<u32> {
-    parsed
-        .exports
-        .iter()
-        .filter(|export| descends_from(parsed, export.index, index))
-        .map(|export| export.index)
-        .collect()
-}
-
 fn name_is_usable(name: &str) -> Result<(), String> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
@@ -259,15 +251,6 @@ fn name_is_usable(name: &str) -> Result<(), String> {
 /// The table word for an outer: an export, or null for the package itself.
 pub(crate) fn outer_index(outer: Option<u32>) -> FPackageIndex {
     outer.map_or_else(FPackageIndex::create_null, FPackageIndex::create_export)
-}
-
-/// Whether another object already sits under `outer` with this name, which the loader resolves by.
-fn name_taken(parsed: &ParsedPackage, outer: i32, name: &str, except: u32) -> bool {
-    parsed.exports.iter().any(|export| {
-        export.index != except
-            && export.outer_index == outer
-            && export.object_name.eq_ignore_ascii_case(name)
-    })
 }
 
 /// What the requested edits would do, with everything standing in the way named at once.
@@ -320,7 +303,6 @@ pub fn plan_export_edits_with(
                     plan.blockers.push(reason);
                     continue;
                 }
-                let name = name.trim();
                 if is_type_like(&export.class_name) {
                     plan.blockers.push(format!(
                         "{} is a {}, which its instances are read under by name, so renaming it would leave them unreadable",
@@ -333,43 +315,14 @@ pub fn plan_export_edits_with(
                         export.path
                     ));
                 }
-                if name_taken(parsed, export.outer_index, name, index) {
-                    plan.blockers.push(format!(
-                        "something called {name} already sits beside {}",
-                        export.path
-                    ));
-                }
-                if export.object_name != name {
-                    note_repaths(parsed, &mut plan, index, |path| {
-                        let head = path.rfind([':', '.']).map_or(0, |at| at + 1);
-                        format!("{}{name}", &path[..head])
-                    });
-                }
             }
             ExportEdit::SetOuter { outer, .. } => {
-                let wanted = outer_index(*outer);
-                if let Some(outer) = *outer {
-                    if outer as usize >= parsed.exports.len() {
-                        plan.blockers
-                            .push(format!("this package has no export {outer} to sit under"));
-                        continue;
-                    }
-                    if descends_from(parsed, outer, index) {
-                        plan.blockers.push(format!(
-                            "{} cannot sit inside itself or anything under it",
-                            export.path
-                        ));
-                        continue;
-                    }
-                }
-                if name_taken(parsed, wanted.index, &export.object_name, index) {
-                    let place = outer.map_or("at the package root".to_string(), |outer| {
-                        format!("under export {outer}")
-                    });
-                    plan.blockers.push(format!(
-                        "something called {} already sits {place}",
-                        export.object_name
-                    ));
+                if let Some(outer) = *outer
+                    && outer as usize >= parsed.exports.len()
+                {
+                    plan.blockers
+                        .push(format!("this package has no export {outer} to sit under"));
+                    continue;
                 }
                 if is_type_like(&export.class_name) {
                     plan.blockers.push(format!(
@@ -377,19 +330,6 @@ pub fn plan_export_edits_with(
                         export.path, export.class_name
                     ));
                 }
-                // A root object is named `Package.Name`; anything deeper `Outer:Name`.
-                let head = match *outer {
-                    Some(outer) => parsed
-                        .exports
-                        .get(outer as usize)
-                        .map(|outer| format!("{}:", outer.path))
-                        .unwrap_or_default(),
-                    None => format!("{}.", parsed.info.package_name),
-                };
-                note_repaths(parsed, &mut plan, index, move |path| {
-                    let tail = path.rsplit([':', '.']).next().unwrap_or(path);
-                    format!("{head}{tail}")
-                });
             }
             ExportEdit::SetClass { class, .. } => {
                 plan_set_class(parsed, &mut plan, export, *class, mappings, resets);
@@ -451,6 +391,11 @@ pub fn plan_export_edits_with(
             }
         }
     }
+    // Renames and moves are judged by where every object ends up, since one save can free a name
+    // another takes, or rename an object on its way to an outer that holds its old name.
+    let places = final_places(parsed, edits);
+    check_final_places(parsed, edits, &places, &mut plan);
+    note_final_repaths(parsed, edits, &places, &mut plan);
     plan.repathed.sort();
     plan.repathed.dedup();
     plan.public.sort();
@@ -770,34 +715,166 @@ fn class_name_of(parsed: &ParsedPackage, index: FPackageIndex) -> Option<String>
     }
 }
 
-/// Records the new path of every export under `index`, and notes the ones other packages import.
-fn note_repaths(
-    parsed: &ParsedPackage,
-    plan: &mut ExportEditPlan,
-    index: u32,
-    rename_root: impl Fn(&str) -> String,
-) {
-    let Ok(root) = export_of(parsed, index) else {
-        return;
-    };
-    let was = root.path.clone();
-    let now = rename_root(&was);
-    for member in subtree(parsed, index) {
-        let Ok(export) = export_of(parsed, member) else {
-            continue;
-        };
-        let path = export.path.clone();
-        let moved = if member == index {
-            now.clone()
-        } else if let Some(tail) = path.strip_prefix(&was) {
-            format!("{now}{tail}")
-        } else {
-            continue;
-        };
-        if export.object_flags & RF_PUBLIC != 0 || export.generate_public_hash {
-            plan.public.push(path.clone());
+/// Each export's name and outer once every rename and move in the save has landed.
+fn final_places(parsed: &ParsedPackage, edits: &[ExportEdit]) -> Vec<(String, i32)> {
+    let mut places: Vec<(String, i32)> = parsed
+        .exports
+        .iter()
+        .map(|export| (export.object_name.clone(), export.outer_index))
+        .collect();
+    for edit in edits {
+        match edit {
+            ExportEdit::Rename { export, name } if name_is_usable(name).is_ok() => {
+                if let Some(place) = places.get_mut(*export as usize) {
+                    place.0 = name.trim().to_string();
+                }
+            }
+            ExportEdit::SetOuter { export, outer }
+                if outer.is_none_or(|outer| (outer as usize) < parsed.exports.len()) =>
+            {
+                if let Some(place) = places.get_mut(*export as usize) {
+                    place.1 = outer_index(*outer).index;
+                }
+            }
+            _ => {}
         }
-        plan.repathed.push((path, moved));
+    }
+    places
+}
+
+/// The exports a save renames or moves.
+fn placed_by(edits: &[ExportEdit]) -> BTreeSet<u32> {
+    edits
+        .iter()
+        .filter_map(|edit| match edit {
+            ExportEdit::Rename { export, .. } | ExportEdit::SetOuter { export, .. } => {
+                Some(*export)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Refuses an outer chain that loops back on itself and two objects that end up sharing a name
+/// under one outer, which the loader resolves by. Both are judged on the table the save leaves.
+fn check_final_places(
+    parsed: &ParsedPackage,
+    edits: &[ExportEdit],
+    places: &[(String, i32)],
+    plan: &mut ExportEditPlan,
+) {
+    let moved: BTreeSet<u32> = edits
+        .iter()
+        .filter_map(|edit| match edit {
+            ExportEdit::SetOuter { export, .. } => Some(*export),
+            _ => None,
+        })
+        .collect();
+    for &index in &moved {
+        let Some(export) = parsed.exports.get(index as usize) else {
+            continue;
+        };
+        let mut at = places[index as usize].1;
+        for _ in 0..=places.len() {
+            let outer = FPackageIndex { index: at };
+            if !outer.is_export() {
+                break;
+            }
+            if outer.to_export_index() == index {
+                plan.blockers.push(format!(
+                    "{} cannot sit inside itself or anything under it",
+                    export.path
+                ));
+                break;
+            }
+            at = places
+                .get(outer.to_export_index() as usize)
+                .map_or(0, |place| place.1);
+        }
+    }
+    let mut reported: BTreeSet<(u32, u32)> = BTreeSet::new();
+    for index in placed_by(edits) {
+        let (Some(export), Some((name, outer))) = (
+            parsed.exports.get(index as usize),
+            places.get(index as usize),
+        ) else {
+            continue;
+        };
+        for (other, (other_name, other_outer)) in places.iter().enumerate() {
+            let other = other as u32;
+            if other == index || other_outer != outer || !other_name.eq_ignore_ascii_case(name) {
+                continue;
+            }
+            if !reported.insert((index.min(other), index.max(other))) {
+                continue;
+            }
+            let place = if moved.contains(&index) {
+                let outer = FPackageIndex { index: *outer };
+                if outer.is_export() {
+                    format!("under export {}", outer.to_export_index())
+                } else {
+                    "at the package root".to_string()
+                }
+            } else {
+                format!("beside {}", export.path)
+            };
+            plan.blockers
+                .push(format!("something called {name} already sits {place}"));
+        }
+    }
+}
+
+/// Records one move from old path to final path for every export a rename or move reaches, its
+/// subobjects included, and notes the ones other packages import. The final path is built from the
+/// table the save leaves, so an object renamed and moved at once, or moved under an outer the same
+/// save renames, gets the path it actually ends at.
+fn note_final_repaths(
+    parsed: &ParsedPackage,
+    edits: &[ExportEdit],
+    places: &[(String, i32)],
+    plan: &mut ExportEditPlan,
+) {
+    let placed = placed_by(edits);
+    if placed.is_empty() {
+        return;
+    }
+    let final_path = |index: u32| -> Option<(String, bool)> {
+        let mut chain = Vec::new();
+        let mut at = index;
+        let mut reached = false;
+        for _ in 0..=places.len() {
+            let (name, outer) = places.get(at as usize)?;
+            reached |= placed.contains(&at);
+            chain.push(name.as_str());
+            let outer = FPackageIndex { index: *outer };
+            if outer.is_null() {
+                chain.reverse();
+                let (root, rest) = chain.split_first()?;
+                let mut path = format!("{}.{root}", parsed.info.package_name);
+                for name in rest {
+                    path.push(':');
+                    path.push_str(name);
+                }
+                return Some((path, reached));
+            }
+            if !outer.is_export() {
+                return None;
+            }
+            at = outer.to_export_index();
+        }
+        None
+    };
+    for export in &parsed.exports {
+        let Some((now, reached)) = final_path(export.index) else {
+            continue;
+        };
+        if !reached || now == export.path {
+            continue;
+        }
+        if export.object_flags & RF_PUBLIC != 0 || export.generate_public_hash {
+            plan.public.push(export.path.clone());
+        }
+        plan.repathed.push((export.path.clone(), now));
     }
 }
 
@@ -1148,6 +1225,145 @@ mod tests {
                 plan.blockers
             );
         }
+    }
+
+    /// The fixture with a holder under the root that already has a child called `Mesh`.
+    fn nested() -> ParsedPackage {
+        let mut parsed = package();
+        let mut holder = export(4, "Holder", "SceneComponent", 1);
+        holder.path = "/Game/Test.Root:Holder".into();
+        let mut inner = export(5, "Mesh", "StaticMeshComponent", 5);
+        inner.path = "/Game/Test.Root:Holder:Mesh".into();
+        parsed.exports.extend([holder, inner]);
+        parsed
+    }
+
+    fn plan_of(parsed: &ParsedPackage, edits: &[ExportEdit]) -> ExportEditPlan {
+        plan_export_edits(parsed, edits, None).expect("plan")
+    }
+
+    /// Renamed and moved in one save, an object is checked where it ends up: the outer's child
+    /// with its old name is no clash, and it gets one move to the path it actually lands at.
+    #[test]
+    fn a_rename_and_a_move_are_judged_together() {
+        let parsed = nested();
+        let plan = plan_of(
+            &parsed,
+            &[
+                ExportEdit::Rename {
+                    export: 1,
+                    name: "MeshL".into(),
+                },
+                ExportEdit::SetOuter {
+                    export: 1,
+                    outer: Some(4),
+                },
+            ],
+        );
+        assert!(plan.blockers.is_empty(), "{:?}", plan.blockers);
+        assert_eq!(
+            plan.repathed,
+            vec![(
+                "/Game/Test.Root:Mesh".to_string(),
+                "/Game/Test.Root:Holder:MeshL".to_string()
+            )]
+        );
+    }
+
+    /// Two siblings may swap names in one save, but may not end up with the same one.
+    #[test]
+    fn siblings_may_swap_names_but_not_share_one() {
+        let parsed = package();
+        let swap = plan_of(
+            &parsed,
+            &[
+                ExportEdit::Rename {
+                    export: 1,
+                    name: "Light".into(),
+                },
+                ExportEdit::Rename {
+                    export: 2,
+                    name: "Mesh".into(),
+                },
+            ],
+        );
+        assert!(swap.blockers.is_empty(), "{:?}", swap.blockers);
+        assert_eq!(swap.repathed.len(), 2, "{:?}", swap.repathed);
+        let shared = plan_of(
+            &parsed,
+            &[
+                ExportEdit::Rename {
+                    export: 1,
+                    name: "Lamp".into(),
+                },
+                ExportEdit::Rename {
+                    export: 2,
+                    name: "Lamp".into(),
+                },
+            ],
+        );
+        assert_eq!(
+            shared
+                .blockers
+                .iter()
+                .filter(|b| b.contains("already sits"))
+                .count(),
+            1,
+            "{:?}",
+            shared.blockers
+        );
+    }
+
+    /// Two moves that each put an object under the other make a loop no single move shows.
+    #[test]
+    fn two_moves_that_make_a_loop_are_refused() {
+        let parsed = package();
+        let plan = plan_of(
+            &parsed,
+            &[
+                ExportEdit::SetOuter {
+                    export: 1,
+                    outer: Some(2),
+                },
+                ExportEdit::SetOuter {
+                    export: 2,
+                    outer: Some(1),
+                },
+            ],
+        );
+        assert!(
+            plan.blockers.iter().any(|b| b.contains("inside itself")),
+            "{:?}",
+            plan.blockers
+        );
+    }
+
+    /// Moving under an outer the same save renames lands at the outer's new path.
+    #[test]
+    fn a_move_under_a_renamed_outer_takes_its_new_path() {
+        let parsed = package();
+        let plan = plan_of(
+            &parsed,
+            &[
+                ExportEdit::Rename {
+                    export: 2,
+                    name: "Lamp".into(),
+                },
+                ExportEdit::SetOuter {
+                    export: 1,
+                    outer: Some(2),
+                },
+            ],
+        );
+        assert!(plan.blockers.is_empty(), "{:?}", plan.blockers);
+        assert!(
+            plan.repathed.contains(&(
+                "/Game/Test.Root:Mesh".to_string(),
+                "/Game/Test.Root:Lamp:Mesh".to_string()
+            )),
+            "{:?}",
+            plan.repathed
+        );
     }
 
     /// No outer is the package root, which is where the package's own asset sits, not export 0.

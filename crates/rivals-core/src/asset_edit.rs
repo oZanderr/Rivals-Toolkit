@@ -11865,6 +11865,52 @@ mod game_data_tests {
         );
     }
 
+    /// Renaming an object and moving it under an outer that holds its old name is one save: the
+    /// clash is judged on where it ends up, and it reads back at that one path.
+    #[test]
+    fn an_export_is_renamed_and_moved_in_one_save() {
+        let Some(fixture) = Fixture::open(WEAPON_CUE) else {
+            return;
+        };
+        let before = fixture.parse();
+        let named = |name: &str| {
+            before
+                .exports
+                .iter()
+                .find(|export| export.object_name == name)
+                .unwrap_or_else(|| panic!("{name}"))
+        };
+        let left = named("UnEquipedStickL_GEN_VARIABLE");
+        let right = named("UnEquipedStickR_GEN_VARIABLE");
+        let record = before
+            .exports
+            .iter()
+            .find(|export| {
+                export.object_name == "CueData_UnarmedWeapon_0"
+                    && export.outer_index == left.index as i32 + 1
+            })
+            .expect("the left baton's record");
+        let (_, after) = fixture.apply_changes(PackageEdits {
+            exports: vec![
+                rivals_uasset::ExportEdit::Rename {
+                    export: record.index,
+                    name: "ToolkitRecordL".into(),
+                },
+                rivals_uasset::ExportEdit::SetOuter {
+                    export: record.index,
+                    outer: Some(right.index),
+                },
+            ],
+            ..Default::default()
+        });
+        let moved = &after.exports[record.index as usize];
+        assert_eq!(
+            moved.path,
+            format!("{}:ToolkitRecordL", right.path),
+            "one path, both changes"
+        );
+    }
+
     /// A map keyed by a struct grows by the key type's default, which reads back as a None-named
     /// variable; the same default asked for twice in one save is refused.
     #[test]
