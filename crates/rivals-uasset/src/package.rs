@@ -274,6 +274,9 @@ pub struct ParsedPackage {
     /// How many texts of each `ETextHistoryType` this package holds.
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub text_histories: std::collections::BTreeMap<i8, usize>,
+    /// How many texts carried each flag word, keyed `"<history> <flags>"` such as `"11 0x0"`.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub text_flags: std::collections::BTreeMap<String, usize>,
     /// Names the mappings file holds more than one entry for, resolved to an entry other than
     /// the default because that is the one this package reads under.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -606,6 +609,11 @@ fn parse_inner(
                 })
                 .collect(),
             text_histories: diagnostics.text_histories,
+            text_flags: diagnostics
+                .text_flags
+                .into_iter()
+                .map(|((history, flags), count)| (format!("{history} {flags:#x}"), count))
+                .collect(),
             twins: twins_chosen,
             resources: crate::write::resource_infos(&header, bundle.exports),
         },

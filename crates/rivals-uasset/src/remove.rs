@@ -820,6 +820,7 @@ mod tests {
             tagged_absent: Vec::new(),
             script_tokens: Default::default(),
             text_histories: Default::default(),
+            text_flags: Default::default(),
             twins: Vec::new(),
             resources: Vec::new(),
             dependencies: None,

@@ -383,6 +383,9 @@ pub struct Diagnostics {
     /// How many texts of each `ETextHistoryType` were read, which says which text layouts the
     /// data exercises at all.
     pub text_histories: BTreeMap<i8, usize>,
+    /// How many texts carried each `ETextFlag` word under each history, which says what flags a
+    /// text rebuilt as another history should take.
+    pub text_flags: BTreeMap<(i8, u32), usize>,
     /// Re-encode every unversioned header and compare it with the bytes it came from. The
     /// writer may only be trusted where it reproduces UE's own fragmentation exactly.
     pub check_headers: bool,
@@ -1381,9 +1384,10 @@ fn read_text(
     if depth > MAX_STRUCT_DEPTH {
         return Err(cursor.err("text nesting is too deep"));
     }
-    let _flags = cursor.read_u32()?;
+    let flags = cursor.read_u32()?;
     let history = cursor.read_i8()?;
     *diagnostics.text_histories.entry(history).or_default() += 1;
+    *diagnostics.text_flags.entry((history, flags)).or_default() += 1;
     let mut parts = Vec::new();
     let (mut namespace, mut key) = (None, None);
     let value = match history {
@@ -2093,6 +2097,20 @@ mod tests {
         assert_eq!(shown.as_deref(), Some("OnFired:Greeting"));
         assert_eq!(parts.len(), 2);
         assert!(matches!(&parts[0].value, PropertyValue::Name { value } if value == "OnFired"));
+    }
+
+    /// Every text read counts its flag word under its history, a nested one included, which is how
+    /// the audit says what flags a rebuilt text should take.
+    #[test]
+    fn a_text_s_flags_are_counted_under_its_history() {
+        let mut data = 0x8u32.to_le_bytes().to_vec();
+        data.push(10);
+        data.extend_from_slice(&invariant("shout"));
+        data.push(1);
+        let (_, consumed, diagnostics) = read_diagnosed(&PropertyInner::Text, &data).expect("read");
+        assert_eq!(consumed, data.len());
+        assert_eq!(diagnostics.text_flags.get(&(10, 0x8)), Some(&1));
+        assert_eq!(diagnostics.text_flags.get(&(-1, 0)), Some(&1));
     }
 
     /// `FScriptDelegate` is a package index followed by the function name, twelve bytes in all.

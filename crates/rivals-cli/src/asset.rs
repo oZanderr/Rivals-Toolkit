@@ -2455,6 +2455,8 @@ pub struct AuditReport {
     pub class_recovery_examples: Vec<ClassExamples>,
     /// `ETextHistoryType` values read, which tells a text layout the data uses from one it never does.
     pub text_histories: Vec<Count>,
+    /// The `ETextFlag` words texts carry under each history, which says what a rebuilt text takes.
+    pub text_flags: Vec<Count>,
     /// Packages storing tagged properties rather than unversioned ones, which the structural
     /// editor treats differently.
     pub packages_tagged: usize,
@@ -2837,6 +2839,7 @@ struct Accumulator {
     recovery: BTreeMap<String, usize>,
     recovery_examples: BTreeMap<String, Vec<String>>,
     histories: BTreeMap<String, usize>,
+    text_flags: BTreeMap<String, usize>,
     twinned: BTreeMap<String, usize>,
     undecoded: BTreeMap<String, usize>,
     undecoded_examples: BTreeMap<String, Vec<String>>,
@@ -2887,6 +2890,7 @@ impl Accumulator {
                 class_recovery_failures: Vec::new(),
                 class_recovery_examples: Vec::new(),
                 text_histories: Vec::new(),
+                text_flags: Vec::new(),
                 packages_tagged: 0,
                 packages_twinned: 0,
                 twins: Vec::new(),
@@ -2912,6 +2916,7 @@ impl Accumulator {
             recovery: BTreeMap::new(),
             recovery_examples: BTreeMap::new(),
             histories: BTreeMap::new(),
+            text_flags: BTreeMap::new(),
             twinned: BTreeMap::new(),
             undecoded: BTreeMap::new(),
             undecoded_examples: BTreeMap::new(),
@@ -2993,6 +2998,14 @@ impl Accumulator {
             *self
                 .histories
                 .entry(format!("{history} {}", text_history_label(*history)))
+                .or_default() += count;
+        }
+        for (key, count) in &parsed.text_flags {
+            let (history, flags) = key.split_once(' ').unwrap_or((key.as_str(), ""));
+            let label = history.parse::<i8>().map_or("unknown", text_history_label);
+            *self
+                .text_flags
+                .entry(format!("{history} {label} flags {flags}"))
                 .or_default() += count;
         }
         for name in &parsed.unresolved_structs {
@@ -3168,6 +3181,7 @@ impl Accumulator {
             })
             .collect();
         self.report.text_histories = rank_all(self.histories);
+        self.report.text_flags = rank_all(self.text_flags);
         self.report.twins = rank_all(self.twinned);
         let mut gaps: BTreeMap<String, MappingsGap> = BTreeMap::new();
         for (cause, count) in &failures {
@@ -3373,6 +3387,7 @@ pub fn print_audit(report: &AuditReport, out: &mut impl FnMut(String)) {
         );
     }
     print_counts("FText histories read", &report.text_histories, out);
+    print_counts("FText flags by history", &report.text_flags, out);
     if report.packages_tagged > 0 {
         out(format!(
             "{} package(s) store tagged properties rather than unversioned ones",
