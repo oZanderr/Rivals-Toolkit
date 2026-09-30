@@ -1253,6 +1253,18 @@ struct FieldWalk {
     element: Option<u32>,
     path: Vec<String>,
     op: EditOp,
+    /// The value reached so far as a path from its export, while the walk has only gone through
+    /// structs: what an archetype holds there is what the value inherits. `None` inside a container
+    /// element, which starts from its struct's defaults instead.
+    trail: Option<Vec<String>>,
+}
+
+/// A field set's segment for a value: its name, and its slot for a static array.
+fn segment_of(name: &str, element: Option<u32>) -> String {
+    match element {
+        Some(at) => format!("{name}[{at}]"),
+        None => name.to_string(),
+    }
 }
 
 /// Where a walk stands in the package as it now reads.
@@ -1432,6 +1444,7 @@ fn field_step(
                     ));
                 };
                 walk.path.remove(0);
+                walk.trail = None;
                 fields
             }
             (other, None) => {
@@ -1473,6 +1486,9 @@ fn field_step(
         walk.offset = start;
         walk.name = field.name.clone();
         walk.element = field.element;
+        if let Some(trail) = &mut walk.trail {
+            trail.push(segment_of(&field.name, field.element));
+        }
         walk.path.remove(0);
     }
 }
@@ -1503,6 +1519,7 @@ fn field_passes(
             element: edit.expect_element,
             path: Vec::new(),
             op: edit.op,
+            trail: None,
         })
         .collect();
     for set in std::mem::take(&mut edits.field_sets) {
@@ -1510,6 +1527,7 @@ fn field_passes(
             return Err("a field set names no field".into());
         }
         walks.push(FieldWalk {
+            trail: Some(vec![segment_of(&set.expect_name, set.expect_element)]),
             offset: set.offset,
             name: set.expect_name,
             element: set.expect_element,
@@ -1519,17 +1537,30 @@ fn field_passes(
     }
     let mut current: Option<(PatchedBundle, rivals_uasset::ParsedPackage)> = None;
     let mut applied = Vec::new();
+    let mut notes: Vec<String> = Vec::new();
     let mut bulk = None;
     let mut optional_bulk = None;
+    // Walks sitting at a struct the last round stored over a value the object inherited.
+    let mut fresh: Vec<usize> = Vec::new();
     for _ in 0..FIELD_ROUNDS {
         let now = current.as_ref().map_or(parsed, |(_, held)| held);
+        whole_struct_fields(request, mappings, now, &mut walks, &fresh, &mut notes)?;
         // Each walk still going, with the edit in this round it waits on.
         let mut waiting: Vec<(FieldWalk, usize)> = Vec::new();
+        // The stores this round makes of a value the object inherits, by position in the round.
+        let mut over_inherited: std::collections::BTreeSet<usize> = Default::default();
         for mut walk in std::mem::take(&mut walks) {
             match field_step(now, &mut walk, &edits.values)? {
                 FieldStep::Edit(edit) => edits.values.push(edit),
                 FieldStep::Wait(at) => waiting.push((walk, at)),
                 FieldStep::Store(store) => {
+                    let inherits = rivals_uasset::entry_named_at(
+                        now,
+                        store.offset,
+                        &store.expect_name,
+                        store.expect_element,
+                    )
+                    .is_some_and(|entry| matches!(entry.value, PropertyValue::Unset { .. }));
                     let at = edits
                         .values
                         .iter()
@@ -1543,6 +1574,9 @@ fn field_passes(
                             edits.values.push(store);
                             edits.values.len() - 1
                         });
+                    if inherits {
+                        over_inherited.insert(at);
+                    }
                     waiting.push((walk, at));
                 }
             }
@@ -1574,14 +1608,20 @@ fn field_passes(
         let (patched, after) = patch_pass(request, mappings, &bundle, sidecars, now, &edits)?;
         // A stored struct or a grown container has moved by whatever went in ahead of it, as its
         // edit reports.
+        fresh.clear();
         walks = waiting
             .into_iter()
-            .map(|(mut walk, at)| {
+            .enumerate()
+            .map(|(position, (mut walk, at))| {
                 walk.offset = patched.applied[at].offset_after;
+                if over_inherited.contains(&at) {
+                    fresh.push(position);
+                }
                 walk
             })
             .collect();
         applied.extend(patched.applied.iter().cloned());
+        notes.extend(patched.notes.iter().cloned());
         bulk = patched.bulk.clone().or(bulk);
         optional_bulk = patched.optional_bulk.clone().or(optional_bulk);
         current = Some((patched, after));
@@ -1598,9 +1638,155 @@ fn field_passes(
     }
     let (mut patched, _) = current.ok_or("No changes to save")?;
     patched.applied = applied;
+    patched.notes = notes;
     patched.bulk = bulk;
     patched.optional_bulk = optional_bulk;
     Ok((patched, loaded))
+}
+
+/// Where a value sits: its offset, name and static-array slot, which is how an edit addresses it.
+type ValueAt = (u64, String, Option<u32>);
+
+/// Checks the structs the last round stored over an inherited value, where UE writes the struct
+/// whole: every field goes in, so one the walks do not type would be written as its default over
+/// what the object inherits. Those fields are given the value the archetype holds, with a note
+/// saying where from; when no archetype in a package holds one, the save is refused and names them.
+fn whole_struct_fields(
+    request: &AssetEditRequest<'_>,
+    mappings: Option<&Mappings>,
+    now: &rivals_uasset::ParsedPackage,
+    walks: &mut Vec<FieldWalk>,
+    fresh: &[usize],
+    notes: &mut Vec<String>,
+) -> Result<(), String> {
+    // The walks into each freshly stored struct, grouped by where it sits.
+    let mut groups: Vec<(ValueAt, Vec<usize>)> = Vec::new();
+    for &position in fresh {
+        let walk = &walks[position];
+        let key = (walk.offset, walk.name.clone(), walk.element);
+        match groups.iter_mut().find(|(held, _)| *held == key) {
+            Some((_, members)) => members.push(position),
+            None => groups.push((key, vec![position])),
+        }
+    }
+    let mut added = Vec::new();
+    for ((offset, name, element), members) in groups {
+        let Some(entry) = rivals_uasset::entry_named_at(now, offset, &name, element) else {
+            continue;
+        };
+        let PropertyValue::Struct { name: kind, fields } = &entry.value else {
+            continue;
+        };
+        let Some(trail) = walks[members[0]].trail.clone() else {
+            continue;
+        };
+        if !rivals_uasset::stored_whole(kind) {
+            continue;
+        }
+        let typed: Vec<&str> = members
+            .iter()
+            .filter_map(|&at| walks[at].path.first().map(String::as_str))
+            .collect();
+        let untyped: Vec<String> = fields
+            .iter()
+            .map(|field| segment_of(&field.name, field.element))
+            .filter(|field| !typed.contains(&field.as_str()))
+            .collect();
+        if untyped.is_empty() {
+            continue;
+        }
+        let owner = now.exports.iter().find(|export| {
+            let start = export.serial_offset.max(0) as u64;
+            start <= offset && offset < start + export.serial_size.max(0) as u64
+        });
+        let report = match owner {
+            Some(owner) => crate::inherit::inherited_at(
+                now,
+                owner.index,
+                untyped
+                    .iter()
+                    .map(|field| {
+                        let mut path = trail.clone();
+                        path.push(field.clone());
+                        path
+                    })
+                    .collect(),
+                &crate::inherit::ArchetypeSource {
+                    game_root: request.game_root,
+                    container: request.container,
+                    mappings,
+                },
+            )?,
+            None => crate::inherit::InheritReport::default(),
+        };
+        let typeable = |value: &PropertyValue| {
+            matches!(
+                value,
+                PropertyValue::Bool { .. }
+                    | PropertyValue::Int { .. }
+                    | PropertyValue::UInt { .. }
+                    | PropertyValue::Float { .. }
+                    | PropertyValue::Byte { .. }
+                    | PropertyValue::Enum { .. }
+                    | PropertyValue::Name { .. }
+                    | PropertyValue::Str { .. }
+            )
+        };
+        let found: Vec<(&String, &crate::inherit::Inherited)> = untyped
+            .iter()
+            .filter_map(|field| {
+                report
+                    .values
+                    .iter()
+                    .find(|held| held.path.last() == Some(field) && typeable(&held.value))
+                    .map(|held| (field, held))
+            })
+            .collect();
+        if found.len() < untyped.len() {
+            let missing: Vec<&str> = untyped
+                .iter()
+                .filter(|field| found.iter().all(|(held, _)| held != field))
+                .map(String::as_str)
+                .collect();
+            let why = report
+                .stopped
+                .map(|reason| format!(" ({reason})"))
+                .unwrap_or_default();
+            let them = if missing.len() == 1 { "it" } else { "them" };
+            return Err(format!(
+                "{} is a {kind}, which is stored whole, so {} would be written as zero over the value it inherits{why}; type {them} as well",
+                trail.join("."),
+                missing.join(", ")
+            ));
+        }
+        let from = found
+            .first()
+            .map_or("its archetype", |(_, held)| held.from.as_str());
+        notes.push(format!(
+            "{} is a {kind}, which is stored whole: {} kept what {from} gives",
+            trail.join("."),
+            found
+                .iter()
+                .map(|(field, held)| format!("{field} = {}", held.value.summary()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+        let walk = &walks[members[0]];
+        for (field, held) in found {
+            added.push(FieldWalk {
+                offset: walk.offset,
+                name: walk.name.clone(),
+                element: walk.element,
+                path: vec![field.clone()],
+                op: EditOp::Set {
+                    text: held.value.summary(),
+                },
+                trail: None,
+            });
+        }
+    }
+    walks.extend(added);
+    Ok(())
 }
 
 /// What removing the requested exports would do, from a fresh read. Nothing is written.
@@ -2236,6 +2422,8 @@ pub enum PreviewOutcome {
     Verified {
         entry: String,
         applied: Vec<rivals_uasset::AppliedEdit>,
+        /// What the save would add or keep on its own that the edits did not spell out.
+        notes: Vec<String>,
     },
     HoldsCopy {
         pak: String,
@@ -2254,6 +2442,7 @@ pub fn preview_save(
         Prepared::Ready { entry, patched, .. } => PreviewOutcome::Verified {
             entry,
             applied: patched.applied,
+            notes: patched.notes,
         },
     })
 }
@@ -3740,6 +3929,9 @@ mod game_data_tests {
     /// Black Widow's weapon cue: the batons on her back are the static mesh components
     /// `UnEquipedStickL`/`UnEquipedStickR`, each with its own mesh import.
     const WEAPON_CUE: &str = "Marvel/Content/Marvel/Characters/1033/1033001/Cues/WeaponCue/Cue_Weapon_Loop_103311_BP.uasset";
+    /// Deadpool's upgraded shield cue, a child Blueprint whose `Toy` override template inherits from
+    /// the parent cue's template in another package.
+    const SHIELD_CUE: &str = "Marvel/Content/Marvel/Characters/1057/1057001/Cues/105747/Cue_Summoner_Loop_10574701_BP.uasset";
     /// A level sequence float section: its channel's extrapolation modes are enums a native
     /// reader names, which the mappings alone would leave as numbers.
     const CHANNEL_ENUM: &str =
@@ -3877,6 +4069,7 @@ mod game_data_tests {
     const ALL_FIXTURES: &[(&str, &str)] = &[
         ("PAK_ROUND_TRIP", PAK_ROUND_TRIP),
         ("WEAPON_CUE", WEAPON_CUE),
+        ("SHIELD_CUE", SHIELD_CUE),
         ("SYNTH_ROW_TABLE", SYNTH_ROW_TABLE),
         ("BATCH_SHAKE_HIT", BATCH_SHAKE_HIT),
         ("BATCH_SHAKE_OTHER", BATCH_SHAKE_OTHER),
@@ -9315,8 +9508,10 @@ mod game_data_tests {
         );
     }
 
-    /// A native struct shows the fields it lays out, whether it is zero or unset, and one of them
-    /// is set in a single save while the others keep what storing it gave them.
+    /// A native struct shows the fields it lays out, whether it is zero or unset. One field of a
+    /// zero one is set in a single save while the others stay zero, which is what it held. An unset
+    /// one inherits, and UE stores the struct whole, so typing one field of it is refused when its
+    /// archetype is native code and nothing can say what the others inherit; typed in full, it saves.
     #[test]
     fn a_field_inside_a_native_struct_is_set_in_one_save() {
         let Some(fixture) = Fixture::open(CURVE_ANIM_BP) else {
@@ -9343,24 +9538,46 @@ mod game_data_tests {
         assert_eq!(preview(&zero), ["X", "Y", "Z"]);
         assert_eq!(preview(&unset_rotator), ["Pitch", "Yaw", "Roll"]);
 
-        for (entry, field, text) in [(&zero, "X", "1.5"), (&unset_rotator, "Yaw", "90")] {
-            let request = AssetEditRequest {
-                game_root: &fixture.root,
-                container: &fixture.container,
-                entry: fixture.entry,
-                kind: AssetSource::Utoc,
-                mod_name: "unused, preview writes nothing",
-                changes: PackageEdits {
-                    field_sets: vec![rivals_uasset::FieldSet {
+        let sets = |entry: &PropertyEntry, typed: &[(&str, &str)]| AssetEditRequest {
+            game_root: &fixture.root,
+            container: &fixture.container,
+            entry: fixture.entry,
+            kind: AssetSource::Utoc,
+            mod_name: "unused, preview writes nothing",
+            changes: PackageEdits {
+                field_sets: typed
+                    .iter()
+                    .map(|(field, text)| rivals_uasset::FieldSet {
                         offset: entry.span.expect("a span").0,
                         expect_name: entry.name.clone(),
                         expect_element: entry.element,
-                        path: vec![field.into()],
-                        text: text.into(),
-                    }],
-                    ..Default::default()
-                },
-            };
+                        path: vec![(*field).into()],
+                        text: (*text).into(),
+                    })
+                    .collect(),
+                ..Default::default()
+            },
+        };
+        let Err(refused) = preview_edits(
+            &sets(&unset_rotator, &[("Yaw", "90")]),
+            Some(&fixture.schema),
+        ) else {
+            panic!("the other fields would be written as zero over what it inherits");
+        };
+        assert!(
+            refused.contains("stored whole")
+                && refused.contains("Pitch")
+                && refused.contains("Roll")
+                && refused.contains("native"),
+            "{refused}"
+        );
+
+        let typed = [("Yaw", "90"), ("Pitch", "0"), ("Roll", "0")];
+        for (entry, field, text, typed) in [
+            (&zero, "X", "1.5", &[("X", "1.5")][..]),
+            (&unset_rotator, "Yaw", "90", &typed[..]),
+        ] {
+            let request = sets(entry, typed);
             let (patched, _) = preview_edits(&request, Some(&fixture.schema)).expect("one save");
             let after = Fixture::parse_bundle(
                 &AssetBundle {
@@ -9391,6 +9608,94 @@ mod game_data_tests {
                     "{name} holds {value}, not {expected}: {values:?}"
                 );
             }
+        }
+    }
+
+    /// Typing one field of a whole-stored struct the object inherits from an archetype in another
+    /// package gives the other fields that archetype's values, not zero, and the save says so.
+    #[test]
+    fn a_whole_struct_takes_its_untyped_fields_from_the_archetype() {
+        let Some(fixture) = Fixture::open(SHIELD_CUE) else {
+            return;
+        };
+        let before = fixture.parse();
+        let toy = before
+            .exports
+            .iter()
+            .find(|export| export.object_name == "Toy_GEN_VARIABLE")
+            .expect("the Toy override template");
+        let rotation = toy
+            .properties
+            .iter()
+            .find(|entry| entry.name == "RelativeRotation")
+            .expect("its rotation")
+            .clone();
+        assert!(matches!(rotation.value, PropertyValue::Unset { .. }));
+        let inherited = crate::inherit::inherited_at(
+            &before,
+            toy.index,
+            vec![
+                vec!["RelativeRotation".to_string(), "Yaw".to_string()],
+                vec!["RelativeRotation".to_string(), "Roll".to_string()],
+            ],
+            &crate::inherit::ArchetypeSource {
+                game_root: &fixture.root,
+                container: &fixture.container,
+                mappings: Some(&fixture.schema),
+            },
+        )
+        .expect("lookup");
+        assert_eq!(inherited.values.len(), 2, "{inherited:?}");
+
+        let request = fixture.request_changes(PackageEdits {
+            field_sets: vec![rivals_uasset::FieldSet {
+                offset: rotation.span.expect("a span").0,
+                expect_name: rotation.name.clone(),
+                expect_element: rotation.element,
+                path: vec!["Pitch".into()],
+                text: "90".into(),
+            }],
+            ..Default::default()
+        });
+        let (patched, _) = preview_edits(&request, Some(&fixture.schema)).expect("one save");
+        assert!(
+            patched
+                .notes
+                .iter()
+                .any(|note| note.contains("stored whole")),
+            "{:?}",
+            patched.notes
+        );
+        let after = Fixture::parse_bundle(
+            &AssetBundle {
+                asset: &patched.asset,
+                exports: &patched.exports,
+            },
+            &fixture.schema,
+            &fixture.source(),
+        );
+        let stored = after.exports[toy.index as usize]
+            .properties
+            .iter()
+            .find(|entry| entry.name == "RelativeRotation")
+            .expect("stored now");
+        let PropertyValue::Struct { fields, .. } = &stored.value else {
+            panic!("{:?}", stored.value);
+        };
+        let held = |name: &str| {
+            fields
+                .iter()
+                .find(|field| field.name == name)
+                .map(|field| field.value.summary())
+                .expect(name)
+        };
+        assert_eq!(
+            held("Pitch"),
+            PropertyValue::Float { value: 90.0 }.summary()
+        );
+        for value in &inherited.values {
+            let field = value.path.last().expect("a field");
+            assert_eq!(held(field), value.value.summary(), "{field}");
         }
     }
 

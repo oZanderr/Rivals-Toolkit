@@ -114,6 +114,22 @@ pub fn inherited_for(
         .ok_or_else(|| format!("no export {export}"))?;
     let mut wanted = Vec::new();
     unstored_paths(&object.properties, &[], &mut wanted);
+    inherited_at(parsed, export, wanted, source)
+}
+
+/// What export `export`'s archetypes hold at each of `wanted`, paths from the export down as a
+/// field set names them, whether or not the export stores them itself.
+pub fn inherited_at(
+    parsed: &ParsedPackage,
+    export: u32,
+    mut wanted: Vec<Vec<String>>,
+    source: &ArchetypeSource<'_>,
+) -> Result<InheritReport, String> {
+    let object = parsed
+        .exports
+        .iter()
+        .find(|candidate| candidate.index == export)
+        .ok_or_else(|| format!("no export {export}"))?;
     let mut report = InheritReport::default();
 
     // The package the chain has reached, `None` while it is still in the viewed one.

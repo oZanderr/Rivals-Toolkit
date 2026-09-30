@@ -91,6 +91,7 @@ pub use props::{
 };
 pub use remove::{ClearedReference, Importers, RemovalPlan, RemovedExport, plan_removal};
 pub use stringtable::{StringEntrySpan, StringTable, StringTableEntry, StringTableLayout};
+pub use structs::stored_whole;
 pub use ustruct::{
     FieldRole, FunctionField, FunctionSignature, StructDefinition, definitions_of,
     mappings_from_definitions, mappings_from_definitions_with, read_struct_definitions,

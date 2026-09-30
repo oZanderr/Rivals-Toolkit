@@ -2406,7 +2406,7 @@ const VALUE_ONLY_DECLARED = new Set([
 ]);
 
 const UNSET_HINT =
-  "Not stored: takes the parent class's value (or the struct's default). Set it to store a value of its own.";
+  "Not stored: takes the parent class's value (or the struct's default). Set it to store a value of its own. A vector, rotator or color is stored whole: the fields you leave take the parent's value when it can be read, otherwise the save asks for them too.";
 
 /** Whether an unset slot can be typed into, or has to be stored first. */
 function unsetReason(declared: string): string | null {

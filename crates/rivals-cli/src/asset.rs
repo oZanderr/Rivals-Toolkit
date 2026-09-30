@@ -832,9 +832,18 @@ pub fn apply(
             outcomes[at] = Some(
                 asset_edit::preview_save(request, schema.as_deref(), &options).map(|outcome| {
                     match outcome {
-                        asset_edit::PreviewOutcome::Verified { applied, .. } => {
-                            ("verified", applied, None)
-                        }
+                        asset_edit::PreviewOutcome::Verified { applied, notes, .. } => (
+                            "verified",
+                            applied,
+                            (!notes.is_empty()).then(|| {
+                                notes
+                                    .iter()
+                                    .map(|note| format!("note: {note}"))
+                                    .collect::<Vec<_>>()
+                                    .join("
+")
+                            }),
+                        ),
                         asset_edit::PreviewOutcome::HoldsCopy { pak } => (
                             "holds_copy",
                             Vec::new(),

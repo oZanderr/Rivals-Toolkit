@@ -125,6 +125,12 @@ pub(crate) enum NativeDefault {
     Recipe(Vec<DefaultPart>),
 }
 
+/// Whether UE writes this struct whole rather than field by field, so storing it writes every
+/// field: the ones not given come out as their default bytes, not as what the object inherits.
+pub fn stored_whole(name: &str) -> bool {
+    !matches!(native_default(name), NativeDefault::NotNative)
+}
+
 /// The bytes a native struct holds when every field is default, for storing one from nothing. A
 /// layout with a name or a reflected block inside comes back as a recipe for the reader to resolve
 /// and the editor to finish.
