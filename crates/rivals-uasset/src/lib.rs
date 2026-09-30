@@ -43,7 +43,10 @@ pub use component::{
 };
 pub use copy::{CopiedExport, CopyExport, CopyPlan, CopySource, plan_copy};
 pub use datatable::{DataTable, DataTableLayout, DataTableRow, RowSpan};
-pub use dependency::{DependencyEdit, DependencyPlan, Runs, plan_dependency_edits, runs_of};
+pub use dependency::{
+    DependencyEdit, DependencyPlan, Runs, plan_dependency_edits, runs_of, zen_keeps, zen_losses,
+    zen_readback,
+};
 pub use duplicate::{
     AddExport, ClassLayout, DuplicatePlan, LevelSlot, class_layout, plan_duplication,
 };

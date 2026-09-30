@@ -1559,11 +1559,19 @@ pub fn plan_dependencies(
         asset: &loaded.asset_file_buffer,
         exports: &loaded.exports_file_buffer,
     })?;
-    rivals_uasset::plan_dependency_edits(
+    let mut plan = rivals_uasset::plan_dependency_edits(
         &parsed,
         &header,
-        &[rivals_uasset::DependencyEdit { export, runs }],
-    )
+        &[rivals_uasset::DependencyEdit {
+            export,
+            runs: runs.clone(),
+        }],
+    )?;
+    if request.target == asset_edit::SaveTarget::IoStore {
+        plan.blockers
+            .extend(rivals_uasset::zen_losses(&parsed, export, &runs));
+    }
+    Ok(plan)
 }
 
 pub fn print_dependency_plan(plan: &rivals_uasset::DependencyPlan, out: &mut impl FnMut(String)) {

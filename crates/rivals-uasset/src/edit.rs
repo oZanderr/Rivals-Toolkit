@@ -2448,7 +2448,7 @@ fn patch_dependencies(
             .collect(),
         bulk: None,
         optional_bulk: None,
-        notes: Vec::new(),
+        notes: plan.warnings,
     })
 }
 

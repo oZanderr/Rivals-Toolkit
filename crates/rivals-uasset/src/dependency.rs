@@ -242,6 +242,145 @@ pub(crate) fn apply_dependency_edits(
     Ok((exports, table))
 }
 
+/// Whether an IoStore package can hold `index` as a preload dependency of export `export`. Zen keeps
+/// an edge to another export of the package, or to an object inside another package that is not
+/// native code: a script object always exists, a package on its own is nothing to wait for, and
+/// the converter drops both.
+pub fn zen_keeps(parsed: &ParsedPackage, export: u32, index: i32) -> bool {
+    let target = FPackageIndex { index };
+    if target.is_export() {
+        return target.to_export_index() != export;
+    }
+    if !target.is_import() {
+        return false;
+    }
+    parsed
+        .imports
+        .get(target.to_import_index() as usize)
+        .is_some_and(|import| {
+            import.outer_index != 0
+                && !import.path.starts_with("/Script/")
+                && !import.path.starts_with("/Engine/UnknownPackage")
+        })
+}
+
+/// The runs export `export` reads back with from an IoStore package written with `runs`: what zen
+/// keeps, in order, then the outer, parent class, class and archetype the reader puts back when a
+/// run lacks them.
+pub fn zen_readback(parsed: &ParsedPackage, export: u32, runs: &Runs) -> Runs {
+    let keep = |run: &[i32]| -> Vec<i32> {
+        run.iter()
+            .copied()
+            .filter(|&index| zen_keeps(parsed, export, index))
+            .collect()
+    };
+    let mut out = Runs {
+        serialize_before_serialize: keep(&runs.serialize_before_serialize),
+        create_before_serialize: keep(&runs.create_before_serialize),
+        serialize_before_create: keep(&runs.serialize_before_create),
+        create_before_create: keep(&runs.create_before_create),
+    };
+    if let Some(held) = parsed.exports.get(export as usize) {
+        let imply = |run: &mut Vec<i32>, index: i32| {
+            if index != 0 && !run.contains(&index) {
+                run.push(index);
+            }
+        };
+        imply(&mut out.create_before_create, held.outer_index);
+        imply(&mut out.serialize_before_serialize, held.super_index);
+        imply(&mut out.serialize_before_create, held.class_index);
+        imply(&mut out.serialize_before_create, held.template_index);
+    }
+    out
+}
+
+/// Why an IoStore package cannot carry `runs` for export `export` as given: every entry the
+/// converter drops and every one the reader puts back. Empty when the runs survive as written.
+pub fn zen_losses(parsed: &ParsedPackage, export: u32, runs: &Runs) -> Vec<String> {
+    // Waiting on its own creation is the edge every export has anyway, which cooked packages
+    // sometimes spell out and the converter leaves implicit, so losing it changes nothing.
+    let own = FPackageIndex::create_export(export).index;
+    let implicit =
+        |run: &[i32]| -> Vec<i32> { run.iter().copied().filter(|&i| i != own).collect() };
+    let runs = &Runs {
+        serialize_before_serialize: implicit(&runs.serialize_before_serialize),
+        create_before_serialize: implicit(&runs.create_before_serialize),
+        serialize_before_create: implicit(&runs.serialize_before_create),
+        create_before_create: implicit(&runs.create_before_create),
+    };
+    let back = zen_readback(parsed, export, runs);
+    if back == *runs {
+        return Vec::new();
+    }
+    let path = parsed
+        .exports
+        .get(export as usize)
+        .map(|held| held.path.clone())
+        .unwrap_or_else(|| format!("export {export}"));
+    let names = [
+        "serialize before serialize",
+        "create before serialize",
+        "serialize before create",
+        "create before create",
+    ];
+    let mut out = Vec::new();
+    for ((asked, read), what) in runs.lists().iter().zip(back.lists()).zip(names) {
+        if *asked == read {
+            continue;
+        }
+        for &index in asked.iter() {
+            if zen_keeps(parsed, export, index) {
+                continue;
+            }
+            // Dropped, then put back from the export table: only its place in the run is lost.
+            if read.contains(&index) {
+                out.push(format!(
+                    "{path}'s {what} run cannot hold {} where it was put: it is dropped in an IoStore package and read back last, since the export table names it",
+                    path_of(parsed, index)
+                ));
+                continue;
+            }
+            out.push(format!(
+                "{path}'s {what} run cannot hold {} in an IoStore package: {}",
+                path_of(parsed, index),
+                why_dropped(parsed, export, index)
+            ));
+        }
+        for &index in read.iter().filter(|index| !asked.contains(index)) {
+            let risk = if (FPackageIndex { index }).is_export() {
+                ", while the package itself loses the edge that orders it"
+            } else {
+                ""
+            };
+            out.push(format!(
+                "{path}'s {what} run reads {} back from an IoStore package whether or not it is listed, since the export table names it{risk}",
+                path_of(parsed, index)
+            ));
+        }
+    }
+    out
+}
+
+fn why_dropped(parsed: &ParsedPackage, export: u32, index: i32) -> &'static str {
+    let target = FPackageIndex { index };
+    if target.is_export() && target.to_export_index() == export {
+        return "an export does not wait on itself";
+    }
+    let import = target
+        .is_import()
+        .then(|| parsed.imports.get(target.to_import_index() as usize))
+        .flatten();
+    match import {
+        Some(import) if import.path.starts_with("/Script/") => {
+            "it is native code, which always exists before anything loads"
+        }
+        Some(import) if import.outer_index == 0 => {
+            "it names a package rather than an object in one"
+        }
+        _ => "the converter keeps only exports and objects in other packages",
+    }
+}
+
 /// One half of an export's loading: zen builds every object before it reads any of their bytes
 /// that need to, and the runs say which halves wait on which.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

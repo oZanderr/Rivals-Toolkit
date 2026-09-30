@@ -2086,24 +2086,55 @@ fn prepare(
     if let Some(SaveOutcome::HoldsCopy { pak }) = holds_copy(request, held, options)? {
         return Ok(Prepared::Held(pak));
     }
-    let (patched, loaded) = match layered_source(request, held, options)? {
-        Some((container, kind)) => preview_edits(
-            &AssetEditRequest {
-                container: &container,
-                entry: &entry,
-                kind,
-                changes: request.changes.clone(),
-                ..*request
-            },
-            mappings,
-        )?,
-        None => preview_edits(request, mappings)?,
+    let source = layered_source(request, held, options)?;
+    let from = |changes: PackageEdits| match &source {
+        Some((container, kind)) => AssetEditRequest {
+            container,
+            entry: &entry,
+            kind: *kind,
+            changes,
+            ..*request
+        },
+        None => AssetEditRequest {
+            changes,
+            ..*request
+        },
     };
+    if options.target == SaveTarget::IoStore && !request.changes.dependencies.is_empty() {
+        zen_dependency_check(
+            &from(PackageEdits::default()),
+            &request.changes.dependencies,
+            mappings,
+        )?;
+    }
+    let (patched, loaded) = preview_edits(&from(request.changes.clone()), mappings)?;
     Ok(Prepared::Ready {
         entry,
         patched: Box::new(patched),
         loaded: Box::new(loaded),
     })
+}
+
+/// Refuses dependency runs an IoStore mod would not hold as given. The converter keeps only exports
+/// and objects in other packages, and the reader puts back what the export table implies, so any
+/// other run would save as something else while its dry run and read-back looked right.
+fn zen_dependency_check(
+    request: &AssetEditRequest<'_>,
+    edits: &[rivals_uasset::DependencyEdit],
+    mappings: Option<&Mappings>,
+) -> Result<(), String> {
+    let (_, parsed) = read_package(request, mappings)?;
+    let losses: Vec<String> = edits
+        .iter()
+        .flat_map(|edit| rivals_uasset::zen_losses(&parsed, edit.export, &edit.runs))
+        .collect();
+    if losses.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "an IoStore mod cannot hold these dependency runs as given; a pak target keeps them verbatim\n  {}",
+        losses.join("\n  ")
+    ))
 }
 
 /// What a save would do, without writing it.
@@ -7520,6 +7551,80 @@ mod game_data_tests {
             assert_eq!(was.path, is.path);
             assert_eq!(was.properties.len(), is.properties.len());
         }
+    }
+
+    /// Runs read out of the game's own IoStore package are what the converter wrote and the reader
+    /// rebuilt, so every one of them has to survive the same round trip untouched. Anything else
+    /// means the rule the save is refused by disagrees with the converter.
+    #[test]
+    fn every_run_read_from_an_iostore_package_survives_being_written_back() {
+        let Some(fixture) = Fixture::open(LEVEL) else {
+            return;
+        };
+        let parsed = fixture.parse();
+        let runs = parsed.dependencies.as_ref().expect("the runs");
+        for (at, held) in runs.iter().enumerate() {
+            let losses = rivals_uasset::zen_losses(&parsed, at as u32, held);
+            assert!(losses.is_empty(), "export {at}: {losses:?}");
+        }
+    }
+
+    /// A native object always exists and a package on its own is nothing to wait for, so the
+    /// converter drops both, and the reader puts back an outer the run leaves out. Each is named,
+    /// while another export or an object in another package is kept as given.
+    #[test]
+    fn a_run_an_iostore_package_cannot_hold_is_named_entry_by_entry() {
+        let Some(fixture) = Fixture::open(LEVEL) else {
+            return;
+        };
+        let parsed = fixture.parse();
+        let runs = parsed.dependencies.as_ref().expect("the runs");
+        let script = parsed
+            .imports
+            .iter()
+            .find(|import| import.path.starts_with("/Script/") && import.outer_index != 0)
+            .expect("a native object import")
+            .index;
+        let package = parsed
+            .imports
+            .iter()
+            .find(|import| import.outer_index == 0 && !import.path.starts_with("/Script/"))
+            .expect("a package import")
+            .index;
+        let (at, held) = runs
+            .iter()
+            .enumerate()
+            .find(|(at, _)| {
+                let outer = parsed.exports[*at].outer_index;
+                outer > 0 && outer as usize - 1 != *at
+            })
+            .expect("an export inside another export");
+        let at = at as u32;
+
+        let mut native = held.clone();
+        native.create_before_create.push(script);
+        native.create_before_serialize.push(package);
+        let losses = rivals_uasset::zen_losses(&parsed, at, &native);
+        assert_eq!(losses.len(), 2, "{losses:?}");
+        assert!(losses[0].contains("names a package"), "{losses:?}");
+        assert!(losses[1].contains("native code"), "{losses:?}");
+
+        let mut orphaned = held.clone();
+        let outer = parsed.exports[at as usize].outer_index;
+        orphaned
+            .create_before_create
+            .retain(|index| *index != outer);
+        let losses = rivals_uasset::zen_losses(&parsed, at, &orphaned);
+        assert_eq!(losses.len(), 1, "{losses:?}");
+        assert!(losses[0].contains("loses the edge"), "{losses:?}");
+
+        let mut kept = held.clone();
+        let other = (0..parsed.exports.len() as i32)
+            .map(|index| index + 1)
+            .find(|index| *index != at as i32 + 1 && !kept.create_before_serialize.contains(index))
+            .expect("another export");
+        kept.create_before_serialize.push(other);
+        assert!(rivals_uasset::zen_losses(&parsed, at, &kept).is_empty());
     }
 
     /// The runs make a graph the loader walks, and a cycle in it is a package that loads nowhere.
