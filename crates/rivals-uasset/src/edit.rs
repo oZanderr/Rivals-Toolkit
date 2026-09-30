@@ -25,6 +25,7 @@ use crate::package::{
 use crate::props::{InstancedLayout, NativeLeaf};
 use crate::reader::Cursor;
 use crate::remove::{plan_removal, remove_exports, reset_export};
+use crate::renumber::rebuild_runs;
 use crate::stringtable::{StringTable, StringTableLayout};
 use crate::unversioned::{self, UnversionedHeader};
 use crate::value::{PropertyEntry, PropertyValue};
@@ -1158,8 +1159,15 @@ pub fn patch_package_with(
 
     // Imports first, so a value edit can point at one added in the same save.
     let mut applied_imports = Vec::with_capacity(edits.imports.len());
+    let usage =
+        (!edits.imports.is_empty()).then(|| crate::import_remove::import_usage(parsed, &package));
     for edit in &edits.imports {
-        applied_imports.push(apply_import_edit(&mut tables, &package, edit)?);
+        applied_imports.push(apply_import_edit(
+            &mut tables,
+            &package,
+            edit,
+            usage.as_deref(),
+        )?);
     }
 
     let mut applied: Vec<AppliedEdit> = Vec::with_capacity(edits.values.len());
@@ -1183,9 +1191,9 @@ pub fn patch_package_with(
     // Tags taken out, with the `None` of the block they now read as absent at.
     let mut removed_tags: Vec<(usize, u64)> = Vec::new();
     let mut absent_counts: Vec<(usize, usize)> = Vec::new();
-    // Exports newly pointed at from a value, which the pointing export has to be able to create
+    // Objects newly pointed at from a value, which the pointing export has to be able to create
     // before it serializes.
-    let mut object_links: Vec<(u64, u32)> = Vec::new();
+    let mut object_links: Vec<(u64, i32)> = Vec::new();
     // The keys added to each set or map in this save, since two edits cannot see each other.
     let mut inserted_keys: Vec<(u64, Vec<u8>)> = Vec::new();
     // Several edits can land in one property block, and its header may only be re-emitted once.
@@ -1335,7 +1343,7 @@ pub fn patch_package_with(
                         enums: mappings,
                     },
                 )?;
-                if let Some(target) = export_reference(&entry.value, &bytes) {
+                if let Some(target) = object_reference(&entry.value, &bytes) {
                     object_links.push((start, target));
                 }
                 if let Some((layout, slot)) = channel_time_at(parsed, start) {
@@ -1457,7 +1465,7 @@ pub fn patch_package_with(
                         enums: mappings,
                     },
                 )?;
-                if let Some(target) = export_reference(element, &bytes) {
+                if let Some(target) = object_reference(element, &bytes) {
                     object_links.push((start, target));
                 }
                 (
@@ -1500,12 +1508,12 @@ pub fn patch_package_with(
                     .keys
                     .as_ref()
                     .is_some_and(|keys| is_object_kind(keys.kind))
-                    && let Some(target) = export_target(key_part)
+                    && let Some(target) = object_target(key_part)
                 {
                     object_links.push((start, target));
                 }
                 if is_object_kind(layout.element_kind)
-                    && let Some(target) = export_target(value_part)
+                    && let Some(target) = object_target(value_part)
                 {
                     object_links.push((start, target));
                 }
@@ -1829,23 +1837,15 @@ pub fn patch_package_with(
 
     let names_changed = tables.names.num_names() > grown;
     let imports_changed = !edits.imports.is_empty() || tables.imports.len() != imports_before;
-    let links: Vec<(usize, u32)> = object_links
+    let links: Vec<(usize, i32)> = object_links
         .iter()
-        .filter_map(|&(at, target)| {
-            package
-                .exports
-                .iter()
-                .position(|export| {
-                    let start = export.serial_offset.max(0) as u64;
-                    start <= at && at < start + export.serial_size.max(0) as u64
-                })
-                .map(|owner| (owner, target))
-        })
+        .filter_map(|&(at, target)| owner_at(&package, at).map(|owner| (owner, target)))
         .collect();
-    let (dependency_exports, dependencies) = match add_serialize_dependencies(&package, &links)? {
-        Some((exports, dependencies)) => (Some(exports), Some(dependencies)),
-        None => (None, None),
-    };
+    let (dependency_exports, dependencies) =
+        match follow_references(&package, parsed, &tables, &links, &splices)? {
+            Some((exports, dependencies)) => (Some(exports), Some(dependencies)),
+            None => (None, None),
+        };
     let rewritten = rewrite(
         bundle,
         &splices,
@@ -1920,23 +1920,30 @@ pub fn patch_package_with(
 
 /// Removes and resets exports. Reference splices inside an export being reset are dropped: its
 /// property bytes are replaced wholesale, and the two would otherwise cover the same bytes.
-/// The export a written object reference points at, when it is one of this package's exports.
-fn export_reference(value: &PropertyValue, bytes: &[u8]) -> Option<u32> {
+/// The object a written reference points at, export or import, when the value is a hard reference
+/// that names one.
+fn object_reference(value: &PropertyValue, bytes: &[u8]) -> Option<i32> {
     let object = matches!(value, PropertyValue::Object { .. })
         || matches!(value, PropertyValue::Unset { declared, .. } if *declared == "Object");
     if !object {
         return None;
     }
-    export_target(bytes)
+    object_target(bytes)
 }
 
-/// The export a four-byte `FPackageIndex` names, when it names one of this package's exports.
-fn export_target(bytes: &[u8]) -> Option<u32> {
-    if bytes.len() != 4 {
-        return None;
-    }
-    let raw = i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-    (raw > 0).then(|| (raw - 1) as u32)
+/// The object a four-byte `FPackageIndex` names, export or import; `None` for a null.
+fn object_target(bytes: &[u8]) -> Option<i32> {
+    let raw: [u8; 4] = bytes.try_into().ok()?;
+    let raw = i32::from_le_bytes(raw);
+    (raw != 0).then_some(raw)
+}
+
+/// The export whose serialized bytes hold absolute offset `at`.
+fn owner_at(header: &retoc::legacy_asset::FLegacyPackageHeader, at: u64) -> Option<usize> {
+    header.exports.iter().position(|export| {
+        let start = export.serial_offset.max(0) as u64;
+        start <= at && at < start + export.serial_size.max(0) as u64
+    })
 }
 
 /// The kinds stored as a hard `FPackageIndex`, whose target the loader has to create first. A weak
@@ -1993,22 +2000,96 @@ fn check_frame_order(
     Ok(())
 }
 
-/// The dependency runs with a create-before-serialize edge from each owner to each export it now
-/// points at, where the runs lack one. The loader creates a dependency before serializing the
-/// export that names it, which a pointer written by hand would otherwise not be promised. Rebuilt
-/// in table order so every export's first index stays right; `None` when nothing was missing.
 type DependencyDraft = (Vec<FObjectExport>, Vec<FPackageIndex>);
 
-pub(crate) fn add_serialize_dependencies(
+/// The dependency runs after a save that rewrote references. The loader creates what an export
+/// points at before reading it, so each owner gains a create-before-serialize edge to every object
+/// a written reference now names, and loses the one to an object whose last reference in it the
+/// save overwrote. Only what an IoStore package can hold is added, and an edge stays while anything
+/// left in the export names it or the export table does. Rebuilt in table order so every export's
+/// first index stays right; `None` when no run changes.
+fn follow_references(
     header: &retoc::legacy_asset::FLegacyPackageHeader,
-    links: &[(usize, u32)],
+    parsed: &ParsedPackage,
+    tables: &Tables,
+    links: &[(usize, i32)],
+    splices: &[Splice],
 ) -> Result<Option<DependencyDraft>, String> {
-    if links.is_empty() {
+    let replaced = |at: u64| {
+        splices
+            .iter()
+            .any(|splice| splice.start <= at && at < splice.end)
+    };
+    let mut remaining: BTreeMap<usize, BTreeSet<i32>> = BTreeMap::new();
+    let mut overwritten: BTreeSet<(usize, i32)> = BTreeSet::new();
+    for reference in &parsed.references {
+        let Some(owner) = owner_at(header, reference.at) else {
+            continue;
+        };
+        if replaced(reference.at) {
+            overwritten.insert((owner, reference.index));
+        } else {
+            remaining.entry(owner).or_default().insert(reference.index);
+        }
+    }
+    let mut added: BTreeMap<usize, Vec<i32>> = BTreeMap::new();
+    for &(owner, index) in links {
+        remaining.entry(owner).or_default().insert(index);
+        let target = FPackageIndex { index };
+        let keeps = if target.is_export() {
+            target.to_export_index() as usize != owner
+        } else {
+            tables.zen_keeps_import(index)
+        };
+        let list = added.entry(owner).or_default();
+        if keeps && !list.contains(&index) {
+            list.push(index);
+        }
+    }
+    let mut dropped: BTreeMap<usize, BTreeSet<i32>> = BTreeMap::new();
+    for (owner, index) in overwritten {
+        if remaining
+            .get(&owner)
+            .is_some_and(|held| held.contains(&index))
+        {
+            continue;
+        }
+        let Some(export) = header.exports.get(owner) else {
+            continue;
+        };
+        let named = [
+            export.class_index,
+            export.super_index,
+            export.template_index,
+            export.outer_index,
+        ];
+        if named.iter().all(|held| held.index != index) {
+            dropped.entry(owner).or_default().insert(index);
+        }
+    }
+    if added.values().all(Vec::is_empty) && dropped.is_empty() {
         return Ok(None);
     }
     let mut exports = header.exports.clone();
-    let added = link_dependencies(&mut exports, &header.preload_dependencies, links)?;
-    Ok(added.map(|dependencies| (exports, dependencies)))
+    let mut changed = false;
+    let table = rebuild_runs(header, &mut exports, |position, mut runs| {
+        if let Some(gone) = dropped.get(&position) {
+            let before = runs[1].len();
+            runs[1].retain(|held| !gone.contains(&held.index));
+            changed |= runs[1].len() != before;
+        }
+        for &index in added.get(&position).into_iter().flatten() {
+            if runs
+                .iter()
+                .all(|run| run.iter().all(|held| held.index != index))
+            {
+                runs[1].push(FPackageIndex { index });
+                changed = true;
+            }
+        }
+        Ok(runs)
+    })?;
+    Ok(changed.then_some((exports, table)))
 }
 
 /// The same over a table the caller is already holding, which is how a duplication links its
@@ -2472,12 +2553,15 @@ fn patch_export_edits(
     let mut splices = patch.splices;
     let applied = patch.applied;
     splices.sort_by_key(|splice| (splice.start, splice.end));
+    let mut exports = patch.exports;
+    let dependencies = follow_table_changes(package, &mut exports)?;
     let rewritten = rewrite(
         bundle,
         &splices,
         HeaderDraft {
             names: patch.names,
-            exports: Some(patch.exports),
+            exports: Some(exports),
+            preload_dependencies: dependencies,
             ..Default::default()
         },
     )?;
@@ -2493,6 +2577,57 @@ fn patch_export_edits(
         optional_bulk: None,
         notes: Vec::new(),
     })
+}
+
+/// The runs after an export table edit. An export moved, retyped, given another archetype or
+/// another parent class waits on the new object instead of the old one, which is the edge that
+/// orders it in an IoStore package: the reader puts an implied entry back either way, so a stale one
+/// would read as right while the package lacked it. `None` when no run changes.
+fn follow_table_changes(
+    header: &retoc::legacy_asset::FLegacyPackageHeader,
+    exports: &mut [FObjectExport],
+) -> Result<Option<Vec<FPackageIndex>>, String> {
+    // Which run holds each implied entry: serialize before serialize for the parent class, serialize
+    // before create for the class and the archetype, create before create for the outer.
+    let mut swaps: BTreeMap<usize, Vec<(usize, i32, i32)>> = BTreeMap::new();
+    for (position, (was, now)) in header.exports.iter().zip(exports.iter()).enumerate() {
+        let pairs = [
+            (0, was.super_index, now.super_index),
+            (2, was.class_index, now.class_index),
+            (2, was.template_index, now.template_index),
+            (3, was.outer_index, now.outer_index),
+        ];
+        for (run, old, new) in pairs {
+            if old != new {
+                swaps
+                    .entry(position)
+                    .or_default()
+                    .push((run, old.index, new.index));
+            }
+        }
+    }
+    if swaps.is_empty() {
+        return Ok(None);
+    }
+    let mut changed = false;
+    let table = rebuild_runs(header, exports, |position, mut runs| {
+        for &(run, old, new) in swaps.get(&position).into_iter().flatten() {
+            let list = &mut runs[run];
+            let at = list.iter().position(|held| held.index == old);
+            let has_new = new == 0 || list.iter().any(|held| held.index == new);
+            match (at, has_new) {
+                (Some(at), false) => list[at] = FPackageIndex { index: new },
+                (Some(at), true) => {
+                    list.remove(at);
+                }
+                (None, false) => list.push(FPackageIndex { index: new }),
+                (None, true) => continue,
+            }
+            changed = true;
+        }
+        Ok(runs)
+    })?;
+    Ok(changed.then_some(table))
 }
 
 /// The whole of an import removal: the table shifted, the references rewritten, nothing else.
@@ -2627,9 +2762,24 @@ fn patch_structure(
     }
     let mut splices = Vec::new();
     let mut draft = HeaderDraft::default();
+    // A reset overwrites every reference its properties held, so the edges those references asked
+    // for go with them unless something the reset keeps still names the object.
+    let mut header = package.clone();
+    let tables = Tables {
+        names: package.name_map.clone(),
+        imports: package.imports.clone(),
+    };
+    if let Some((exports, dependencies)) =
+        follow_references(package, parsed, &tables, &[], &resets)?
+    {
+        header.exports = exports;
+        header.preload_dependencies = dependencies;
+        draft.exports = Some(header.exports.clone());
+        draft.preload_dependencies = Some(header.preload_dependencies.clone());
+    }
     if !edits.remove_exports.is_empty() {
         let plan = plan_removal(parsed, &edits.remove_exports)?;
-        let removal = remove_exports(parsed, package, bundle.exports, &plan)?;
+        let removal = remove_exports(parsed, &header, bundle.exports, &plan)?;
         splices.extend(removal.splices.into_iter().filter(|splice| {
             !resets
                 .iter()
@@ -4883,7 +5033,7 @@ pub fn verify_patch(
     if let Some(add) = edits.add_components.first() {
         return verify_component_copies(before, after, add);
     }
-    let dropped_imports: Vec<i32> = edits
+    let asked_imports: Vec<i32> = edits
         .imports
         .iter()
         .filter_map(|edit| match edit {
@@ -4891,6 +5041,7 @@ pub fn verify_patch(
             _ => None,
         })
         .collect();
+    let dropped_imports = crate::import_remove::removed_with_outers(before, &asked_imports);
     if !dropped_imports.is_empty() {
         verify_import_removal(before, after, &dropped_imports)?;
     }
@@ -8912,34 +9063,170 @@ mod tests {
         assert!(crate::remove::INDEX_BEARING.contains(&"function layout and bytecode"));
     }
 
-    /// Pointing an export at another one it never depended on adds the edge the loader needs, once,
-    /// and never from an export to itself.
+    /// The import table `follow_references` classifies against: a mesh in a game package, and a
+    /// native class.
+    fn reference_tables() -> Tables {
+        use retoc::legacy_asset::{FMinimalName, FObjectImport};
+        let mut tables = tables();
+        let package_class = (
+            tables.names.store("/Script/CoreUObject"),
+            tables.names.store("Package"),
+        );
+        let script = tables.names.store("/Script/Engine");
+        let class = tables.names.store("StaticMesh");
+        let import = |outer: FPackageIndex, name: FMinimalName| FObjectImport {
+            class_package: package_class.0,
+            class_name: package_class.1,
+            outer_index: outer,
+            object_name: name,
+            is_optional: false,
+        };
+        tables.imports = vec![
+            import(
+                FPackageIndex::create_null(),
+                FMinimalName {
+                    index: 2,
+                    number: 0,
+                },
+            ),
+            import(
+                FPackageIndex::create_import(0),
+                FMinimalName {
+                    index: 3,
+                    number: 0,
+                },
+            ),
+            import(FPackageIndex::create_null(), script),
+            import(FPackageIndex::create_import(2), class),
+        ];
+        tables
+    }
+
+    fn runs(exports: &[FObjectExport], table: &[FPackageIndex], at: usize) -> Vec<i32> {
+        let export = &exports[at];
+        let start = (export.first_export_dependency_index.max(0)
+            + export.serialize_before_serialize_dependencies) as usize;
+        table[start..start + export.create_before_serialize_dependencies as usize]
+            .iter()
+            .map(|index| index.index)
+            .collect()
+    }
+
+    /// Pointing an export at an object it never depended on adds the edge the loader needs, once,
+    /// never from an export to itself, and only for what an IoStore package can hold: an export or
+    /// an object in a game package, not a native class or a bare package.
     #[test]
     fn an_object_edit_gains_a_create_before_serialize_dependency() {
         let header = two_export_header([8, 8]);
-        let (exports, dependencies) =
-            add_serialize_dependencies(&header, &[(0, 1), (1, 0), (1, 1)])
-                .expect("rebuilt")
-                .expect("an edge was missing");
-        assert_eq!(exports[0].first_export_dependency_index, 0);
-        assert_eq!(exports[0].create_before_serialize_dependencies, 1);
-        assert_eq!(exports[1].first_export_dependency_index, 1);
+        let parsed = two_export_package();
+        let tables = reference_tables();
+        let (exports, table) = follow_references(
+            &header,
+            &parsed,
+            &tables,
+            &[(0, 2), (0, -2), (0, -4), (0, -1), (1, 1), (1, 2)],
+            &[],
+        )
+        .expect("rebuilt")
+        .expect("edges were missing");
+        assert_eq!(runs(&exports, &table, 0), vec![2, -2]);
         assert_eq!(
-            exports[1].create_before_serialize_dependencies, 1,
+            runs(&exports, &table, 1),
+            vec![1],
             "the edge it had is kept once"
         );
-        assert_eq!(
-            dependencies,
-            vec![
-                FPackageIndex::create_export(1),
-                FPackageIndex::create_export(0)
-            ]
-        );
         assert!(
-            add_serialize_dependencies(&header, &[(1, 0)])
+            follow_references(&header, &parsed, &tables, &[(1, 1)], &[])
                 .expect("rebuilt")
                 .is_none(),
             "an edge already there adds nothing"
+        );
+    }
+
+    /// A reference the save overwrites takes its edge with it once nothing left in the export names
+    /// the old object, while the new target takes one; an edge the export table implies stays.
+    #[test]
+    fn an_overwritten_reference_hands_its_edge_to_the_new_target() {
+        let mut header = two_export_header([8, 8]);
+        let parsed = two_export_package();
+        let tables = reference_tables();
+        let over = Splice {
+            start: 0x108 + 4,
+            end: 0x108 + 8,
+            bytes: (-2i32).to_le_bytes().to_vec(),
+        };
+        // Export 1 sits inside export 0, so the outer keeps the edge the reference no longer needs.
+        let (exports, table) = follow_references(
+            &header,
+            &parsed,
+            &tables,
+            &[(1, -2)],
+            std::slice::from_ref(&over),
+        )
+        .expect("rebuilt")
+        .expect("the new target was missing");
+        assert_eq!(runs(&exports, &table, 1), vec![1, -2]);
+
+        header.exports[1].outer_index = FPackageIndex::create_null();
+        let (exports, table) = follow_references(
+            &header,
+            &parsed,
+            &tables,
+            &[(1, -2)],
+            std::slice::from_ref(&over),
+        )
+        .expect("rebuilt")
+        .expect("the runs changed");
+        assert_eq!(runs(&exports, &table, 1), vec![-2]);
+
+        // Still named elsewhere in the export: the edge stays.
+        let mut named = parsed.clone();
+        named.references.push(crate::props::IndexRef {
+            at: 0x108,
+            index: 1,
+        });
+        let (exports, table) = follow_references(&header, &named, &tables, &[(1, -2)], &[over])
+            .expect("rebuilt")
+            .expect("the new target was missing");
+        assert_eq!(runs(&exports, &table, 1), vec![1, -2]);
+    }
+
+    /// Moving an export, or giving it another class, moves the run entry that orders it: the old
+    /// outer and class are waited on no longer, the new class is, and a move to the package root
+    /// leaves no outer to wait on.
+    #[test]
+    fn an_export_table_edit_carries_its_run_entries_across() {
+        let mut header = two_export_header([8, 8]);
+        header.exports[1].class_index = FPackageIndex::create_import(0);
+        header.exports[1].serialize_before_create_dependencies = 1;
+        header.exports[1].create_before_create_dependencies = 1;
+        header.preload_dependencies = vec![
+            FPackageIndex::create_export(0),
+            FPackageIndex::create_import(0),
+            FPackageIndex::create_export(0),
+        ];
+        let mut exports = header.exports.clone();
+        exports[1].outer_index = FPackageIndex::create_null();
+        exports[1].class_index = FPackageIndex::create_import(1);
+        let table = follow_table_changes(&header, &mut exports)
+            .expect("rebuilt")
+            .expect("the runs changed");
+        assert_eq!(
+            table,
+            vec![
+                FPackageIndex::create_export(0),
+                FPackageIndex::create_import(1)
+            ]
+        );
+        assert_eq!(exports[1].create_before_serialize_dependencies, 1);
+        assert_eq!(exports[1].serialize_before_create_dependencies, 1);
+        assert_eq!(exports[1].create_before_create_dependencies, 0);
+
+        let mut untouched = header.exports.clone();
+        assert!(
+            follow_table_changes(&header, &mut untouched)
+                .expect("rebuilt")
+                .is_none()
         );
     }
 
@@ -9425,10 +9712,10 @@ mod tests {
     fn hard_object_kinds_take_a_dependency_edge_and_soft_ones_do_not() {
         assert!(is_object_kind("Object") && is_object_kind("Interface"));
         assert!(!is_object_kind("SoftObject") && !is_object_kind("WeakObject"));
-        assert_eq!(export_target(&3i32.to_le_bytes()), Some(2));
-        assert_eq!(export_target(&(-3i32).to_le_bytes()), None);
-        assert_eq!(export_target(&[0, 0, 0, 0]), None);
-        assert_eq!(export_target(&[1, 0]), None);
+        assert_eq!(object_target(&3i32.to_le_bytes()), Some(3));
+        assert_eq!(object_target(&(-3i32).to_le_bytes()), Some(-3));
+        assert_eq!(object_target(&[0, 0, 0, 0]), None);
+        assert_eq!(object_target(&[1, 0]), None);
     }
 
     /// Verification replays the edits over the frames and reads the added key's value back.

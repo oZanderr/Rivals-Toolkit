@@ -1714,7 +1714,15 @@ pub fn plan_import_removal(
 
 pub fn print_import_plan(plan: &rivals_uasset::ImportRemovalPlan, out: &mut impl FnMut(String)) {
     for import in &plan.removed {
-        out(format!("remove   {:>4}  {}", import.index, import.path));
+        let along = if import.requested {
+            ""
+        } else {
+            "  (an outer left with nothing under it)"
+        };
+        out(format!(
+            "remove   {:>4}  {}{along}",
+            import.index, import.path
+        ));
     }
     if plan.renumbered > 0 {
         out(format!(

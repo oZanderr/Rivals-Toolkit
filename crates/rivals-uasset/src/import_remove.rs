@@ -135,6 +135,8 @@ pub struct RemovedImport {
     pub index: i32,
     pub path: String,
     pub class_name: String,
+    /// False for an outer that goes only because the removal leaves nothing under it.
+    pub requested: bool,
 }
 
 /// What dropping some imports would do. Nothing is written.
@@ -200,6 +202,19 @@ pub fn plan_import_removal(
         }
     }
     let usage = import_usage(parsed, header);
+    let asked = going.clone();
+    take_emptied_outers(
+        |position| {
+            header
+                .imports
+                .get(position as usize)
+                .map(|import| import.outer_index)
+                .filter(FPackageIndex::is_import)
+                .map(|outer| outer.to_import_index())
+        },
+        |position| usage.get(position as usize),
+        &mut going,
+    );
     for &position in &going {
         let info = parsed.imports.get(position as usize);
         let path = info.map(|i| i.path.clone()).unwrap_or_default();
@@ -238,6 +253,7 @@ pub fn plan_import_removal(
             index: FPackageIndex::create_import(position).index,
             path,
             class_name: info.map(|i| i.class_name.clone()).unwrap_or_default(),
+            requested: asked.contains(&position),
         });
     }
     // An export whose bytes the reader cannot account for may name any import without this
@@ -267,6 +283,66 @@ pub fn plan_import_removal(
             .saturating_sub(first as usize + going.len());
     }
     Ok(plan)
+}
+
+/// Adds every outer the removal leaves naming nothing but what goes with it, up the chain. A
+/// package import with nothing under it cannot be written to an IoStore package, whose reader
+/// brings it back as `/Engine/UnknownPackage` on every later save, so it goes along instead.
+fn take_emptied_outers<'a>(
+    outer_of: impl Fn(u32) -> Option<u32>,
+    usage_of: impl Fn(u32) -> Option<&'a ImportUsage>,
+    going: &mut BTreeSet<u32>,
+) {
+    let mut pending: Vec<u32> = going.iter().copied().collect();
+    while let Some(position) = pending.pop() {
+        let Some(outer) = outer_of(position) else {
+            continue;
+        };
+        let Some(held) = usage_of(outer) else {
+            continue;
+        };
+        let emptied = held.references == 0
+            && held.roles.is_empty()
+            && held.preload == 0
+            && held.resources == 0
+            && held
+                .outer_of
+                .iter()
+                .all(|&inner| going.contains(&FPackageIndex { index: inner }.to_import_index()));
+        if emptied && going.insert(outer) {
+            pending.push(outer);
+        }
+    }
+}
+
+/// The raw indices removing `requested` takes out of `parsed`, the outers it empties included,
+/// for checking a saved removal against the table it should have left.
+pub(crate) fn removed_with_outers(parsed: &ParsedPackage, requested: &[i32]) -> Vec<i32> {
+    let mut going: BTreeSet<u32> = requested
+        .iter()
+        .map(|&index| FPackageIndex { index }.to_import_index())
+        .collect();
+    take_emptied_outers(
+        |position| {
+            parsed
+                .imports
+                .get(position as usize)
+                .map(|import| import.outer_index)
+                .filter(|&outer| outer < 0)
+                .map(|outer| FPackageIndex { index: outer }.to_import_index())
+        },
+        |position| {
+            parsed
+                .imports
+                .get(position as usize)
+                .map(|import| &import.usage)
+        },
+        &mut going,
+    );
+    going
+        .into_iter()
+        .map(|position| FPackageIndex::create_import(position).index)
+        .collect()
 }
 
 /// The tables and splices one import removal comes to.
@@ -524,6 +600,61 @@ mod tests {
             removal.splices[0].bytes,
             FPackageIndex::create_import(1).index.to_le_bytes().to_vec(),
             "the reference to the third import now names the second"
+        );
+    }
+
+    /// The fixture plus a package import `/Game/D` holding `D.D` and `D.E`, neither named by
+    /// anything, as a mesh import is once the reference to it has been pointed elsewhere.
+    fn package_with_siblings() -> (ParsedPackage, FLegacyPackageHeader) {
+        let (mut parsed, mut header) = package();
+        header.imports.push(import(FPackageIndex::create_null()));
+        header.imports.push(import(FPackageIndex::create_import(3)));
+        header.imports.push(import(FPackageIndex::create_import(3)));
+        parsed.imports.push(info(-4, "/Game/D"));
+        parsed.imports.push(info(-5, "/Game/D.D"));
+        parsed.imports.push(info(-6, "/Game/D.E"));
+        parsed.info.import_count = 6;
+        (parsed, header)
+    }
+
+    /// Removing the last import under a package takes the package too, since an IoStore package
+    /// cannot carry a package import with nothing under it, and marks it as not asked for.
+    #[test]
+    fn the_outer_a_removal_empties_goes_with_it() {
+        let (parsed, header) = package_with_siblings();
+        let plan = plan_import_removal(&parsed, &header, &[4, 5]).expect("plan");
+        assert!(plan.blockers.is_empty(), "{:?}", plan.blockers);
+        let removed: Vec<(&str, bool)> = plan
+            .removed
+            .iter()
+            .map(|import| (import.path.as_str(), import.requested))
+            .collect();
+        assert_eq!(
+            removed,
+            vec![("/Game/D", false), ("/Game/D.D", true), ("/Game/D.E", true)]
+        );
+
+        let removal = remove_imports(&parsed, &header, &plan).expect("removal");
+        assert_eq!(
+            removal.imports.len(),
+            3,
+            "the package went with its imports"
+        );
+    }
+
+    /// A package that still holds an import stays, and so does an outer something else names.
+    #[test]
+    fn an_outer_still_in_use_stays() {
+        let (parsed, header) = package_with_siblings();
+        let plan = plan_import_removal(&parsed, &header, &[4]).expect("plan");
+        assert!(plan.blockers.is_empty(), "{:?}", plan.blockers);
+        assert_eq!(plan.removed.len(), 1, "{:?}", plan.removed);
+        assert_eq!(plan.removed[0].path, "/Game/D.D");
+
+        let plan = plan_import_removal(&parsed, &header, &[2]).expect("plan");
+        assert!(
+            plan.removed.iter().all(|import| import.path != "/Game/A.A"),
+            "an export's class stays however many imports under it go"
         );
     }
 

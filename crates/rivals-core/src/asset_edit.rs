@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 
 use retoc::legacy_asset::FSerializedAssetBundle;
 use rivals_uasset::{
-    AssetBundle, EditOp, Mappings, PackageEdits, ParseOptions, PatchedBundle, PropertyValue,
-    RemovalPlan, ValueEdit,
+    AssetBundle, EditOp, ImportEdit, Mappings, PackageEdits, ParseOptions, PatchedBundle,
+    PropertyValue, RemovalPlan, ValueEdit,
 };
 
 pub mod diff;
@@ -102,10 +102,100 @@ pub fn preview_read_edits(
     }
     let touches = template_touches(changes, parsed);
     let (patched, loaded) = value_passes(request, mappings, loaded, parsed)?;
-    if touches.is_empty() {
+    let (patched, loaded) = if touches.is_empty() {
+        (patched, loaded)
+    } else {
+        list_pass(request, mappings, patched, loaded, &touches)?
+    };
+    orphan_pass(request, mappings, parsed, patched, loaded)
+}
+
+/// Removes the imports a retarget left naming nothing: the package, and any objects on the path,
+/// the retargeted import used to sit in. Removal moves every index after it, so it is a stage of its
+/// own, and where this package's imports cannot be removed they stay and the save says so.
+fn orphan_pass(
+    request: &AssetEditRequest<'_>,
+    mappings: Option<&Mappings>,
+    before: &rivals_uasset::ParsedPackage,
+    patched: PatchedBundle,
+    loaded: FSerializedAssetBundle,
+) -> Result<(PatchedBundle, FSerializedAssetBundle), String> {
+    let mut left: std::collections::BTreeSet<i32> = std::collections::BTreeSet::new();
+    for edit in &request.changes.imports {
+        let ImportEdit::Retarget { import, .. } = edit else {
+            continue;
+        };
+        let mut outer = before
+            .imports
+            .get(*import as usize)
+            .map_or(0, |held| held.outer_index);
+        while outer < 0 && left.insert(outer) {
+            outer = before
+                .imports
+                .get((-outer - 1) as usize)
+                .map_or(0, |held| held.outer_index);
+        }
+    }
+    if left.is_empty() {
         return Ok((patched, loaded));
     }
-    list_pass(request, mappings, patched, loaded, &touches)
+    let between = reparse(request, mappings, &patched.asset, &patched.exports)?;
+    let header = rivals_uasset::read_header(&AssetBundle {
+        asset: &patched.asset,
+        exports: &patched.exports,
+    })?;
+    let orphans: Vec<u32> = rivals_uasset::unused_imports(&between, &header)
+        .into_iter()
+        .filter(|unused| left.contains(&unused.index))
+        .map(|unused| (-unused.index - 1) as u32)
+        .collect();
+    if orphans.is_empty() {
+        return Ok((patched, loaded));
+    }
+    let plan = rivals_uasset::plan_import_removal(&between, &header, &orphans)?;
+    let mut patched = patched;
+    if !plan.blockers.is_empty() {
+        patched.notes.push(format!(
+            "the retarget left {} import(s) naming nothing, which stay: {}",
+            orphans.len(),
+            plan.blockers.join("; ")
+        ));
+        return Ok((patched, loaded));
+    }
+    let removal = PackageEdits {
+        imports: orphans
+            .iter()
+            .map(|&import| ImportEdit::Remove { import })
+            .collect(),
+        ..Default::default()
+    };
+    let stage = staged(&patched, &loaded);
+    let (mut removed, _) = patch_pass(
+        &AssetEditRequest {
+            changes: removal.clone(),
+            ..*request
+        },
+        mappings,
+        &AssetBundle {
+            asset: &patched.asset,
+            exports: &patched.exports,
+        },
+        rivals_uasset::Sidecars {
+            bulk: stage.bulk_data_buffer.as_deref(),
+            optional_bulk: stage.optional_bulk_data_buffer.as_deref(),
+        },
+        &between,
+        &removal,
+    )?;
+    let mut applied = patched.applied;
+    applied.append(&mut removed.applied);
+    removed.applied = applied;
+    let mut notes = patched.notes;
+    notes.append(&mut removed.notes);
+    removed.notes = notes;
+    removed.bulk = removed.bulk.or(patched.bulk);
+    removed.optional_bulk = removed.optional_bulk.or(patched.optional_bulk);
+    Ok((removed, loaded))
 }
 
 /// The value edits of a save, in as many reads of the package as they take.
@@ -852,6 +942,9 @@ fn list_pass(
     let mut applied = patched.applied;
     applied.append(&mut listing.applied);
     listing.applied = applied;
+    let mut notes = patched.notes;
+    notes.append(&mut listing.notes);
+    listing.notes = notes;
     listing.bulk = listing.bulk.or(patched.bulk);
     listing.optional_bulk = listing.optional_bulk.or(patched.optional_bulk);
     Ok((listing, loaded))
@@ -3644,6 +3737,9 @@ mod game_data_tests {
     const INPUT_CONTEXT: &str = "Marvel/Content/Marvel/Data/Input/AbilityInputData/InputContext/IMC_1023000_HeroAbilityInput.uasset";
     /// Niagara components whose redirect map removes two inherited keys before holding nothing.
     const REDIRECT_CUE: &str = "Marvel/Plugins/MarvelGAS/Content/Marvel/Characters/1023/1023302/Cues/102392/Cue_Summoner_Loop_10239201_302_BP.uasset";
+    /// Black Widow's weapon cue: the batons on her back are the static mesh components
+    /// `UnEquipedStickL`/`UnEquipedStickR`, each with its own mesh import.
+    const WEAPON_CUE: &str = "Marvel/Content/Marvel/Characters/1033/1033001/Cues/WeaponCue/Cue_Weapon_Loop_103311_BP.uasset";
     /// A level sequence float section: its channel's extrapolation modes are enums a native
     /// reader names, which the mappings alone would leave as numbers.
     const CHANNEL_ENUM: &str =
@@ -3780,6 +3876,7 @@ mod game_data_tests {
     /// that is only ever used as an edit value, never opened, does not belong here.
     const ALL_FIXTURES: &[(&str, &str)] = &[
         ("PAK_ROUND_TRIP", PAK_ROUND_TRIP),
+        ("WEAPON_CUE", WEAPON_CUE),
         ("SYNTH_ROW_TABLE", SYNTH_ROW_TABLE),
         ("BATCH_SHAKE_HIT", BATCH_SHAKE_HIT),
         ("BATCH_SHAKE_OTHER", BATCH_SHAKE_OTHER),
@@ -6276,10 +6373,29 @@ mod game_data_tests {
             .expect("the import is still there");
         assert_eq!(now.path, OTHER_MATERIAL);
         assert_eq!(now.class_name, "MaterialInstanceConstant");
-        assert_eq!(
-            after.imports.len(),
-            before.imports.len() + 1,
-            "the new package needs an import of its own; the old one stays"
+        let old_package = before
+            .imports
+            .iter()
+            .find(|i| i.index == was.outer_index)
+            .expect("the old package import")
+            .path
+            .clone();
+        if was.usage.references == 0 {
+            assert_eq!(
+                after.imports.len(),
+                before.imports.len(),
+                "the package import it left is renamed to the new package, not left behind"
+            );
+        }
+        assert!(
+            after.imports.iter().all(|i| i.path != old_package)
+                || before
+                    .imports
+                    .iter()
+                    .filter(|i| i.outer_index == was.outer_index)
+                    .count()
+                    > 1,
+            "nothing is left naming {old_package}"
         );
         let value = nested(&after.exports[0].properties, &[field.name.as_str()]);
         assert!(
@@ -6288,6 +6404,112 @@ mod game_data_tests {
             value.value.summary()
         );
         assert!(matches!(after.exports[0].status, ExportStatus::Complete));
+    }
+
+    /// Retargeting into a package the package already imports leaves the old package import naming
+    /// nothing, and the same save removes it: an IoStore copy read back holds no unnamed package
+    /// where it was.
+    #[test]
+    fn a_retarget_into_an_imported_package_drops_the_one_it_left() {
+        let Some(fixture) = Fixture::open(WEAPON_CUE) else {
+            return;
+        };
+        let before = fixture.parse();
+        let mesh = |side: &str| {
+            before
+                .imports
+                .iter()
+                .find(|i| i.class_name == "StaticMesh" && i.object_name.ends_with(side))
+                .unwrap_or_else(|| panic!("the {side} mesh import"))
+                .clone()
+        };
+        let (left, right) = (mesh("Stick_L"), mesh("Stick_R"));
+        let old_package = before
+            .imports
+            .iter()
+            .find(|i| i.index == left.outer_index)
+            .expect("the left mesh's package")
+            .path
+            .clone();
+        let scratch = ScratchMod {
+            root: fixture.root.clone(),
+            name: "RivalsToolkitOrphanProbe",
+        };
+        let request = AssetEditRequest {
+            mod_name: scratch.name,
+            ..fixture.request_changes(PackageEdits {
+                imports: vec![ImportEdit::Retarget {
+                    import: (-left.index - 1) as u32,
+                    path: right.path.clone(),
+                    class: None,
+                }],
+                ..Default::default()
+            })
+        };
+        save_edits(&request, Some(&fixture.schema), &SaveOptions::default()).expect("save");
+        let after = read_back(&fixture, &scratch.container());
+        let paths: Vec<&String> = after.imports.iter().map(|i| &i.path).collect();
+        assert!(
+            paths
+                .iter()
+                .all(|path| **path != old_package && !path.starts_with("/Engine/UnknownPackage")),
+            "{paths:?}"
+        );
+        assert_eq!(after.imports.len(), before.imports.len() - 1, "{paths:?}");
+        assert!(
+            after
+                .exports
+                .iter()
+                .all(|e| matches!(e.status, ExportStatus::Complete))
+        );
+    }
+
+    /// Removing the only import under a package takes the package with it, and the save's own
+    /// check expects that: an IoStore copy read back holds neither, rather than a package import
+    /// naming nothing that comes back as an unnamed one.
+    #[test]
+    fn removing_the_last_import_in_a_package_takes_the_package() {
+        let Some(fixture) = Fixture::open(WEAPON_CUE) else {
+            return;
+        };
+        let before = fixture.parse();
+        let tag = before
+            .imports
+            .iter()
+            .find(|i| i.path == "/Script/GameplayTags.GameplayTag")
+            .expect("the unused GameplayTag import")
+            .clone();
+        assert!(tag.usage.unused(), "{:?}", tag.usage);
+        let package = before
+            .imports
+            .iter()
+            .find(|i| i.index == tag.outer_index)
+            .expect("its package")
+            .path
+            .clone();
+        let scratch = ScratchMod {
+            root: fixture.root.clone(),
+            name: "RivalsToolkitOuterProbe",
+        };
+        let request = AssetEditRequest {
+            mod_name: scratch.name,
+            ..fixture.request_changes(PackageEdits {
+                imports: vec![ImportEdit::Remove {
+                    import: (-tag.index - 1) as u32,
+                }],
+                ..Default::default()
+            })
+        };
+        save_edits(&request, Some(&fixture.schema), &SaveOptions::default()).expect("save");
+        let after = read_back(&fixture, &scratch.container());
+        let paths: Vec<&String> = after.imports.iter().map(|i| &i.path).collect();
+        assert!(
+            paths.iter().all(|path| **path != tag.path
+                && **path != package
+                && !path.starts_with("/Engine/UnknownPackage")),
+            "{paths:?}"
+        );
+        assert_eq!(after.imports.len(), before.imports.len() - 2, "{paths:?}");
     }
 
     /// An import of a package neither the game nor a mod has is refused, and saved once the caller
@@ -7812,6 +8034,35 @@ mod game_data_tests {
             "{}",
             child.path
         );
+
+        // The edges that ordered it under its old outer follow it to the new one, so the copy
+        // waits on nothing in the source package and loading it does not load the source.
+        let header = rivals_uasset::read_header(&AssetBundle {
+            asset: &patched.asset,
+            exports: &patched.exports,
+        })
+        .expect("patched header");
+        let runs = &rivals_uasset::runs_of(&header).expect("runs")[copy.index as usize];
+        assert!(
+            runs.create_before_create.contains(&(level as i32 + 1)),
+            "{runs:?}"
+        );
+        for dependency in runs
+            .serialize_before_serialize
+            .iter()
+            .chain(&runs.create_before_serialize)
+            .chain(&runs.serialize_before_create)
+            .chain(&runs.create_before_create)
+            .filter(|&&dependency| dependency < 0)
+        {
+            let import = &after.imports[(-dependency - 1) as usize];
+            assert!(
+                !import.path.starts_with(&from_parsed.info.package_name),
+                "{} waits on the source's {}",
+                copy.path,
+                import.path
+            );
+        }
 
         // With no outer named, the copy sits at the package root rather than under export 0.
         let to_root = CopyRequest {
@@ -11444,9 +11695,173 @@ mod game_data_tests {
             exports: &patched.exports,
         })
         .expect("patched header");
+        // Any run naming the target already promises it exists before the owner is read.
+        let runs = rivals_uasset::runs_of(&patched_header).expect("runs");
+        let held = &runs[owner as usize];
+        let wanted = target as i32 + 1;
         assert!(
-            created_before(&patched_header, owner as usize).contains(&(target as i32 + 1)),
+            [
+                &held.serialize_before_serialize,
+                &held.create_before_serialize,
+                &held.serialize_before_create,
+                &held.create_before_create,
+            ]
+            .iter()
+            .any(|run| run.contains(&wanted)),
             "export {owner} now creates export {target} before it serializes"
+        );
+        let was = &rivals_uasset::runs_of(&header).expect("runs")[owner as usize];
+        if !was.create_before_create.contains(&wanted)
+            && !was.serialize_before_create.contains(&wanted)
+            && !was.serialize_before_serialize.contains(&wanted)
+        {
+            assert!(created_before(&patched_header, owner as usize).contains(&wanted));
+        }
+    }
+
+    /// Pointing a mesh at another asset hands the create-before-serialize edge over with the
+    /// reference: the new import is waited on, and the old one, named by nothing left, is not, so it
+    /// becomes removable instead of lingering as a dependency.
+    #[test]
+    fn a_repointed_reference_moves_its_dependency_to_the_new_import() {
+        let Some(fixture) = Fixture::open(WEAPON_CUE) else {
+            return;
+        };
+        let before = fixture.parse();
+        let owner = before
+            .exports
+            .iter()
+            .find(|export| export.object_name == "UnEquipedStickR_GEN_VARIABLE")
+            .expect("the right baton");
+        let field = owner
+            .properties
+            .iter()
+            .find(|field| field.name == "StaticMesh")
+            .expect("its mesh")
+            .clone();
+        let PropertyValue::Object { index: old, .. } = field.value else {
+            panic!("a mesh reference");
+        };
+        let (patched, after) = fixture.apply(vec![edit_of(
+            &field,
+            EditOp::Set {
+                text: "/Engine/BasicShapes/Sphere.Sphere".into(),
+            },
+        )]);
+        let header = rivals_uasset::read_header(&AssetBundle {
+            asset: &patched.asset,
+            exports: &patched.exports,
+        })
+        .expect("patched header");
+        let runs = &rivals_uasset::runs_of(&header).expect("runs")[owner.index as usize];
+        let sphere = after
+            .imports
+            .iter()
+            .find(|import| import.path == "/Engine/BasicShapes/Sphere.Sphere")
+            .expect("the added import")
+            .index;
+        assert!(runs.create_before_serialize.contains(&sphere), "{runs:?}");
+        assert!(!runs.create_before_serialize.contains(&old), "{runs:?}");
+        let was = after
+            .imports
+            .iter()
+            .find(|import| import.index == old)
+            .expect("the old mesh import");
+        assert!(was.usage.unused(), "{:?}", was.usage);
+    }
+
+    /// A reset drops the edges its references asked for along with them: the baton that stored a
+    /// mesh and a socket record waits on neither afterwards, and the mesh import, named by nothing
+    /// left, becomes removable.
+    #[test]
+    fn a_reset_export_stops_waiting_on_what_it_named() {
+        let Some(fixture) = Fixture::open(WEAPON_CUE) else {
+            return;
+        };
+        let before = fixture.parse();
+        let owner = before
+            .exports
+            .iter()
+            .find(|export| export.object_name == "UnEquipedStickR_GEN_VARIABLE")
+            .expect("the right baton");
+        let PropertyValue::Object { index: mesh, .. } = owner
+            .properties
+            .iter()
+            .find(|field| field.name == "StaticMesh")
+            .expect("its mesh")
+            .value
+        else {
+            panic!("a mesh reference");
+        };
+        let (patched, after) = fixture.apply_changes(PackageEdits {
+            reset_exports: vec![owner.index],
+            ..Default::default()
+        });
+        let header = rivals_uasset::read_header(&AssetBundle {
+            asset: &patched.asset,
+            exports: &patched.exports,
+        })
+        .expect("patched header");
+        let runs = &rivals_uasset::runs_of(&header).expect("runs")[owner.index as usize];
+        assert!(runs.create_before_serialize.is_empty(), "{runs:?}");
+        let was = after
+            .imports
+            .iter()
+            .find(|import| import.index == mesh)
+            .expect("the mesh import");
+        assert!(was.usage.unused(), "{:?}", was.usage);
+    }
+
+    /// Moving an export carries the edge that orders it along: its create-before-create run waits
+    /// on the new outer instead of the old one, which an IoStore package would otherwise lack while
+    /// its read-back, which puts an outer back on its own, looked right.
+    #[test]
+    fn a_moved_export_waits_on_its_new_outer() {
+        let Some(fixture) = Fixture::open(WEAPON_CUE) else {
+            return;
+        };
+        let before = fixture.parse();
+        let find = |name: &str, outer_name: &str| {
+            before
+                .exports
+                .iter()
+                .find(|export| {
+                    export.object_name == name
+                        && before
+                            .exports
+                            .get((export.outer_index - 1).max(0) as usize)
+                            .is_some_and(|outer| {
+                                export.outer_index > 0 && outer.object_name == outer_name
+                            })
+                })
+                .unwrap_or_else(|| panic!("{name} under {outer_name}"))
+        };
+        let record = find("CueData_UnarmedWeapon_0", "UnEquipedStickL_GEN_VARIABLE");
+        let default = before
+            .exports
+            .iter()
+            .find(|export| export.object_name.starts_with("Default__"))
+            .expect("the class default object");
+        let old = record.outer_index;
+        let new = default.index as i32 + 1;
+        let (patched, after) = fixture.apply_changes(PackageEdits {
+            exports: vec![rivals_uasset::ExportEdit::SetOuter {
+                export: record.index,
+                outer: Some(default.index),
+            }],
+            ..Default::default()
+        });
+        let header = rivals_uasset::read_header(&AssetBundle {
+            asset: &patched.asset,
+            exports: &patched.exports,
+        })
+        .expect("patched header");
+        let runs = &rivals_uasset::runs_of(&header).expect("runs")[record.index as usize];
+        assert!(runs.create_before_create.contains(&new), "{runs:?}");
+        assert!(!runs.create_before_create.contains(&old), "{runs:?}");
+        assert_eq!(
+            after.exports[record.index as usize].outer_index, new,
+            "the move itself landed"
         );
     }
 

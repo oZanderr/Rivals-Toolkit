@@ -383,6 +383,12 @@ pub(crate) fn copy_exports(
             .map(|copy| (copy.export, copy.index))
             .collect();
         let source_total = i64::from(source.header.summary.versioning_info.total_header_size);
+        let old_outer = source
+            .parsed
+            .exports
+            .get(request.export as usize)
+            .map_or(0, |root| root.outer_index);
+        let new_outer = crate::export_edit::outer_index(request.into_outer);
 
         for &member in &members {
             let held = &source.parsed.exports[member as usize];
@@ -497,12 +503,17 @@ pub(crate) fn copy_exports(
             let first = entry.first_export_dependency_index;
             let mut cursor = usize::try_from(first).unwrap_or(0);
             let run_start = preload_dependencies.len() as i32;
-            for count in [
+            let mut counts = [0i32; 4];
+            for (slot, count) in [
                 entry.serialize_before_serialize_dependencies,
                 entry.create_before_serialize_dependencies,
                 entry.serialize_before_create_dependencies,
                 entry.create_before_create_dependencies,
-            ] {
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let mut run: Vec<FPackageIndex> = Vec::new();
                 for _ in 0..usize::try_from(count).unwrap_or(0) {
                     let dep = source
                         .header
@@ -511,11 +522,26 @@ pub(crate) fn copy_exports(
                         .copied()
                         .ok_or("the source's preload dependencies run past their table")?;
                     cursor += 1;
-                    preload_dependencies.push(FPackageIndex {
-                        index: remap(dep.index, &mut tables)?,
-                    });
+                    // The copy hangs under a new outer, so an edge to the one it left follows it
+                    // there, rather than becoming an import that loads the source package.
+                    let now = if old_outer != 0 && dep.index == old_outer {
+                        new_outer
+                    } else {
+                        FPackageIndex {
+                            index: remap(dep.index, &mut tables)?,
+                        }
+                    };
+                    if !now.is_null() && !run.contains(&now) {
+                        run.push(now);
+                    }
                 }
+                counts[slot] = run.len() as i32;
+                preload_dependencies.extend(run);
             }
+            row.serialize_before_serialize_dependencies = counts[0];
+            row.create_before_serialize_dependencies = counts[1];
+            row.serialize_before_create_dependencies = counts[2];
+            row.create_before_create_dependencies = counts[3];
             if first >= 0 {
                 row.first_export_dependency_index = run_start;
             }

@@ -234,7 +234,7 @@ interface ExportEditPlan {
 
 /** What `plan_import_removal` reports before an import row is dropped. */
 interface ImportRemovalPlan {
-  removed: { index: number; path: string; class_name: string }[];
+  removed: { index: number; path: string; class_name: string; requested: boolean }[];
   blockers: string[];
   cleared: string[];
   warnings: string[];
@@ -5338,6 +5338,14 @@ function ImportRemovalForm({
               ? ` ${plan.dropped_dependencies} preload dependency entr${plan.dropped_dependencies === 1 ? "y is" : "ies are"} dropped.`
               : ""}
           </p>
+          {plan.removed
+            .filter((r) => !r.requested)
+            .map((r) => (
+              <p key={r.index} className="text-muted-foreground">
+                Also removes <span className="font-mono">{r.path}</span>, which is left with nothing
+                under it.
+              </p>
+            ))}
           {plan.blockers.map((b, i) => (
             <p
               key={i}

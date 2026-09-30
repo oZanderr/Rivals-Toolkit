@@ -4,6 +4,7 @@ use retoc::legacy_asset::{FLegacyPackageHeader, FMinimalName, FObjectImport, FPa
 use retoc::zen::FPackageIndex;
 
 use crate::edit::AppliedEdit;
+use crate::import_remove::ImportUsage;
 use crate::package::path_from;
 
 /// One change to the import table.
@@ -66,6 +67,38 @@ impl Tables {
             self.name(import.class_package)?,
             self.name(import.class_name)?,
         ))
+    }
+
+    /// Whether an IoStore package can hold a dependency on this import, including one added in the
+    /// same save: an object inside another package that is not native code. A package on its own
+    /// and anything under `/Script` are dropped by the converter.
+    pub(crate) fn zen_keeps_import(&self, index: i32) -> bool {
+        let at = FPackageIndex { index };
+        if !at.is_import() {
+            return false;
+        }
+        let Some(import) = self.imports.get(at.to_import_index() as usize) else {
+            return false;
+        };
+        if import.outer_index.is_null() {
+            return false;
+        }
+        let mut root = import;
+        for _ in 0..self.imports.len() {
+            if !root.outer_index.is_import() {
+                break;
+            }
+            match self
+                .imports
+                .get(root.outer_index.to_import_index() as usize)
+            {
+                Some(outer) => root = outer,
+                None => return false,
+            }
+        }
+        self.name(root.object_name).is_some_and(|package| {
+            !package.starts_with("/Script/") && !package.starts_with("/Engine/UnknownPackage")
+        })
     }
 
     fn find(&self, outer: FPackageIndex, name: &str) -> Option<FPackageIndex> {
@@ -171,11 +204,52 @@ pub(crate) fn add_import(
     Ok(tables.ensure_object(outer, last, class).index)
 }
 
-/// Applies one import edit to the tables, describing what changed.
+/// Renames the package import a retarget is about to leave naming nothing to the package it
+/// moves into, so the table keeps one package import rather than gaining one and orphaning the
+/// other. Done only when the retargeted import is all that names it and the new package is not
+/// imported yet; otherwise the old one is left for a removal to tidy.
+fn reuse_old_package(tables: &mut Tables, at: usize, path: &ObjectPath, usage: &[ImportUsage]) {
+    let old = tables.imports[at].outer_index;
+    if !old.is_import() {
+        return;
+    }
+    let position = old.to_import_index() as usize;
+    let Some(package) = tables.imports.get(position) else {
+        return;
+    };
+    if !package.outer_index.is_null()
+        || tables.name(package.object_name).as_deref() == Some(path.package.as_str())
+        || tables
+            .find(FPackageIndex::create_null(), &path.package)
+            .is_some()
+    {
+        return;
+    }
+    let named_elsewhere = tables
+        .imports
+        .iter()
+        .enumerate()
+        .any(|(held, import)| held != at && import.outer_index == old);
+    let untouched = usage.get(position).is_some_and(|usage| {
+        usage.references == 0
+            && usage.roles.is_empty()
+            && usage.preload == 0
+            && usage.resources == 0
+    });
+    if !named_elsewhere && untouched {
+        let name = tables.names.store(&path.package);
+        tables.imports[position].object_name = name;
+    }
+}
+
+/// Applies one import edit to the tables, describing what changed. `usage` is what names each
+/// import as the package was read, which lets a retarget reuse the package import it would
+/// otherwise leave behind.
 pub(crate) fn apply_import_edit(
     tables: &mut Tables,
     package: &FLegacyPackageHeader,
     edit: &ImportEdit,
+    usage: Option<&[ImportUsage]>,
 ) -> Result<AppliedEdit, String> {
     let describe = |tables: &Tables, index: FPackageIndex| {
         path_from(
@@ -256,6 +330,9 @@ pub(crate) fn apply_import_edit(
                 tables.imports[at].object_name = name;
             } else {
                 let parsed = parse_object_path(path)?;
+                if let Some(usage) = usage {
+                    reuse_old_package(tables, at, &parsed, usage);
+                }
                 let outer = tables.ensure_outers(&parsed);
                 let mut probe = outer;
                 while probe.is_import() {
@@ -381,6 +458,7 @@ mod tests {
                 path: "/Game/Meshes/SM_B.SM_B".into(),
                 class: None,
             },
+            None,
         )
         .expect("retarget");
         assert_eq!(done.before, "/Game/Meshes/SM_A.SM_A");
@@ -389,7 +467,52 @@ mod tests {
             tables.import_class(mesh),
             Some(("/Script/Engine".into(), "StaticMesh".into()))
         );
-        assert_eq!(tables.imports.len(), 3, "the old package import stays");
+        assert_eq!(
+            tables.imports.len(),
+            3,
+            "with nothing known of what names it, the old package import stays"
+        );
+    }
+
+    /// Told nothing else names the old package, a retarget into a package not yet imported renames
+    /// that package import rather than adding one beside it and leaving it orphaned.
+    #[test]
+    fn a_retarget_reuses_the_package_it_leaves() {
+        let mut tables = tables();
+        let mesh = add_import(
+            &mut tables,
+            "/Game/Meshes/SM_A.SM_A",
+            Some(("/Script/Engine".into(), "StaticMesh".into())),
+        )
+        .expect("add");
+        let package = FLegacyPackageHeader::default();
+        let usage = vec![ImportUsage::default(); tables.imports.len()];
+        let retarget = |path: &str| ImportEdit::Retarget {
+            import: FPackageIndex { index: mesh }.to_import_index(),
+            path: path.into(),
+            class: None,
+        };
+        let done = apply_import_edit(
+            &mut tables,
+            &package,
+            &retarget("/Game/Meshes/SM_B.SM_B"),
+            Some(&usage),
+        )
+        .expect("retarget");
+        assert_eq!(done.after, "/Game/Meshes/SM_B.SM_B");
+        assert_eq!(tables.imports.len(), 2, "one package import, renamed");
+
+        // A package already imported is used as it is, leaving the old one for a removal.
+        add_import(&mut tables, "/Game/Meshes/SM_C.SM_C", None).expect("add");
+        let usage = vec![ImportUsage::default(); tables.imports.len()];
+        apply_import_edit(
+            &mut tables,
+            &package,
+            &retarget("/Game/Meshes/SM_C.SM_C"),
+            Some(&usage),
+        )
+        .expect("retarget");
+        assert_eq!(tables.imports.len(), 4);
     }
 
     #[test]
@@ -411,6 +534,7 @@ mod tests {
                 path: "/Script/Engine.SkeletalMesh".into(),
                 class: None,
             },
+            None,
         )
         .expect_err("refused");
         assert!(error.contains("class"), "{error}");
