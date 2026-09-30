@@ -1479,7 +1479,7 @@ fn byte_value(cursor: &mut Cursor<'_>) -> Result<PropertyValue, String> {
 
 /// `FNumberFormattingOptions`: two full-word bools, a rounding mode byte and four `int32` digit
 /// counts.
-const NUMBER_FORMATTING_OPTIONS_BYTES: usize = 4 + 4 + 1 + 4 * 4;
+pub(crate) const NUMBER_FORMATTING_OPTIONS_BYTES: usize = 4 + 4 + 1 + 4 * 4;
 
 /// `FFormatArgumentValue`: a type byte, then the value that type says.
 fn read_format_argument(

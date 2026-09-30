@@ -358,7 +358,7 @@ fn localize_value(value: &mut PropertyValue, localizer: &Localizer, tables: &Tab
                 (Some(namespace), Some(key)) => localizer
                     .lookup(namespace, key, value.as_deref())
                     .map(str::to_string),
-                _ => table_text(parts, localizer, tables),
+                _ => table_text(parts, localizer, tables).or_else(|| transformed_text(parts)),
             };
             *display = shown.filter(|shown| Some(shown) != value.as_ref());
         }
@@ -378,6 +378,29 @@ fn localize_value(value: &mut PropertyValue, localizer: &Localizer, tables: &Tab
         }
         _ => {}
     }
+}
+
+/// A transformed text shows its source text, as the game shows that, upper- or lower-cased.
+fn transformed_text(parts: &[PropertyEntry]) -> Option<String> {
+    let part = |name: &str| {
+        parts
+            .iter()
+            .find(|part| part.name == name)
+            .map(|part| &part.value)
+    };
+    let (
+        Some(PropertyValue::Text { value, display, .. }),
+        Some(PropertyValue::Byte { value: kind }),
+    ) = (part("SourceText"), part("TransformType"))
+    else {
+        return None;
+    };
+    let shown = display.as_ref().or(value.as_ref())?;
+    Some(if *kind == 1 {
+        shown.to_uppercase()
+    } else {
+        shown.to_lowercase()
+    })
 }
 
 /// A string table reference's text: the entry's translation, or its source when there is none.

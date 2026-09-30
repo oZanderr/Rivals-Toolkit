@@ -221,6 +221,7 @@ pub fn sparse_mappings() -> Mappings {
                     },
                 ),
                 property("Chain", 11, struct_named("Level1")),
+                property("Caption", 12, PropertyInner::Text),
             ],
         },
         // Structs three deep, for previews and field sets that reach past two.

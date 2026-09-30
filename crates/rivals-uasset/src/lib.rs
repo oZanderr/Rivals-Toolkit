@@ -30,6 +30,7 @@ mod tagged_edit_tests;
 #[cfg(any(test, feature = "test-support"))]
 pub mod tagged_fixture;
 mod tails;
+pub mod text_literal;
 mod unversioned;
 mod ustruct;
 mod value;

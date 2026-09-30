@@ -532,6 +532,10 @@ fn value_text(value: &PropertyValue) -> Option<String> {
             parts,
             ..
         } if parts.is_empty() => value.clone(),
+        // A text built from parts is compared as the literal that spells it.
+        PropertyValue::Text { .. } => {
+            crate::text_literal::format(&crate::text_literal::of_value(value)?)
+        }
         PropertyValue::Object {
             path: Some(path), ..
         } => path.clone(),
@@ -1200,6 +1204,8 @@ pub fn patch_package_with(
     let mut blocks: BTreeMap<u64, (UnversionedHeader, usize)> = BTreeMap::new();
 
     let tagged = !parsed.info.unversioned_properties;
+    let mut notes: Vec<String> = Vec::new();
+    check_whole_text_edits(parsed, &edits.values)?;
     for edit in &edits.values {
         let entry = locate(parsed, edit)?;
         let (start, end) = entry
@@ -1244,6 +1250,9 @@ pub fn patch_package_with(
                     };
                     let (value, flag) =
                         tagged_value(absent, text, &mut tables, &package, mappings)?;
+                    if matches!(absent.inner, usmap::PropertyInner::Text) {
+                        link_text_tables(&value, start, &mut tables, &mut object_links)?;
+                    }
                     let (bytes, value_at) = tag_bytes(
                         &absent.name,
                         absent.array_index,
@@ -1345,6 +1354,10 @@ pub fn patch_package_with(
                 )?;
                 if let Some(target) = object_reference(&entry.value, &bytes) {
                     object_links.push((start, target));
+                }
+                if is_text(&entry.value) {
+                    link_text_tables(&bytes, start, &mut tables, &mut object_links)?;
+                    notes.extend(text_note(&entry.label(), &entry.value, text));
                 }
                 if let Some((layout, slot)) = channel_time_at(parsed, start) {
                     check_frame_order(layout, slot, &bytes, &entry.label())?;
@@ -1467,6 +1480,14 @@ pub fn patch_package_with(
                 )?;
                 if let Some(target) = object_reference(element, &bytes) {
                     object_links.push((start, target));
+                }
+                if is_text(element) || layout.element_kind == "Text" {
+                    link_text_tables(&bytes, start, &mut tables, &mut object_links)?;
+                    notes.extend(text_note(
+                        &format!("{}[{index}]", entry.label()),
+                        element,
+                        text,
+                    ));
                 }
                 (
                     vec![Splice {
@@ -1914,8 +1935,94 @@ pub fn patch_package_with(
         applied,
         bulk: bulk_out.bulk,
         optional_bulk: bulk_out.optional_bulk,
-        notes: Vec::new(),
+        notes,
     })
+}
+
+/// Whether a value is a text, including a text slot that holds nothing yet.
+fn is_text(value: &PropertyValue) -> bool {
+    match value {
+        PropertyValue::Text { .. } => true,
+        PropertyValue::Unset { declared, .. } => *declared == "Text",
+        PropertyValue::Default { declared, .. } => *declared == Some("Text"),
+        _ => false,
+    }
+}
+
+/// The string tables a text names, imported and waited on the way the cook writes them: the
+/// export holding a text that shows a table entry reads only after that table exists. A table
+/// named by anything but an asset path is left to the game to find.
+fn link_text_tables(
+    bytes: &[u8],
+    at: u64,
+    tables: &mut Tables,
+    links: &mut Vec<(u64, i32)>,
+) -> Result<(), String> {
+    let (_, names_at) = text_extent(bytes, 0)?;
+    for offset in names_at {
+        let table = text_table_id(&bytes[offset - 5..], &tables.names)?;
+        if !table.starts_with('/') {
+            continue;
+        }
+        let import = crate::header_edit::add_import(
+            tables,
+            &table,
+            Some(("/Script/Engine".to_string(), "StringTable".to_string())),
+        )?;
+        links.push((at, import));
+    }
+    Ok(())
+}
+
+/// What a plain string does to a string table text beyond what it says: replacing the entry with
+/// itself, the text stops following the table.
+fn text_note(label: &str, value: &PropertyValue, text: &str) -> Option<String> {
+    use crate::text_literal::{TextLiteral, of_value, parse, table_reference};
+    let Some(TextLiteral::Table { table_id, key }) = of_value(value) else {
+        return None;
+    };
+    if parse(text).is_some() || table_reference(text, &table_id).is_some() {
+        return None;
+    }
+    Some(format!(
+        "{label} now shows \"{text}\" in every language; it no longer follows {table_id}:{key}"
+    ))
+}
+
+/// A text set as a whole replaces its parts, so an edit to one of those parts in the same save
+/// would land in bytes that no longer exist.
+fn check_whole_text_edits(parsed: &ParsedPackage, edits: &[ValueEdit]) -> Result<(), String> {
+    let mut whole: Vec<((u64, u64), String)> = Vec::new();
+    for edit in edits {
+        if !matches!(edit.op, EditOp::Set { .. }) {
+            continue;
+        }
+        let Ok(entry) = locate(parsed, edit) else {
+            continue;
+        };
+        if let (PropertyValue::Text { parts, .. }, Some(span)) = (&entry.value, entry.span)
+            && !parts.is_empty()
+        {
+            whole.push((span, entry.label()));
+        }
+    }
+    for edit in edits {
+        let Ok(entry) = locate(parsed, edit) else {
+            continue;
+        };
+        let Some(span) = entry.span else { continue };
+        if let Some((_, label)) = whole
+            .iter()
+            .find(|((from, to), _)| span != (*from, *to) && *from <= span.0 && span.1 <= *to)
+        {
+            return Err(format!(
+                "{label} is set as a whole in this save, so {} inside it cannot be edited too; \
+                 edit the whole text or one of its parts, not both",
+                entry.label()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Removes and resets exports. Reference splices inside an export being reset are dropped: its
@@ -5302,6 +5409,7 @@ pub fn verify_patch(
                         entry.value.summary()
                     ));
                 }
+                check_text_tables(after, &entry.value, &edit.expect_name)?;
             }
             EditOp::Clear => {
                 if entry.span.is_some_and(|(start, end)| end > start)
@@ -5345,6 +5453,7 @@ pub fn verify_patch(
                         element.summary()
                     ));
                 }
+                check_text_tables(after, element, &edit.expect_name)?;
             }
             EditOp::Insert { .. } | EditOp::Remove { .. } => {
                 check_count(&entry.value, done, &edit.expect_name)?;
@@ -5352,6 +5461,29 @@ pub fn verify_patch(
         }
     }
     verify_unique_keys(before, after, edits, applied)
+}
+
+/// A text that shows a string table entry needs that table imported, the way the cook writes it,
+/// or the game reads the text before the table is there.
+fn check_text_tables(
+    after: &ParsedPackage,
+    value: &PropertyValue,
+    name: &str,
+) -> Result<(), String> {
+    use crate::text_literal::TextLiteral;
+    let mut literal = crate::text_literal::of_value(value);
+    while let Some(TextLiteral::Transform { inner, .. }) = literal {
+        literal = Some(*inner);
+    }
+    let Some(TextLiteral::Table { table_id, .. }) = literal else {
+        return Ok(());
+    };
+    if table_id.starts_with('/') && !after.imports.iter().any(|import| import.path == table_id) {
+        return Err(format!(
+            "{name} shows an entry of {table_id}, which the package does not import after patching"
+        ));
+    }
+    Ok(())
 }
 
 /// The node and the template read back copied at the end of the table, as one set: each copy reads
@@ -6502,10 +6634,7 @@ fn encode(value: &PropertyValue, text: &str, target: Target<'_>) -> Result<Vec<u
         PropertyValue::Str { .. } => Ok(encode_string(text)),
         PropertyValue::Name { .. } => Ok(encode_name(text, &mut target.tables.names)),
         PropertyValue::SoftObject { .. } => Ok(encode_soft_object(text, &mut target.tables.names)),
-        PropertyValue::Text { parts, .. } if !parts.is_empty() => {
-            Err("this text is built from the parts below; edit one of them instead".to_string())
-        }
-        PropertyValue::Text { .. } => encode_text(text, target.was),
+        PropertyValue::Text { .. } => encode_text(text, target.was, &mut target.tables.names),
         PropertyValue::Object { index, .. } => {
             encode_object(text, target.package, target.tables, Some(*index))
         }
@@ -6593,7 +6722,7 @@ fn encode_declared(declared: &str, text: &str, target: Target<'_>) -> Result<Vec
         "Object" | "WeakObject" | "Interface" => {
             encode_object(text, target.package, target.tables, None)
         }
-        "Text" => encode_text(text, &UNSET_TEXT),
+        "Text" => encode_text(text, &UNSET_TEXT, &mut target.tables.names),
         "Bool" => scalar(PropertyValue::Bool { value: false }),
         "Byte" => scalar(PropertyValue::Byte { value: 0 }),
         "Int8" | "Int16" | "Int" | "Int64" => scalar(PropertyValue::Int { value: 0 }),
@@ -6777,12 +6906,27 @@ fn encode_soft_object(text: &str, names: &mut FPackageNameMap) -> Vec<u8> {
     out
 }
 
+/// `ETextFlag::CultureInvariant`: the text shows the same in every language.
+const CULTURE_INVARIANT: u32 = 1 << 1;
+
+/// A text made from nothing: no flags, and the None history.
+const FRESH_TEXT: [u8; 5] = [0, 0, 0, 0, 0xFF];
+
 /// `PropertyValue::Text` keeps only the displayed string, so the flags, the history type and a
 /// localized entry's namespace and key have to come back out of the bytes that are already there.
-/// Histories this cannot reproduce are refused by name rather than written half-formed.
-fn encode_text(text: &str, was: &[u8]) -> Result<Vec<u8>, String> {
+/// A text literal (`LOCTABLE(...)`, `NSLOCTEXT(...)`, `INVTEXT(...)`, `LOCGEN_TOUPPER(...)`)
+/// builds the text it spells whatever the history was. A plain string edits what the text shows in
+/// place, except over a string table entry, which it replaces with that string, shown the same in
+/// every language, unless it names a table and key the way the text reads. Histories this cannot
+/// reproduce are refused by name rather than written half-formed.
+fn encode_text(text: &str, was: &[u8], names: &mut FPackageNameMap) -> Result<Vec<u8>, String> {
     if was.len() < 5 {
         return Err("this text has no bytes to rebuild from, so it cannot be edited yet".into());
+    }
+    match crate::text_literal::parse(text) {
+        Some(Ok(literal)) => return build_text(&literal, was, names),
+        Some(Err(reason)) => return Err(reason),
+        None => {}
     }
     let flags = &was[..4];
     let history = was[4] as i8;
@@ -6807,6 +6951,22 @@ fn encode_text(text: &str, was: &[u8]) -> Result<Vec<u8>, String> {
         // AsNumber, AsPercent and AsCurrency: only the source value changes; the formatting
         // options and the culture are copied through.
         4 => return encode_formatted_number(text, was),
+        // A transformed text shows its source text cased, so the string goes to the source.
+        10 => {
+            let (inner_end, _) = text_extent(was, 5)?;
+            out.extend_from_slice(&encode_text(text, &was[5..inner_end], names)?);
+            out.extend_from_slice(&was[inner_end..]);
+        }
+        // A string table entry has no string of its own to edit: the string either names another
+        // entry the way the text reads, or replaces the entry with itself.
+        11 => {
+            let current = text_table_id(was, names)?;
+            let literal = match crate::text_literal::table_reference(text, &current) {
+                Some((table_id, key)) => crate::text_literal::TextLiteral::Table { table_id, key },
+                None => crate::text_literal::TextLiteral::Invariant(text.to_string()),
+            };
+            return build_text(&literal, was, names);
+        }
         other => {
             return Err(format!(
                 "text with history type {other} cannot be edited yet"
@@ -6814,6 +6974,135 @@ fn encode_text(text: &str, was: &[u8]) -> Result<Vec<u8>, String> {
         }
     }
     Ok(out)
+}
+
+/// The bytes of the text a literal spells. The flags carry over from the text it replaces, all but
+/// `CultureInvariant`, which only an `INVTEXT` has; a transform keeps its source text's flags when
+/// it was a transform already, and a new source starts from none.
+fn build_text(
+    literal: &crate::text_literal::TextLiteral,
+    was: &[u8],
+    names: &mut FPackageNameMap,
+) -> Result<Vec<u8>, String> {
+    use crate::text_literal::TextLiteral;
+    let old = was
+        .get(..4)
+        .map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+    let flags = match literal {
+        TextLiteral::Invariant(_) => old | CULTURE_INVARIANT,
+        _ => old & !CULTURE_INVARIANT,
+    };
+    let mut out = flags.to_le_bytes().to_vec();
+    match literal {
+        TextLiteral::Invariant(text) => {
+            out.push(0xFF);
+            out.extend_from_slice(&1u32.to_le_bytes());
+            out.extend_from_slice(&encode_string(text));
+        }
+        TextLiteral::Localized {
+            namespace,
+            key,
+            source,
+        } => {
+            out.push(0);
+            out.extend_from_slice(&encode_string(namespace));
+            out.extend_from_slice(&encode_string(key));
+            out.extend_from_slice(&encode_string(source));
+        }
+        TextLiteral::Table { table_id, key } => {
+            out.push(11);
+            out.extend_from_slice(&encode_name(table_id, names));
+            out.extend_from_slice(&encode_string(key));
+        }
+        TextLiteral::Transform { upper, inner } => {
+            out.push(10);
+            let source = if was.get(4).is_some_and(|&history| history as i8 == 10) {
+                &was[5..text_extent(was, 5)?.0]
+            } else {
+                &FRESH_TEXT[..]
+            };
+            out.extend_from_slice(&build_text(inner, source, names)?);
+            out.push(u8::from(*upper));
+        }
+    }
+    Ok(out)
+}
+
+/// The string table a StringTableEntry text's bytes name.
+fn text_table_id(was: &[u8], names: &FPackageNameMap) -> Result<String, String> {
+    let name = was
+        .get(5..13)
+        .ok_or("this string table text ends before its table")?;
+    let index = i32::from_le_bytes([name[0], name[1], name[2], name[3]]);
+    let number = i32::from_le_bytes([name[4], name[5], name[6], name[7]]);
+    names
+        .get(retoc::legacy_asset::FMinimalName { index, number })
+        .map(|name| name.into_owned())
+        .map_err(|e| format!("resolve the text's string table: {e}"))
+}
+
+/// Where the text starting at `start` ends, and where each string table name inside it sits,
+/// nested ones included. Mirrors the reader, for the histories it reads.
+fn text_extent(data: &[u8], start: usize) -> Result<(usize, Vec<usize>), String> {
+    let short = || "this text ends before its history does".to_string();
+    let word = |at: usize| -> Result<u32, String> {
+        data.get(at..at + 4)
+            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .ok_or_else(short)
+    };
+    let history = *data.get(start + 4).ok_or_else(short)? as i8;
+    let mut at = start + 5;
+    let mut tables = Vec::new();
+    match history {
+        -1 => {
+            let has = word(at)?;
+            at += 4;
+            if has != 0 {
+                take_string(data, &mut at)?;
+            }
+        }
+        0 => {
+            for _ in 0..3 {
+                take_string(data, &mut at)?;
+            }
+        }
+        4 => {
+            let kind = *data.get(at).ok_or_else(short)? as i8;
+            at += 1;
+            match kind {
+                0 | 1 | 3 => at += 8,
+                2 => at += 4,
+                4 => {
+                    let (end, nested) = text_extent(data, at)?;
+                    tables.extend(nested);
+                    at = end;
+                }
+                5 => at += 1,
+                other => return Err(format!("unknown FText format argument type {other}")),
+            }
+            let has_options = word(at)?;
+            at += 4;
+            if has_options != 0 {
+                at += crate::props::NUMBER_FORMATTING_OPTIONS_BYTES;
+            }
+            take_string(data, &mut at)?;
+        }
+        10 => {
+            let (end, nested) = text_extent(data, at)?;
+            tables.extend(nested);
+            at = end + 1;
+        }
+        11 => {
+            tables.push(at);
+            at += 8;
+            take_string(data, &mut at)?;
+        }
+        other => return Err(format!("text with history type {other} cannot be walked")),
+    }
+    if at > data.len() {
+        return Err(short());
+    }
+    Ok((at, tables))
 }
 
 /// `FTextHistory_FormatNumber` holds the number it formats as a typed `FFormatArgumentValue`, so
@@ -7008,9 +7297,15 @@ fn reads_back_as(value: &PropertyValue, text: &str) -> bool {
         }
         PropertyValue::Name { value } => value == text.trim(),
         PropertyValue::SoftObject { path } => path == text.trim(),
-        PropertyValue::Text { value, .. } => value
-            .as_deref()
-            .is_some_and(|shown| shown == text || formatted_number_reads_back(shown, text)),
+        // A literal spells the whole text, so it reads back as the same kind of text holding the
+        // same pieces; a plain string reads back as what the text shows.
+        PropertyValue::Text { value: shown, .. } => match crate::text_literal::parse(text) {
+            Some(Ok(literal)) => crate::text_literal::matches(&literal, value),
+            Some(Err(_)) => false,
+            None => shown
+                .as_deref()
+                .is_some_and(|shown| shown == text || formatted_number_reads_back(shown, text)),
+        },
         // Typed as a path but stored as an index, so the path it resolves back to is the check.
         // Either separator convention may have been typed; only the segments have to agree.
         PropertyValue::Object { index, path } => {
@@ -7780,7 +8075,7 @@ mod tests {
         was.extend_from_slice(&encode_string("NS"));
         was.extend_from_slice(&encode_string("KEY"));
         was.extend_from_slice(&encode_string("old"));
-        let out = encode_text("new", &was).expect("encode");
+        let out = encode_text("new", &was, &mut name_map()).expect("encode");
         let mut want = vec![0u8; 4];
         want.push(0);
         want.extend_from_slice(&encode_string("NS"));
@@ -7794,7 +8089,7 @@ mod tests {
         let mut was = vec![0u8; 4];
         was.push(0xFF);
         was.extend_from_slice(&0u32.to_le_bytes());
-        let out = encode_text("hello", &was).expect("encode");
+        let out = encode_text("hello", &was, &mut name_map()).expect("encode");
         assert_eq!(out[4], 0xFF);
         assert_eq!(&out[5..9], &1u32.to_le_bytes());
         assert_eq!(&out[9..], &encode_string("hello")[..]);
@@ -7818,25 +8113,25 @@ mod tests {
     #[test]
     fn editing_a_formatted_number_rewrites_only_its_source_value() {
         let was = formatted_number(3, &2.0f64.to_le_bytes());
-        let out = encode_text("3", &was).expect("encode");
+        let out = encode_text("3", &was, &mut name_map()).expect("encode");
         assert_eq!(out, formatted_number(3, &3.0f64.to_le_bytes()));
 
         let was = formatted_number(0, &(-4i64).to_le_bytes());
         assert_eq!(
-            encode_text("12", &was).expect("encode"),
+            encode_text("12", &was, &mut name_map()).expect("encode"),
             formatted_number(0, &12i64.to_le_bytes())
         );
-        let error = encode_text("1.5", &was).expect_err("refused");
+        let error = encode_text("1.5", &was, &mut name_map()).expect_err("refused");
         assert!(error.contains("not a whole number"), "{error}");
 
         let was = formatted_number(2, &0.25f32.to_le_bytes());
         assert_eq!(
-            encode_text("0.5", &was).expect("encode"),
+            encode_text("0.5", &was, &mut name_map()).expect("encode"),
             formatted_number(2, &0.5f32.to_le_bytes())
         );
 
         let was = formatted_number(4, &[]);
-        let error = encode_text("3", &was).expect_err("refused");
+        let error = encode_text("3", &was, &mut name_map()).expect_err("refused");
         assert!(error.contains("formats another text"), "{error}");
     }
 
@@ -7848,13 +8143,222 @@ mod tests {
     }
 
     /// A history this cannot rebuild is refused by name, because writing a plausible-looking but
-    /// wrong FText would break the string silently.
+    /// wrong FText would break the string silently; so is a literal that goes wrong once begun.
     #[test]
     fn text_with_a_history_that_cannot_be_rebuilt_is_refused() {
         let mut was = vec![0u8; 4];
-        was.push(11);
-        let error = encode_text("hello", &was).expect_err("refused");
-        assert!(error.contains("history type 11"), "{error}");
+        was.push(12);
+        let error = encode_text("hello", &was, &mut name_map()).expect_err("refused");
+        assert!(error.contains("history type 12"), "{error}");
+        let error = encode_text("INVTEXT(\"open", &was, &mut name_map()).expect_err("refused");
+        assert!(error.contains("never closed"), "{error}");
+    }
+
+    /// A StringTableEntry text as UE writes it: flags, history 11, the table's name, the key.
+    fn table_text_bytes(
+        flags: u32,
+        table: &str,
+        key: &str,
+        names: &mut FPackageNameMap,
+    ) -> Vec<u8> {
+        let mut out = flags.to_le_bytes().to_vec();
+        out.push(11);
+        out.extend_from_slice(&encode_name(table, names));
+        out.extend_from_slice(&encode_string(key));
+        out
+    }
+
+    fn invariant_text_bytes(flags: u32, text: &str) -> Vec<u8> {
+        let mut out = flags.to_le_bytes().to_vec();
+        out.push(0xFF);
+        out.extend_from_slice(&1u32.to_le_bytes());
+        out.extend_from_slice(&encode_string(text));
+        out
+    }
+
+    fn localized_text_bytes(flags: u32, namespace: &str, key: &str, source: &str) -> Vec<u8> {
+        let mut out = flags.to_le_bytes().to_vec();
+        out.push(0);
+        for part in [namespace, key, source] {
+            out.extend_from_slice(&encode_string(part));
+        }
+        out
+    }
+
+    fn transform_text_bytes(flags: u32, inner: &[u8], upper: bool) -> Vec<u8> {
+        let mut out = flags.to_le_bytes().to_vec();
+        out.push(10);
+        out.extend_from_slice(inner);
+        out.push(u8::from(upper));
+        out
+    }
+
+    const TABLE: &str = "/Game/UI/Menu_ST.Menu_ST";
+
+    /// A plain string over a string table text replaces the entry with itself, shown the same in
+    /// every language: the flags keep every bit but gain CultureInvariant.
+    #[test]
+    fn a_plain_string_over_a_table_text_shows_that_string_in_every_language() {
+        let mut names = name_map();
+        let was = table_text_bytes(0x9, TABLE, "Play", &mut names);
+        let out = encode_text("Fixed label", &was, &mut names).expect("encode");
+        assert_eq!(
+            out,
+            invariant_text_bytes(0x9 | CULTURE_INVARIANT, "Fixed label")
+        );
+    }
+
+    /// The text's own `Table:Key` form names another entry, and a literal names any table; a new
+    /// table's name joins the name map.
+    #[test]
+    fn a_table_text_is_pointed_at_another_entry() {
+        let mut names = name_map();
+        let was = table_text_bytes(0, TABLE, "Play", &mut names);
+        let out = encode_text(&format!("{TABLE}:Quit"), &was, &mut names).expect("encode");
+        assert_eq!(out, table_text_bytes(0, TABLE, "Quit", &mut names));
+
+        let other = "/Game/UI/Shop_ST.Shop_ST";
+        let before = names.num_names();
+        let literal = format!("LOCTABLE(\"{other}\", \"Buy\")");
+        let out = encode_text(&literal, &was, &mut names).expect("encode");
+        assert!(names.num_names() > before, "the new table's name is stored");
+        assert_eq!(out, table_text_bytes(0, other, "Buy", &mut names));
+    }
+
+    /// Any text becomes a table text from its literal, keeping its flags but CultureInvariant; a
+    /// slot with nothing in it starts from no flags.
+    #[test]
+    fn any_text_becomes_a_table_text_from_its_literal() {
+        let literal = format!("LOCTABLE(\"{TABLE}\", \"Play\")");
+        for was in [
+            invariant_text_bytes(CULTURE_INVARIANT | 0x8, "old"),
+            localized_text_bytes(0x8, "NS", "K", "old"),
+        ] {
+            let mut names = name_map();
+            let out = encode_text(&literal, &was, &mut names).expect("encode");
+            assert_eq!(out, table_text_bytes(0x8, TABLE, "Play", &mut names));
+        }
+        let mut names = name_map();
+        let out = encode_text(&literal, &FRESH_TEXT, &mut names).expect("encode");
+        assert_eq!(out, table_text_bytes(0, TABLE, "Play", &mut names));
+    }
+
+    /// A localized literal gives the text a namespace and key of its own, and is not invariant.
+    #[test]
+    fn a_table_text_becomes_a_localized_one() {
+        let mut names = name_map();
+        let was = table_text_bytes(CULTURE_INVARIANT, TABLE, "Play", &mut names);
+        let out =
+            encode_text("NSLOCTEXT(\"Mod\", \"Title\", \"Hi\")", &was, &mut names).expect("encode");
+        assert_eq!(out, localized_text_bytes(0, "Mod", "Title", "Hi"));
+    }
+
+    /// A transform literal wraps the text it cases; a plain string over a transform edits its
+    /// source by the source's own rules and keeps the transform.
+    #[test]
+    fn a_transformed_text_is_built_and_its_source_edited() {
+        let mut names = name_map();
+        let literal = format!("LOCGEN_TOUPPER(LOCTABLE(\"{TABLE}\", \"Play\"))");
+        let out = encode_text(&literal, &FRESH_TEXT, &mut names).expect("encode");
+        let inner = table_text_bytes(0, TABLE, "Play", &mut names);
+        assert_eq!(out, transform_text_bytes(0, &inner, true));
+
+        let lower = transform_text_bytes(0x8, &invariant_text_bytes(0, "loud"), false);
+        let out = encode_text("quiet", &lower, &mut names).expect("encode");
+        assert_eq!(
+            out,
+            transform_text_bytes(0x8, &invariant_text_bytes(0, "quiet"), false)
+        );
+
+        let localized = transform_text_bytes(0, &localized_text_bytes(0, "NS", "K", "a"), true);
+        let out = encode_text("b", &localized, &mut names).expect("encode");
+        assert_eq!(
+            out,
+            transform_text_bytes(0, &localized_text_bytes(0, "NS", "K", "b"), true)
+        );
+
+        let tabled = transform_text_bytes(0, &inner, true);
+        let out = encode_text("Fixed", &tabled, &mut names).expect("encode");
+        assert_eq!(
+            out,
+            transform_text_bytes(0, &invariant_text_bytes(CULTURE_INVARIANT, "Fixed"), true)
+        );
+    }
+
+    /// The walker ends each text where the reader would, and finds a table name however deep.
+    #[test]
+    fn a_text_s_extent_and_tables_are_found_through_every_history() {
+        let mut names = name_map();
+        let table = table_text_bytes(0, TABLE, "Play", &mut names);
+        assert_eq!(
+            text_extent(&table, 0).expect("walk"),
+            (table.len(), vec![5])
+        );
+        let nested = transform_text_bytes(0, &table, true);
+        assert_eq!(
+            text_extent(&nested, 0).expect("walk"),
+            (nested.len(), vec![10])
+        );
+        let number = formatted_number(3, &2.0f64.to_le_bytes());
+        assert_eq!(text_extent(&number, 0).expect("walk").0, number.len());
+        let mut formatted_text = vec![0u8; 4];
+        formatted_text.push(4);
+        formatted_text.push(4);
+        formatted_text.extend_from_slice(&table);
+        formatted_text.extend_from_slice(&0u32.to_le_bytes());
+        formatted_text.extend_from_slice(&encode_string(""));
+        assert_eq!(
+            text_extent(&formatted_text, 0).expect("walk"),
+            (formatted_text.len(), vec![11])
+        );
+        let empty = FRESH_TEXT
+            .iter()
+            .copied()
+            .chain(0u32.to_le_bytes())
+            .collect::<Vec<_>>();
+        assert_eq!(text_extent(&empty, 0).expect("walk").0, empty.len());
+        assert!(text_extent(&table[..table.len() - 1], 0).is_err());
+    }
+
+    fn table_text_value(table: &str, key: &str) -> PropertyValue {
+        let part = |name: &str, value: PropertyValue| PropertyEntry {
+            name: name.into(),
+            element: None,
+            value,
+            span: None,
+            slot: None,
+        };
+        PropertyValue::Text {
+            value: Some(format!("{table}:{key}")),
+            parts: vec![
+                part(
+                    "TableId",
+                    PropertyValue::Name {
+                        value: table.into(),
+                    },
+                ),
+                part("Key", PropertyValue::Str { value: key.into() }),
+            ],
+            namespace: None,
+            key: None,
+            display: None,
+        }
+    }
+
+    /// A literal reads back as the text it spells, compared piece by piece, and a table text is
+    /// expected as its literal, which is what the drift check holds it to.
+    #[test]
+    fn a_table_text_reads_back_as_its_literal() {
+        let value = table_text_value(TABLE, "Play");
+        let literal = format!("LOCTABLE(\"{TABLE}\", \"Play\")");
+        assert!(reads_back_as(&value, &literal));
+        assert!(reads_back_as(&value, &format!("{TABLE}:Play")));
+        assert!(!reads_back_as(
+            &value,
+            &format!("LOCTABLE(\"{TABLE}\", \"Quit\")")
+        ));
+        assert!(!reads_back_as(&value, "INVTEXT(\"open"));
+        assert_eq!(value_text(&value), Some(literal));
     }
 
     /// One wire shape serves the desktop app, the CLI and an edit file on disk, so these strings

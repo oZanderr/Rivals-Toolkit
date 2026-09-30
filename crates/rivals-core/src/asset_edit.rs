@@ -3961,6 +3961,9 @@ mod game_data_tests {
     /// Black Widow's weapon cue: the batons on her back are the static mesh components
     /// `UnEquipedStickL`/`UnEquipedStickR`, each with its own mesh import.
     const WEAPON_CUE: &str = "Marvel/Content/Marvel/Characters/1033/1033001/Cues/WeaponCue/Cue_Weapon_Loop_103311_BP.uasset";
+    /// Settings > Audio's layout table: each row's name is a string table text, from the two tables
+    /// the package imports.
+    const AUDIO_SETTINGS: &str = "Marvel/Content/Marvel/Data/DataTable/UI/Setting/SettingPageLayout/Default/Audio_PageLayoutTable.uasset";
     /// The same cue for one of her skins: a Blueprint of its own, whose batons use the skin's
     /// meshes, which the default cue does not import.
     const SKIN_WEAPON_CUE: &str = "Marvel/Content/Marvel/Characters/1033/1033500/Cues/WeaponCue/Cue_Weapon_Loop_103311_BP.uasset";
@@ -4105,6 +4108,7 @@ mod game_data_tests {
         ("PAK_ROUND_TRIP", PAK_ROUND_TRIP),
         ("WEAPON_CUE", WEAPON_CUE),
         ("SKIN_WEAPON_CUE", SKIN_WEAPON_CUE),
+        ("AUDIO_SETTINGS", AUDIO_SETTINGS),
         ("SHIELD_CUE", SHIELD_CUE),
         ("SYNTH_ROW_TABLE", SYNTH_ROW_TABLE),
         ("BATCH_SHAKE_HIT", BATCH_SHAKE_HIT),
@@ -6691,6 +6695,177 @@ mod game_data_tests {
                 .iter()
                 .all(|e| matches!(e.status, ExportStatus::Complete))
         );
+    }
+
+    /// The mode selection table, which the Audio settings package never imports.
+    const MODE_TABLE: &str =
+        "/Game/Marvel/Data/StringTable/111_ModeSelection_ST.111_ModeSelection_ST";
+    const SETTINGS_TABLE: &str =
+        "/Game/Marvel/Data/StringTable/117_UserSettings_ST.117_UserSettings_ST";
+
+    /// One Audio settings row's name text.
+    fn entry_name(parsed: &rivals_uasset::ParsedPackage, row: &str) -> PropertyEntry {
+        parsed
+            .exports
+            .iter()
+            .filter_map(|export| export.data_table.as_ref())
+            .flat_map(|table| &table.rows)
+            .find(|held| held.name == row)
+            .and_then(|held| {
+                held.fields
+                    .iter()
+                    .find(|field| field.name.starts_with("EntryName"))
+            })
+            .unwrap_or_else(|| panic!("{row}'s name"))
+            .clone()
+    }
+
+    fn literal(text: &str) -> rivals_uasset::text_literal::TextLiteral {
+        rivals_uasset::text_literal::parse(text)
+            .expect("a literal")
+            .expect("well formed")
+    }
+
+    /// A label pointed at a table its package never used imports that table and reads the row
+    /// only after it, the way the game's own packages hold their tables, and both survive the
+    /// IoStore round trip; the label then shows that table's entry.
+    #[test]
+    fn a_label_is_pointed_at_a_table_its_package_never_used() {
+        let Some(fixture) = Fixture::open(AUDIO_SETTINGS) else {
+            return;
+        };
+        let before = fixture.parse();
+        assert!(
+            !before
+                .imports
+                .iter()
+                .any(|import| import.path == MODE_TABLE),
+            "the fixture must not import the table already"
+        );
+        let field = entry_name(&before, "Volume_Master");
+        let text = format!("LOCTABLE(\"{MODE_TABLE}\", \"Text_QuickMode\")");
+        let scratch = ScratchMod {
+            root: fixture.root.clone(),
+            name: "RivalsToolkitTextProbe",
+        };
+        let request = AssetEditRequest {
+            mod_name: scratch.name,
+            ..fixture.request(vec![edit_of(&field, EditOp::Set { text: text.clone() })])
+        };
+        save_edits(&request, Some(&fixture.schema), &SaveOptions::default()).expect("save");
+        let after = read_back(&fixture, &scratch.container());
+        let now = entry_name(&after, "Volume_Master");
+        assert!(
+            rivals_uasset::text_literal::matches(&literal(&text), &now.value),
+            "{:?}",
+            now.value
+        );
+        let import = after
+            .imports
+            .iter()
+            .find(|import| import.path == MODE_TABLE)
+            .expect("the table is imported");
+        assert_eq!(import.class_name, "StringTable");
+        let runs = after.dependencies.as_ref().expect("runs");
+        let owner = after
+            .exports
+            .iter()
+            .position(|export| export.data_table.is_some())
+            .expect("the table export");
+        assert!(
+            runs[owner].create_before_serialize.contains(&import.index),
+            "{:?}",
+            runs[owner]
+        );
+
+        let mut shown = after;
+        crate::localization::localize(
+            &mut shown,
+            &crate::localization::Localizer::for_culture(&fixture.root, "en").expect("English"),
+            &crate::localization::TableSource {
+                game_root: &fixture.root,
+                container: &fixture.container,
+                mappings: Some(&fixture.schema),
+            },
+        );
+        match entry_name(&shown, "Volume_Master").value {
+            PropertyValue::Text { display, .. } => {
+                assert_eq!(display.as_deref(), Some("QUICK MATCH"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Typed over a label, a plain string shows itself in every language and says the label no
+    /// longer follows its table; the table's own `Table:Key` form names another entry instead,
+    /// and a lower-cased table text reads as its entry lower-cased.
+    #[test]
+    fn labels_take_fixed_text_other_keys_and_transforms() {
+        let Some(fixture) = Fixture::open(AUDIO_SETTINGS) else {
+            return;
+        };
+        let before = fixture.parse();
+        let lower = format!("LOCGEN_TOLOWER(LOCTABLE(\"{SETTINGS_TABLE}\", \"Volume\"))");
+        let request = fixture.request(vec![
+            edit_of(
+                &entry_name(&before, "Volume_Music"),
+                EditOp::Set {
+                    text: "TOOLKIT PLAIN".into(),
+                },
+            ),
+            edit_of(
+                &entry_name(&before, "Volume_Effect"),
+                EditOp::Set {
+                    text: format!("{SETTINGS_TABLE}:Volume_Voice"),
+                },
+            ),
+            edit_of(
+                &entry_name(&before, "Title_Volume"),
+                EditOp::Set {
+                    text: lower.clone(),
+                },
+            ),
+        ]);
+        let (patched, _) = preview_edits(&request, Some(&fixture.schema)).expect("preview");
+        assert!(
+            patched
+                .notes
+                .iter()
+                .any(|note| note.contains("TOOLKIT PLAIN") && note.contains("no longer follows")),
+            "{:?}",
+            patched.notes
+        );
+        let mut after = Fixture::parse_bundle(
+            &AssetBundle {
+                asset: &patched.asset,
+                exports: &patched.exports,
+            },
+            &fixture.schema,
+            &fixture.source(),
+        );
+        assert_eq!(
+            rivals_uasset::text_literal::of_value(&entry_name(&after, "Volume_Music").value),
+            Some(rivals_uasset::text_literal::TextLiteral::Invariant(
+                "TOOLKIT PLAIN".into()
+            ))
+        );
+        assert!(rivals_uasset::text_literal::matches(
+            &literal(&format!("LOCTABLE(\"{SETTINGS_TABLE}\", \"Volume_Voice\")")),
+            &entry_name(&after, "Volume_Effect").value
+        ));
+        crate::localization::localize(
+            &mut after,
+            &crate::localization::Localizer::for_culture(&fixture.root, "en").expect("English"),
+            &crate::localization::TableSource {
+                game_root: &fixture.root,
+                container: &fixture.container,
+                mappings: Some(&fixture.schema),
+            },
+        );
+        match entry_name(&after, "Title_Volume").value {
+            PropertyValue::Text { display, .. } => assert_eq!(display.as_deref(), Some("volume")),
+            other => panic!("{other:?}"),
+        }
     }
 
     /// Removing the only import under a package takes the package with it, and the save's own

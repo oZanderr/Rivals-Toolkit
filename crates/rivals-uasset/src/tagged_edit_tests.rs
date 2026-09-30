@@ -293,6 +293,147 @@ fn a_text_changes_its_string() {
     }
 }
 
+const MENU_TABLE: &str = "/Game/UI/Menu_ST.Menu_ST";
+
+fn table_literal(key: &str) -> String {
+    format!("LOCTABLE(\"{MENU_TABLE}\", \"{key}\")")
+}
+
+fn table_of(entry: &PropertyEntry) -> Option<crate::text_literal::TextLiteral> {
+    crate::text_literal::of_value(&entry.value)
+}
+
+/// The fixture with its title turned into a string table text, handed back as bytes.
+fn with_table_title() -> (ParsedPackage, Vec<u8>, Vec<u8>) {
+    let (asset, exports) = tagged_package();
+    apply_to(&asset, &exports, |p| {
+        vec![edit_of(find(top(p), "Title"), set(&table_literal("Play")))]
+    })
+}
+
+/// A text given a table literal becomes a string table text, and the package imports the table and
+/// reads the export only after it exists, the way the cook writes a text that shows a table entry.
+/// Turned back into fixed text, the tag's size follows it again.
+#[test]
+fn a_text_given_a_table_literal_imports_and_waits_on_its_table() {
+    let (after, asset, exports) = with_table_title();
+    assert_eq!(
+        table_of(find(top(&after), "Title")),
+        Some(crate::text_literal::TextLiteral::Table {
+            table_id: MENU_TABLE.into(),
+            key: "Play".into()
+        })
+    );
+    let import = after
+        .imports
+        .iter()
+        .find(|import| import.path == MENU_TABLE)
+        .expect("the table is imported");
+    assert_eq!(import.class_name, "StringTable");
+    let header = crate::read_header(&AssetBundle {
+        asset: &asset,
+        exports: &exports,
+    })
+    .expect("header");
+    let runs = &crate::runs_of(&header).expect("runs")[0];
+    assert!(
+        runs.create_before_serialize.contains(&import.index),
+        "{runs:?}"
+    );
+
+    let (back, ..) = apply_to(&asset, &exports, |p| {
+        vec![edit_of(find(top(p), "Title"), set("INVTEXT(\"Back\")"))]
+    });
+    assert_eq!(find(top(&back), "Title").value.summary(), "Back");
+}
+
+/// A plain string over a table text shows that string in every language, and the save says the
+/// text no longer follows its table; the text's own `Table:Key` form names another entry instead.
+#[test]
+fn a_plain_string_over_a_table_text_is_noted_and_a_table_key_repoints_it() {
+    let (before, asset, exports) = with_table_title();
+    let changes = PackageEdits {
+        values: vec![edit_of(find(top(&before), "Title"), set("Fixed"))],
+        ..Default::default()
+    };
+    let bundle = AssetBundle {
+        asset: &asset,
+        exports: &exports,
+    };
+    let patched = patch_package(&bundle, &before, &changes, None).expect("patch");
+    assert!(
+        patched
+            .notes
+            .iter()
+            .any(|note| note.contains("no longer follows") && note.contains(MENU_TABLE)),
+        "{:?}",
+        patched.notes
+    );
+    let after = parse(&patched.asset, &patched.exports);
+    verify_patch(&before, &after, &changes, &patched.applied).expect("verifies");
+    assert_eq!(
+        table_of(find(top(&after), "Title")),
+        Some(crate::text_literal::TextLiteral::Invariant("Fixed".into()))
+    );
+
+    let (repointed, ..) = apply_to(&asset, &exports, |p| {
+        vec![edit_of(
+            find(top(p), "Title"),
+            set(&format!("{MENU_TABLE}:Quit")),
+        )]
+    });
+    assert_eq!(
+        table_of(find(top(&repointed), "Title")),
+        Some(crate::text_literal::TextLiteral::Table {
+            table_id: MENU_TABLE.into(),
+            key: "Quit".into()
+        })
+    );
+}
+
+/// A text set as a whole and one of its parts edited in the same save would write over each other,
+/// so the save is refused saying which to choose; a part edit alone still works.
+#[test]
+fn a_whole_text_and_one_of_its_parts_are_not_edited_together() {
+    let (before, asset, exports) = with_table_title();
+    let title = find(top(&before), "Title");
+    let key = match &title.value {
+        PropertyValue::Text { parts, .. } => find(parts, "Key"),
+        other => panic!("{other:?}"),
+    };
+    let changes = PackageEdits {
+        values: vec![
+            edit_of(title, set("INVTEXT(\"x\")")),
+            edit_of(key, set("Quit")),
+        ],
+        ..Default::default()
+    };
+    let error = patch_package(
+        &AssetBundle {
+            asset: &asset,
+            exports: &exports,
+        },
+        &before,
+        &changes,
+        None,
+    )
+    .err()
+    .expect("refused");
+    assert!(error.contains("not both"), "{error}");
+
+    let (after, ..) = apply_to(&asset, &exports, |p| {
+        let key = match &find(top(p), "Title").value {
+            PropertyValue::Text { parts, .. } => find(parts, "Key").clone(),
+            other => panic!("{other:?}"),
+        };
+        vec![edit_of(&key, set("Quit"))]
+    });
+    assert_eq!(
+        find(top(&after), "Title").value.summary(),
+        format!("{MENU_TABLE}:Quit")
+    );
+}
+
 fn fields_of(entry: &PropertyEntry) -> &[PropertyEntry] {
     match &entry.value {
         PropertyValue::Struct { fields, .. } => fields,
@@ -915,7 +1056,8 @@ fn a_tagged_block_lists_what_its_schema_declares_and_it_lacks() {
     assert_eq!(
         absent,
         [
-            "Extra", "Label", "On", "Mode", "Nested", "Items", "Scores", "Counts", "Chain"
+            "Extra", "Label", "On", "Mode", "Nested", "Items", "Scores", "Counts", "Chain",
+            "Caption"
         ]
     );
     let inner = find(holder(&parsed), "Inner");
@@ -954,6 +1096,30 @@ fn values_typed_for_absent_tagged_properties_add_their_tags() {
         "4"
     );
     assert_eq!(got("Count"), "3", "what was there reads as it did");
+}
+
+/// A table literal typed for an absent text adds its tag as a string table text, and imports the
+/// table the same as an edit of a stored text does.
+#[test]
+fn a_table_literal_for_an_absent_text_adds_its_tag_and_table() {
+    let (asset, exports) = sparse_package();
+    let mappings = sparse_mappings();
+    let (after, ..) = apply_declared(&asset, &exports, Some(&mappings), |p| {
+        vec![edit_of(
+            find(holder(p), "Caption"),
+            set(&table_literal("Title")),
+        )]
+    })
+    .expect("added");
+    assert_eq!(
+        table_of(find(holder(&after), "Caption")),
+        Some(crate::text_literal::TextLiteral::Table {
+            table_id: MENU_TABLE.into(),
+            key: "Title".into()
+        })
+    );
+    assert!(after.imports.iter().any(|import| import.path == MENU_TABLE));
+    assert_eq!(find(holder(&after), "Count").value.summary(), "3");
 }
 
 /// Storing an absent struct, array or map adds its tag holding the empty form, which reads back
