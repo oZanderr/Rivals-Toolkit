@@ -292,6 +292,23 @@ fn parse_offset(text: &str) -> Result<u64, String> {
     u64::from_str_radix(trimmed, radix).map_err(|e| e.to_string())
 }
 
+/// One dependency run as typed: package indices in a single comma-separated value, which may
+/// start with a minus sign, or nothing for an empty run.
+#[derive(Clone, Debug)]
+struct RunList(Vec<i32>);
+
+fn parse_run(text: &str) -> Result<RunList, String> {
+    text.split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            part.parse::<i32>()
+                .map_err(|_| format!("{part} is not a package index"))
+        })
+        .collect::<Result<_, _>>()
+        .map(RunList)
+}
+
 #[derive(Args)]
 struct SweepArgs {
     /// IoStore container to sweep. Every package it declares is a candidate.
@@ -366,7 +383,12 @@ struct AssetSetArgs {
     index: Option<u32>,
 
     /// The new value.
-    #[arg(long, value_name = "TEXT", default_value = "")]
+    #[arg(
+        long,
+        value_name = "TEXT",
+        default_value = "",
+        allow_hyphen_values = true
+    )]
     value: String,
 
     /// Mod pak to write into, created in `~mods` if it does not exist. Defaults to the name the
@@ -648,11 +670,11 @@ struct RowArgs {
     op: String,
 
     /// The row the operation is about: the name to add, or the row to copy, remove or rename.
-    #[arg(long, value_name = "NAME")]
+    #[arg(long, value_name = "NAME", allow_hyphen_values = true)]
     row: String,
 
     /// The new name a copy or a rename takes.
-    #[arg(long, value_name = "NAME")]
+    #[arg(long, value_name = "NAME", allow_hyphen_values = true)]
     name: Option<String>,
 
     /// Where an added or copied row goes: in front of the row at this position, counting from 0.
@@ -689,11 +711,11 @@ struct StringsArgs {
     index: Option<u32>,
 
     /// The entry's key as it reads now, or the key an added entry takes.
-    #[arg(long, value_name = "KEY")]
+    #[arg(long, value_name = "KEY", allow_hyphen_values = true)]
     key: String,
 
     /// The new key, source string or tag, an added entry's source string, or a metadata value.
-    #[arg(long, value_name = "TEXT")]
+    #[arg(long, value_name = "TEXT", allow_hyphen_values = true)]
     text: Option<String>,
 
     /// The metadata item's id, for `meta-set` and `meta-remove`.
@@ -737,11 +759,11 @@ struct KeysArgs {
     index: Option<u32>,
 
     /// The frame of the new key.
-    #[arg(long, value_name = "FRAME")]
+    #[arg(long, value_name = "FRAME", allow_hyphen_values = true)]
     time: Option<i32>,
 
     /// The value of the added key.
-    #[arg(long, value_name = "NUMBER")]
+    #[arg(long, value_name = "NUMBER", allow_hyphen_values = true)]
     value: Option<f64>,
 
     /// Mod pak to write into, created in `~mods` if it does not exist. Defaults to the name the
@@ -803,7 +825,7 @@ struct ScriptSetArgs {
 
     /// The new value in the constant's own kind: an integer, a number, a string, a name, or
     /// `x,y,z` for a vector. It must fit the bytes the old value took.
-    #[arg(long, value_name = "TEXT")]
+    #[arg(long, value_name = "TEXT", allow_hyphen_values = true)]
     value: String,
 
     /// Mod pak to write into, created in `~mods` if it does not exist. Defaults to the name the
@@ -2351,22 +2373,22 @@ struct DepsArgs {
     #[arg(long, value_name = "N")]
     export: u32,
 
-    /// Objects that must be fully read before this one is. Package indices: an export's position
-    /// plus one, or minus an import's position plus one.
-    #[arg(long, value_name = "LIST", value_delimiter = ',', num_args = 0..)]
-    sbs: Option<Vec<i32>>,
+    /// Objects that must be fully read before this one is. Package indices, comma separated: an
+    /// export's position plus one, or minus an import's position plus one. `--sbs=` empties it.
+    #[arg(long, value_name = "LIST", value_parser = parse_run, num_args = 0..=1, default_missing_value = "", allow_hyphen_values = true)]
+    sbs: Option<RunList>,
 
     /// Objects that must exist before this one is read, which is what a reference needs.
-    #[arg(long, value_name = "LIST", value_delimiter = ',', num_args = 0..)]
-    cbs: Option<Vec<i32>>,
+    #[arg(long, value_name = "LIST", value_parser = parse_run, num_args = 0..=1, default_missing_value = "", allow_hyphen_values = true)]
+    cbs: Option<RunList>,
 
     /// Objects that must be fully read before this one is built.
-    #[arg(long, value_name = "LIST", value_delimiter = ',', num_args = 0..)]
-    sbc: Option<Vec<i32>>,
+    #[arg(long, value_name = "LIST", value_parser = parse_run, num_args = 0..=1, default_missing_value = "", allow_hyphen_values = true)]
+    sbc: Option<RunList>,
 
     /// Objects that must exist before this one is built.
-    #[arg(long, value_name = "LIST", value_delimiter = ',', num_args = 0..)]
-    cbc: Option<Vec<i32>>,
+    #[arg(long, value_name = "LIST", value_parser = parse_run, num_args = 0..=1, default_missing_value = "", allow_hyphen_values = true)]
+    cbc: Option<RunList>,
 
     /// Report what the change would do and write nothing.
     #[arg(long)]
@@ -2427,11 +2449,13 @@ fn asset_deps(cli: &Cli, app: &settings::AppSettings, args: &DepsArgs) -> Result
         });
     }
     let held = asset::dependencies(&request, args.export)?.runs;
+    let given =
+        |run: &Option<RunList>, held: Vec<i32>| run.as_ref().map_or(held, |run| run.0.clone());
     let runs = rivals_uasset::Runs {
-        serialize_before_serialize: args.sbs.clone().unwrap_or(held.serialize_before_serialize),
-        create_before_serialize: args.cbs.clone().unwrap_or(held.create_before_serialize),
-        serialize_before_create: args.sbc.clone().unwrap_or(held.serialize_before_create),
-        create_before_create: args.cbc.clone().unwrap_or(held.create_before_create),
+        serialize_before_serialize: given(&args.sbs, held.serialize_before_serialize),
+        create_before_serialize: given(&args.cbs, held.create_before_serialize),
+        serialize_before_create: given(&args.sbc, held.serialize_before_create),
+        create_before_create: given(&args.cbc, held.create_before_create),
     };
     if args.dry_run {
         let plan = asset::plan_dependencies(&request, args.export, runs)?;
@@ -3586,6 +3610,115 @@ mod preset_tests {
             );
             rivals_core::pak_tweaks::edits_for_settings(&kept)
                 .unwrap_or_else(|e| panic!("enabled={enabled}: {e}"));
+        }
+    }
+}
+
+/// Arguments that start with a minus sign: import indices, negative numbers and comma lists of
+/// them have to reach their option rather than read as flags.
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod parse_tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    fn asset(args: &[&str]) -> AssetCmd {
+        let argv = [&["rivals-cli", "asset"][..], args].concat();
+        match Cli::try_parse_from(argv).expect("should parse").command {
+            Command::Asset(cmd) => cmd,
+            _ => panic!("not an asset command"),
+        }
+    }
+
+    const PACKAGE: [&str; 4] = ["--container", "c.utoc", "--entry", "e.uasset"];
+
+    fn deps(extra: &[&str]) -> DepsArgs {
+        let args = [&["deps"][..], &PACKAGE, &["--export", "19"], extra].concat();
+        match asset(&args) {
+            AssetCmd::Deps(args) => args,
+            _ => panic!("not deps"),
+        }
+    }
+
+    fn run(list: &Option<RunList>) -> Option<Vec<i32>> {
+        list.as_ref().map(|run| run.0.clone())
+    }
+
+    #[test]
+    fn the_command_line_definition_is_consistent() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn a_dependency_run_takes_negative_indices_in_one_list() {
+        let args = deps(&["--sbc", "-41,-11", "--cbs", "6,-39", "--dry-run"]);
+        assert_eq!(run(&args.sbc), Some(vec![-41, -11]));
+        assert_eq!(run(&args.cbs), Some(vec![6, -39]));
+        assert!(args.dry_run, "the flag after a list stays a flag");
+        assert_eq!(run(&args.sbs), None);
+    }
+
+    #[test]
+    fn an_empty_dependency_run_is_given_with_an_equals_sign_or_at_the_end() {
+        assert_eq!(run(&deps(&["--cbc="]).cbc), Some(vec![]));
+        assert_eq!(run(&deps(&["--dry-run", "--cbc"]).cbc), Some(vec![]));
+        let bad = [
+            &["rivals-cli", "asset", "deps"][..],
+            &PACKAGE,
+            &["--export", "1", "--sbs", "a,-2"],
+        ];
+        assert!(Cli::try_parse_from(bad.concat()).is_err());
+    }
+
+    #[test]
+    fn values_may_start_with_a_minus_sign() {
+        let set = [
+            &["set"][..],
+            &PACKAGE,
+            &[
+                "--offset", "8", "--kind", "int", "--name", "N", "--value", "-5",
+            ],
+        ];
+        match asset(&set.concat()) {
+            AssetCmd::Set(args) => assert_eq!(args.value, "-5"),
+            _ => panic!("not set"),
+        }
+        let keys = [
+            &["keys"][..],
+            &PACKAGE,
+            &[
+                "--offset", "8", "--name", "C", "--op", "add", "--time", "-600", "--value", "-0.5",
+            ],
+        ];
+        match asset(&keys.concat()) {
+            AssetCmd::Keys(args) => {
+                assert_eq!(args.time, Some(-600));
+                assert_eq!(args.value, Some(-0.5));
+            }
+            _ => panic!("not keys"),
+        }
+        let script = [
+            &["script-set"][..],
+            &PACKAGE,
+            &["--export", "5", "--statement", "0x10", "--value", "-1,0,0"],
+        ];
+        match asset(&script.concat()) {
+            AssetCmd::ScriptSet(args) => assert_eq!(args.value, "-1,0,0"),
+            _ => panic!("not script-set"),
+        }
+        let strings = [
+            &["strings"][..],
+            &PACKAGE,
+            &[
+                "--export", "0", "--op", "add", "--key", "-k", "--text", "-dash",
+            ],
+        ];
+        match asset(&strings.concat()) {
+            AssetCmd::Strings(args) => {
+                assert_eq!(args.key, "-k");
+                assert_eq!(args.text.as_deref(), Some("-dash"));
+            }
+            _ => panic!("not strings"),
         }
     }
 }
