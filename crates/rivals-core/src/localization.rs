@@ -282,7 +282,16 @@ impl TableSource<'_> {
         } else {
             "pakchunk0-Windows.utoc".to_string()
         };
-        let cache_key = format!("{}\u{1}{container}\u{1}{table_id}", self.game_root);
+        // A mod's own container changes while the app runs; its tables are read again when it has.
+        let stamp = std::fs::metadata(&container)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |since| since.as_secs());
+        let cache_key = format!(
+            "{}\u{1}{container}\u{1}{stamp}\u{1}{table_id}",
+            self.game_root
+        );
         let read = READ.get_or_init(|| Mutex::new(HashMap::new()));
         if let Some(found) = read.lock().ok()?.get(&cache_key) {
             return found.clone();
@@ -374,6 +383,61 @@ fn localize_value(value: &mut PropertyValue, localizer: &Localizer, tables: &Tab
             for pair in entries {
                 localize_value(&mut pair.key, localizer, tables);
                 localize_value(&mut pair.value, localizer, tables);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Every string table entry the package's texts name, as table and key, through transforms too:
+/// what a save is checked against so it points no text at an entry that is not there.
+pub fn table_references(parsed: &ParsedPackage) -> std::collections::BTreeSet<(String, String)> {
+    let mut found = std::collections::BTreeSet::new();
+    for export in &parsed.exports {
+        collect_tables(&export.properties, &mut found);
+        collect_tables(&export.defaults, &mut found);
+        if let Some(table) = &export.data_table {
+            for row in &table.rows {
+                collect_tables(&row.fields, &mut found);
+            }
+        }
+    }
+    found
+}
+
+fn collect_tables(
+    entries: &[PropertyEntry],
+    found: &mut std::collections::BTreeSet<(String, String)>,
+) {
+    for entry in entries {
+        collect_table(&entry.value, found);
+    }
+}
+
+fn collect_table(value: &PropertyValue, found: &mut std::collections::BTreeSet<(String, String)>) {
+    use rivals_uasset::text_literal::TextLiteral;
+    match value {
+        PropertyValue::Text { .. } => {
+            let mut literal = rivals_uasset::text_literal::of_value(value);
+            while let Some(TextLiteral::Transform { inner, .. }) = literal {
+                literal = Some(*inner);
+            }
+            if let Some(TextLiteral::Table { table_id, key }) = literal {
+                found.insert((table_id, key));
+            }
+        }
+        PropertyValue::Struct { fields, .. }
+        | PropertyValue::Unset { fields, .. }
+        | PropertyValue::Default { fields, .. } => collect_tables(fields, found),
+        PropertyValue::Array { items } | PropertyValue::Set { items } => {
+            for item in items {
+                collect_table(item, found);
+            }
+        }
+        PropertyValue::Map { entries } => {
+            for pair in entries {
+                collect_table(&pair.key, found);
+                collect_table(&pair.value, found);
             }
         }
         _ => {}

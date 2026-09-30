@@ -1186,10 +1186,58 @@ fn patch_pass(
     let after =
         schema_synth::parse_package_opts(&reread, mappings, &source_of(request), editor_options())?;
     rivals_uasset::verify_patch(parsed, &after, changes, &patched.applied)?;
+    let mut patched = patched;
     if !request.changes.allow_missing {
         check_new_imports(request, parsed, &after)?;
+        patched
+            .notes
+            .extend(check_new_table_keys(request, mappings, parsed, &after)?);
     }
     Ok((patched, after))
+}
+
+/// Refuses a text the patch pointed at a string table entry the table does not hold: the game
+/// shows a placeholder for it. A table that cannot be read here, such as one another enabled mod
+/// adds, is left to that mod, and said so.
+fn check_new_table_keys(
+    request: &AssetEditRequest<'_>,
+    mappings: Option<&Mappings>,
+    before: &rivals_uasset::ParsedPackage,
+    after: &rivals_uasset::ParsedPackage,
+) -> Result<Vec<String>, String> {
+    let had = crate::localization::table_references(before);
+    let tables = crate::localization::TableSource {
+        game_root: request.game_root,
+        container: request.container,
+        mappings,
+    };
+    let mut missing = Vec::new();
+    let mut notes = Vec::new();
+    for (table_id, key) in crate::localization::table_references(after).difference(&had) {
+        if !table_id.starts_with('/') {
+            missing.push(format!(
+                "{table_id} is not an asset path, so it cannot be read as a string table"
+            ));
+            continue;
+        }
+        match tables.table(table_id) {
+            Some(table) if !table.sources.contains_key(key) => {
+                missing.push(format!("{table_id} has no key {key}"));
+            }
+            Some(_) => {}
+            None => notes.push(format!(
+                "{table_id} could not be read here, so its key {key} was not checked"
+            )),
+        }
+    }
+    if missing.is_empty() {
+        return Ok(notes);
+    }
+    Err(format!(
+        "{}:\n  {}\nAdd the entry to its table first, or save anyway if something loaded alongside provides it.",
+        crate::object_check::MISSING,
+        missing.join("\n  ")
+    ))
 }
 
 /// Refuses imports the patch added or retargeted that point at nothing the game or an enabled mod
@@ -6794,6 +6842,37 @@ mod game_data_tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// A key the table does not hold is refused with the prefix the retry dialog knows, and saves
+    /// when told something loaded alongside provides it.
+    #[test]
+    fn a_label_is_not_pointed_at_a_key_its_table_lacks() {
+        let Some(fixture) = Fixture::open(AUDIO_SETTINGS) else {
+            return;
+        };
+        let field = entry_name(&fixture.parse(), "Volume_Master");
+        let edits = vec![edit_of(
+            &field,
+            EditOp::Set {
+                text: format!("LOCTABLE(\"{SETTINGS_TABLE}\", \"No_Such_Key\")"),
+            },
+        )];
+        let error = preview_edits(&fixture.request(edits.clone()), Some(&fixture.schema))
+            .map(|_| ())
+            .expect_err("refused");
+        assert!(error.starts_with(crate::object_check::MISSING), "{error}");
+        assert!(error.contains("has no key No_Such_Key"), "{error}");
+
+        let allowed = AssetEditRequest {
+            changes: PackageEdits {
+                values: edits,
+                allow_missing: true,
+                ..Default::default()
+            },
+            ..fixture.request(Vec::new())
+        };
+        preview_edits(&allowed, Some(&fixture.schema)).expect("saves when allowed");
     }
 
     /// Typed over a label, a plain string shows itself in every language and says the label no

@@ -272,8 +272,8 @@ describe("AssetInspector dialogs", () => {
     await user.type(within(dialog).getByLabelText("Class"), "/Game/X.X_C");
     await user.type(within(dialog).getByLabelText("Name"), "Thing");
     await user.click(within(dialog).getByRole("button", { name: "Add" }));
-    dialog = await screen.findByRole("alertdialog", { name: /points at nothing/ });
-    await user.click(within(dialog).getByRole("button", { name: "Add anyway" }));
+    dialog = await screen.findByRole("alertdialog", { name: /point at nothing/ });
+    await user.click(within(dialog).getByRole("button", { name: "Save anyway" }));
     await waitFor(() => expect(mock.callsTo("save_asset_edits")).toHaveLength(2));
     expect(mock.callsTo("save_asset_edits")[1]).toMatchObject({ allowMissing: true });
   });

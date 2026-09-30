@@ -8056,11 +8056,11 @@ export default function AssetInspector({
           >
             <AlertDialogContent>
               <AlertDialogHeader>
-                <AlertDialogTitle>An import points at nothing</AlertDialogTitle>
+                <AlertDialogTitle>These edits point at nothing</AlertDialogTitle>
                 <AlertDialogDescription className="whitespace-pre-line">
                   {edits.pendingMissing?.message}
-                  {"\n\n"}The game loads such an import as nothing, so whatever uses it finds
-                  nothing too. Add it anyway only if a mod loaded alongside this one provides it.
+                  {"\n\n"}The game finds nothing there: an import loads as nothing, and a text shows
+                  a placeholder. Save anyway only if a mod loaded alongside this one provides it.
                 </AlertDialogDescription>
               </AlertDialogHeader>
               <AlertDialogFooter>
@@ -8072,7 +8072,7 @@ export default function AssetInspector({
                   }}
                   className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
                 >
-                  Add anyway
+                  Save anyway
                 </AlertDialogAction>
               </AlertDialogFooter>
             </AlertDialogContent>
