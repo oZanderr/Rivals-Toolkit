@@ -1,6 +1,6 @@
 {
   "source": "https://raw.githubusercontent.com/donutman07/MarvelRivalsCharacterIDs/main/MarvelRivalsCharacterIDs.md",
-  "generated_at": "2026-09-24T11:28:07.316Z",
+  "generated_at": "2026-10-01T12:51:12.776Z",
   "characters": {
     "1011": {
       "name": "Hulk",
@@ -347,7 +347,10 @@
         "1031315": "NIGHT NEBULA",
         "1031316": "CARMINE CASSETTE",
         "1031317": "PURPLE PULSE",
-        "1031318": "CITRUS SPARK"
+        "1031318": "CITRUS SPARK",
+        "1031500": "LUNAR LUNA",
+        "1031501": "PINK PLANETS",
+        "1031502": "DARK NEBULA"
       }
     },
     "1032": {
@@ -821,7 +824,8 @@
         "1054501": "SEAT OF SPRING",
         "1054502": "VERDANT VOGUE",
         "1054503": "WHITE CROWN PHOENIX",
-        "1054504": "VIRIDIAN VOGUE"
+        "1054504": "VIRIDIAN VOGUE",
+        "1054505": "COSMIC SPARK"
       }
     },
     "1055": {
