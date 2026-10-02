@@ -2831,23 +2831,7 @@ fn asset_set(cli: &Cli, app: &settings::AppSettings, args: &AssetSetArgs) -> Res
                 expect_name: args.name.clone(),
                 expect_element: args.element,
                 expect_kind: args.kind.clone(),
-                op: match (args.op.as_str(), args.index) {
-                    ("clear", _) => rivals_uasset::EditOp::Clear,
-                    ("store", _) => rivals_uasset::EditOp::Store,
-                    ("unset", _) => rivals_uasset::EditOp::Unset,
-                    ("set-element", Some(index)) => rivals_uasset::EditOp::SetElement {
-                        index,
-                        text: args.value.clone(),
-                    },
-                    ("insert", Some(index)) => rivals_uasset::EditOp::Insert {
-                        index,
-                        key: (!args.value.is_empty()).then(|| args.value.clone()),
-                    },
-                    ("remove", Some(index)) => rivals_uasset::EditOp::Remove { index },
-                    _ => rivals_uasset::EditOp::Set {
-                        text: args.value.clone(),
-                    },
-                },
+                op: value_op(args)?,
             }],
             ..Default::default()
         },
@@ -2858,6 +2842,43 @@ fn asset_set(cli: &Cli, app: &settings::AppSettings, args: &AssetSetArgs) -> Res
     }
     let message = asset::set(&request, changes, mod_name, args.replace)?;
     emit(cli, &message, || outln!("{message}"))
+}
+
+/// The edit `--op` names. One it does not know, or one missing the element it acts on, is refused
+/// rather than taken for a `set`.
+fn value_op(args: &AssetSetArgs) -> Result<rivals_uasset::EditOp, String> {
+    use rivals_uasset::EditOp;
+    let index = || {
+        args.index
+            .ok_or_else(|| format!("--op {} needs --index", args.op))
+    };
+    let whole = |op: EditOp| match args.index {
+        Some(_) => Err(format!(
+            "--op {} acts on the whole value and takes no --index; set-element sets one element",
+            args.op
+        )),
+        None => Ok(op),
+    };
+    match args.op.as_str() {
+        "set" => whole(EditOp::Set {
+            text: args.value.clone(),
+        }),
+        "clear" => whole(EditOp::Clear),
+        "store" => whole(EditOp::Store),
+        "unset" => whole(EditOp::Unset),
+        "set-element" => Ok(EditOp::SetElement {
+            index: index()?,
+            text: args.value.clone(),
+        }),
+        "insert" => Ok(EditOp::Insert {
+            index: index()?,
+            key: (!args.value.is_empty()).then(|| args.value.clone()),
+        }),
+        "remove" => Ok(EditOp::Remove { index: index()? }),
+        other => Err(format!(
+            "--op {other} is not an edit this command makes: use set, clear, store, unset,              set-element, insert or remove"
+        )),
+    }
 }
 
 /// A dry run's report: every change the save would make, then its notes.
@@ -3971,6 +3992,44 @@ mod parse_tests {
             }
             _ => panic!("not import"),
         }
+    }
+
+    fn value_set(extra: &[&str]) -> AssetSetArgs {
+        let args = [
+            &["set"][..],
+            &PACKAGE,
+            &["--offset", "8", "--kind", "array", "--name", "N"],
+            extra,
+        ]
+        .concat();
+        match asset(&args) {
+            AssetCmd::Set(args) => args,
+            _ => panic!("not set"),
+        }
+    }
+
+    /// An op `asset set` does not know is refused rather than taken for a `set`, and so is an
+    /// element op without the element or a whole-value op given one.
+    #[test]
+    fn a_value_op_is_one_it_knows_with_the_index_it_needs() {
+        use rivals_uasset::EditOp;
+        let op = |extra: &[&str]| value_op(&value_set(extra));
+        assert!(matches!(
+            op(&["--op", "remove", "--index", "2"]),
+            Ok(EditOp::Remove { index: 2 })
+        ));
+        assert!(matches!(op(&["--value", "4"]), Ok(EditOp::Set { text }) if text == "4"));
+        let refused = |extra: &[&str], says: &str| {
+            let error = op(extra).expect_err("refused");
+            assert!(error.contains(says), "{error}");
+        };
+        refused(&["--op", "delete", "--index", "2"], "not an edit");
+        refused(&["--op", "set-element", "--value", "4"], "needs --index");
+        refused(&["--op", "remove"], "needs --index");
+        refused(
+            &["--op", "set", "--index", "2", "--value", "4"],
+            "set-element",
+        );
     }
 
     #[test]
