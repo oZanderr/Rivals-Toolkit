@@ -59,6 +59,8 @@ pub enum PropertyValue {
     Int {
         value: i64,
     },
+    /// Named as one word, the way every edit and the app spell it, rather than as `u_int`.
+    #[serde(rename = "uint")]
     UInt {
         value: u64,
     },
@@ -345,6 +347,81 @@ mod tests {
             .summary(),
             "(default)"
         );
+    }
+
+    /// One value of every kind.
+    fn every_kind() -> Vec<PropertyValue> {
+        let empty = Vec::new;
+        vec![
+            PropertyValue::Bool { value: true },
+            PropertyValue::Int { value: -1 },
+            PropertyValue::UInt { value: 1 },
+            PropertyValue::Float { value: 1.5 },
+            PropertyValue::Byte { value: 1 },
+            PropertyValue::Str { value: "a".into() },
+            PropertyValue::Name { value: "A".into() },
+            PropertyValue::Text {
+                value: Some("a".into()),
+                parts: empty(),
+                namespace: None,
+                key: None,
+                display: None,
+            },
+            PropertyValue::Enum {
+                value: 0,
+                name: None,
+                enum_type: None,
+            },
+            PropertyValue::Object {
+                index: 0,
+                path: None,
+            },
+            PropertyValue::SoftObject {
+                path: "/A.A".into(),
+            },
+            PropertyValue::Delegate {
+                object: None,
+                function: "F".into(),
+            },
+            PropertyValue::FieldPath { path: "A".into() },
+            PropertyValue::LazyObject { guid: "0".into() },
+            PropertyValue::Array { items: Vec::new() },
+            PropertyValue::Set { items: Vec::new() },
+            PropertyValue::Map {
+                entries: Vec::new(),
+            },
+            PropertyValue::Struct {
+                name: "S".into(),
+                fields: empty(),
+            },
+            PropertyValue::Undecoded {
+                reason: "r".into(),
+                bytes: 0,
+            },
+            PropertyValue::Default {
+                declared: None,
+                fields: empty(),
+            },
+            PropertyValue::Unset {
+                declared: "Int",
+                enum_type: None,
+                fields: empty(),
+            },
+        ]
+    }
+
+    /// The JSON names a value by the kind an edit has to expect of it, so a dump read back or an
+    /// edit from the app always matches the value it came from.
+    #[test]
+    fn every_value_serializes_under_the_kind_an_edit_expects() {
+        for value in every_kind() {
+            let json = serde_json::to_value(&value).unwrap();
+            assert_eq!(
+                json["kind"].as_str(),
+                Some(crate::edit::kind_of(&value).as_str()),
+                "{json}"
+            );
+        }
     }
 
     /// An undecoded payload says how much it holds and why, so it can never read as a value.

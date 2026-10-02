@@ -345,10 +345,7 @@ fn diff_value(
     out: &mut DiffOutcome,
 ) {
     let was = kind_of(&entry.value);
-    let is = edited
-        .get("kind")
-        .and_then(Json::as_str)
-        .unwrap_or_default();
+    let is = kind_in(edited).unwrap_or_default();
     let label = format!("{owner}.{}", entry.label());
     let at = || entry.span.map(|(start, _)| start);
 
@@ -673,7 +670,7 @@ fn field_sets_in(
                 _ => None,
             })
             .unwrap_or(&[]);
-        match value.get("kind").and_then(Json::as_str) {
+        match kind_in(value) {
             Some("unset" | "struct" | "default") => {
                 if let Some(nested) = value.get("fields").and_then(Json::as_array) {
                     found += field_sets_in(entry, inner, nested, &here, label, out);
@@ -825,10 +822,7 @@ fn element_sets(
     let Some((offset, _)) = entry.span else {
         return false;
     };
-    let kind = edited
-        .get("kind")
-        .and_then(Json::as_str)
-        .unwrap_or_default();
+    let kind = kind_in(edited).unwrap_or_default();
     let stored = source.filter(|was| {
         !matches!(
             was,
@@ -979,7 +973,7 @@ fn summary_changed(was: &PropertyValue, edited: &Json) -> bool {
 /// never turn one into a `Set`: none of these three is written from text.
 fn bound_reference(edited: &Json) -> Option<String> {
     let field = |name: &str| edited.get(name).and_then(Json::as_str);
-    match edited.get("kind").and_then(Json::as_str)? {
+    match kind_in(edited)? {
         "delegate" => {
             let function = field("function")?;
             Some(match field("object") {
@@ -993,10 +987,19 @@ fn bound_reference(edited: &Json) -> Option<String> {
     }
 }
 
+/// The kind a dump names a value by. Dumps from before unsigned integers were named as one word
+/// call them `u_int`.
+fn kind_in(edited: &Json) -> Option<&str> {
+    match edited.get("kind").and_then(Json::as_str)? {
+        "u_int" => Some("uint"),
+        kind => Some(kind),
+    }
+}
+
 /// The text form of an edited value, the way a `Set` carries it. `None` for a value with no single
 /// text form, which is every container and struct.
 fn text_of(edited: &Json) -> Option<String> {
-    let kind = edited.get("kind").and_then(Json::as_str)?;
+    let kind = kind_in(edited)?;
     let field = |name: &str| edited.get(name);
     Some(match kind {
         "bool" => field("value")?.as_bool()?.to_string(),
@@ -1644,6 +1647,137 @@ mod tests {
             "{}",
             out.notes[0]
         );
+    }
+
+    /// A dump written before unsigned integers were named as one word still diffs as the value it
+    /// was: an unchanged one is no retype, and a changed one is set.
+    #[test]
+    fn an_old_dump_s_u_int_reads_as_uint() {
+        let count = entry("Count", PropertyValue::UInt { value: 3 }, 0x40);
+        let out = one(count.clone(), json!({"kind": "u_int", "value": 3}));
+        assert!(out.edits.is_empty(), "{:?}", out.edits);
+        assert!(out.notes.is_empty(), "{:?}", out.notes);
+        let out = one(count, json!({"kind": "u_int", "value": 4}));
+        assert!(matches!(&value(&out).op, EditOp::Set { text } if text == "4"));
+        assert_eq!(value(&out).expect_kind, "uint");
+    }
+
+    /// Every kind of value, nested the ways a package nests them.
+    fn every_kind() -> Vec<PropertyEntry> {
+        let scalars = vec![
+            PropertyValue::Bool { value: true },
+            PropertyValue::Int { value: -3 },
+            PropertyValue::UInt { value: 3 },
+            PropertyValue::Float { value: 2.5 },
+            PropertyValue::Byte { value: 7 },
+            PropertyValue::Str { value: "a".into() },
+            PropertyValue::Name { value: "A".into() },
+            PropertyValue::Text {
+                value: Some("Play".into()),
+                parts: Vec::new(),
+                namespace: Some("Menu".into()),
+                key: Some("Play".into()),
+                display: None,
+            },
+            PropertyValue::Enum {
+                value: 1,
+                name: Some("Tank".into()),
+                enum_type: Some("EHeroRole".into()),
+            },
+            PropertyValue::Object {
+                index: -1,
+                path: Some("/Script/Engine.Actor".into()),
+            },
+            PropertyValue::SoftObject {
+                path: "/Game/A.A".into(),
+            },
+            PropertyValue::Delegate {
+                object: Some("/Game/A.A_C".into()),
+                function: "OnFired".into(),
+            },
+            PropertyValue::FieldPath { path: "A.B".into() },
+            PropertyValue::LazyObject {
+                guid: "00000000000000000000000000000000".into(),
+            },
+            PropertyValue::Undecoded {
+                reason: "no schema".into(),
+                bytes: 4,
+            },
+            PropertyValue::Default {
+                declared: None,
+                fields: Vec::new(),
+            },
+            PropertyValue::Unset {
+                declared: "Int",
+                enum_type: None,
+                fields: Vec::new(),
+            },
+        ];
+        let mut entries: Vec<PropertyEntry> = scalars
+            .iter()
+            .enumerate()
+            .map(|(at, value)| entry(&format!("P{at}"), value.clone(), at as u64 * 0x10))
+            .collect();
+        let point = || PropertyValue::Struct {
+            name: "IntPoint".into(),
+            fields: vec![
+                entry("X", PropertyValue::Int { value: 1 }, 0x400),
+                entry("Y", PropertyValue::Int { value: 2 }, 0x404),
+            ],
+        };
+        entries.push(entry("Where", point(), 0x400));
+        entries.push(entry(
+            "List",
+            PropertyValue::Array {
+                items: vec![point(), point()],
+            },
+            0x500,
+        ));
+        entries.push(entry(
+            "Names",
+            PropertyValue::Set {
+                items: vec![PropertyValue::Name { value: "A".into() }],
+            },
+            0x600,
+        ));
+        entries.push(entry(
+            "Lookup",
+            PropertyValue::Map {
+                entries: scalars
+                    .iter()
+                    .filter(|value| {
+                        !matches!(
+                            value,
+                            PropertyValue::Default { .. } | PropertyValue::Unset { .. }
+                        )
+                    })
+                    .enumerate()
+                    .map(|(at, value)| rivals_uasset::MapEntry {
+                        key: PropertyValue::Name {
+                            value: format!("K{at}"),
+                        },
+                        value: value.clone(),
+                    })
+                    .collect(),
+            },
+            0x700,
+        ));
+        entries.push(table_text("Play"));
+        entries
+    }
+
+    /// A dump read back untouched says nothing at all, for every kind of value however it nests.
+    #[test]
+    fn an_untouched_dump_of_every_kind_diffs_to_nothing() {
+        let entries = every_kind();
+        let json: Vec<Json> = entries
+            .iter()
+            .map(|entry| serde_json::to_value(entry).unwrap())
+            .collect();
+        let mut out = DiffOutcome::default();
+        diff_entries(&entries, &json, 0, "/Game/Thing.Thing", &mut out);
+        assert!(out.edits.is_empty(), "{:?}", out.edits);
+        assert!(out.notes.is_empty(), "{:?}", out.notes);
     }
 
     /// The text form the dump renders is the one an edit carries, so a whole float keeps the
