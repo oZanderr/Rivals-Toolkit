@@ -391,6 +391,52 @@ fn a_plain_string_over_a_table_text_is_noted_and_a_table_key_repoints_it() {
     );
 }
 
+/// A table text's `TableId` pointed at another table imports that table and waits on it, the way
+/// the whole text given a table literal does.
+#[test]
+fn a_table_id_pointed_elsewhere_imports_the_new_table() {
+    const OTHER: &str = "/Game/UI/Other_ST.Other_ST";
+    let (before, asset, exports) = with_table_title();
+    let table = match &find(top(&before), "Title").value {
+        PropertyValue::Text { parts, .. } => find(parts, "TableId").clone(),
+        other => panic!("{other:?}"),
+    };
+    let changes = PackageEdits {
+        values: vec![edit_of(&table, set(OTHER))],
+        ..Default::default()
+    };
+    let bundle = AssetBundle {
+        asset: &asset,
+        exports: &exports,
+    };
+    let patched = patch_package(&bundle, &before, &changes, None).expect("patch");
+    let after = parse(&patched.asset, &patched.exports);
+    verify_patch(&before, &after, &changes, &patched.applied).expect("verifies");
+    assert_eq!(
+        table_of(find(top(&after), "Title")),
+        Some(crate::text_literal::TextLiteral::Table {
+            table_id: OTHER.into(),
+            key: "Play".into()
+        })
+    );
+    let import = after
+        .imports
+        .iter()
+        .find(|import| import.path == OTHER)
+        .expect("the new table is imported");
+    assert_eq!(import.class_name, "StringTable");
+    let header = crate::read_header(&AssetBundle {
+        asset: &patched.asset,
+        exports: &patched.exports,
+    })
+    .expect("header");
+    let runs = &crate::runs_of(&header).expect("runs")[0];
+    assert!(
+        runs.create_before_serialize.contains(&import.index),
+        "{runs:?}"
+    );
+}
+
 /// A text set as a whole and one of its parts edited in the same save would write over each other,
 /// so the save is refused saying which to choose; a part edit alone still works.
 #[test]

@@ -1466,14 +1466,15 @@ pub fn patch_package_with(
         let (splices, done) = match &edit.op {
             EditOp::Set { text } => {
                 let was = bytes_at(bundle, base, start, end)?;
+                // A value with no bytes shares its offset with the one stored next, which is not
+                // the struct it is.
+                let native = stored.then(|| native_leaf_at(parsed, start)).flatten();
                 let bytes = encode(
                     &entry.value,
                     text,
                     Target {
                         declared: entry.slot.map_or("", |slot| slot.declared),
-                        // A value with no bytes shares its offset with the one stored next,
-                        // which is not the struct it is.
-                        native: stored.then(|| native_leaf_at(parsed, start)).flatten(),
+                        native,
                         width: stored.then_some(end - start),
                         was,
                         tables: &mut tables,
@@ -1492,6 +1493,9 @@ pub fn patch_package_with(
                 if is_text(&entry.value) {
                     link_text_tables(&bytes, start, &mut tables, &mut object_links)?;
                     notes.extend(text_note(&entry.label(), &entry.value, text));
+                }
+                if native == Some(NativeLeaf::StringTableId) {
+                    link_table(text.trim(), start, &mut tables, &mut object_links)?;
                 }
                 if let Some((layout, slot)) = channel_time_at(parsed, start) {
                     check_frame_order(layout, slot, &bytes, &entry.label())?;
@@ -2112,16 +2116,27 @@ fn link_text_tables(
     let (_, names_at) = text_extent(bytes, 0)?;
     for offset in names_at {
         let table = text_table_id(&bytes[offset - 5..], &tables.names)?;
-        if !table.starts_with('/') {
-            continue;
-        }
-        let import = crate::header_edit::add_import(
-            tables,
-            &table,
-            Some(("/Script/Engine".to_string(), "StringTable".to_string())),
-        )?;
-        links.push((at, import));
+        link_table(&table, at, tables, links)?;
     }
+    Ok(())
+}
+
+/// One string table a text names, imported and waited on from `at`.
+fn link_table(
+    table: &str,
+    at: u64,
+    tables: &mut Tables,
+    links: &mut Vec<(u64, i32)>,
+) -> Result<(), String> {
+    if !table.starts_with('/') {
+        return Ok(());
+    }
+    let import = crate::header_edit::add_import(
+        tables,
+        table,
+        Some(("/Script/Engine".to_string(), "StringTable".to_string())),
+    )?;
+    links.push((at, import));
     Ok(())
 }
 
@@ -5423,6 +5438,9 @@ pub fn verify_patch(
                     ));
                 }
                 check_text_tables(after, &entry.value, &edit.expect_name)?;
+                if native_leaf_at(after, done.offset_after) == Some(NativeLeaf::StringTableId) {
+                    check_table_import(after, text.trim(), &edit.expect_name)?;
+                }
             }
             EditOp::Clear => {
                 if entry.span.is_some_and(|(start, end)| end > start)
@@ -5491,6 +5509,11 @@ fn check_text_tables(
     let Some(TextLiteral::Table { table_id, .. }) = literal else {
         return Ok(());
     };
+    check_table_import(after, &table_id, name)
+}
+
+/// The string table a text shows an entry of is imported, where it is named by asset path.
+fn check_table_import(after: &ParsedPackage, table_id: &str, name: &str) -> Result<(), String> {
     if table_id.starts_with('/') && !after.imports.iter().any(|import| import.path == table_id) {
         return Err(format!(
             "{name} shows an entry of {table_id}, which the package does not import after patching"
@@ -6943,6 +6966,7 @@ fn encode_native_leaf(
             Ok(out)
         }
         NativeLeaf::MarvelSoftObjectPath => Ok(encode_string(text)),
+        NativeLeaf::StringTableId => Ok(encode_name(text, names)),
     }
 }
 

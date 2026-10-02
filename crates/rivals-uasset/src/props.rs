@@ -313,6 +313,8 @@ pub enum NativeLeaf {
     TopLevelAssetPath,
     /// One string holding the whole path.
     MarvelSoftObjectPath,
+    /// The name of the string table a text shows an entry of, which the package has to import.
+    StringTableId,
 }
 
 /// A tagged property's tag from its name to the end of its value, keyed by where its entry's span
@@ -1419,6 +1421,9 @@ fn read_text(
             Some(source)
         }
         11 => {
+            diagnostics
+                .native_leaves
+                .push((cursor.file_offset(), NativeLeaf::StringTableId));
             let table = spanned(cursor, "TableId", |c| {
                 Ok(PropertyValue::Name {
                     value: c.read_name(ctx.names())?,
