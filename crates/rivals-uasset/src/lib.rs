@@ -56,7 +56,7 @@ pub use edit::{
     NOT_STORED, PackageEdits, PatchedBundle, PayloadEdit, RowEdit, RowOp, ScriptConstEdit,
     Sidecars, StringEdit, StringOp, ValueEdit, check_expectations, entry_named_at, expectations,
     kind_of, patch_identity, patch_package, patch_package_copy, patch_package_with, patch_values,
-    payload_lock, verify_copy, verify_identity, verify_patch, verify_references,
+    payload_lock, same_enumerator, verify_copy, verify_identity, verify_patch, verify_references,
 };
 pub use export_edit::{
     EDITABLE_FLAGS, ExportEdit, ExportEditPlan, flag_names, plan_export_edits,

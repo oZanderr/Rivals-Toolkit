@@ -6613,13 +6613,16 @@ fn encode(value: &PropertyValue, text: &str, target: Target<'_>) -> Result<Vec<u
         };
         return encode_declared(declared, text, target);
     }
-    if let PropertyValue::Enum { enum_type, .. } = value {
+    if let PropertyValue::Enum {
+        enum_type,
+        name: was,
+        ..
+    } = value
+    {
         let text = text.trim();
         if target.element {
-            let name = match text.parse::<i64>() {
-                Ok(number) => enumerator_name(target.enums, enum_type.as_deref(), number)?,
-                Err(_) => text.to_string(),
-            };
+            let name =
+                element_enumerator(target.enums, enum_type.as_deref(), was.as_deref(), text)?;
             return Ok(encode_name(&name, &mut target.tables.names));
         }
         match text.parse::<i64>() {
@@ -6687,6 +6690,52 @@ fn enumerator_value(
     mappings
         .enum_value(enum_type, text)
         .ok_or_else(|| format!("{text} is not an enumerator of {enum_type}"))
+}
+
+/// The name an enum written by name takes: a number becomes its enumerator, and a name must be
+/// one where the mappings know the enum. Either is spelt the way the slot already was, since the
+/// cook writes a namespaced enum's elements as `EType::Name` where the mappings list `Name`.
+fn element_enumerator(
+    mappings: Option<&Mappings>,
+    enum_type: Option<&str>,
+    was: Option<&str>,
+    text: &str,
+) -> Result<String, String> {
+    let name = match text.parse::<i64>() {
+        Ok(number) => enumerator_name(mappings, enum_type, number)?,
+        Err(_) => {
+            if let (Some(mappings), Some(enum_type)) = (mappings, enum_type)
+                && !mappings.enumerators(enum_type).is_empty()
+            {
+                enumerator_value(Some(mappings), Some(enum_type), text)?;
+            }
+            text.to_string()
+        }
+    };
+    Ok(match (enum_type, was) {
+        (Some(enum_type), Some(was))
+            if !name.contains("::")
+                && was
+                    .strip_prefix(enum_type)
+                    .is_some_and(|rest| rest.starts_with("::")) =>
+        {
+            format!("{enum_type}::{name}")
+        }
+        _ => name,
+    })
+}
+
+/// Whether two spellings name the same enumerator, one perhaps namespaced (`EType::Name`) as the
+/// cook writes a container element and the other bare as the mappings list it.
+pub fn same_enumerator(enum_type: Option<&str>, one: &str, other: &str) -> bool {
+    let bare = |name: &str| {
+        let name = name.trim();
+        enum_type
+            .and_then(|enum_type| name.strip_prefix(enum_type)?.strip_prefix("::"))
+            .unwrap_or(name)
+            .to_string()
+    };
+    bare(one) == bare(other)
 }
 
 /// The enumerator a number stands for, for container elements written by name.
@@ -7320,9 +7369,15 @@ fn reads_back_as(value: &PropertyValue, text: &str) -> bool {
             (true, "true" | "1" | "yes" | "on") | (false, "false" | "0" | "no" | "off")
         ),
         PropertyValue::Int { value } => text.trim().parse::<i64>().is_ok_and(|want| want == *value),
-        PropertyValue::Enum { value, name, .. } => {
+        PropertyValue::Enum {
+            value,
+            name,
+            enum_type,
+        } => {
             text.trim().parse::<i64>().is_ok_and(|want| want == *value)
-                || name.as_deref() == Some(text.trim())
+                || name
+                    .as_deref()
+                    .is_some_and(|name| same_enumerator(enum_type.as_deref(), name, text))
         }
         PropertyValue::UInt { value } => {
             text.trim().parse::<u64>().is_ok_and(|want| want == *value)
@@ -7508,6 +7563,10 @@ mod tests {
             Ok(2)
         );
         assert_eq!(
+            enumerator_value(Some(&schema), Some("EColour"), "EColour::Blue"),
+            Ok(2)
+        );
+        assert_eq!(
             enumerator_value(Some(&schema), Some("EColour"), "Green"),
             Err("Green is not an enumerator of EColour".to_string())
         );
@@ -7526,6 +7585,38 @@ mod tests {
             vec![(0, "Red".to_string()), (2, "Blue".to_string())]
         );
         assert!(schema.enumerators("EShape").is_empty());
+    }
+
+    /// An enum written by name is checked against the enum and spelt as the slot was: the cook
+    /// namespaces a container element's name, which the mappings list bare.
+    #[test]
+    fn an_enum_element_is_checked_and_keeps_the_slots_spelling() {
+        let schema = colours();
+        let write = |was: Option<&str>, text: &str| {
+            element_enumerator(Some(&schema), Some("EColour"), was, text)
+        };
+        assert_eq!(write(Some("EColour::Red"), "2"), Ok("EColour::Blue".into()));
+        assert_eq!(
+            write(Some("EColour::Red"), "Blue"),
+            Ok("EColour::Blue".into())
+        );
+        assert_eq!(
+            write(Some("EColour::Red"), "EColour::Blue"),
+            Ok("EColour::Blue".into())
+        );
+        assert_eq!(write(Some("Red"), "2"), Ok("Blue".into()));
+        assert_eq!(
+            write(Some("EColour::Red"), "a, b"),
+            Err("a, b is not an enumerator of EColour".into())
+        );
+        // An enum the mappings do not list takes the name as typed.
+        assert_eq!(
+            element_enumerator(Some(&schema), Some("EShape"), Some("EShape::Box"), "Disc"),
+            Ok("EShape::Disc".into())
+        );
+        assert!(same_enumerator(Some("EColour"), "EColour::Blue", " Blue"));
+        assert!(!same_enumerator(Some("EColour"), "EColour::Blue", "Red"));
+        assert!(!same_enumerator(None, "EColour::Blue", "Blue"));
     }
 
     #[test]

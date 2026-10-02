@@ -297,15 +297,21 @@ impl Mappings {
         counts
     }
 
-    /// The value behind an enumerator name, for the container elements UE writes by name.
+    /// The value behind an enumerator name, for the container elements UE writes by name. The cook
+    /// spells a namespaced enum's elements `EType::Name` where the mappings list `Name`, so either
+    /// is found.
     pub fn enum_value(&self, enum_name: &str, entry: &str) -> Option<i64> {
         let index = *self.enums.get(enum_name)?;
+        let bare = entry
+            .strip_prefix(enum_name)
+            .and_then(|rest| rest.strip_prefix("::"))
+            .unwrap_or(entry);
         self.inner
             .enums
             .get(index as usize)?
             .entries
             .iter()
-            .find(|(_, name)| name.as_str() == entry)
+            .find(|(_, name)| name.as_str() == entry || name.as_str() == bare)
             .map(|(value, _)| *value)
     }
 
