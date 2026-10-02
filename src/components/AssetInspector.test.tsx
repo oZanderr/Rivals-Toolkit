@@ -399,6 +399,47 @@ function scriptView() {
   };
 }
 
+describe("AssetInspector without a mappings file", () => {
+  /** A tagged asset whose function layout the reader left unexplained. */
+  function partialPackage() {
+    return {
+      ...blueprint(),
+      unversioned_properties: false,
+      exports: [
+        {
+          ...exp(0, "CollectPaks", "Function"),
+          status: { state: "partial", consumed: 12, expected: 1928 },
+        },
+      ],
+    };
+  }
+
+  const noMappings = {
+    path: null,
+    loaded: false,
+    struct_count: 0,
+    enum_count: 0,
+    error: "no .usmap mappings file is set.",
+  };
+
+  it("says unexplained bytes come from the missing mappings file, and offers to set one", async () => {
+    mock = tauri(partialPackage()).on("get_mappings_status", () => noMappings);
+    installTauri(mock);
+    mount();
+    expect(await screen.findByText(/No mappings file is loaded/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Set the mappings file" })).toBeTruthy();
+  });
+
+  it("says nothing about mappings when one is loaded", async () => {
+    mock = tauri(partialPackage());
+    installTauri(mock);
+    mount();
+    await screen.findAllByText(/bytes unexplained/);
+    await waitFor(() => expect(mock.callsTo("get_mappings_status")).toHaveLength(1));
+    expect(screen.queryByText(/No mappings file is loaded/)).toBeNull();
+  });
+});
+
 describe("AssetInspector script edits", () => {
   it("fixes a branch's condition by where it starts, holding it to what it read", async () => {
     mock = tauri(functionPackage()).on("export_script_view", () => scriptView());

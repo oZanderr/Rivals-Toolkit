@@ -7310,6 +7310,11 @@ export default function AssetInspector({
         });
         if (cancelled) return;
         setPkg(result);
+        // An asset that stores its own property types reads without a mappings file, but not all
+        // of it: whether one is loaded says what its unexplained bytes are.
+        void invoke<MappingsStatus>("get_mappings_status").then((s) => {
+          if (!cancelled) setMappings(s);
+        });
         const wanted = target.current
           ? result.exports.findIndex((e) => e.index === target.current?.exportIndex)
           : -1;
@@ -7373,6 +7378,10 @@ export default function AssetInspector({
       });
   };
   const needsMappings = mappings !== null && !mappings.loaded;
+  const unreadWithoutMappings =
+    needsMappings &&
+    (pkg?.exports.some((e) => e.status.state === "partial" || e.status.state === "failed") ??
+      false);
 
   const onSaved = useCallback(() => setEpoch((n) => n + 1), []);
   const edits = useAssetEdits({
@@ -8095,6 +8104,23 @@ export default function AssetInspector({
               </div>
 
               <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+                {unreadWithoutMappings && (
+                  <div className="flex shrink-0 items-center gap-3 border-b border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-300">
+                    <span className="min-w-0 flex-1">
+                      No mappings file is loaded. This asset stores its own property types, so its
+                      values still read, but the layouts of its classes and functions, their fields
+                      and bytecode, are only read with one. Those are the unexplained bytes here.
+                    </span>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-6 shrink-0"
+                      onClick={onOpenSettings}
+                    >
+                      Set the mappings file
+                    </Button>
+                  </div>
+                )}
                 {pkg.schema_fixups && pkg.schema_fixups.length > 0 && (
                   <div className="shrink-0 border-b border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-300">
                     Your mappings file declares{" "}
