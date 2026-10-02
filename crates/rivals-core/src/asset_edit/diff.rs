@@ -387,7 +387,7 @@ fn diff_value(
 enum Whole {
     Value,
     Element(u32),
-    Key,
+    Key(u32),
 }
 
 /// A value that keeps its place, against its edited form: a property, or either half of a
@@ -548,12 +548,7 @@ fn push_edit(
     let op = match whole {
         Whole::Value => EditOp::Set { text },
         Whole::Element(index) => EditOp::SetElement { index, text },
-        Whole::Key => {
-            out.notes.push(format!(
-                "{label}: a key that changed is a remove and an insert rather than a value edit"
-            ));
-            return;
-        }
+        Whole::Key(index) => EditOp::SetKey { index, text },
     };
     out.edits.values.push(ValueEdit {
         offset,
@@ -753,6 +748,10 @@ fn diff_items(
     let Some(now) = edited.get("items").and_then(Json::as_array) else {
         return;
     };
+    let was: Vec<Json> = items.iter().map(dumped).collect();
+    if let Some(order) = reordered(&was, now) {
+        return push_reorder(entry, order, label, out);
+    }
     for (position, (before, after)) in items.iter().zip(now).enumerate() {
         let at = Whole::Element(position as u32);
         let here = format!("{label}[{position}]");
@@ -950,11 +949,39 @@ fn diff_map(
         ));
         return;
     }
+    // Pairs that only moved are one reorder. Keys that moved while values changed are a reorder
+    // too, since a value set by position would land on the wrong key; the values follow on the
+    // next pass.
+    let pairs: Vec<Json> = entries.iter().map(dumped).collect();
+    if let Some(order) = reordered(&pairs, items) {
+        return push_reorder(entry, order, label, out);
+    }
+    let keys: Vec<Json> = entries.iter().map(|pair| dumped(&pair.key)).collect();
+    let now_keys: Vec<Json> = items
+        .iter()
+        .map(|item| item.get("key").cloned().unwrap_or_default())
+        .collect();
+    if let Some(order) = reordered(&keys, &now_keys) {
+        push_reorder(entry, order, label, out);
+        out.notes.push(format!(
+            "{label}: its pairs moved and some of their values changed; this save moves them, \
+             and a dump of the saved copy diffed again changes the values"
+        ));
+        return;
+    }
+    let held: Vec<Json> = now_keys.iter().map(content).collect();
+    let keys_unique = !(1..held.len()).any(|at| held[..at].contains(&held[at]));
+    if !keys_unique {
+        out.notes.push(format!(
+            "{label}: two pairs hold the same key in the edited dump, which a map cannot; its \
+             keys are left as they are"
+        ));
+    }
     for (position, (before, now)) in entries.iter().zip(items).enumerate() {
         let at = position as u32;
-        if let Some(key) = now.get("key") {
+        if let Some(key) = now.get("key").filter(|_| keys_unique) {
             let here = format!("{label}[{position}].key");
-            diff_in_place(entry, Whole::Key, &before.key, key, export, &here, out);
+            diff_in_place(entry, Whole::Key(at), &before.key, key, export, &here, out);
         }
         if let Some(value) = now.get("value") {
             let here = format!("{label}[{position}]");
@@ -969,6 +996,47 @@ fn diff_map(
             );
         }
     }
+}
+
+/// A value as the dump wrote it, less what it shows only for reading.
+fn dumped(value: &impl serde::Serialize) -> Json {
+    content(&serde_json::to_value(value).unwrap_or_default())
+}
+
+/// The order the edited list holds the original elements in, when it holds exactly them and has
+/// moved some: `order[new_position]` is where the element there was read. A repeated element keeps
+/// its place among its twins. `None` when anything changed besides the order, or nothing did.
+fn reordered(was: &[Json], now: &[Json]) -> Option<Vec<u32>> {
+    if was.len() != now.len() {
+        return None;
+    }
+    let mut taken = vec![false; was.len()];
+    let mut order = Vec::with_capacity(now.len());
+    for item in now {
+        let item = content(item);
+        let at = (0..was.len()).find(|&at| !taken[at] && was[at] == item)?;
+        taken[at] = true;
+        order.push(at as u32);
+    }
+    let moved = order.iter().enumerate().any(|(at, old)| at as u32 != *old);
+    moved.then_some(order)
+}
+
+/// A container's elements put in another order, in one edit at its own offset.
+fn push_reorder(entry: &PropertyEntry, order: Vec<u32>, label: &str, out: &mut DiffOutcome) {
+    let Some((offset, _)) = entry.span else {
+        out.notes.push(format!(
+            "{label}: the reader recorded no offset for it, so it cannot be addressed"
+        ));
+        return;
+    };
+    out.edits.values.push(ValueEdit {
+        offset,
+        expect_name: entry.name.clone(),
+        expect_element: entry.element,
+        expect_kind: kind_of(&entry.value),
+        op: EditOp::Reorder { order },
+    });
 }
 
 /// The text an edited value is typed as. Where the dump shows a value two ways, the one that
@@ -2076,9 +2144,9 @@ mod tests {
         assert!(out.notes.is_empty(), "{:?}", out.notes);
     }
 
-    /// A scalar key that changed is a note until keys can be set.
+    /// A key that changed is set through its pair's index.
     #[test]
-    fn a_changed_scalar_key_is_noted() {
+    fn a_changed_map_key_is_set_by_index() {
         let out = one(
             entry(
                 "Scores",
@@ -2095,9 +2163,92 @@ mod tests {
                 "value": {"kind": "int", "value": 7},
             }]}),
         );
+        assert!(
+            matches!(&value(&out).op, EditOp::SetKey { index: 0, text } if text == "B"),
+            "{:?}",
+            out.edits
+        );
+        assert!(out.notes.is_empty(), "{:?}", out.notes);
+    }
+
+    fn scores(pairs: &[(&str, i64)]) -> PropertyEntry {
+        entry(
+            "Scores",
+            PropertyValue::Map {
+                entries: pairs
+                    .iter()
+                    .map(|(key, value)| rivals_uasset::MapEntry {
+                        key: PropertyValue::Name {
+                            value: (*key).into(),
+                        },
+                        value: PropertyValue::Int { value: *value },
+                    })
+                    .collect(),
+            },
+            0x40,
+        )
+    }
+
+    fn scores_json(pairs: &[(&str, i64)]) -> Json {
+        json!({"kind": "map", "entries": pairs
+            .iter()
+            .map(|(key, value)| json!({
+                "key": {"kind": "name", "value": key},
+                "value": {"kind": "int", "value": value},
+            }))
+            .collect::<Vec<_>>()})
+    }
+
+    /// Pairs that only moved are one reorder, never values set by position, which would land on
+    /// the wrong keys. Pairs that moved and changed move first and say the rest needs a second pass.
+    #[test]
+    fn a_reordered_map_is_one_reorder_not_swapped_values() {
+        let out = one(
+            scores(&[("A", 1), ("B", 2)]),
+            scores_json(&[("B", 2), ("A", 1)]),
+        );
+        assert!(matches!(&value(&out).op, EditOp::Reorder { order } if *order == [1, 0]));
+        assert!(out.notes.is_empty(), "{:?}", out.notes);
+
+        let out = one(
+            scores(&[("A", 1), ("B", 2)]),
+            scores_json(&[("B", 5), ("A", 1)]),
+        );
+        assert!(matches!(&value(&out).op, EditOp::Reorder { order } if *order == [1, 0]));
+        assert!(out.notes[0].contains("diffed again"), "{:?}", out.notes);
+
+        let out = one(
+            scores(&[("A", 1), ("B", 2)]),
+            scores_json(&[("B", 1), ("B", 2)]),
+        );
         assert!(out.edits.is_empty(), "{:?}", out.edits);
-        assert_eq!(out.notes.len(), 1, "{:?}", out.notes);
-        assert!(out.notes[0].contains("Scores[0].key"), "{}", out.notes[0]);
+        assert!(out.notes[0].contains("same key"), "{:?}", out.notes);
+    }
+
+    /// Repeated elements keep their order among themselves, so a reorder moves only what moved.
+    #[test]
+    fn repeated_elements_keep_their_order_in_a_reorder() {
+        let names = |values: &[&str]| -> Vec<PropertyValue> {
+            values
+                .iter()
+                .map(|value| PropertyValue::Str {
+                    value: (*value).into(),
+                })
+                .collect()
+        };
+        let out = one(
+            array(names(&["a", "b", "a"])),
+            json!({"kind": "array", "items": [
+                {"kind": "str", "value": "b"},
+                {"kind": "str", "value": "a"},
+                {"kind": "str", "value": "a"},
+            ]}),
+        );
+        assert!(
+            matches!(&value(&out).op, EditOp::Reorder { order } if *order == [1, 0, 2]),
+            "{:?}",
+            out.edits
+        );
     }
 
     /// The text form the dump renders is the one an edit carries, so a whole float keeps the

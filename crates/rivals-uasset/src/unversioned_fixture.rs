@@ -134,6 +134,46 @@ pub fn slots() -> Vec<Slot> {
             "NavAgentSelector",
             0b1001u32.to_le_bytes().to_vec(),
         ),
+        slot(
+            "Lookup",
+            PropertyInner::Map {
+                key: Box::new(PropertyInner::Name),
+                value: Box::new(PropertyInner::Int),
+            },
+            Held::Bytes({
+                let mut pairs = 0i32.to_le_bytes().to_vec();
+                pairs.extend_from_slice(&3i32.to_le_bytes());
+                for (key, value) in [("OnFired", 1i32), ("Handler", 2), ("Count", 3)] {
+                    name(&mut pairs, key);
+                    pairs.extend_from_slice(&value.to_le_bytes());
+                }
+                pairs
+            }),
+        ),
+        slot(
+            "Numbers",
+            PropertyInner::Array {
+                inner: Box::new(PropertyInner::Int),
+            },
+            Held::Bytes(
+                [3i32, 10, 20, 30]
+                    .iter()
+                    .flat_map(|value| value.to_le_bytes())
+                    .collect(),
+            ),
+        ),
+        slot(
+            "Targets",
+            PropertyInner::Array {
+                inner: Box::new(PropertyInner::Object),
+            },
+            Held::Bytes(
+                [2i32, HELPER, 0]
+                    .iter()
+                    .flat_map(|value| value.to_le_bytes())
+                    .collect(),
+            ),
+        ),
     ]
 }
 

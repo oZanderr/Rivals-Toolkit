@@ -223,6 +223,8 @@ rivals-cli asset table --container ... --entry ... --row NAME      # one row in 
 rivals-cli asset trace --container ... --entry ... --export 0      # the bytes each property took
 
 rivals-cli asset set --container ... --entry ...   --offset 0xBE6 --kind float --name Damage --value 42.5 --mod-name MyMod
+rivals-cli asset set --container ... --entry ...   --offset 0x3A0 --kind map --name Scores --op set-key --index 1 --key Hulk --mod-name MyMod
+rivals-cli asset set --container ... --entry ...   --offset 0x3A0 --kind array --name Tags --op reorder --order 2,0,1 --mod-name MyMod
 rivals-cli asset row     --container ... --entry ... --export 0 --op add --row NewRow
 rivals-cli asset strings --container ... --entry ... --export 0 --op set-source --index 3 --to "Hello"
 
@@ -306,8 +308,10 @@ beside a note still apply. The limits worth knowing:
   copy and diff again from there.
 - **Adding needs a second pass.** A new container element, table row or stored struct is created
   with its default; dump the result and diff again to give it a value.
-- **Some changes are not value edits.** Retyping a property, renaming an export, reordering a
-  container, changing a map key, and editing a delegate or a field path are reported, not written.
+- **Some changes are not value edits.** Retyping a property and renaming an export are reported,
+  not written.
+- **Moving comes first.** Elements that only moved are one reorder. If some of them changed as well,
+  the save moves them, and a dump of the saved copy diffed again changes them.
 - **Bytes are not in the JSON.** Payload and bulk data are named by file in an edit list, never
   dumped inline.
 

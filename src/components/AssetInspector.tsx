@@ -15,8 +15,10 @@ import { listen } from "@tauri-apps/api/event";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import {
   AlertTriangle,
+  ArrowDown,
   ArrowLeft,
   ArrowLeftRight,
+  ArrowUp,
   Check,
   ChevronDown,
   ChevronRight,
@@ -80,6 +82,7 @@ import {
   scriptTarget,
   EditSessionContext,
   elementTarget,
+  keyTarget,
   entryTarget,
   isKeyDraft,
   isStructural,
@@ -665,6 +668,12 @@ interface TreeRow {
   /** From the export down to this row, as field sets name it, for matching the values an
    *  archetype gives. Only rows reached through properties and struct fields have one. */
   path?: string[];
+  /** For a map's pair, its key, shown and edited as a row of its own under the pair. */
+  key?: { value: PropertyValue; target: EditTarget | null };
+  /** For an element, how many its container holds, which is how far it can move. */
+  siblings?: number;
+  /** For an element a pending reorder moved, the position it was read at. */
+  movedFrom?: number;
 }
 
 /** A field's segment in a path: its name, and its slot for a static array. */
@@ -741,6 +750,17 @@ function childrenOf(row: TreeRow, draft?: Draft): TreeRow[] {
       path: row.path && [...row.path, segment],
     };
   };
+  // A map pair's key comes first, as a row of its own.
+  if (row.key && pending === undefined) {
+    const key = row.key;
+    const keyRow: TreeRow = {
+      entry: { name: "key", value: key.value },
+      target: key.target,
+      reason: key.target ? null : NO_POSITION,
+      within: inner,
+    };
+    return [keyRow, ...childrenOf({ ...row, key: undefined }, draft)];
+  }
   if (pending !== undefined) {
     switch (value.kind) {
       case "struct":
@@ -771,8 +791,10 @@ function childrenOf(row: TreeRow, draft?: Draft): TreeRow[] {
           target: element,
           reason: element ? null : NO_POSITION,
           within: inner,
+          siblings: value.items.length,
         };
       });
+      if (draft?.op === "reorder") return reordered(rows, draft.order);
       // The element an add brings to an array starts as a copy of the one at its index, or of the
       // last, and is filled in through its index in the same save.
       if (value.kind === "array" && target && draft?.op === "insert" && value.items.length > 0) {
@@ -788,16 +810,20 @@ function childrenOf(row: TreeRow, draft?: Draft): TreeRow[] {
       }
       return rows;
     }
-    case "map":
-      return value.entries.map((pair, i) => {
+    case "map": {
+      const rows: TreeRow[] = value.entries.map((pair, i) => {
         const element = target ? elementTarget(entry, i) : null;
         return {
           entry: { name: `[${i}] ${summarise(pair.key)}`, value: pair.value },
           target: element,
           reason: element ? null : NO_POSITION,
           within: inner,
+          key: { value: pair.key, target: target ? keyTarget(entry, i) : null },
+          siblings: value.entries.length,
         };
       });
+      return draft?.op === "reorder" ? reordered(rows, draft.order) : rows;
+    }
     case "text":
       return (value.parts ?? []).map((part) => rowOf(part, inner));
     // The fields of an unset or zero struct have no bytes yet, so each is reached through the
@@ -810,8 +836,18 @@ function childrenOf(row: TreeRow, draft?: Draft): TreeRow[] {
   }
 }
 
-/** Why nothing about a row may change, or null: the export is locked, or a pending add/drop on a
- *  container above it would move its bytes. */
+/** A container's element rows in the order a pending reorder puts them, each named by where it
+ *  now sits and marked with where it was read. */
+function reordered(rows: TreeRow[], order: number[]): TreeRow[] {
+  return order.map((old, at) => {
+    const row = rows[old];
+    const name = row.entry.name.replace(/^\[\d+\]/, `[${at}]`);
+    return { ...row, entry: { ...row.entry, name }, movedFrom: old === at ? undefined : old };
+  });
+}
+
+/** Why nothing about a row may change, or null: the export is locked, or a pending add, drop or
+ *  move on a container above it would move its bytes. */
 function structuralLock(row: TreeRow, session: EditSession): string | null {
   if (session.locked) return session.locked;
   const above = row.within.find((key) => {
@@ -819,7 +855,9 @@ function structuralLock(row: TreeRow, session: EditSession): string | null {
     return key !== row.pending && held !== undefined && isStructural(held.draft);
   });
   if (above) {
-    return `Finish or discard the add/drop on ${session.drafts[above].target.name} first.`;
+    const held = session.drafts[above];
+    const what = held.draft.op === "reorder" ? "move" : "add/drop";
+    return `Finish or discard the ${what} on ${held.target.name} first.`;
   }
   return null;
 }
@@ -1405,12 +1443,43 @@ function RowMenu({
     </>
   );
 
+  if (target.index !== undefined && target.field === "key") {
+    return (
+      <>
+        <ContextMenuItem disabled={!!locked} onSelect={() => onEdit(key)}>
+          <Pencil size={14} />
+          Edit key
+        </ContextMenuItem>
+        {discard}
+      </>
+    );
+  }
+
   if (target.index !== undefined) {
     // An element's structural changes belong to its container, which is the key before its own.
     const { index, ...container } = target;
     const containerKey = draftKey(container);
     const containerWithin = within.slice(0, -1);
     const held = session.drafts[containerKey]?.draft;
+    // A move only changes the container's pending order, so it may follow another move, but not
+    // an add, a drop, or an edit inside the container, which address elements where they were.
+    const count = row.siblings ?? 0;
+    const order =
+      held?.op === "reorder" ? held.order : Array.from({ length: count }, (_, at) => at);
+    const at = order.indexOf(index);
+    const moveBusy =
+      !!structuralLock({ ...row, within: containerWithin }, session) ||
+      (held !== undefined && held.op !== "reorder") ||
+      hasDraftsWithin(session, containerKey);
+    const move = (by: number) => {
+      const next = [...order];
+      [next[at], next[at + by]] = [next[at + by], next[at]];
+      if (next.every((old, position) => old === position)) {
+        session.dropDraft(containerKey);
+      } else {
+        session.setDraft(container, { op: "reorder", order: next }, containerWithin);
+      }
+    };
     // Adding or dropping an element moves every byte after it, so it waits for the edits inside
     // the container rather than throwing them away. What the element holds does not matter: a
     // struct or a delegate is copied or dropped whole.
@@ -1438,6 +1507,15 @@ function RowMenu({
         >
           <Minus size={14} />
           Remove this element
+        </ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem disabled={moveBusy || at <= 0} onSelect={() => move(-1)}>
+          <ArrowUp size={14} />
+          Move up
+        </ContextMenuItem>
+        <ContextMenuItem disabled={moveBusy || at < 0 || at >= count - 1} onSelect={() => move(1)}>
+          <ArrowDown size={14} />
+          Move down
         </ContextMenuItem>
         {discard}
       </>
@@ -1564,7 +1642,7 @@ const PropertyRow = memo(function PropertyRow({ row, depth }: { row: TreeRow; de
   const menu = useContext(TreeMenuContext);
   const { entry, target, within } = row;
   const [open, setOpen] = useState(depth < 1);
-  const expandable = isExpandable(entry.value);
+  const expandable = isExpandable(entry.value) || row.key !== undefined;
   const label = labelOf(entry);
   const key = target ? draftKey(target) : null;
   const draft = key ? session.drafts[key]?.draft : undefined;
@@ -1598,7 +1676,9 @@ const PropertyRow = memo(function PropertyRow({ row, depth }: { row: TreeRow; de
       target,
       target.index === undefined
         ? { op: "set", text: next }
-        : { op: "set_element", index: target.index, text: next },
+        : target.field === "key"
+          ? { op: "set_key", index: target.index, text: next }
+          : { op: "set_element", index: target.index, text: next },
       within
     );
   };
@@ -1628,6 +1708,11 @@ const PropertyRow = memo(function PropertyRow({ row, depth }: { row: TreeRow; de
         <Tip content={label} disabled={displayName(label) === label}>
           <span className="w-[38%] max-w-[260px] min-w-[80px] shrink-0 truncate font-mono text-foreground/80">
             {displayName(label)}
+            {row.movedFrom !== undefined && (
+              <span className="ml-1 text-[10px] text-blue-accent-foreground">
+                moved from [{row.movedFrom}]
+              </span>
+            )}
           </span>
         </Tip>
         {editing ? (
@@ -1635,7 +1720,7 @@ const PropertyRow = memo(function PropertyRow({ row, depth }: { row: TreeRow; de
             <ValueInput
               value={entry.value}
               initial={
-                draft?.op === "set" || draft?.op === "set_element"
+                draft?.op === "set" || draft?.op === "set_element" || draft?.op === "set_key"
                   ? draft.text
                   : stored && target
                     ? initialText(entry, target)
@@ -2924,7 +3009,10 @@ function draftText(draft: Draft | undefined, count: number | null): string | nul
   switch (draft.op) {
     case "set":
     case "set_element":
+    case "set_key":
       return draft.text;
+    case "reorder":
+      return "(reordered)";
     case "clear":
       return "(zero)";
     case "store":

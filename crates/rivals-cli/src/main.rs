@@ -479,15 +479,26 @@ struct AssetSetArgs {
 
     /// `set` writes `--value`; `clear` flags the property as zero; `store` gives an unset struct,
     /// container or reference its empty form; `unset` drops it so the inherited value applies;
-    /// `set-element`, `insert` and `remove` act on the container element at `--index`. An array's
-    /// new element takes `--value` when one is given; in a set or a map, `insert` takes the new
-    /// element's key from it.
+    /// `set-element`, `insert` and `remove` act on the container element at `--index`, and
+    /// `set-key` gives the map pair there the key `--key`. In a set or a map, `insert` takes the
+    /// new element's key from `--key`, or from `--value`. `reorder` puts the elements in the
+    /// order `--order` gives.
     #[arg(long, value_name = "OP", default_value = "set")]
     op: String,
 
     /// Which element of a container to act on.
     #[arg(long, value_name = "N")]
     index: Option<u32>,
+
+    /// The key `set-key` gives a map's pair, or the one `insert` adds a set's or a map's new
+    /// element under.
+    #[arg(long, value_name = "KEY", allow_hyphen_values = true)]
+    key: Option<String>,
+
+    /// For `reorder`, each element's index as read, in its new order: `2,0,1` moves the last
+    /// element to the front.
+    #[arg(long, value_name = "INDICES", value_delimiter = ',')]
+    order: Option<Vec<u32>>,
 
     /// The new value.
     #[arg(
@@ -2872,11 +2883,22 @@ fn value_op(args: &AssetSetArgs) -> Result<rivals_uasset::EditOp, String> {
         }),
         "insert" => Ok(EditOp::Insert {
             index: index()?,
-            key: (!args.value.is_empty()).then(|| args.value.clone()),
+            key: args
+                .key
+                .clone()
+                .or_else(|| (!args.value.is_empty()).then(|| args.value.clone())),
         }),
         "remove" => Ok(EditOp::Remove { index: index()? }),
+        "set-key" => Ok(EditOp::SetKey {
+            index: index()?,
+            text: args.key.clone().ok_or("--op set-key needs --key")?,
+        }),
+        "reorder" => whole(EditOp::Reorder {
+            order: args.order.clone().ok_or("--op reorder needs --order")?,
+        }),
         other => Err(format!(
-            "--op {other} is not an edit this command makes: use set, clear, store, unset,              set-element, insert or remove"
+            "--op {other} is not an edit this command makes: use set, clear, store, unset, \
+             set-element, insert, remove, set-key or reorder"
         )),
     }
 }
@@ -4030,6 +4052,20 @@ mod parse_tests {
             &["--op", "set", "--index", "2", "--value", "4"],
             "set-element",
         );
+        refused(&["--op", "set-key", "--index", "2"], "needs --key");
+        refused(&["--op", "reorder"], "needs --order");
+        assert!(matches!(
+            op(&["--op", "set-key", "--index", "1", "--key", "-k"]),
+            Ok(EditOp::SetKey { index: 1, text }) if text == "-k"
+        ));
+        assert!(matches!(
+            op(&["--op", "reorder", "--order", "2,0,1"]),
+            Ok(EditOp::Reorder { order }) if order == [2, 0, 1]
+        ));
+        assert!(matches!(
+            op(&["--op", "insert", "--index", "0", "--key", "K"]),
+            Ok(EditOp::Insert { index: 0, key: Some(key) }) if key == "K"
+        ));
     }
 
     #[test]

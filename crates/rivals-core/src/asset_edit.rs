@@ -1983,7 +1983,10 @@ fn field_step(
                 held.offset == walk.offset
                     && held.expect_name == walk.name
                     && held.expect_element == walk.element
-                    && matches!(held.op, EditOp::Insert { .. } | EditOp::Remove { .. })
+                    && matches!(
+                        held.op,
+                        EditOp::Insert { .. } | EditOp::Remove { .. } | EditOp::Reorder { .. }
+                    )
             })
         {
             return Ok(FieldStep::Wait(at));
@@ -8776,6 +8779,51 @@ mod game_data_tests {
             assert!(outcome.edits.is_empty(), "{path}: {:?}", outcome.edits);
             assert!(outcome.notes.is_empty(), "{path}: {:?}", outcome.notes);
         }
+    }
+
+    /// A map whose pairs a dump lists in another order saves as one reorder: each value stays with
+    /// its key, and the saved copy's dump diffs back to nothing.
+    #[test]
+    fn a_reordered_map_in_a_dump_saves_as_one_reorder_and_diffs_back_to_nothing() {
+        /// Swaps the first two pairs of the first map holding at least two, and says what they were.
+        fn swap_first_map(value: &mut serde_json::Value) -> Option<(String, String)> {
+            if value["kind"] == "map"
+                && let Some(entries) = value["entries"].as_array_mut()
+                && entries.len() >= 2
+            {
+                entries.swap(0, 1);
+                return Some((entries[1]["key"].to_string(), entries[0]["key"].to_string()));
+            }
+            match value {
+                serde_json::Value::Object(fields) => fields.values_mut().find_map(swap_first_map),
+                serde_json::Value::Array(items) => items.iter_mut().find_map(swap_first_map),
+                _ => None,
+            }
+        }
+        let Some(fixture) = Fixture::open(MAPS) else {
+            return;
+        };
+        let before = fixture.parse();
+        let mut dump = serde_json::to_value(&before).expect("dump");
+        let (first, second) = swap_first_map(&mut dump["exports"]).expect("a map of two pairs");
+        let outcome = crate::asset_edit::diff::diff_dump(&before, &dump).expect("diff");
+        assert!(outcome.notes.is_empty(), "{:?}", outcome.notes);
+        assert_eq!(outcome.edits.values.len(), 1, "{:?}", outcome.edits.values);
+        assert!(matches!(
+            &outcome.edits.values[0].op,
+            EditOp::Reorder { order } if order[..2] == [1, 0]
+        ));
+        let changes = outcome
+            .edits
+            .resolve(std::path::Path::new("."))
+            .expect("resolve");
+        let (_, after) = fixture.apply_changes(changes);
+        let mut again = serde_json::to_value(&after).expect("dump");
+        let settled = crate::asset_edit::diff::diff_dump(&after, &again).expect("diff");
+        assert!(settled.edits.is_empty(), "{:?}", settled.edits);
+        assert!(settled.notes.is_empty(), "{:?}", settled.notes);
+        let (now_first, now_second) = swap_first_map(&mut again["exports"]).expect("the map");
+        assert_eq!((now_first, now_second), (second, first), "the pairs moved");
     }
 
     /// A string table round trips the same way, through its own entry ops rather than value edits.

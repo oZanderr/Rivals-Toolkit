@@ -77,6 +77,12 @@ pub enum EditOp {
     },
     /// Drop element `index`. A map pair counts as one element.
     Remove { index: u32 },
+    /// Give pair `index` of a map another key, typed in the key's own kind. A set's element is its
+    /// own key, so a set changes one with [`EditOp::SetElement`].
+    SetKey { index: u32, text: String },
+    /// Put a container's elements in another order: `order[new_position]` is the index the
+    /// element there was read at, and every element appears once. A map's pairs move whole.
+    Reorder { order: Vec<u32> },
 }
 
 /// What a patch did, for reporting back to the user.
@@ -304,6 +310,7 @@ impl Expected {
             EditOp::SetElement { index, .. } | EditOp::Remove { index } => {
                 format!("{}[{index}]", edit.offset)
             }
+            EditOp::SetKey { index, .. } => format!("{}[{index}].key", edit.offset),
             _ => edit.offset.to_string(),
         }
     }
@@ -367,10 +374,23 @@ pub fn check_expectations(parsed: &ParsedPackage, edits: &PackageEdits) -> Resul
         else {
             continue;
         };
+        // A reorder is held to every element it moves, in the order they read.
+        if let EditOp::Reorder { .. } = edit.op {
+            let now = fingerprint(&entry.value);
+            if now.as_deref() != Some(was.as_str()) {
+                drift.push(format!(
+                    "{} held {was}, and now holds {}",
+                    entry.label(),
+                    now.as_deref().unwrap_or("no elements")
+                ));
+            }
+            continue;
+        }
         let now = match &edit.op {
             EditOp::SetElement { index, .. } | EditOp::Remove { index } => {
                 element_value(&entry.value, *index)
             }
+            EditOp::SetKey { index, .. } => element_key(&entry.value, *index),
             EditOp::Set { .. } => Some(&entry.value),
             _ => continue,
         };
@@ -567,10 +587,17 @@ pub fn expectations(parsed: &ParsedPackage, edits: &PackageEdits) -> Expected {
         else {
             continue;
         };
+        if let EditOp::Reorder { .. } = edit.op {
+            if let Some(held) = fingerprint(&entry.value) {
+                expect.values.insert(Expected::value_key(edit), held);
+            }
+            continue;
+        }
         let now = match &edit.op {
             EditOp::SetElement { index, .. } | EditOp::Remove { index } => {
                 element_value(&entry.value, *index)
             }
+            EditOp::SetKey { index, .. } => element_key(&entry.value, *index),
             EditOp::Set { .. } => Some(&entry.value),
             _ => None,
         };
@@ -639,6 +666,21 @@ pub fn expectations(parsed: &ParsedPackage, edits: &PackageEdits) -> Expected {
         }
     }
     expect
+}
+
+/// A container's elements in the order they read, which is what a reorder is held to.
+fn fingerprint(value: &PropertyValue) -> Option<String> {
+    let shown: Vec<String> = match value {
+        PropertyValue::Array { items } | PropertyValue::Set { items } => {
+            items.iter().map(PropertyValue::summary).collect()
+        }
+        PropertyValue::Map { entries } => entries
+            .iter()
+            .map(|pair| format!("{}: {}", pair.key.summary(), pair.value.summary()))
+            .collect(),
+        _ => return None,
+    };
+    Some(format!("[{}]", shown.join(", ")))
 }
 
 /// A script's loaded and stored sizes, as its drift key holds them.
@@ -1318,6 +1360,13 @@ pub fn patch_package_with(
     // Elements removed from each container this save, by the offset the container is edited at.
     // Indices are the container's own as read, however many other edits it takes.
     let removing = removals(edits)?;
+    // Pairs given another key, and so with every pair removed, the pairs whose keys this save
+    // frees for others to take.
+    let rekeying = rekeyed(edits)?;
+    let mut left_out = removing.clone();
+    for (offset, rekeyed) in &rekeying {
+        left_out.entry(*offset).or_default().extend(rekeyed);
+    }
     // Every container whose element count changes, with its count's width and the net change.
     let mut counts: BTreeMap<u64, (u8, i32, usize)> = BTreeMap::new();
     // Which applied edits act on which container, so each can be told its final element count.
@@ -1334,8 +1383,9 @@ pub fn patch_package_with(
     // Objects newly pointed at from a value, which the pointing export has to be able to create
     // before it serializes.
     let mut object_links: Vec<(u64, i32)> = Vec::new();
-    // The keys added to each set or map in this save, since two edits cannot see each other.
-    let mut inserted_keys: Vec<(u64, Vec<u8>)> = Vec::new();
+    // The keys each set or map gains in this save, added or given to a pair, since two edits
+    // cannot see each other.
+    let mut new_keys: Vec<(u64, Vec<u8>)> = Vec::new();
     // Each word of bits several edits share, by where it starts, with the pending splice that
     // writes it, so every bit changed in this save lands in the one write.
     let mut bit_words: BTreeMap<u64, usize> = BTreeMap::new();
@@ -1344,7 +1394,7 @@ pub fn patch_package_with(
 
     let tagged = !parsed.info.unversioned_properties;
     let mut notes: Vec<String> = Vec::new();
-    check_whole_text_edits(parsed, &edits.values)?;
+    check_whole_edits(parsed, &edits.values)?;
     for edit in &edits.values {
         let entry = locate(parsed, edit)?;
         let (start, end) = entry
@@ -1701,7 +1751,7 @@ pub fn patch_package_with(
                     layout,
                     *index,
                     key.as_deref(),
-                    removing.get(&start),
+                    left_out.get(&start),
                     bundle,
                     base,
                     entry,
@@ -1729,7 +1779,7 @@ pub fn patch_package_with(
                 }
                 if key_len > 0 {
                     let key_bytes = bytes[..key_len].to_vec();
-                    if inserted_keys
+                    if new_keys
                         .iter()
                         .any(|(at, held)| *at == start && *held == key_bytes)
                     {
@@ -1738,7 +1788,7 @@ pub fn patch_package_with(
                             entry.label()
                         ));
                     }
-                    inserted_keys.push((start, key_bytes));
+                    new_keys.push((start, key_bytes));
                 }
                 let mut bytes = bytes;
                 if layout.absent.is_some() {
@@ -1796,6 +1846,151 @@ pub fn patch_package_with(
                         elements_after: None,
                         before: entry.value.summary(),
                         after: String::new(),
+                    },
+                )
+            }
+            EditOp::SetKey { index, text } => {
+                if removing
+                    .get(&start)
+                    .is_some_and(|gone| gone.contains(index))
+                {
+                    return Err(format!(
+                        "{}[{index}] is both removed and given a new key in one save",
+                        entry.label()
+                    ));
+                }
+                let layout = container_at(parsed, start, entry)?;
+                let keys = layout.keys.as_ref().ok_or_else(|| {
+                    format!(
+                        "{} is not a map; a set's element is its own key, so set the element",
+                        entry.label()
+                    )
+                })?;
+                let was = element_key(&entry.value, *index)
+                    .ok_or_else(|| format!("{} has no pair {index}", entry.label()))?;
+                if let PropertyValue::Struct { .. } = was {
+                    return Err(format!(
+                        "{}[{index}]'s key is a struct, whose fields are edited one at a time",
+                        entry.label()
+                    ));
+                }
+                let (from, to) = keys.spans.get(*index as usize).copied().ok_or_else(|| {
+                    format!("{} has no key recorded for pair {index}", entry.label())
+                })?;
+                let bytes = encode_key(
+                    keys.kind,
+                    keys.is_enum.then_some(keys.enum_type.as_deref()),
+                    text.trim(),
+                    &mut tables,
+                    &package,
+                    mappings,
+                    entry,
+                )?;
+                if let Some(held) = held_key(layout, &bytes, left_out.get(&start), bundle, base)? {
+                    return Err(format!(
+                        "{}[{held}] already holds the key {text}, which would then be held twice",
+                        entry.label()
+                    ));
+                }
+                if new_keys
+                    .iter()
+                    .any(|(at, held)| *at == start && *held == bytes)
+                {
+                    return Err(format!(
+                        "{} is given the same key twice in one save",
+                        entry.label()
+                    ));
+                }
+                new_keys.push((start, bytes.clone()));
+                if is_object_kind(keys.kind)
+                    && let Some(target) = object_target(&bytes)
+                {
+                    object_links.push((start, target));
+                }
+                (
+                    vec![Splice {
+                        start: from,
+                        end: to,
+                        bytes,
+                    }],
+                    AppliedEdit {
+                        name: format!("{}[{index}].key", entry.label()),
+                        offset: start,
+                        offset_after: start,
+                        element: Some(*index),
+                        elements_after: None,
+                        before: was.summary(),
+                        after: text.clone(),
+                    },
+                )
+            }
+            EditOp::Reorder { order } => {
+                let layout = container_at(parsed, start, entry)?;
+                let elements = &layout.elements;
+                let mut seen = vec![false; elements.len()];
+                for &old in order {
+                    match seen.get_mut(old as usize) {
+                        Some(held) if !*held => *held = true,
+                        Some(_) => {
+                            return Err(format!(
+                                "{} names element {old} twice in its new order",
+                                entry.label()
+                            ));
+                        }
+                        None => {
+                            return Err(format!(
+                                "{} has {} elements, so there is no element {old} to move",
+                                entry.label(),
+                                elements.len()
+                            ));
+                        }
+                    }
+                }
+                if order.len() != elements.len() {
+                    return Err(format!(
+                        "{} holds {} elements, and its new order names {}",
+                        entry.label(),
+                        elements.len(),
+                        order.len()
+                    ));
+                }
+                let (Some(&(from, _)), Some(&(_, to))) = (elements.first(), elements.last()) else {
+                    return Err(format!("{} holds no elements to reorder", entry.label()));
+                };
+                if elements.windows(2).any(|pair| pair[0].1 != pair[1].0) {
+                    return Err(format!(
+                        "{}'s elements do not sit end to end, so they cannot be moved as a block",
+                        entry.label()
+                    ));
+                }
+                let mut bytes = Vec::with_capacity((to - from) as usize);
+                for &old in order {
+                    let (a, b) = elements[old as usize];
+                    bytes.extend_from_slice(bytes_at(bundle, base, a, b)?);
+                }
+                // The references the elements hold move with them, and the export still needs
+                // what they point at.
+                for reference in parsed
+                    .references
+                    .iter()
+                    .filter(|reference| from <= reference.at && reference.at < to)
+                {
+                    object_links.push((start, reference.index));
+                }
+                (
+                    vec![Splice {
+                        start: from,
+                        end: to,
+                        bytes,
+                    }],
+                    AppliedEdit {
+                        name: entry.label(),
+                        offset: start,
+                        offset_after: start,
+                        element: None,
+                        elements_after: None,
+                        before: fingerprint(&entry.value).unwrap_or_default(),
+                        after: format!("{order:?}"),
                     },
                 )
             }
@@ -2206,37 +2401,67 @@ fn text_note(label: &str, value: &PropertyValue, text: &str) -> Option<String> {
     ))
 }
 
-/// A text set as a whole replaces its parts, so an edit to one of those parts in the same save
-/// would land in bytes that no longer exist.
-fn check_whole_text_edits(parsed: &ParsedPackage, edits: &[ValueEdit]) -> Result<(), String> {
-    let mut whole: Vec<((u64, u64), String)> = Vec::new();
+/// Edits that write a value's bytes whole: a text set over its parts, or a container's elements
+/// put in another order. Another edit in the same save that lands inside one, or acts on the same
+/// container's elements, would address bytes that no longer hold what it read.
+fn check_whole_edits(parsed: &ParsedPackage, edits: &[ValueEdit]) -> Result<(), String> {
+    struct Whole<'a> {
+        edit: &'a ValueEdit,
+        span: (u64, u64),
+        label: String,
+        why: &'static str,
+    }
+    let mut whole: Vec<Whole<'_>> = Vec::new();
     for edit in edits {
-        if !matches!(edit.op, EditOp::Set { .. }) {
-            continue;
-        }
         let Ok(entry) = locate(parsed, edit) else {
             continue;
         };
-        if let (PropertyValue::Text { parts, .. }, Some(span)) = (&entry.value, entry.span)
-            && !parts.is_empty()
-        {
-            whole.push((span, entry.label()));
-        }
+        let Some(span) = entry.span else { continue };
+        let why = match (&edit.op, &entry.value) {
+            (EditOp::Set { .. }, PropertyValue::Text { parts, .. }) if !parts.is_empty() => {
+                "edit the whole text or one of its parts, not both"
+            }
+            (EditOp::Reorder { .. }, _) => "reorder it in a save of its own",
+            _ => continue,
+        };
+        whole.push(Whole {
+            edit,
+            span,
+            label: entry.label(),
+            why,
+        });
     }
     for edit in edits {
         let Ok(entry) = locate(parsed, edit) else {
             continue;
         };
         let Some(span) = entry.span else { continue };
-        if let Some((_, label)) = whole
-            .iter()
-            .find(|((from, to), _)| span != (*from, *to) && *from <= span.0 && span.1 <= *to)
-        {
-            return Err(format!(
-                "{label} is set as a whole in this save, so {} inside it cannot be edited too; \
-                 edit the whole text or one of its parts, not both",
-                entry.label()
-            ));
+        for held in &whole {
+            if std::ptr::eq(held.edit, edit) {
+                continue;
+            }
+            let (from, to) = held.span;
+            let same = edit.offset == held.edit.offset
+                && edit.expect_name == held.edit.expect_name
+                && edit.expect_element == held.edit.expect_element;
+            // Half open: a value with no bytes at the end of this one belongs to what follows.
+            let inside = !same && from <= span.0 && span.0 < to && span.1 <= to;
+            if same || inside {
+                let verb = match held.edit.op {
+                    EditOp::Reorder { .. } => "reordered",
+                    _ => "set as a whole",
+                };
+                return Err(format!(
+                    "{} is {verb} in this save, so {} cannot be edited too; {}",
+                    held.label,
+                    if same {
+                        "its elements".to_string()
+                    } else {
+                        format!("{} inside it", entry.label())
+                    },
+                    held.why
+                ));
+            }
         }
     }
     Ok(())
@@ -3730,26 +3955,14 @@ fn insertion(
         };
         if keyed {
             key_len = bytes.len();
-            for (position, (start, end)) in layout.elements.iter().enumerate() {
-                // A key the same save removes is free to be added again.
-                if removed.is_some_and(|gone| gone.contains(&(position as u32))) {
-                    continue;
-                }
-                let key_end = layout
-                    .keys
-                    .as_ref()
-                    .and_then(|keys| keys.spans.get(position))
-                    .map_or(*end, |(_, key_end)| *key_end);
-                if key_end - start == bytes.len() as u64
-                    && bytes_at(bundle, base, *start, key_end)? == bytes.as_slice()
-                {
-                    return Err(format!(
-                        "{} already holds the key {}, and a new element would repeat it; edit \
-                         that element instead",
-                        entry.label(),
-                        typed.unwrap_or("it defaults to")
-                    ));
-                }
+            // A key the same save removes or gives another is free to be added again.
+            if held_key(layout, &bytes, removed, bundle, base)?.is_some() {
+                return Err(format!(
+                    "{} already holds the key {}, and a new element would repeat it; edit that \
+                     element instead",
+                    entry.label(),
+                    typed.unwrap_or("it defaults to")
+                ));
             }
             if layout.keys.is_some() {
                 bytes.extend(value(&mut tables.names)?);
@@ -3775,6 +3988,31 @@ fn insertion(
         |(start, _)| *start,
     );
     Ok((target, bytes, 0))
+}
+
+/// The element of `layout` holding `key` as its key, among those this save leaves in place:
+/// neither removed nor given another key.
+fn held_key(
+    layout: &crate::props::ContainerLayout,
+    key: &[u8],
+    left_out: Option<&BTreeSet<u32>>,
+    bundle: &AssetBundle<'_>,
+    base: u64,
+) -> Result<Option<usize>, String> {
+    for (position, (start, end)) in layout.elements.iter().enumerate() {
+        if left_out.is_some_and(|gone| gone.contains(&(position as u32))) {
+            continue;
+        }
+        let key_end = layout
+            .keys
+            .as_ref()
+            .and_then(|keys| keys.spans.get(position))
+            .map_or(*end, |(_, key_end)| *key_end);
+        if key_end - start == key.len() as u64 && bytes_at(bundle, base, *start, key_end)? == key {
+            return Ok(Some(position));
+        }
+    }
+    Ok(None)
 }
 
 /// A typed key written in the key's own kind. An enum key is the enumerator's name (a number is
@@ -3874,6 +4112,23 @@ fn removals(edits: &PackageEdits) -> Result<BTreeMap<u64, BTreeSet<u32>>, String
         {
             return Err(format!(
                 "{}[{index}] is removed twice in one save",
+                edit.expect_name
+            ));
+        }
+    }
+    Ok(out)
+}
+
+/// The pairs each map is given new keys for this save, keyed by the offset its edits address it
+/// at. A pair re-keyed twice is refused: the second key would undo the first.
+fn rekeyed(edits: &PackageEdits) -> Result<BTreeMap<u64, BTreeSet<u32>>, String> {
+    let mut out: BTreeMap<u64, BTreeSet<u32>> = BTreeMap::new();
+    for edit in &edits.values {
+        if let EditOp::SetKey { index, .. } = edit.op
+            && !out.entry(edit.offset).or_default().insert(index)
+        {
+            return Err(format!(
+                "{}[{index}] is given a new key twice in one save",
                 edit.expect_name
             ));
         }
@@ -5058,6 +5313,14 @@ fn row_splices(
     Ok(out)
 }
 
+/// The key of a map's pair `index`.
+fn element_key(container: &PropertyValue, index: u32) -> Option<&PropertyValue> {
+    match container {
+        PropertyValue::Map { entries } => entries.get(index as usize).map(|pair| &pair.key),
+        _ => None,
+    }
+}
+
 fn element_value(container: &PropertyValue, index: u32) -> Option<&PropertyValue> {
     match container {
         PropertyValue::Array { items } | PropertyValue::Set { items } => items.get(index as usize),
@@ -5561,6 +5824,25 @@ pub fn verify_patch(
             }
             EditOp::Insert { .. } | EditOp::Remove { .. } => {
                 check_count(&entry.value, done, &edit.expect_name)?;
+            }
+            EditOp::SetKey { index, text } => {
+                let now = index_after(edits, edit.offset, *index, true) as u32;
+                let key = element_key(&entry.value, now).ok_or_else(|| {
+                    format!("{} lost pair {index} after patching", edit.expect_name)
+                })?;
+                if !reads_back_as(key, text) {
+                    return Err(format!(
+                        "{}[{index}]'s key reads back as {} rather than {text}",
+                        edit.expect_name,
+                        key.summary()
+                    ));
+                }
+            }
+            EditOp::Reorder { order } => {
+                let was = find_at(before, edit.offset, &edit.expect_name, edit.expect_element)
+                    .ok_or_else(|| format!("{} was not read before patching", edit.expect_name))?;
+                verify_reorder(&was.value, &entry.value, order)
+                    .map_err(|reason| format!("{} after reordering: {reason}", edit.expect_name))?;
             }
         }
     }
@@ -6077,6 +6359,42 @@ fn same_key(a: &PropertyValue, b: &PropertyValue) -> bool {
         }
         _ => same_copy_value(a, b, &std::collections::BTreeMap::new()).is_ok(),
     }
+}
+
+/// A reordered container holds what it held, each element where the order put it: the element
+/// now at `k` reads as the one read at `order[k]`.
+fn verify_reorder(was: &PropertyValue, is: &PropertyValue, order: &[u32]) -> Result<(), String> {
+    let pairs = |value: &PropertyValue| -> Vec<(Option<PropertyValue>, PropertyValue)> {
+        match value {
+            PropertyValue::Array { items } | PropertyValue::Set { items } => {
+                items.iter().map(|item| (None, item.clone())).collect()
+            }
+            PropertyValue::Map { entries } => entries
+                .iter()
+                .map(|pair| (Some(pair.key.clone()), pair.value.clone()))
+                .collect(),
+            _ => Vec::new(),
+        }
+    };
+    let (was, is) = (pairs(was), pairs(is));
+    if was.len() != is.len() {
+        return Err(format!(
+            "it holds {} elements where it held {}",
+            is.len(),
+            was.len()
+        ));
+    }
+    let same = |a: &PropertyValue, b: &PropertyValue| {
+        same_copy_value(a, b, &std::collections::BTreeMap::new())
+    };
+    for (position, &old) in order.iter().enumerate() {
+        let ((was_key, was_value), (is_key, is_value)) = (&was[old as usize], &is[position]);
+        if let (Some(a), Some(b)) = (was_key, is_key) {
+            same(a, b).map_err(|e| format!("the key at {position}: {e}"))?;
+        }
+        same(was_value, is_value).map_err(|e| format!("the element at {position}: {e}"))?;
+    }
+    Ok(())
 }
 
 /// An add or a drop is only right if the container really holds the number of elements the edit
@@ -9803,6 +10121,23 @@ mod tests {
         let reason = payload_lock(&parsed.exports[1], &[]).expect("locked");
         assert!(reason.contains("no known start"), "{reason}");
         assert!(crate::remove::INDEX_BEARING.contains(&"function layout and bytecode"));
+    }
+
+    /// A reordered container is checked element by element against the old ones in the new order,
+    /// so one that read back in any other order is refused.
+    #[test]
+    fn verification_holds_a_reorder_to_the_old_elements_permuted() {
+        let list = |values: &[i64]| PropertyValue::Array {
+            items: values
+                .iter()
+                .map(|value| PropertyValue::Int { value: *value })
+                .collect(),
+        };
+        let was = list(&[10, 20, 30]);
+        verify_reorder(&was, &list(&[30, 10, 20]), &[2, 0, 1]).expect("as ordered");
+        let error = verify_reorder(&was, &list(&[10, 30, 20]), &[2, 0, 1]).expect_err("misplaced");
+        assert!(error.contains("the element at 0"), "{error}");
+        assert!(verify_reorder(&was, &list(&[30, 10]), &[2, 0]).is_err());
     }
 
     /// The import table `follow_references` classifies against: a mesh in a game package, and a

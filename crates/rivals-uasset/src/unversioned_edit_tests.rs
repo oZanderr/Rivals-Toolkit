@@ -373,6 +373,196 @@ fn a_lazy_object_takes_a_guid_in_any_spelling() {
     );
 }
 
+fn summaries(value: &PropertyValue) -> Vec<String> {
+    match value {
+        PropertyValue::Array { items } | PropertyValue::Set { items } => {
+            items.iter().map(PropertyValue::summary).collect()
+        }
+        PropertyValue::Map { entries } => entries
+            .iter()
+            .map(|pair| format!("{}={}", pair.key.summary(), pair.value.summary()))
+            .collect(),
+        other => panic!("{other:?} holds no elements"),
+    }
+}
+
+fn set_key(index: u32, text: &str) -> EditOp {
+    EditOp::SetKey {
+        index,
+        text: text.into(),
+    }
+}
+
+fn reorder(order: &[u32]) -> EditOp {
+    EditOp::Reorder {
+        order: order.to_vec(),
+    }
+}
+
+#[test]
+fn a_map_key_changes_in_place() {
+    let after = apply(|p| vec![edit_of(find(top(p), "Lookup"), set_key(1, "Fresh"))]);
+    assert_eq!(
+        summaries(value(&after, "Lookup")),
+        ["OnFired=1", "Fresh=2", "Count=3"]
+    );
+}
+
+/// Two pairs trade keys in one save: each key is free once its own pair takes another.
+#[test]
+fn two_map_keys_swap_in_one_save() {
+    let after = apply(|p| {
+        let lookup = find(top(p), "Lookup");
+        vec![
+            edit_of(lookup, set_key(0, "Handler")),
+            edit_of(lookup, set_key(1, "OnFired")),
+        ]
+    });
+    assert_eq!(
+        summaries(value(&after, "Lookup")),
+        ["Handler=1", "OnFired=2", "Count=3"]
+    );
+}
+
+#[test]
+fn a_key_another_pair_holds_is_refused() {
+    let error = refused(|p| vec![edit_of(find(top(p), "Lookup"), set_key(0, "Handler"))]);
+    assert!(error.contains("already holds the key Handler"), "{error}");
+    let error = refused(|p| {
+        let lookup = find(top(p), "Lookup");
+        vec![
+            edit_of(lookup, set_key(0, "Fresh")),
+            edit_of(lookup, set_key(2, "Fresh")),
+        ]
+    });
+    assert!(error.contains("same key twice"), "{error}");
+}
+
+/// A pair the save removes takes no key, and its own key is free for another pair to take.
+#[test]
+fn a_removed_pair_takes_no_new_key() {
+    let error = refused(|p| {
+        let lookup = find(top(p), "Lookup");
+        vec![
+            edit_of(lookup, EditOp::Remove { index: 1 }),
+            edit_of(lookup, set_key(1, "Fresh")),
+        ]
+    });
+    assert!(error.contains("removed and given a new key"), "{error}");
+    let after = apply(|p| {
+        let lookup = find(top(p), "Lookup");
+        vec![
+            edit_of(lookup, EditOp::Remove { index: 1 }),
+            edit_of(lookup, set_key(2, "Handler")),
+        ]
+    });
+    assert_eq!(
+        summaries(value(&after, "Lookup")),
+        ["OnFired=1", "Handler=3"]
+    );
+}
+
+/// A key edit is held to the key it read, under a drift key of its own.
+#[test]
+fn a_key_edit_is_held_to_the_key_it_read() {
+    let (before, ..) = fixture();
+    let lookup = find(top(&before), "Lookup");
+    let changes = PackageEdits {
+        values: vec![edit_of(lookup, set_key(1, "Fresh"))],
+        ..Default::default()
+    };
+    let expect = expectations(&before, &changes);
+    let at = lookup.span.unwrap().0;
+    assert_eq!(
+        expect
+            .values
+            .get(&format!("{at}[1].key"))
+            .map(String::as_str),
+        Some("Handler")
+    );
+    let after = apply(|_| changes.values.clone());
+    assert!(check_expectations(&after, &PackageEdits { expect, ..changes }).is_err());
+}
+
+#[test]
+fn an_array_is_reordered_in_one_splice() {
+    let (before, asset, exports) = fixture();
+    let numbers = find(top(&before), "Numbers");
+    let changes = PackageEdits {
+        values: vec![edit_of(numbers, reorder(&[2, 0, 1]))],
+        ..Default::default()
+    };
+    assert_eq!(
+        expectations(&before, &changes)
+            .values
+            .values()
+            .collect::<Vec<_>>(),
+        ["[10, 20, 30]"]
+    );
+    let (after, _, patched) = apply_to(&asset, &exports, |_| changes.values.clone());
+    assert_eq!(summaries(value(&after, "Numbers")), ["30", "10", "20"]);
+    assert_eq!(patched.len(), exports.len(), "nothing grew or shrank");
+}
+
+#[test]
+fn a_map_s_pairs_move_with_their_values() {
+    let after = apply(|p| vec![edit_of(find(top(p), "Lookup"), reorder(&[2, 1, 0]))]);
+    assert_eq!(
+        summaries(value(&after, "Lookup")),
+        ["Count=3", "Handler=2", "OnFired=1"]
+    );
+}
+
+/// A reorder writes the container's elements whole, so nothing else may act on them in the same
+/// save, and an order has to name each element once.
+#[test]
+fn a_reorder_rides_alone_in_its_container() {
+    let error = refused(|p| {
+        let numbers = find(top(p), "Numbers");
+        vec![
+            edit_of(numbers, reorder(&[2, 0, 1])),
+            edit_of(
+                numbers,
+                EditOp::SetElement {
+                    index: 0,
+                    text: "5".into(),
+                },
+            ),
+        ]
+    });
+    assert!(error.contains("a save of its own"), "{error}");
+    let error = refused(|p| vec![edit_of(find(top(p), "Numbers"), reorder(&[0, 0, 1]))]);
+    assert!(error.contains("twice"), "{error}");
+    let error = refused(|p| vec![edit_of(find(top(p), "Numbers"), reorder(&[0, 1]))]);
+    assert!(error.contains("names 2"), "{error}");
+}
+
+/// The objects a reordered array points at are still waited on: the references moved, and the
+/// export still needs them.
+#[test]
+fn a_reordered_array_of_references_keeps_its_dependencies() {
+    const OTHER: &str = "/Game/Others.Other";
+    let (asset, exports) = unversioned_package();
+    let (pointed, asset, exports) = apply_to(&asset, &exports, |p| {
+        vec![edit_of(
+            find(top(p), "Targets"),
+            EditOp::SetElement {
+                index: 1,
+                text: OTHER.into(),
+            },
+        )]
+    });
+    assert!(waited_on(&asset, &exports, &pointed, OTHER));
+    let (after, asset, exports) = apply_to(&asset, &exports, |p| {
+        vec![edit_of(find(top(p), "Targets"), reorder(&[1, 0]))]
+    });
+    assert_eq!(
+        summaries(value(&after, "Targets")),
+        [OTHER.to_string(), HELPER_PATH.to_string()]
+    );
+    assert!(waited_on(&asset, &exports, &after, OTHER));
+}
+
 /// The field reached from `parsed`'s property `name` down through `path`.
 fn field<'a>(parsed: &'a ParsedPackage, name: &str, path: &[&str]) -> &'a PropertyEntry {
     let mut entry = find(top(parsed), name);

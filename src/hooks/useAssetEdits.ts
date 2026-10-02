@@ -26,6 +26,8 @@ export type Draft =
   | { op: "insert"; index: number; key?: string }
   | { op: "remove"; index: number }
   | { op: "set_element"; index: number; text: string }
+  | { op: "set_key"; index: number; text: string }
+  | { op: "reorder"; order: number[] }
   | { op: "store" }
   | { op: "unset" }
   | { op: "key_add"; time: number; value: number }
@@ -195,6 +197,15 @@ export function elementTarget(container: PropertyEntry, index: number): EditTarg
   return { ...base, index, was: valueText(element) };
 }
 
+/** A map pair's key, addressed through its container like the pair's value and kept apart from
+ *  it by `field`. */
+export function keyTarget(container: PropertyEntry, index: number): EditTarget | null {
+  const base = entryTarget(container);
+  const value = container.value;
+  if (!base || value.kind !== "map" || !value.entries[index]) return null;
+  return { ...base, index, field: "key", was: valueText(value.entries[index].key) };
+}
+
 /** The payload export `exportIndex` carries after its properties. */
 export function payloadTarget(exportIndex: number): EditTarget {
   return { offset: 0, name: "payload", kind: "payload", payload: { export: exportIndex } };
@@ -267,7 +278,12 @@ export function stringTarget(
 /** Adding or dropping an element moves every byte after it inside the container, and removing a
  *  row deletes every byte in it. */
 export function isStructural(draft: Draft): boolean {
-  return draft.op === "insert" || draft.op === "remove" || draft.op === "row_remove";
+  return (
+    draft.op === "insert" ||
+    draft.op === "remove" ||
+    draft.op === "reorder" ||
+    draft.op === "row_remove"
+  );
 }
 
 /**
@@ -313,6 +329,8 @@ type ValueEdit = EditTargetFields &
     | { op: "set_element"; index: number; text: string }
     | { op: "insert"; index: number; key?: string }
     | { op: "remove"; index: number }
+    | { op: "set_key"; index: number; text: string }
+    | { op: "reorder"; order: number[] }
   );
 
 function toValueEdit({ target, draft }: DraftRecord): ValueEdit | null {
@@ -335,6 +353,10 @@ function toValueEdit({ target, draft }: DraftRecord): ValueEdit | null {
       return { ...at, op: "insert", index: draft.index, key: draft.key };
     case "remove":
       return { ...at, op: "remove", index: draft.index };
+    case "set_key":
+      return { ...at, op: "set_key", index: draft.index, text: draft.text };
+    case "reorder":
+      return { ...at, op: "reorder", order: draft.order };
     default:
       return null;
   }
@@ -550,6 +572,7 @@ function expectOf(records: DraftRecord[], exportPath: string | undefined, export
     if (draft.op === "set") values[String(target.offset)] = target.was;
     if (draft.op === "set_element" || draft.op === "remove")
       values[`${target.offset}[${draft.index}]`] = target.was;
+    if (draft.op === "set_key") values[`${target.offset}[${draft.index}].key`] = target.was;
   }
   return {
     exports: exportPath !== undefined ? { [exportIndex]: exportPath } : undefined,

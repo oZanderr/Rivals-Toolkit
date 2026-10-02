@@ -437,6 +437,45 @@ fn a_table_id_pointed_elsewhere_imports_the_new_table() {
     );
 }
 
+/// An array of structs is written under one tag for every element, so its elements move as a
+/// block after that tag, which stays where it is.
+#[test]
+fn an_array_of_structs_is_reordered_under_its_element_tag() {
+    let (asset, exports) = tagged_package();
+    let (_, asset, exports) = apply_to(&asset, &exports, |p| {
+        vec![edit_of(
+            find(top(p), "Points"),
+            EditOp::Insert {
+                index: 1,
+                key: None,
+            },
+        )]
+    });
+    let (_, asset, exports) = apply_to(&asset, &exports, |p| {
+        let PropertyValue::Array { items } = &find(top(p), "Points").value else {
+            panic!("not an array");
+        };
+        let PropertyValue::Struct { fields, .. } = &items[1] else {
+            panic!("not a struct");
+        };
+        vec![edit_of(find(fields, "X"), set("9"))]
+    });
+    let (after, ..) = apply_to(&asset, &exports, |p| {
+        vec![edit_of(
+            find(top(p), "Points"),
+            EditOp::Reorder { order: vec![1, 0] },
+        )]
+    });
+    let xs: Vec<String> = items_of(find(top(&after), "Points"))
+        .iter()
+        .map(|item| match item {
+            PropertyValue::Struct { fields, .. } => find(fields, "X").value.summary(),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(xs, ["9", "5"]);
+}
+
 /// A text set as a whole and one of its parts edited in the same save would write over each other,
 /// so the save is refused saying which to choose; a part edit alone still works.
 #[test]

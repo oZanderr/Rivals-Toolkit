@@ -418,6 +418,77 @@ describe("AssetInspector reference edits", () => {
   });
 });
 
+/** One export holding a map of names to ints and an array of strings. */
+function containersPackage() {
+  const name = (value: string) => ({ kind: "name", value });
+  const int = (value: number) => ({ kind: "int", value });
+  return {
+    ...labelPackage(),
+    exports: [
+      exp(0, "Settings", "SettingsData", [
+        {
+          name: "Scores",
+          span: [40, 72],
+          value: {
+            kind: "map",
+            entries: [
+              { key: name("A"), value: int(1) },
+              { key: name("B"), value: int(2) },
+            ],
+          },
+        },
+        {
+          name: "Tags",
+          span: [80, 100],
+          value: {
+            kind: "array",
+            items: ["a", "b", "c"].map((value) => ({ kind: "str", value })),
+          },
+        },
+      ]),
+    ],
+  };
+}
+
+describe("AssetInspector keys and moves", () => {
+  it("renames a map key from its own row", async () => {
+    mock = tauri(containersPackage());
+    installTauri(mock);
+    mount();
+    const user = userEvent.setup();
+    await user.click(await screen.findByText("[0] A"));
+    await user.click(await screen.findByText("A"));
+    const input = await screen.findByDisplayValue("A");
+    await user.clear(input);
+    await user.type(input, "Z{Enter}");
+    await user.click(await screen.findByRole("button", { name: /Save as mod/ }));
+    await waitFor(() =>
+      expect(lastSave().values).toEqual([
+        { offset: 40, name: "Scores", kind: "map", op: "set_key", index: 0, text: "Z" },
+      ])
+    );
+    expect(lastSave().expect).toMatchObject({ values: { "40[0].key": "A" } });
+  });
+
+  it("moves elements and saves one reorder", async () => {
+    mock = tauri(containersPackage());
+    installTauri(mock);
+    mount();
+    const user = userEvent.setup();
+    let menu = await menuOf(user, "[2]");
+    await user.click(within(menu).getByRole("menuitem", { name: /Move up/ }));
+    menu = await menuOf(user, "moved from [2]");
+    await user.click(within(menu).getByRole("menuitem", { name: /Move up/ }));
+    expect(await screen.findByText("moved from [1]")).toBeTruthy();
+    await user.click(await screen.findByRole("button", { name: /Save as mod/ }));
+    await waitFor(() =>
+      expect(lastSave().values).toEqual([
+        { offset: 80, name: "Tags", kind: "array", op: "reorder", order: [2, 0, 1] },
+      ])
+    );
+  });
+});
+
 describe("AssetInspector container edits", () => {
   it.each([
     ["Remove this element", "[1]", { op: "remove", index: 1 }],
