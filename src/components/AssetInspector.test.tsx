@@ -336,3 +336,162 @@ describe("AssetInspector text edits", () => {
     });
   });
 });
+
+const BRANCH = "Jump 0x0139 unless LocalVariable(bOk)";
+const CALL = "CallMath /Script/Engine.KismetMathLibrary:Greater_IntInt(LocalVariable(Count), 0)";
+
+/** One function with a branch and a call, which opens straight into its script. */
+function functionPackage() {
+  return {
+    package_name: PACKAGE,
+    cooked: true,
+    unversioned_properties: true,
+    name_count: 0,
+    import_count: 0,
+    export_count: 1,
+    names: [],
+    imports: [],
+    exports: [
+      {
+        ...exp(0, "IsActiveAbility", "Function"),
+        status: { state: "payload", consumed: 8, payload_bytes: 316, kind: "bytecode" },
+        script: { buffer_size: 316, storage_size: 456, decoded_size: 316, statements: [] },
+      },
+    ],
+    unresolved_structs: [],
+    resources: [],
+  };
+}
+
+function scriptView() {
+  return {
+    lines: [
+      {
+        offset: 0x55,
+        text: BRANCH,
+        targets: [0x139],
+        expressions: [{ at: 0x55, kind: "condition", token: "JumpIfNot", text: BRANCH }],
+      },
+      {
+        offset: 0x104,
+        text: `LetBool LocalVariable(Greater) = ${CALL}`,
+        expressions: [
+          {
+            at: 0x10e,
+            kind: "call",
+            token: "CallMath",
+            text: CALL,
+            value: "/Script/Engine.KismetMathLibrary:Greater_IntInt",
+          },
+        ],
+      },
+    ],
+    entries: [],
+    signature: null,
+    signature_text: null,
+    callers: [],
+    complete: true,
+    stopped: null,
+    resize_lock: null,
+    buffer_size: 316,
+    storage_size: 456,
+    statements: 2,
+  };
+}
+
+describe("AssetInspector script edits", () => {
+  it("fixes a branch's condition by where it starts, holding it to what it read", async () => {
+    mock = tauri(functionPackage()).on("export_script_view", () => scriptView());
+    installTauri(mock);
+    mount();
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "always false" }));
+    await user.click(await screen.findByRole("button", { name: /Save as mod/ }));
+    await waitFor(() =>
+      expect(lastSave().scripts).toEqual([
+        { export: 0, statement: 0x55, constant: 0, at: 0x55, value: "false", was: BRANCH },
+      ])
+    );
+  });
+
+  it("shows whether a retargeted call fits the function it now names", async () => {
+    mock = tauri(functionPackage())
+      .on("export_script_view", () => scriptView())
+      .on("script_call_preview", () => ({
+        callee: "/Script/Engine.KismetMathLibrary:Greater_IntInt",
+        was: "(Int, Int) -> Bool",
+        now: "(Str) -> Text",
+        verdict: "mismatch",
+        reason: "argument 0 is a Int, and the new function takes a Str there",
+      }));
+    installTauri(mock);
+    mount();
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: /Greater_IntInt/ }));
+    const input = await screen.findByDisplayValue(
+      "/Script/Engine.KismetMathLibrary:Greater_IntInt"
+    );
+    await user.clear(input);
+    await user.type(input, "/Script/Engine.KismetTextLibrary:Conv_StringToText{Enter}");
+    await user.hover(await screen.findByLabelText("call does not fit"));
+    expect(await screen.findAllByText(/\(Str\) -> Text/)).not.toHaveLength(0);
+    expect(await screen.findAllByText(/argument 0 is a Int/)).not.toHaveLength(0);
+  });
+
+  it("asks before saving a call it could not check, and saves it when told to", async () => {
+    let tries = 0;
+    mock = tauri(functionPackage())
+      .on("export_script_view", () => scriptView())
+      .on("script_call_preview", () => ({
+        callee: "/Script/Engine.KismetMathLibrary:Greater_IntInt",
+        was: "(Int, Int) -> Bool",
+        now: null,
+        verdict: "unknown",
+        reason: "how it is called could not be read",
+      }))
+      .on("save_asset_edits", () => {
+        tries += 1;
+        if (tries === 1)
+          return Promise.reject(
+            "These edits point a script at something that could not be confirmed to fit it: Less"
+          );
+        return {
+          outcome: "written",
+          message: "Saved",
+          pak: "TestMod_9999999_P.utoc",
+          warnings: [],
+        };
+      });
+    installTauri(mock);
+    mount();
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: /Greater_IntInt/ }));
+    const input = await screen.findByDisplayValue(
+      "/Script/Engine.KismetMathLibrary:Greater_IntInt"
+    );
+    await user.clear(input);
+    await user.type(input, "/Script/Engine.KismetMathLibrary:Less_IntInt{Enter}");
+    await screen.findByLabelText("call not confirmed");
+    expect(mock.callsTo("script_call_preview")[0]).toMatchObject({
+      export: 0,
+      statement: 0x104,
+      at: 0x10e,
+      value: "/Script/Engine.KismetMathLibrary:Less_IntInt",
+    });
+    await user.click(await screen.findByRole("button", { name: /Save as mod/ }));
+    const dialog = await screen.findByRole("alertdialog", { name: /could not be checked/ });
+    await user.click(within(dialog).getByRole("button", { name: "Save anyway" }));
+    await waitFor(() => expect(mock.callsTo("save_asset_edits")).toHaveLength(2));
+    expect(mock.callsTo("save_asset_edits")[1]).toMatchObject({ allowUnchecked: true });
+    expect(lastSave().scripts).toEqual([
+      {
+        export: 0,
+        statement: 0x104,
+        constant: 0,
+        at: 0x10e,
+        value: "/Script/Engine.KismetMathLibrary:Less_IntInt",
+        was: CALL,
+      },
+    ]);
+  });
+});

@@ -20,6 +20,7 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  CircleHelp,
   Copy,
   Database,
   Eraser,
@@ -74,6 +75,7 @@ import { Tip } from "@/components/ui/tooltip";
 import {
   bulkTarget,
   draftKey,
+  scriptExpressionTarget,
   scriptTarget,
   EditSessionContext,
   elementTarget,
@@ -1861,6 +1863,20 @@ function ScriptPane({
     };
   }, [gamePath, container, entry, exportIndex]);
 
+  const previewCall = useCallback(
+    (statement: number, at: number, value: string) =>
+      invoke<CallPreview>("script_call_preview", {
+        gameRoot: gamePath,
+        container,
+        entry,
+        export: exportIndex,
+        statement,
+        at,
+        value,
+      }),
+    [gamePath, container, entry, exportIndex]
+  );
+
   if (busy) {
     return <p className="p-6 text-center text-sm text-muted-foreground">Disassembling…</p>;
   }
@@ -1879,6 +1895,13 @@ function ScriptPane({
           <span className="flex items-center gap-1 text-amber-400">
             <AlertTriangle size={10} /> stopped: {view.stopped}
           </span>
+        )}
+        {view.complete && view.resize_lock && (
+          <Tip content={view.resize_lock}>
+            <span className="flex items-center gap-1 text-amber-400">
+              <AlertTriangle size={10} /> keeps its size
+            </span>
+          </Tip>
         )}
       </div>
       {view.signature_text && view.signature && (
@@ -1923,6 +1946,7 @@ function ScriptPane({
         exportNames={exportNames}
         focus={focus}
         onOpen={onOpen}
+        previewCall={previewCall}
       />
     </div>
   );
@@ -1939,6 +1963,7 @@ function ScriptLines({
   exportNames,
   focus,
   onOpen,
+  previewCall,
 }: {
   exportIndex: number;
   lines: ScriptLine[];
@@ -1946,6 +1971,7 @@ function ScriptLines({
   exportNames: Set<string>;
   focus: number | null;
   onOpen: (name: string, offset?: number) => void;
+  previewCall: PreviewCall;
 }) {
   const [focused, setFocused] = useState<number | null>(focus);
   const rowRefs = useRef(new Map<number, HTMLDivElement>());
@@ -1995,6 +2021,57 @@ function ScriptLines({
       )}
       {lines.map((line) => {
         const from = incoming.get(line.offset);
+        const actions = [
+          ...(line.literals ?? []).map((slot) => (
+            <LiteralChip
+              key={`literal:${slot.index}`}
+              exportIndex={exportIndex}
+              statement={line.offset}
+              slot={slot}
+            />
+          )),
+          ...(line.expressions ?? [])
+            .filter((slot) => slot.kind !== "literal" || ONE_BYTE_FORMS.has(slot.token))
+            .map((slot) =>
+              slot.kind === "condition" ? (
+                <ConditionToggle
+                  key={`at:${slot.at}`}
+                  exportIndex={exportIndex}
+                  statement={line.offset}
+                  slot={slot}
+                />
+              ) : (
+                <ExpressionChip
+                  key={`at:${slot.at}`}
+                  exportIndex={exportIndex}
+                  statement={line.offset}
+                  slot={slot}
+                  previewCall={previewCall}
+                />
+              )
+            ),
+          ...(line.targets ?? []).map((target) => (
+            <button
+              key={`target:${target}`}
+              className="whitespace-nowrap font-sans text-blue-accent-foreground hover:underline"
+              onClick={() => go(target)}
+            >
+              → {hex(target)}
+            </button>
+          )),
+          ...(line.calls ?? [])
+            .filter((call) => exportNames.has(call))
+            .map((call) => (
+              <Tip key={`call:${call}`} content={`Open ${call}`}>
+                <button
+                  className="whitespace-nowrap font-sans text-blue-accent-foreground hover:underline"
+                  onClick={() => onOpen(call)}
+                >
+                  ↗ {call}
+                </button>
+              </Tip>
+            )),
+        ];
         return (
           <React.Fragment key={line.offset}>
             {eventsAt.get(line.offset)?.map((name) => (
@@ -2007,10 +2084,7 @@ function ScriptLines({
                 if (el) rowRefs.current.set(line.offset, el);
                 else rowRefs.current.delete(line.offset);
               }}
-              className={cn(
-                "flex gap-3 whitespace-pre rounded-sm",
-                focused === line.offset && "bg-primary/15"
-              )}
+              className={cn("flex gap-3 rounded-sm", focused === line.offset && "bg-primary/15")}
             >
               <span className="w-12 shrink-0 text-muted-foreground">
                 {hex(line.offset)}
@@ -2020,36 +2094,16 @@ function ScriptLines({
                   </Tip>
                 )}
               </span>
-              <span>{line.text}</span>
-              {(line.literals ?? []).map((slot) => (
-                <LiteralChip
-                  key={slot.index}
-                  exportIndex={exportIndex}
-                  statement={line.offset}
-                  slot={slot}
-                />
-              ))}
-              {(line.targets ?? []).map((target) => (
-                <button
-                  key={target}
-                  className="shrink-0 font-sans text-blue-accent-foreground hover:underline"
-                  onClick={() => go(target)}
-                >
-                  → {hex(target)}
-                </button>
-              ))}
-              {(line.calls ?? [])
-                .filter((call) => exportNames.has(call))
-                .map((call) => (
-                  <Tip key={call} content={`Open ${call}`}>
-                    <button
-                      className="shrink-0 font-sans text-blue-accent-foreground hover:underline"
-                      onClick={() => onOpen(call)}
-                    >
-                      ↗ {call}
-                    </button>
-                  </Tip>
-                ))}
+              {/* A long statement wraps under itself, and what can be changed or followed on it
+                  flows after the text, onto a line of its own when the text fills the width. */}
+              <div className="min-w-0 flex-1">
+                <span className="whitespace-pre-wrap [overflow-wrap:anywhere]">{line.text}</span>
+                {actions.length > 0 && (
+                  <span className="ml-3 inline-flex max-w-full flex-wrap items-center gap-x-3 gap-y-0.5 align-top">
+                    {actions}
+                  </span>
+                )}
+              </div>
             </div>
           </React.Fragment>
         );
@@ -2058,23 +2112,56 @@ function ScriptLines({
   );
 }
 
-/** A constant in a statement that can take a new value in place. */
+/** A constant in a statement that can take a new value. */
 interface LiteralSlot {
   /** Which literal in the statement, counting every literal, which is how an edit names it. */
   index: number;
   kind: string;
   value: string;
-  /** A string's length, which a replacement has to keep. */
-  length?: number;
 }
 
-/** How long a string constant's replacement is, in the units its width is counted in. */
-function literalLength(kind: string, text: string): number {
-  return kind === "UnicodeStringConst" ? text.length : [...text].length;
+/** Something in a statement an edit names by the offset it starts at. */
+interface ExpressionSlot {
+  at: number;
+  kind: "literal" | "object" | "text" | "call" | "condition";
+  /** The instruction, such as `ObjectConst` or `JumpIfNot`. */
+  token: string;
+  /** The expression as the disassembly shows it, which a save holds the script to. */
+  text: string;
+  /** What it holds as an edit types it. */
+  value?: string;
 }
+
+/** What a call would meet pointed at another function, as a save would judge it. A native
+ *  function is never checked: the game's files do not say what one takes. */
+interface CallPreview {
+  callee: string;
+  /** What the function it names now takes and gives back, `(Int, Int) -> Bool`, or what the call
+   *  passes and keeps when the function does not say. */
+  was: string | null;
+  /** What the new function takes and gives back, when it is a Blueprint function. */
+  now: string | null;
+  verdict: "fits" | "mismatch" | "unknown";
+  reason: string | null;
+}
+
+type PreviewCall = (statement: number, at: number, value: string) => Promise<CallPreview>;
+
+/** The literals with no value bytes, which only an edit by offset reaches. */
+const ONE_BYTE_FORMS = new Set(["True", "False", "IntZero", "IntOne"]);
+
+/** What each kind of expression takes, for the field that changes it. */
+const SLOT_HINTS: Record<ExpressionSlot["kind"], string> = {
+  literal: "true or false for a boolean, any integer for IntZero and IntOne.",
+  object:
+    "An object's path as the disassembly shows it, or None. It has to be of the class the script held there.",
+  text: 'UE\'s text literal syntax: INVTEXT("..."), NSLOCTEXT("ns", "key", "...") or LOCTABLE("/Game/...", "key"). Plain words edit a text\'s source, or show as typed in every language.',
+  call: "The function's path as the disassembly shows it, or a bare name for a virtual call. It has to take the same arguments and give back what the call keeps.",
+  condition: "",
+};
 
 /** One editable constant: its value, or the draft replacing it, and an inline field to change it.
- *  The bytes cannot grow in place, so a string keeps its length and a number its type. */
+ *  A value of another length moves the code after it, and everything pointing into it follows. */
 function LiteralChip({
   exportIndex,
   statement,
@@ -2091,14 +2178,8 @@ function LiteralChip({
   const current = draft?.op === "script_set" ? draft.text : slot.value;
   const [editing, setEditing] = useState<string | null>(null);
 
-  const problem =
-    editing !== null &&
-    slot.length !== undefined &&
-    literalLength(slot.kind, editing) !== slot.length
-      ? `Must stay ${slot.length} characters long; this is ${literalLength(slot.kind, editing)}.`
-      : null;
   const commit = () => {
-    if (editing === null || problem) return;
+    if (editing === null) return;
     if (editing === slot.value) session.dropDraft(key);
     else session.setDraft(target, { op: "script_set", text: editing }, []);
     setEditing(null);
@@ -2106,7 +2187,7 @@ function LiteralChip({
 
   if (editing !== null) {
     return (
-      <Tip content={problem ?? `${slot.kind}. Enter to keep, Esc to cancel.`}>
+      <Tip content={`${slot.kind}. Enter to keep, Esc to cancel.`}>
         <input
           autoFocus
           value={editing}
@@ -2115,19 +2196,14 @@ function LiteralChip({
             if (e.key === "Enter") commit();
             if (e.key === "Escape") setEditing(null);
           }}
-          onBlur={() => (problem ? setEditing(null) : commit())}
+          onBlur={commit}
           size={Math.max(editing.length, 4)}
-          className={cn(
-            "shrink-0 rounded-sm border bg-background px-1 font-mono text-[11px] outline-none",
-            problem ? "border-err" : "border-primary"
-          )}
+          className="max-w-full shrink-0 rounded-sm border border-primary bg-background px-1 font-mono text-[11px] outline-none"
         />
       </Tip>
     );
   }
-  const hint =
-    session.locked ??
-    `${slot.kind}${slot.length !== undefined ? `, ${slot.length} characters` : ""}. Click to change it.`;
+  const hint = session.locked ?? `${slot.kind}. Click to change it.`;
   return (
     <span className="flex shrink-0 items-center">
       <Tip content={hint}>
@@ -2156,12 +2232,210 @@ function LiteralChip({
   );
 }
 
+/** An object, a text, a call's function or a one-byte literal, changed by where it starts. */
+function ExpressionChip({
+  exportIndex,
+  statement,
+  slot,
+  previewCall,
+}: {
+  exportIndex: number;
+  statement: number;
+  slot: ExpressionSlot;
+  previewCall: PreviewCall;
+}) {
+  const session = useEditSession();
+  const target = scriptExpressionTarget(exportIndex, statement, slot.at, slot.text);
+  const key = draftKey(target);
+  const draft = session.drafts[key]?.draft;
+  const value = slot.value ?? "";
+  const current = draft?.op === "script_set" ? draft.text : value;
+  const [editing, setEditing] = useState<string | null>(null);
+
+  const commit = () => {
+    if (editing === null) return;
+    if (editing === value) session.dropDraft(key);
+    else session.setDraft(target, { op: "script_set", text: editing }, []);
+    setEditing(null);
+  };
+
+  if (editing !== null) {
+    return (
+      <Tip content={`${SLOT_HINTS[slot.kind]} Enter to keep, Esc to cancel.`}>
+        <input
+          autoFocus
+          value={editing}
+          onChange={(e) => setEditing(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") commit();
+            if (e.key === "Escape") setEditing(null);
+          }}
+          onBlur={commit}
+          size={Math.max(editing.length, 8)}
+          className="max-w-full shrink-0 rounded-sm border border-primary bg-background px-1 font-mono text-[11px] outline-none"
+        />
+      </Tip>
+    );
+  }
+  const hint = session.locked ?? `${slot.token}: ${SLOT_HINTS[slot.kind]} Click to change it.`;
+  return (
+    <span className="flex shrink-0 items-center">
+      <Tip content={hint}>
+        <button
+          disabled={!!session.locked}
+          onClick={() => setEditing(current)}
+          className={cn(
+            "max-w-72 truncate rounded-sm border px-1 font-mono",
+            draft
+              ? "border-blue-accent-border bg-blue-accent/15 text-blue-accent-foreground"
+              : "border-border/60 text-muted-foreground hover:text-foreground"
+          )}
+        >
+          <span className="mr-1 font-sans opacity-70">
+            {slot.kind === "literal" ? "" : slot.kind}
+          </span>
+          {current === "" ? "\u2205" : current}
+        </button>
+      </Tip>
+      {draft && slot.kind === "call" && (
+        <CallVerdict statement={statement} at={slot.at} value={current} preview={previewCall} />
+      )}
+      {draft && (
+        <button
+          className="px-0.5 text-muted-foreground hover:text-foreground"
+          onClick={() => session.dropDraft(key)}
+        >
+          <X size={10} />
+        </button>
+      )}
+    </span>
+  );
+}
+
+/** Whether a drafted call fits the function it now names, with both signatures on hover. */
+function CallVerdict({
+  statement,
+  at,
+  value,
+  preview,
+}: {
+  statement: number;
+  at: number;
+  value: string;
+  preview: PreviewCall;
+}) {
+  const [result, setResult] = useState<CallPreview | string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setResult(null);
+    preview(statement, at, value).then(
+      (found) => !cancelled && setResult(found),
+      (e) => !cancelled && setResult(String(e))
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [preview, statement, at, value]);
+
+  if (result === null) {
+    return <Loader2 size={10} className="ml-0.5 animate-spin text-muted-foreground" />;
+  }
+  if (typeof result === "string") {
+    return (
+      <Tip content={result}>
+        <AlertTriangle aria-label="call not checked" size={10} className="ml-0.5 text-red-400" />
+      </Tip>
+    );
+  }
+  const shape = (text: string | null) => text ?? "not known";
+  const content = (
+    <div className="space-y-0.5 font-mono text-[11px]">
+      <p>
+        {result.callee} {shape(result.was)}
+      </p>
+      <p>
+        {value} {shape(result.now)}
+      </p>
+      {result.reason && <p className="font-sans">{result.reason}</p>}
+    </div>
+  );
+  const icon =
+    result.verdict === "fits" ? (
+      <Check aria-label="call fits" size={10} className="ml-0.5 text-emerald-400" />
+    ) : result.verdict === "mismatch" ? (
+      <X aria-label="call does not fit" size={10} className="ml-0.5 text-red-400" />
+    ) : (
+      <CircleHelp aria-label="call not confirmed" size={10} className="ml-0.5 text-amber-400" />
+    );
+  return <Tip content={content}>{icon}</Tip>;
+}
+
+/** A branch's condition fixed either way: always on into what follows, or always jumping. */
+function ConditionToggle({
+  exportIndex,
+  statement,
+  slot,
+}: {
+  exportIndex: number;
+  statement: number;
+  slot: ExpressionSlot;
+}) {
+  const session = useEditSession();
+  const target = scriptExpressionTarget(exportIndex, statement, slot.at, slot.text);
+  const key = draftKey(target);
+  const draft = session.drafts[key]?.draft;
+  const chosen = draft?.op === "script_set" ? draft.text : null;
+  const choose = (value: "true" | "false") => {
+    if (chosen === value) session.dropDraft(key);
+    else session.setDraft(target, { op: "script_set", text: value }, []);
+  };
+  const jump = slot.token === "JumpIfNot";
+  const options: { value: "true" | "false"; label: string; tip: string }[] = [
+    {
+      value: "true",
+      label: "always true",
+      tip: jump
+        ? "Never take the jump: go on into the code after it, as though the condition held."
+        : "Never end this branch here, as though the condition held.",
+    },
+    {
+      value: "false",
+      label: "always false",
+      tip: jump
+        ? "Always take the jump, as though the condition failed."
+        : "Always end this branch here, as though the condition failed.",
+    },
+  ];
+  return (
+    <span className="flex shrink-0 items-center gap-0.5 font-sans">
+      {options.map((option) => (
+        <Tip key={option.value} content={session.locked ?? option.tip}>
+          <button
+            disabled={!!session.locked}
+            onClick={() => choose(option.value)}
+            className={cn(
+              "rounded-sm border px-1",
+              chosen === option.value
+                ? "border-blue-accent-border bg-blue-accent/15 text-blue-accent-foreground"
+                : "border-border/60 text-muted-foreground hover:text-foreground"
+            )}
+          >
+            {option.label}
+          </button>
+        </Tip>
+      ))}
+    </span>
+  );
+}
+
 interface ScriptLine {
   offset: number;
   text: string;
   targets?: number[];
   calls?: string[];
   literals?: LiteralSlot[];
+  expressions?: ExpressionSlot[];
 }
 
 interface FunctionField {
@@ -2178,6 +2452,8 @@ interface ScriptView {
   callers: [string, number][];
   complete: boolean;
   stopped: string | null;
+  /** Why the script has to keep its size, when it does. */
+  resize_lock?: string | null;
   buffer_size: number;
   storage_size: number;
   statements: number;
@@ -8074,19 +8350,29 @@ export default function AssetInspector({
           >
             <AlertDialogContent>
               <AlertDialogHeader>
-                <AlertDialogTitle>These edits point at nothing</AlertDialogTitle>
+                <AlertDialogTitle>
+                  {edits.pendingMissing?.unchecked
+                    ? "These edits could not be checked"
+                    : "These edits point at nothing"}
+                </AlertDialogTitle>
                 <AlertDialogDescription className="whitespace-pre-line">
                   {edits.pendingMissing?.message}
-                  {"\n\n"}The game finds nothing there: an import loads as nothing, and a text shows
-                  a placeholder. Save anyway only if a mod loaded alongside this one provides it.
+                  {"\n\n"}
+                  {edits.pendingMissing?.unchecked
+                    ? "The script was compiled for what it held there. Something that does not fit can break the code around it or crash the game. Save anyway only if you know the two are used the same way."
+                    : "The game finds nothing there: an import loads as nothing, and a text shows a placeholder. Save anyway only if a mod loaded alongside this one provides it."}
                 </AlertDialogDescription>
               </AlertDialogHeader>
               <AlertDialogFooter>
                 <AlertDialogCancel>Cancel</AlertDialogCancel>
                 <AlertDialogAction
                   onClick={() => {
-                    const options = edits.pendingMissing?.options;
-                    void edits.save({ ...options, allowMissing: true });
+                    const pending = edits.pendingMissing;
+                    void edits.save(
+                      pending?.unchecked
+                        ? { ...pending.options, allowUnchecked: true }
+                        : { ...pending?.options, allowMissing: true }
+                    );
                   }}
                   className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
                 >

@@ -181,6 +181,7 @@ pub fn run() {
             asset_view::set_asset_save_target,
             asset_view::export_bytes_view,
             asset_view::export_script_view,
+            asset_view::script_call_preview,
             asset_view::export_payload,
             asset_view::export_bulk,
             asset_view::enum_options,

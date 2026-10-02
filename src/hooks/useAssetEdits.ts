@@ -74,7 +74,9 @@ export interface EditTarget {
   bulk?: { resource: number };
   /** A constant inside a function's bytecode: the export, the statement's offset, and which
    *  literal in that statement. */
-  script?: { export: number; statement: number; constant: number };
+  /** An expression in an export's bytecode: by the offset it starts at when `at` is set, and
+   *  otherwise as its statement's `constant`-th literal. */
+  script?: { export: number; statement: number; constant: number; at?: number };
   /** The value as it read when the draft was made, so a save refuses one that has since changed. */
   was?: string;
   /** Down from the value at this target to the one the draft sets: field names through an unset
@@ -125,8 +127,8 @@ export function draftKey(target: EditTarget): string {
   if (target.payload) return ["payload", target.payload.export].join(SEP);
   if (target.bulk) return ["bulk", target.bulk.resource].join(SEP);
   if (target.script) {
-    const { export: exportIndex, statement, constant } = target.script;
-    return ["script", exportIndex, statement, constant].join(SEP);
+    const { export: exportIndex, statement, constant, at } = target.script;
+    return ["script", exportIndex, statement, at === undefined ? constant : `@${at}`].join(SEP);
   }
   if (target.row) return ["row", target.row.export, target.row.name].join(SEP);
   if (target.string) {
@@ -188,6 +190,23 @@ export function scriptTarget(exportIndex: number, statement: number, constant: n
     name: "script",
     kind: "script",
     script: { export: exportIndex, statement, constant },
+  };
+}
+
+/** The expression starting at `at` in the statement at `statement`, reading `was` as it was
+ *  disassembled, so a save refuses it once the script has changed underneath. */
+export function scriptExpressionTarget(
+  exportIndex: number,
+  statement: number,
+  at: number,
+  was: string
+): EditTarget {
+  return {
+    offset: 0,
+    name: "script",
+    kind: "script",
+    script: { export: exportIndex, statement, constant: 0, at },
+    was,
   };
 }
 
@@ -523,17 +542,23 @@ function toPayloadEdit({ target, draft }: DraftRecord): PayloadEdit | null {
   return { export: target.payload.export, file: draft.file };
 }
 
-/** A bytecode constant given a new value at its own width. */
+/** Something in a function's bytecode given a new value: a literal, an object constant, a text,
+ *  a call's function, or a condition. */
 interface ScriptEdit {
   export: number;
   statement: number;
   constant: number;
+  at?: number;
   value: string;
+  /** The expression as it was disassembled, for one addressed by `at`. */
+  was?: string;
 }
 
 function toScriptEdit({ target, draft }: DraftRecord): ScriptEdit | null {
   if (!target.script || draft.op !== "script_set") return null;
-  return { ...target.script, value: draft.text };
+  const edit: ScriptEdit = { ...target.script, value: draft.text };
+  if (target.script.at !== undefined && target.was !== undefined) edit.was = target.was;
+  return edit;
 }
 
 function toBulkEdit({ target, draft }: DraftRecord): BulkEdit | null {
@@ -592,6 +617,8 @@ export interface SaveOptions {
   allowDrift?: boolean;
   /** Save imports that point at a path neither the game nor an enabled mod has. */
   allowMissing?: boolean;
+  /** Save script edits that point at something not confirmed to fit what the script held. */
+  allowUnchecked?: boolean;
   structural?: Structural;
 }
 
@@ -599,6 +626,8 @@ export interface SaveOptions {
 const DRIFT = "The package changed since these edits were written";
 /** How the backend's refusal of an import pointed at nothing begins. */
 const MISSING = "Nothing is at the path these edits point at";
+/** How the backend's refusal of a script edit it could not confirm begins. */
+const UNCHECKED = "These edits point a script at something that could not be confirmed to fit it";
 
 /** What `check_object_path` found at a path. */
 export type ObjectCheck =
@@ -706,9 +735,10 @@ export interface AssetEdits {
   /** Set when the asset no longer reads the way it did when the drafts were made. */
   pendingDrift: { message: string; structural?: Structural } | null;
   cancelDrift: () => void;
-  /** Set when an import the save adds or retargets points at nothing. Carries the options the
-   *  save was made with, so going ahead repeats it. */
-  pendingMissing: { message: string; options: SaveOptions } | null;
+  /** Set when an import the save adds or retargets points at nothing, or, with `unchecked`, when a
+   *  script edit points at something not confirmed to fit. Carries the options the save was made
+   *  with, so going ahead repeats it. */
+  pendingMissing: { message: string; options: SaveOptions; unchecked?: boolean } | null;
   cancelMissing: () => void;
   /** What is at an object path, looked up in the game and the enabled mods. */
   checkPath: (path: string) => Promise<ObjectCheck>;
@@ -735,7 +765,7 @@ interface Held {
   imports: Record<string, ImportDraft>;
   pendingReplace: { pak: string; structural?: Structural; saveAs?: SaveAs } | null;
   pendingDrift: { message: string; structural?: Structural } | null;
-  pendingMissing: { message: string; options: SaveOptions } | null;
+  pendingMissing: { message: string; options: SaveOptions; unchecked?: boolean } | null;
 }
 
 const EMPTY: Record<string, DraftRecord> = {};
@@ -989,6 +1019,7 @@ export function useAssetEdits({
           layer: onModCopy,
           allowDrift: options?.allowDrift ?? false,
           allowMissing: options?.allowMissing ?? false,
+          allowUnchecked: options?.allowUnchecked ?? false,
           target: saveTarget,
           edits: list,
         });
@@ -1025,10 +1056,14 @@ export function useAssetEdits({
           update(() => ({ pendingDrift: { message, structural } }));
           return;
         }
-        if (message.startsWith(MISSING)) {
+        if (message.startsWith(MISSING) || message.startsWith(UNCHECKED)) {
           update(() => ({
             pendingDrift: null,
-            pendingMissing: { message, options: { ...options, structural, saveAs } },
+            pendingMissing: {
+              message,
+              options: { ...options, structural, saveAs },
+              unchecked: message.startsWith(UNCHECKED),
+            },
           }));
           return;
         }

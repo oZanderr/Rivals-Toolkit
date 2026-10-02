@@ -354,6 +354,9 @@ pub(crate) struct ScriptView {
     /// Whether the walk reached the end. A script that stopped is shown as far as it got.
     complete: bool,
     stopped: Option<String>,
+    /// Why the script has to keep its size, when it does: an edit that changes the length of
+    /// anything in it is refused, and one that keeps every byte where it was is not.
+    resize_lock: Option<String>,
     buffer_size: u32,
     storage_size: u32,
     statements: usize,
@@ -402,10 +405,54 @@ pub(crate) async fn export_script_view(
             callers,
             complete: script.stopped.is_none(),
             stopped: script.stopped.as_ref().map(|stop| stop.reason.clone()),
+            resize_lock: script
+                .stopped
+                .is_none()
+                .then(|| script.resize_lock())
+                .flatten(),
             buffer_size: script.buffer_size,
             storage_size: script.storage_size,
             statements: script.statements.len(),
         })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// How the call starting at `at` would fare pointed at `value`: both functions' shapes and the
+/// verdict a save would reach. See `rivals_core::asset_edit::preview_call`.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn script_call_preview(
+    state: State<'_, SettingsState>,
+    game_root: String,
+    container: String,
+    entry: String,
+    export: u32,
+    statement: u32,
+    at: u32,
+    value: String,
+) -> Result<asset_edit::CallPreview, String> {
+    let usmap = configured_usmap(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let schema = mappings::resolve(None, usmap.as_deref())
+            .and_then(|path| mappings::load(&path))
+            .ok();
+        asset_edit::preview_call(
+            &AssetEditRequest {
+                game_root: &game_root,
+                container: &container,
+                entry: &entry,
+                kind: source_of(&container),
+                mod_name: "",
+                changes: Default::default(),
+            },
+            schema.as_deref(),
+            export,
+            statement,
+            at,
+            &value,
+        )
     })
     .await
     .map_err(|e| e.to_string())?
@@ -680,11 +727,13 @@ pub(crate) async fn save_asset_edits(
     layer: Option<bool>,
     allow_drift: Option<bool>,
     allow_missing: Option<bool>,
+    allow_unchecked: Option<bool>,
     target: Option<asset_edit::SaveTarget>,
     mut edits: asset_edit::json::EditList,
 ) -> Result<SaveResult, String> {
     edits.allow_drift = allow_drift.unwrap_or(false);
     edits.allow_missing = allow_missing.unwrap_or(false);
+    edits.allow_unchecked = allow_unchecked.unwrap_or(false);
     if crate::game_status::should_block_for_game() {
         return Err(crate::game_status::game_running_error());
     }
