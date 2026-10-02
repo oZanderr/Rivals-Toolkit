@@ -28,6 +28,7 @@ export type Draft =
   | { op: "set_element"; index: number; text: string }
   | { op: "set_key"; index: number; text: string }
   | { op: "reorder"; order: number[] }
+  | { op: "set_raw"; hex: string }
   | { op: "store" }
   | { op: "unset" }
   | { op: "key_add"; time: number; value: number }
@@ -282,6 +283,7 @@ export function isStructural(draft: Draft): boolean {
     draft.op === "insert" ||
     draft.op === "remove" ||
     draft.op === "reorder" ||
+    draft.op === "set_raw" ||
     draft.op === "row_remove"
   );
 }
@@ -331,6 +333,7 @@ type ValueEdit = EditTargetFields &
     | { op: "remove"; index: number }
     | { op: "set_key"; index: number; text: string }
     | { op: "reorder"; order: number[] }
+    | { op: "set_raw"; hex: string }
   );
 
 function toValueEdit({ target, draft }: DraftRecord): ValueEdit | null {
@@ -357,6 +360,8 @@ function toValueEdit({ target, draft }: DraftRecord): ValueEdit | null {
       return { ...at, op: "set_key", index: draft.index, text: draft.text };
     case "reorder":
       return { ...at, op: "reorder", order: draft.order };
+    case "set_raw":
+      return { ...at, op: "set_raw", hex: draft.hex };
     default:
       return null;
   }

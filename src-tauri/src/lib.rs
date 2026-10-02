@@ -180,6 +180,7 @@ pub fn run() {
             asset_view::get_asset_save_target,
             asset_view::set_asset_save_target,
             asset_view::export_bytes_view,
+            asset_view::value_bytes,
             asset_view::export_script_view,
             asset_view::script_call_preview,
             asset_view::assemble_preview,

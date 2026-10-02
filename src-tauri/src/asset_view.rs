@@ -338,6 +338,61 @@ pub(crate) async fn export_bytes_view(
     .map_err(|e| e.to_string())?
 }
 
+/// The most bytes a value's own bytes are fetched for editing by hand: past this, hex is no way to
+/// write a value.
+const VALUE_BYTES_CAP: u64 = 64 * 1024;
+
+/// The bytes a value spans, by the absolute offsets the reader recorded: in the header below
+/// `base`, its length, and in the export data from there.
+fn value_slice(
+    asset: &[u8],
+    exports: &[u8],
+    base: u64,
+    start: u64,
+    end: u64,
+) -> Result<Vec<u8>, String> {
+    let length = end
+        .checked_sub(start)
+        .ok_or("a value cannot end before it starts")?;
+    if length > VALUE_BYTES_CAP {
+        return Err(format!(
+            "this value holds {length} bytes, more than the {VALUE_BYTES_CAP} that are edited by hand"
+        ));
+    }
+    let (data, from) = match start.checked_sub(base) {
+        Some(from) => (exports, from),
+        None => (asset, start),
+    };
+    let from = usize::try_from(from).map_err(|_| "implausible offset")?;
+    data.get(from..from + length as usize)
+        .map(<[u8]>::to_vec)
+        .ok_or_else(|| "this value lies outside the package".to_string())
+}
+
+/// A value's bytes as the package holds them, for typing new ones over them.
+#[tauri::command]
+pub(crate) async fn value_bytes(
+    game_root: String,
+    container: String,
+    entry: String,
+    start: u64,
+    end: u64,
+) -> Result<Vec<u8>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let loaded = asset::load_bundle(&game_root, &container, &entry, source_of(&container))?;
+        let bundle = AssetBundle {
+            asset: &loaded.asset_file_buffer,
+            exports: &loaded.exports_file_buffer,
+        };
+        let header = rivals_uasset::read_header(&bundle)?;
+        let base = u64::try_from(header.summary.versioning_info.total_header_size)
+            .map_err(|_| "this package reports an implausible header size")?;
+        value_slice(bundle.asset, bundle.exports, base, start, end)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// One export's bytecode, disassembled for reading.
 #[derive(Serialize)]
 pub(crate) struct ScriptView {
@@ -1216,6 +1271,39 @@ pub(crate) fn set_mappings_path(
 }
 
 /// Set `RIVALS_GAME_ROOT` and `RIVALS_USMAP` to a real install to run this. Skipped otherwise.
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn value_slice_reads_the_header_or_the_export_data_by_offset() {
+        let asset = [1u8, 2, 3, 4];
+        let exports = [5u8, 6, 7, 8];
+        assert_eq!(
+            value_slice(&asset, &exports, 4, 1, 3).expect("header"),
+            [2, 3]
+        );
+        assert_eq!(
+            value_slice(&asset, &exports, 4, 5, 8).expect("exports"),
+            [6, 7, 8]
+        );
+        assert_eq!(
+            value_slice(&asset, &exports, 4, 6, 6).expect("empty"),
+            Vec::<u8>::new()
+        );
+    }
+
+    #[test]
+    fn value_slice_refuses_what_is_not_a_value() {
+        let exports = vec![0u8; (VALUE_BYTES_CAP + 8) as usize];
+        assert!(value_slice(&[], &exports, 0, 4, 2).is_err());
+        assert!(value_slice(&[], &exports, 0, 9, 9 + exports.len() as u64).is_err());
+        let error = value_slice(&[], &exports, 0, 0, VALUE_BYTES_CAP + 1).expect_err("too long");
+        assert!(error.contains("by hand"), "{error}");
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod game_data_tests {

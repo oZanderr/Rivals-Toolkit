@@ -225,6 +225,7 @@ rivals-cli asset trace --container ... --entry ... --export 0      # the bytes e
 rivals-cli asset set --container ... --entry ...   --offset 0xBE6 --kind float --name Damage --value 42.5 --mod-name MyMod
 rivals-cli asset set --container ... --entry ...   --offset 0x3A0 --kind map --name Scores --op set-key --index 1 --key Hulk --mod-name MyMod
 rivals-cli asset set --container ... --entry ...   --offset 0x3A0 --kind array --name Tags --op reorder --order 2,0,1 --mod-name MyMod
+rivals-cli asset set --container ... --entry ...   --offset 0x4C0 --kind struct --name Payload --op set-raw --hex "0a 00 00 00" --mod-name MyMod
 rivals-cli asset row     --container ... --entry ... --export 0 --op add --row NewRow
 rivals-cli asset strings --container ... --entry ... --export 0 --op set-source --index 3 --to "Hello"
 
@@ -306,14 +307,14 @@ beside a note still apply. The limits worth knowing:
 - **Offsets are one-shot.** An edit file addresses the package state its dump came from. Applying it
   twice, or applying two files to one entry expecting them to stack, does not work: dump the saved
   copy and diff again from there.
-- **Adding needs a second pass.** A new container element, table row or stored struct is created
-  with its default; dump the result and diff again to give it a value.
+- **Some changes take a second pass.** A new container element, table row or stored struct is
+  created with its default, an instanced struct given another type holds that type's defaults, and
+  elements that moved and changed are moved first. Dump the saved copy and diff again for the rest.
 - **Some changes are not value edits.** Retyping a property and renaming an export are reported,
   not written.
-- **Moving comes first.** Elements that only moved are one reorder. If some of them changed as well,
-  the save moves them, and a dump of the saved copy diffed again changes them.
 - **Bytes are not in the JSON.** Payload and bulk data are named by file in an edit list, never
-  dumped inline.
+  dumped inline, and neither is a payload that did not decode: replace it with `asset set --op
+  set-raw`, or a `set_raw` edit, which takes any value's bytes as hex.
 
 ### Editing a function as text
 

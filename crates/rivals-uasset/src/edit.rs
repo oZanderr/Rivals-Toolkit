@@ -83,6 +83,9 @@ pub enum EditOp {
     /// Put a container's elements in another order: `order[new_position]` is the index the
     /// element there was read at, and every element appears once. A map's pairs move whole.
     Reorder { order: Vec<u32> },
+    /// Replace a stored value's bytes with these, typed as hex digits, at any length. Whatever
+    /// holds the value moves its length to follow; the bytes have to read back as a value.
+    SetRaw { hex: String },
 }
 
 /// What a patch did, for reporting back to the user.
@@ -374,6 +377,17 @@ pub fn check_expectations(parsed: &ParsedPackage, edits: &PackageEdits) -> Resul
         else {
             continue;
         };
+        // Bytes typed by hand replace whatever the value read as.
+        if let EditOp::SetRaw { .. } = edit.op {
+            if entry.value.summary() != *was {
+                drift.push(format!(
+                    "{} was {was}, and is now {}",
+                    entry.label(),
+                    entry.value.summary()
+                ));
+            }
+            continue;
+        }
         // A reorder is held to every element it moves, in the order they read.
         if let EditOp::Reorder { .. } = edit.op {
             let now = fingerprint(&entry.value);
@@ -591,6 +605,12 @@ pub fn expectations(parsed: &ParsedPackage, edits: &PackageEdits) -> Expected {
             if let Some(held) = fingerprint(&entry.value) {
                 expect.values.insert(Expected::value_key(edit), held);
             }
+            continue;
+        }
+        if let EditOp::SetRaw { .. } = edit.op {
+            expect
+                .values
+                .insert(Expected::value_key(edit), entry.value.summary());
             continue;
         }
         let now = match &edit.op {
@@ -1962,6 +1982,42 @@ pub fn patch_package_with(
                     },
                 )
             }
+            EditOp::SetRaw { hex } => {
+                if !stored {
+                    return Err(format!(
+                        "{} stores nothing yet, so it has no bytes to replace; store it first",
+                        entry.label()
+                    ));
+                }
+                let bytes = crate::hex::parse(hex)
+                    .map_err(|reason| format!("{}: {reason}", entry.label()))?;
+                // Whatever the old bytes pointed at may still be named by the new ones.
+                for reference in parsed
+                    .references
+                    .iter()
+                    .filter(|reference| start <= reference.at && reference.at < end)
+                {
+                    object_links.push((start, reference.index));
+                }
+                notes.push(format!(
+                    "{} is written as the bytes typed; an object they name that it did not name \
+                     before is not waited on",
+                    entry.label()
+                ));
+                let after = format!("{} bytes", bytes.len());
+                (
+                    vec![Splice { start, end, bytes }],
+                    AppliedEdit {
+                        name: entry.label(),
+                        offset: start,
+                        offset_after: start,
+                        element: None,
+                        elements_after: None,
+                        before: format!("{} bytes", end - start),
+                        after,
+                    },
+                )
+            }
             EditOp::Reorder { order } => {
                 let layout = container_at(parsed, start, entry)?;
                 let elements = &layout.elements;
@@ -2367,6 +2423,7 @@ pub fn patch_package_with(
         asset: &rewritten.asset,
         exports: &rewritten.exports,
     })?;
+    check_raw_bytes(&rewritten, &edits.values, &applied)?;
     Ok(PatchedBundle {
         asset: rewritten.asset,
         exports: rewritten.exports,
@@ -2375,6 +2432,34 @@ pub fn patch_package_with(
         optional_bulk: bulk_out.optional_bulk,
         notes,
     })
+}
+
+/// Bytes typed by hand sit where the edit says they went, exactly as typed. Verification reads the
+/// package back as values, which cannot tell one set of bytes that reads from another.
+fn check_raw_bytes(
+    rewritten: &crate::write::RewrittenPackage,
+    values: &[ValueEdit],
+    applied: &[AppliedEdit],
+) -> Result<(), String> {
+    let bundle = AssetBundle {
+        asset: &rewritten.asset,
+        exports: &rewritten.exports,
+    };
+    let base = header_size(&bundle)?;
+    for (edit, done) in values.iter().zip(applied) {
+        let EditOp::SetRaw { hex } = &edit.op else {
+            continue;
+        };
+        let wanted = crate::hex::parse(hex)?;
+        let at = done.offset_after;
+        if bytes_at(&bundle, base, at, at + wanted.len() as u64)? != wanted.as_slice() {
+            return Err(format!(
+                "the bytes written for {} are not at {at:#X} after patching",
+                done.name
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Whether a value is a text, including a text slot that holds nothing yet.
@@ -2459,6 +2544,7 @@ fn check_whole_edits(parsed: &ParsedPackage, edits: &[ValueEdit]) -> Result<(), 
                 "edit the whole text or one of its parts, not both"
             }
             (EditOp::Reorder { .. }, _) => "reorder it in a save of its own",
+            (EditOp::SetRaw { .. }, _) => "replace its bytes in a save of their own",
             (EditOp::Set { .. }, _) if entry.name == TYPE_FIELD => {
                 if let Some(layout) = instanced_at(parsed, span.0) {
                     span.1 = layout.payload_end;
@@ -2492,6 +2578,7 @@ fn check_whole_edits(parsed: &ParsedPackage, edits: &[ValueEdit]) -> Result<(), 
             if same || inside {
                 let verb = match held.edit.op {
                     EditOp::Reorder { .. } => "reordered",
+                    EditOp::SetRaw { .. } => "replaced byte for byte",
                     _ if held.label == TYPE_FIELD => "given another type",
                     _ => "set as a whole",
                 };
@@ -5883,6 +5970,26 @@ pub fn verify_patch(
     }
 
     for (edit, done) in edits.values.iter().zip(applied) {
+        // Bytes typed by hand read back as a value of the length written, or, for a payload that
+        // did not decode, as a payload of that length that now may.
+        if let EditOp::SetRaw { hex } = &edit.op {
+            let length = crate::hex::parse(hex)?.len() as u64;
+            let at = done.offset_after;
+            let reads = find_at(after, at, &edit.expect_name, edit.expect_element)
+                .and_then(|entry| entry.span)
+                .is_some_and(|(start, end)| end - start == length)
+                || after.instanced.iter().any(|layout| {
+                    layout.payload_start == at
+                        && layout.payload_end - layout.payload_start == length
+                });
+            if !reads {
+                return Err(format!(
+                    "{} does not read back as the {length} bytes written for it",
+                    edit.expect_name
+                ));
+            }
+            continue;
+        }
         let Some(entry) = find_at(
             after,
             done.offset_after,
@@ -5978,6 +6085,8 @@ pub fn verify_patch(
                 verify_reorder(&was.value, &entry.value, order)
                     .map_err(|reason| format!("{} after reordering: {reason}", edit.expect_name))?;
             }
+            // Read back by its length, ahead of the others.
+            EditOp::SetRaw { .. } => {}
         }
     }
     verify_unique_keys(before, after, edits, applied)
@@ -7513,7 +7622,12 @@ fn encode_scalar(
             8 => parse::<f64>(text)?.to_le_bytes().to_vec(),
             other => return Err(format!("cannot write a {other}-byte float")),
         },
-        other => return Err(format!("{} values cannot be edited yet", kind_of(other))),
+        other => {
+            return Err(format!(
+                "a {} cannot be typed; its bytes can be replaced as raw hex",
+                kind_of(other)
+            ));
+        }
     };
     if bytes.len() as u64 != width {
         return Err(format!(

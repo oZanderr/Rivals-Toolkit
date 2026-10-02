@@ -8,8 +8,9 @@ use crate::edit::{
 };
 use crate::package::{AssetBundle, ExportStatus, ParseOptions, ParsedPackage, parse_package_opts};
 use crate::props::TYPE_FIELD;
+use crate::props::UNDECODED_FIELD;
 use crate::unversioned_fixture::{
-    HELPER_PATH, POINT_PATH, TEST_CLASS_PATH, unversioned_mappings, unversioned_package,
+    HELPER_PATH, POINT_PATH, TEST_CLASS_PATH, point, unversioned_mappings, unversioned_package,
 };
 use crate::value::{PropertyEntry, PropertyValue};
 
@@ -955,4 +956,106 @@ fn generator_contents_grow_and_shrink() {
 fn a_plain_string_over_a_format_text_names_its_parts() {
     let error = refused(|p| vec![edit_of(field(p, "Named", &[]), set("hello"))]);
     assert!(error.contains("edit one of its parts"), "{error}");
+}
+
+fn raw(bytes: &[u8]) -> EditOp {
+    EditOp::SetRaw {
+        hex: bytes.iter().map(|byte| format!("{byte:02x} ")).collect(),
+    }
+}
+
+/// A value's bytes typed by hand may be any length: the array that follows moves, and the save
+/// reads back as what they say.
+#[test]
+fn a_value_is_rewritten_from_raw_hex_at_another_length() {
+    let mut numbers = 2i32.to_le_bytes().to_vec();
+    numbers.extend_from_slice(&5i32.to_le_bytes());
+    numbers.extend_from_slice(&6i32.to_le_bytes());
+    let after = apply(|p| {
+        vec![
+            edit_of(find(top(p), "Numbers"), raw(&numbers)),
+            edit_of(find(top(p), "Count"), raw(&10i32.to_le_bytes())),
+        ]
+    });
+    assert_eq!(summaries(value(&after, "Numbers")), ["5", "6"]);
+    assert_eq!(value(&after, "Count").summary(), "10");
+    assert_eq!(
+        summaries(value(&after, "Targets")).len(),
+        2,
+        "what follows reads on"
+    );
+}
+
+/// Bytes that leave the export unreadable are refused when the save reads itself back.
+#[test]
+fn raw_bytes_that_do_not_read_are_refused() {
+    let (before, asset, exports) = fixture();
+    let mappings = unversioned_mappings();
+    let changes = PackageEdits {
+        values: vec![edit_of(find(top(&before), "Count"), raw(&[1]))],
+        ..Default::default()
+    };
+    let patched = patch_package(
+        &AssetBundle {
+            asset: &asset,
+            exports: &exports,
+        },
+        &before,
+        &changes,
+        Some(&mappings),
+    )
+    .expect("written");
+    let after = parse_package_opts(
+        &AssetBundle {
+            asset: &patched.asset,
+            exports: &patched.exports,
+        },
+        Some(&mappings),
+        None,
+        ParseOptions {
+            declared_slots: true,
+            ..Default::default()
+        },
+    )
+    .expect("parses");
+    assert!(verify_patch(&before, &after, &changes, &patched.applied).is_err());
+}
+
+/// A payload that did not decode is replaced through its bytes, and its length follows; bytes that
+/// do decode as its type read back as that struct.
+#[test]
+fn an_undecoded_instanced_payload_is_replaced_and_its_size_follows() {
+    let after = apply(|p| {
+        vec![edit_of(
+            field(p, "Garbled", &[UNDECODED_FIELD]),
+            raw(&[0x11, 0x22, 0x33, 0x44, 0x55]),
+        )]
+    });
+    assert!(matches!(
+        field(&after, "Garbled", &[UNDECODED_FIELD]).value,
+        PropertyValue::Undecoded { bytes: 5, .. }
+    ));
+    let after = apply(|p| {
+        vec![edit_of(
+            field(p, "Mangled", &[UNDECODED_FIELD]),
+            raw(&point(9)),
+        )]
+    });
+    assert_eq!(
+        instanced_fields(value(&after, "Mangled")).1,
+        ["X=9", "Y=(not stored)"]
+    );
+    assert_eq!(value(&after, "Count").summary(), "7");
+}
+
+/// Raw bytes write a value whole, so nothing inside it can be edited in the same save.
+#[test]
+fn raw_bytes_ride_alone_in_their_value() {
+    let error = refused(|p| {
+        vec![
+            edit_of(find(top(p), "Payload"), raw(&[0; 8])),
+            edit_of(field(p, "Payload", &["X"]), set("3")),
+        ]
+    });
+    assert!(error.contains("replaced byte for byte"), "{error}");
 }

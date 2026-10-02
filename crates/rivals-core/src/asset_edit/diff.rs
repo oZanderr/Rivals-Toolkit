@@ -457,7 +457,8 @@ fn diff_in_place(
             let now = edited.get("bytes").and_then(Json::as_u64);
             if now != Some(*bytes) {
                 out.notes.push(format!(
-                    "{label}: this payload did not decode, so its bytes are kept as they are"
+                    "{label}: this payload did not decode, so the dump does not hold its bytes; \
+                     replace them with asset set --op set-raw, or a set_raw edit"
                 ));
             }
         }

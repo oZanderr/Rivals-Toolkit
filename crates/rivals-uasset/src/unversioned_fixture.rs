@@ -34,6 +34,7 @@ pub const NAMES: &[&str] = &[
     "Point",
     "Wrapper",
     "Gen",
+    "Broken",
 ];
 
 /// Where the package's imports sit, as the package indices values point at.
@@ -45,6 +46,8 @@ pub const TEST_CLASS_PATH: &str = "/Script/Test.TestClass";
 pub const POINT: i32 = -5;
 pub const POINT_PATH: &str = "/Script/Test.Point";
 pub const WRAPPER: i32 = -6;
+/// A struct the mappings do not describe, so a payload of it does not decode.
+pub const BROKEN: i32 = -7;
 
 pub fn index_of(value: &str) -> i32 {
     NAMES
@@ -245,6 +248,17 @@ pub fn slots() -> Vec<Slot> {
             generated
         }),
         slot(
+            "Garbled",
+            instanced_struct(),
+            Held::Bytes(instanced(BROKEN, &[0xAA, 0xBB, 0xCC])),
+        ),
+        // A `Point` whose header is cut short.
+        slot(
+            "Mangled",
+            instanced_struct(),
+            Held::Bytes(instanced(POINT, &[0xFF])),
+        ),
+        slot(
             "Nest",
             instanced_struct(),
             Held::Bytes(instanced(
@@ -303,7 +317,7 @@ fn instanced(index: i32, payload: &[u8]) -> Vec<u8> {
 }
 
 /// A `Point` storing `X` alone.
-fn point(x: i32) -> Vec<u8> {
+pub fn point(x: i32) -> Vec<u8> {
     block(2, &[(0, x.to_le_bytes().to_vec())])
 }
 
@@ -421,6 +435,12 @@ pub fn unversioned_package() -> (Vec<u8>, Vec<u8>) {
                 "ScriptStruct",
                 FPackageIndex::create_import(0),
                 "Wrapper",
+            ),
+            import(
+                "/Script/CoreUObject",
+                "ScriptStruct",
+                FPackageIndex::create_import(0),
+                "Broken",
             ),
         ],
         exports: vec![FObjectExport {

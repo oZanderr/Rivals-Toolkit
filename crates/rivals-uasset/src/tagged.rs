@@ -86,11 +86,17 @@ pub(crate) fn read_tagged_block(
             Ok(value) if cursor.position() == end => value,
             Ok(_) => {
                 diagnostics.unsupported.insert(tag.type_name.clone());
-                undecoded(&tag, "decoder did not consume the declared size")
+                undecoded(
+                    &tag,
+                    "decoder did not consume the declared size",
+                    base,
+                    start,
+                    end,
+                )
             }
             Err(reason) => {
                 diagnostics.unsupported.insert(tag.type_name.clone());
-                undecoded(&tag, &reason)
+                undecoded(&tag, &reason, base, start, end)
             }
         };
 
@@ -173,16 +179,19 @@ fn list_absent(
     }
 }
 
-fn undecoded(tag: &Tag, reason: &str) -> PropertyValue {
+/// A tag's value that did not decode, as its bytes alone: kept as they are, and replaced only by
+/// bytes typed for it.
+fn undecoded(tag: &Tag, reason: &str, base: u64, start: usize, end: usize) -> PropertyValue {
     PropertyValue::Struct {
         name: tag.type_name.clone(),
         fields: vec![PropertyEntry {
             name: crate::props::UNDECODED_FIELD.into(),
             element: None,
-            span: None,
+            span: Some((base + start as u64, base + end as u64)),
             slot: None,
-            value: PropertyValue::Str {
-                value: reason.to_string(),
+            value: PropertyValue::Undecoded {
+                reason: reason.to_string(),
+                bytes: (end - start) as u64,
             },
         }],
     }

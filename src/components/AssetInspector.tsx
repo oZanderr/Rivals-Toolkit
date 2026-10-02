@@ -19,6 +19,7 @@ import {
   ArrowLeft,
   ArrowLeftRight,
   ArrowUp,
+  Binary,
   Check,
   ChevronDown,
   ChevronRight,
@@ -856,7 +857,8 @@ function structuralLock(row: TreeRow, session: EditSession): string | null {
   });
   if (above) {
     const held = session.drafts[above];
-    const what = held.draft.op === "reorder" ? "move" : "add/drop";
+    const what =
+      held.draft.op === "reorder" ? "move" : held.draft.op === "set_raw" ? "new bytes" : "add/drop";
     return `Finish or discard the ${what} on ${held.target.name} first.`;
   }
   return null;
@@ -873,7 +875,7 @@ function rowLock(row: TreeRow, session: EditSession): string | null {
     return row.target ? null : row.reason;
   }
   if (value.kind === "undecoded") {
-    return "This payload did not decode, so its bytes are kept exactly as they are.";
+    return "This payload did not decode, so its bytes are kept as they are. Right click to replace them.";
   }
   if (value.kind === "struct") return "Edit the fields inside.";
   // A text typed whole replaces its parts, so the two cannot both change in one save.
@@ -917,6 +919,140 @@ const TreeMenuContext = createContext<TreeMenu | null>(null);
 /** Whether the package tags each value it stores. A tagged value has no zero flag: it is written
  *  out, or taken out to inherit. */
 const TaggedContext = createContext(false);
+
+/** Where the package on show is read from, for a row that fetches its own bytes. */
+const PackageContext = createContext<{ gamePath: string; container: string; entry: string } | null>(
+  null
+);
+
+/** A value about to be replaced byte for byte. */
+interface BytesAsk {
+  target: EditTarget;
+  within: string[];
+  label: string;
+  span: [number, number];
+}
+
+/** Bytes as hex, sixteen to a line. */
+function hexLines(bytes: number[]): string {
+  const lines: string[] = [];
+  for (let at = 0; at < bytes.length; at += 16) {
+    lines.push(
+      bytes
+        .slice(at, at + 16)
+        .map((byte) => byte.toString(16).padStart(2, "0").toUpperCase())
+        .join(" ")
+    );
+  }
+  return lines.join("\n");
+}
+
+/** Hex digits as bytes, two to a byte, spaces and a leading 0x ignored; null for anything else. */
+function parseHex(text: string): number[] | null {
+  const digits = text.trim().replace(/^0x/i, "").replace(/\s+/g, "");
+  if (!/^[0-9a-f]*$/i.test(digits) || digits.length % 2 !== 0) return null;
+  const bytes: number[] = [];
+  for (let at = 0; at < digits.length; at += 2) bytes.push(parseInt(digits.slice(at, at + 2), 16));
+  return bytes;
+}
+
+/** Typing a value's bytes by hand, starting from the ones it holds. */
+function BytesForm({ ask, onConfirm }: { ask: BytesAsk; onConfirm: (hex: string) => void }) {
+  const place = useContext(PackageContext);
+  const [held, setHeld] = useState<number[] | null>(null);
+  const [text, setText] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [start, end] = ask.span;
+  useEffect(() => {
+    if (!place) return;
+    let cancelled = false;
+    invoke<number[]>("value_bytes", {
+      gameRoot: place.gamePath,
+      container: place.container,
+      entry: place.entry,
+      start,
+      end,
+    }).then(
+      (bytes) => {
+        if (cancelled) return;
+        setHeld(bytes);
+        setText(hexLines(bytes));
+      },
+      (e) => !cancelled && setError(String(e))
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [place, start, end]);
+  const typed = parseHex(text);
+  const changed = typed !== null && held !== null && typed.join(",") !== held.join(",");
+  return (
+    <>
+      <AlertDialogHeader>
+        <AlertDialogTitle>Replace the bytes of {ask.label}</AlertDialogTitle>
+        <AlertDialogDescription>
+          Typed as hex, two digits a byte, at any length. Whatever holds the value moves its length
+          to follow, and the save is refused unless the package reads back. An object the new bytes
+          name that the old ones did not is not waited on.
+        </AlertDialogDescription>
+      </AlertDialogHeader>
+      {error ? (
+        <p className="text-xs text-red-400">{error}</p>
+      ) : held === null ? (
+        <p className="text-xs text-muted-foreground">Reading its bytes…</p>
+      ) : (
+        <textarea
+          aria-label="Bytes"
+          autoFocus
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          rows={Math.min(12, Math.max(3, Math.ceil(held.length / 16)))}
+          spellCheck={false}
+          className="w-full resize-y rounded-md border border-input bg-transparent p-2 font-mono text-xs"
+        />
+      )}
+      <p className="text-xs text-muted-foreground">
+        {typed === null
+          ? "Whole bytes of two hex digits each."
+          : `${typed.length} bytes${held ? `, where it holds ${held.length}` : ""}.`}
+      </p>
+      <AlertDialogFooter>
+        <AlertDialogCancel>Cancel</AlertDialogCancel>
+        <AlertDialogAction disabled={!changed} onClick={() => onConfirm(text)}>
+          Replace
+        </AlertDialogAction>
+      </AlertDialogFooter>
+    </>
+  );
+}
+
+/** The dialog around a BytesForm, queueing the new bytes it collects. */
+function BytesAskDialog({
+  ask,
+  session,
+  onClose,
+}: {
+  ask: BytesAsk | null;
+  session: EditSession;
+  onClose: () => void;
+}) {
+  return (
+    <AlertDialog open={ask !== null} onOpenChange={(open) => !open && onClose()}>
+      <AlertDialogContent>
+        {ask && (
+          <BytesForm
+            key={draftKey(ask.target)}
+            ask={ask}
+            onConfirm={(hex) => {
+              session.setDraft(ask.target, { op: "set_raw", hex }, ask.within);
+              onClose();
+            }}
+          />
+        )}
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
 
 /** A set or a map about to grow: the key form needs to know where the element goes. */
 interface KeyAsk {
@@ -1374,6 +1510,7 @@ function PropertyTree({ rows }: { rows: TreeRow[] }) {
   const [menuRow, setMenuRow] = useState<TreeRow | null>(null);
   const [keyAsk, setKeyAsk] = useState<KeyAsk | null>(null);
   const [keysAsk, setKeysAsk] = useState<KeysAsk | null>(null);
+  const [bytesAsk, setBytesAsk] = useState<BytesAsk | null>(null);
   const menu = useMemo<TreeMenu>(
     () => ({ editingKey, setEditingKey, openMenu: setMenuRow }),
     [editingKey]
@@ -1403,12 +1540,14 @@ function PropertyTree({ rows }: { rows: TreeRow[] }) {
               onEdit={(key) => setEditingKey(key)}
               onAddKeyed={setKeyAsk}
               onKeys={setKeysAsk}
+              onBytes={setBytesAsk}
             />
           )}
         </ContextMenuContent>
       </ContextMenu>
       <KeyAskDialog ask={keyAsk} session={session} onClose={() => setKeyAsk(null)} />
       <KeysAskDialog ask={keysAsk} session={session} onClose={() => setKeysAsk(null)} />
+      <BytesAskDialog ask={bytesAsk} session={session} onClose={() => setBytesAsk(null)} />
     </TreeMenuContext.Provider>
   );
 }
@@ -1420,12 +1559,14 @@ function RowMenu({
   onEdit,
   onAddKeyed,
   onKeys,
+  onBytes,
 }: {
   row: TreeRow;
   session: EditSession;
   onEdit: (key: string) => void;
   onAddKeyed: (ask: KeyAsk) => void;
   onKeys: (ask: KeysAsk) => void;
+  onBytes: (ask: BytesAsk) => void;
 }) {
   const tagged = useContext(TaggedContext);
   const { entry, target, within } = row;
@@ -1433,6 +1574,29 @@ function RowMenu({
   const key = draftKey(target);
   const draft = session.drafts[key]?.draft;
   const locked = rowLock(row, session);
+  // Bytes typed by hand replace what a value stores, so it has to store some, and nothing inside
+  // it may be waiting to change.
+  const span = entry.span;
+  const bytesItem = (
+    <Tip
+      content="Types the value's bytes by hand, as hex. Its length may change: whatever holds it follows."
+      side="right"
+    >
+      <ContextMenuItem
+        disabled={
+          !span ||
+          span[1] <= span[0] ||
+          !!structuralLock(row, session) ||
+          hasDraftsWithin(session, key) ||
+          (draft !== undefined && draft.op !== "set_raw")
+        }
+        onSelect={() => span && onBytes({ target, within, label: displayName(entry.name), span })}
+      >
+        <Binary size={14} />
+        Edit bytes…
+      </ContextMenuItem>
+    </Tip>
+  );
   const discard = (
     <>
       <ContextMenuSeparator />
@@ -1562,6 +1726,7 @@ function RowMenu({
           <Minus size={14} />
           Drop last element
         </ContextMenuItem>
+        {bytesItem}
         {discard}
       </>
     );
@@ -1632,6 +1797,7 @@ function RowMenu({
           Inherit default
         </ContextMenuItem>
       </Tip>
+      {bytesItem}
       {discard}
     </>
   );
@@ -3017,6 +3183,8 @@ function draftText(draft: Draft | undefined, count: number | null): string | nul
       return draft.text;
     case "reorder":
       return "(reordered)";
+    case "set_raw":
+      return `(${parseHex(draft.hex)?.length ?? 0} bytes typed)`;
     case "clear":
       return "(zero)";
     case "store":
@@ -7473,6 +7641,10 @@ export default function AssetInspector({
   onOpenCopy,
   initialTarget,
 }: Props) {
+  const packagePlace = useMemo(
+    () => ({ gamePath, container, entry }),
+    [gamePath, container, entry]
+  );
   const [pkg, setPkg] = useState<ParsedPackage | null>(null);
   /// A removal or reset the user has asked about but not yet confirmed.
   const [ask, setAsk] = useState<StructuralAsk | null>(null);
@@ -8053,686 +8225,694 @@ export default function AssetInspector({
   return (
     <EditSessionContext.Provider value={edits.session}>
       <TaggedContext.Provider value={pkg ? !pkg.unversioned_properties : false}>
-        <div className="absolute inset-0 z-20 flex flex-col bg-background">
-          <div className="flex items-center gap-2 border-b border-border px-3 py-2">
-            <Button size="sm" variant="ghost" className="h-7" onClick={() => guarded(onClose)}>
-              <ArrowLeft size={13} /> Back
-            </Button>
-            <Tip content={entry} side="bottom" align="start">
-              <span className="min-w-0 flex-1 truncate font-mono text-xs text-foreground/80">
-                {fileName}
-              </span>
-            </Tip>
-            {pkg && !showPackage && (
-              <div className="flex shrink-0 items-center gap-2">
-                {active && (
-                  <StatusBadge
-                    status={active.status}
-                    note={active.note}
-                    undecoded={active.undecoded}
-                  />
-                )}
-                {active && (
-                  <ExportActions
-                    export={active}
-                    lock={structuralLock}
-                    duplicateLock={duplicateLockOf(active, pkg, structuralLock)}
-                    onDuplicate={() => setAsk({ kind: "duplicate", index: active.index })}
-                    payload={{
-                      lock: payloadLockOf(active, pkg),
-                      drafted:
-                        edits.session.drafts[draftKey(payloadTarget(active.index))] !== undefined,
-                      onExport: () => bytesActions.exportPayload(active.index, active.object_name),
-                      onReplace: () => bytesActions.replacePayload(active.index),
-                      onDiscard: () =>
-                        edits.session.dropDraft(draftKey(payloadTarget(active.index))),
-                    }}
-                    onRemove={() => askRemoval(active.index)}
-                    onReset={() => setAsk({ kind: "reset", index: active.index })}
-                    onRename={() =>
-                      setAsk({
-                        kind: "rename",
-                        index: active.index,
-                        name: active.object_name,
-                        plan: null,
-                        error: null,
-                      })
-                    }
-                    onMove={() =>
-                      setAsk({
-                        kind: "move",
-                        index: active.index,
-                        outer: active.outer_index > 0 ? active.outer_index - 1 : null,
-                        plan: null,
-                        error: null,
-                      })
-                    }
-                    onAddUnder={() => setAddingObject({ outer: active.index })}
-                    onAddComponent={() => setAddingComponent(active.index)}
-                    onRemoveComponent={() => setRemovingComponent(active.index)}
-                    onFlags={() => setAsk({ kind: "flags", index: active.index, set: 0, clear: 0 })}
-                    onRetype={() =>
-                      setAsk({
-                        kind: "retype",
-                        index: active.index,
-                        class: null,
-                        plan: null,
-                        error: null,
-                      })
-                    }
-                    onDeps={() =>
-                      setAsk({
-                        kind: "deps",
-                        index: active.index,
-                        runs: pkg.dependencies?.[active.index] ?? {
-                          serialize_before_serialize: [],
-                          create_before_serialize: [],
-                          serialize_before_create: [],
-                          create_before_create: [],
-                        },
-                        plan: null,
-                        error: null,
-                      })
-                    }
-                  />
-                )}
-                {(effectiveView === "tree" || effectiveView === "table") && cultures.length > 0 && (
-                  <Select value={culture} onValueChange={chooseCulture}>
+        <PackageContext.Provider value={packagePlace}>
+          <div className="absolute inset-0 z-20 flex flex-col bg-background">
+            <div className="flex items-center gap-2 border-b border-border px-3 py-2">
+              <Button size="sm" variant="ghost" className="h-7" onClick={() => guarded(onClose)}>
+                <ArrowLeft size={13} /> Back
+              </Button>
+              <Tip content={entry} side="bottom" align="start">
+                <span className="min-w-0 flex-1 truncate font-mono text-xs text-foreground/80">
+                  {fileName}
+                </span>
+              </Tip>
+              {pkg && !showPackage && (
+                <div className="flex shrink-0 items-center gap-2">
+                  {active && (
+                    <StatusBadge
+                      status={active.status}
+                      note={active.note}
+                      undecoded={active.undecoded}
+                    />
+                  )}
+                  {active && (
+                    <ExportActions
+                      export={active}
+                      lock={structuralLock}
+                      duplicateLock={duplicateLockOf(active, pkg, structuralLock)}
+                      onDuplicate={() => setAsk({ kind: "duplicate", index: active.index })}
+                      payload={{
+                        lock: payloadLockOf(active, pkg),
+                        drafted:
+                          edits.session.drafts[draftKey(payloadTarget(active.index))] !== undefined,
+                        onExport: () =>
+                          bytesActions.exportPayload(active.index, active.object_name),
+                        onReplace: () => bytesActions.replacePayload(active.index),
+                        onDiscard: () =>
+                          edits.session.dropDraft(draftKey(payloadTarget(active.index))),
+                      }}
+                      onRemove={() => askRemoval(active.index)}
+                      onReset={() => setAsk({ kind: "reset", index: active.index })}
+                      onRename={() =>
+                        setAsk({
+                          kind: "rename",
+                          index: active.index,
+                          name: active.object_name,
+                          plan: null,
+                          error: null,
+                        })
+                      }
+                      onMove={() =>
+                        setAsk({
+                          kind: "move",
+                          index: active.index,
+                          outer: active.outer_index > 0 ? active.outer_index - 1 : null,
+                          plan: null,
+                          error: null,
+                        })
+                      }
+                      onAddUnder={() => setAddingObject({ outer: active.index })}
+                      onAddComponent={() => setAddingComponent(active.index)}
+                      onRemoveComponent={() => setRemovingComponent(active.index)}
+                      onFlags={() =>
+                        setAsk({ kind: "flags", index: active.index, set: 0, clear: 0 })
+                      }
+                      onRetype={() =>
+                        setAsk({
+                          kind: "retype",
+                          index: active.index,
+                          class: null,
+                          plan: null,
+                          error: null,
+                        })
+                      }
+                      onDeps={() =>
+                        setAsk({
+                          kind: "deps",
+                          index: active.index,
+                          runs: pkg.dependencies?.[active.index] ?? {
+                            serialize_before_serialize: [],
+                            create_before_serialize: [],
+                            serialize_before_create: [],
+                            create_before_create: [],
+                          },
+                          plan: null,
+                          error: null,
+                        })
+                      }
+                    />
+                  )}
+                  {(effectiveView === "tree" || effectiveView === "table") &&
+                    cultures.length > 0 && (
+                      <Select value={culture} onValueChange={chooseCulture}>
+                        <Tip
+                          content="The language texts are shown in, as the game shows them"
+                          side="bottom"
+                        >
+                          <SelectTrigger
+                            size="sm"
+                            className="h-7 w-24 px-2 text-[10px] font-semibold uppercase"
+                          >
+                            <Languages size={13} className="text-muted-foreground" />
+                            <SelectValue />
+                          </SelectTrigger>
+                        </Tip>
+                        <SelectContent className="max-h-72">
+                          {cultures.map((name) => (
+                            <SelectItem key={name} value={name} className="text-[11px]">
+                              {name}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    )}
+                  {(effectiveView === "tree" || effectiveView === "table") && (
                     <Tip
-                      content="The language texts are shown in, as the game shows them"
+                      content={
+                        showInherited
+                          ? "Hide the slots this export does not store"
+                          : "Show the slots this export declares but does not store. They take the value the class inherits, and can be given one of their own."
+                      }
                       side="bottom"
                     >
-                      <SelectTrigger
+                      <Button
                         size="sm"
-                        className="h-7 w-24 px-2 text-[10px] font-semibold uppercase"
+                        variant={showInherited ? "outline" : "ghost"}
+                        className="h-7 px-2 text-[10px] font-semibold uppercase"
+                        onClick={() => toggleInherited(!showInherited)}
                       >
-                        <Languages size={13} className="text-muted-foreground" />
-                        <SelectValue />
-                      </SelectTrigger>
+                        {showInherited ? <Eye size={13} /> : <EyeOff size={13} />} Inherited
+                      </Button>
                     </Tip>
-                    <SelectContent className="max-h-72">
-                      {cultures.map((name) => (
-                        <SelectItem key={name} value={name} className="text-[11px]">
-                          {name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                )}
-                {(effectiveView === "tree" || effectiveView === "table") && (
-                  <Tip
-                    content={
-                      showInherited
-                        ? "Hide the slots this export does not store"
-                        : "Show the slots this export declares but does not store. They take the value the class inherits, and can be given one of their own."
-                    }
-                    side="bottom"
-                  >
-                    <Button
-                      size="sm"
-                      variant={showInherited ? "outline" : "ghost"}
-                      className="h-7 px-2 text-[10px] font-semibold uppercase"
-                      onClick={() => toggleInherited(!showInherited)}
-                    >
-                      {showInherited ? <Eye size={13} /> : <EyeOff size={13} />} Inherited
+                  )}
+                  <div className="flex items-center gap-0.5 rounded-md bg-muted p-0.5">
+                    {views.map((option) => (
+                      <button
+                        key={option.id}
+                        onClick={() => setView(option.id)}
+                        className={cn(
+                          "rounded px-2 py-0.5 text-[10px] font-semibold uppercase transition-colors",
+                          effectiveView === option.id
+                            ? "bg-background text-foreground"
+                            : "text-muted-foreground hover:text-foreground"
+                        )}
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Outside the loaded branch on purpose: a save re-reads the asset, and the notice has to
+            outlive that. */}
+            {edits.modCopy && !edits.onModCopy && onOpenCopy && (
+              <div className="flex shrink-0 items-center gap-2 border-b border-border bg-warn/10 px-3 py-1.5 text-[11px]">
+                <AlertTriangle size={13} className="shrink-0 text-warn" />
+                <span className="min-w-0 truncate">
+                  {previewContainerFilename(edits.modName, edits.saveTarget)} already holds an
+                  edited copy of this asset. Edits made here would start over from this one.
+                </span>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="ml-auto h-6 shrink-0"
+                  onClick={() => edits.modCopy && onOpenCopy(edits.modCopy)}
+                >
+                  Open the edited copy
+                </Button>
+              </div>
+            )}
+
+            {(edits.dirty || edits.notice) && (
+              <EditBar
+                edits={edits}
+                gamePath={gamePath}
+                gameRunning={gameRunning}
+                onOpenCopy={onOpenCopy}
+              />
+            )}
+
+            {busy && (
+              <div className="flex flex-1 items-center justify-center gap-2 text-sm text-muted-foreground">
+                <Loader2 size={15} className="animate-spin" /> Reading asset
+              </div>
+            )}
+
+            {!busy && error && (
+              <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
+                <AlertTriangle size={26} className="text-amber-400/70" />
+                {needsMappings ? (
+                  <>
+                    <p className="max-w-lg text-sm text-foreground">
+                      This asset needs a .usmap mappings file.
+                    </p>
+                    <p className="max-w-lg text-xs text-muted-foreground">
+                      Marvel Rivals ships packages with unversioned properties, so their property
+                      names and types are not stored in the asset itself. Assets saved out of the
+                      editor keep that information and open without a mappings file.
+                    </p>
+                    <Button size="sm" variant="outline" onClick={onOpenSettings}>
+                      Set the mappings file
                     </Button>
-                  </Tip>
+                  </>
+                ) : (
+                  <p className="max-w-2xl break-words text-sm text-muted-foreground">{error}</p>
                 )}
-                <div className="flex items-center gap-0.5 rounded-md bg-muted p-0.5">
-                  {views.map((option) => (
+              </div>
+            )}
+
+            {!busy && pkg && (
+              <div className="flex min-h-0 min-w-0 flex-1">
+                <div className="w-[240px] shrink-0 overflow-y-auto border-r border-border">
+                  <Tip content={pkg.package_name} side="right">
                     <button
-                      key={option.id}
-                      onClick={() => setView(option.id)}
+                      onClick={() => setShowPackage(true)}
                       className={cn(
-                        "rounded px-2 py-0.5 text-[10px] font-semibold uppercase transition-colors",
-                        effectiveView === option.id
-                          ? "bg-background text-foreground"
-                          : "text-muted-foreground hover:text-foreground"
+                        "flex w-full flex-col gap-0.5 border-b border-border px-3 py-2 text-left transition-colors",
+                        showPackage ? "bg-muted" : "hover:bg-muted/50"
                       )}
                     >
-                      {option.label}
+                      <span className="flex items-center gap-1.5">
+                        <Package size={11} className="shrink-0 text-muted-foreground" />
+                        <span className="truncate font-mono text-[11px] text-foreground">
+                          {pkg.package_name.split("/").pop()}
+                        </span>
+                      </span>
+                      <span className="truncate text-[10px] text-muted-foreground">
+                        {pkg.names.length} names · {pkg.imports.length} imports ·{" "}
+                        {pkg.exports.length} exports
+                      </span>
                     </button>
+                  </Tip>
+                  {pkg.exports.map((exp, index) => (
+                    <ContextMenu key={exp.index}>
+                      <ContextMenuTrigger asChild>
+                        <button
+                          onClick={() => {
+                            if (index === selected) {
+                              setShowPackage(false);
+                              return;
+                            }
+                            guarded(() => {
+                              discard();
+                              setSelected(index);
+                              setShowPackage(false);
+                            });
+                          }}
+                          className={cn(
+                            "flex w-full flex-col gap-0.5 border-b border-border/40 py-2 pr-3 pl-6 text-left transition-colors",
+                            !showPackage && index === selected ? "bg-muted" : "hover:bg-muted/50"
+                          )}
+                        >
+                          <span className="flex items-center gap-1.5">
+                            <span className="truncate font-mono text-[11px] text-foreground">
+                              {exp.object_name}
+                            </span>
+                            {exp.data_table && (
+                              <Table2 size={11} className="shrink-0 text-sky-400" />
+                            )}
+                          </span>
+                          <span className="flex items-center gap-1.5">
+                            <span className="truncate text-[10px] text-muted-foreground">
+                              {exp.class_name}
+                            </span>
+                            <StatusBadge
+                              status={exp.status}
+                              note={exp.note}
+                              undecoded={exp.undecoded}
+                            />
+                          </span>
+                        </button>
+                      </ContextMenuTrigger>
+                      <ContextMenuContent>
+                        <ContextMenuItem
+                          disabled={!!structuralLock}
+                          onSelect={() => askRemoval(exp.index)}
+                        >
+                          <Trash2 size={14} />
+                          Remove export…
+                        </ContextMenuItem>
+                        <ContextMenuItem
+                          disabled={!!resetLockOf(exp, structuralLock)}
+                          onSelect={() => setAsk({ kind: "reset", index: exp.index })}
+                        >
+                          <RotateCcw size={14} />
+                          Reset to defaults…
+                        </ContextMenuItem>
+                      </ContextMenuContent>
+                    </ContextMenu>
                   ))}
+                </div>
+
+                <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+                  {unreadWithoutMappings && (
+                    <div className="flex shrink-0 items-center gap-3 border-b border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-300">
+                      <span className="min-w-0 flex-1">
+                        No mappings file is loaded. This asset stores its own property types, so its
+                        values still read, but what some engine classes keep after them is only read
+                        with one. Those are likely the unexplained bytes here.
+                      </span>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-6 shrink-0"
+                        onClick={onOpenSettings}
+                      >
+                        Set the mappings file
+                      </Button>
+                    </div>
+                  )}
+                  {pkg.schema_fixups && pkg.schema_fixups.length > 0 && (
+                    <div className="shrink-0 border-b border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-300">
+                      Your mappings file declares{" "}
+                      {pkg.schema_fixups.map((f) => `${f.struct_name}.${f.property}`).join(", ")},
+                      which this build does not store. It was skipped so the rest of the asset reads
+                      correctly.
+                    </div>
+                  )}
+
+                  {!showPackage && active?.status.state === "failed" && (
+                    <div className="shrink-0 border-b border-red-500/30 bg-red-500/10 px-3 py-2 text-[11px] text-red-300">
+                      {active.status.reason}
+                    </div>
+                  )}
+
+                  {showPackage ? (
+                    <PackageView
+                      pkg={pkg}
+                      edits={edits}
+                      lock={structuralLock}
+                      bytes={bytesActions}
+                      onSelectExport={(index) => {
+                        if (index === selected) {
+                          setShowPackage(false);
+                          return;
+                        }
+                        guarded(() => {
+                          discard();
+                          setSelected(index);
+                          setShowPackage(false);
+                        });
+                      }}
+                      onRemove={askRemoval}
+                      onReset={(index) => setAsk({ kind: "reset", index })}
+                      onDuplicate={(index) => setAsk({ kind: "duplicate", index })}
+                      onRename={(index) =>
+                        setAsk({
+                          kind: "rename",
+                          index,
+                          name: pkg.exports[index].object_name,
+                          plan: null,
+                          error: null,
+                        })
+                      }
+                      onMove={(index) => {
+                        const outer = pkg.exports[index].outer_index;
+                        setAsk({
+                          kind: "move",
+                          index,
+                          outer: outer > 0 ? outer - 1 : null,
+                          plan: null,
+                          error: null,
+                        });
+                      }}
+                      onFlags={(index) => setAsk({ kind: "flags", index, set: 0, clear: 0 })}
+                      onRetype={(index) =>
+                        setAsk({ kind: "retype", index, class: null, plan: null, error: null })
+                      }
+                      onCopyOut={(index) => {
+                        const exp = pkg.exports[index];
+                        clipboard.copy({
+                          container,
+                          entry,
+                          export: index,
+                          name: exp.object_name,
+                          className: exp.class_name,
+                          path: exp.path,
+                        });
+                        edits.report(
+                          `${exp.object_name} is ready to paste into another package`,
+                          "ok"
+                        );
+                      }}
+                      clipboard={clipboard.held}
+                      onPaste={() => {
+                        if (!clipboard.held) return;
+                        setAsk({
+                          kind: "paste",
+                          held: clipboard.held,
+                          outer: null,
+                          name: clipboard.held.name,
+                          plan: null,
+                          error: null,
+                        });
+                      }}
+                      onDeps={(index) =>
+                        setAsk({
+                          kind: "deps",
+                          index,
+                          runs: pkg.dependencies?.[index] ?? {
+                            serialize_before_serialize: [],
+                            create_before_serialize: [],
+                            serialize_before_create: [],
+                            create_before_create: [],
+                          },
+                          plan: null,
+                          error: null,
+                        })
+                      }
+                      onDropImport={askDropImport}
+                      onCompactNames={askCompactNames}
+                      onSaveAs={() => setSavingAs(true)}
+                      onAddObject={(outer) => setAddingObject({ outer })}
+                      onAddComponent={(node) => setAddingComponent(node)}
+                      onRemoveComponent={(node) => setRemovingComponent(node)}
+                      onAddParentComponent={() => setAddingParentComponent(true)}
+                    />
+                  ) : active && effectiveView === "table" && active.data_table ? (
+                    <DataTableGrid table={active.data_table} exportIndex={active.index} />
+                  ) : active && effectiveView === "strings" && active.string_table ? (
+                    <StringTableView table={active.string_table} exportIndex={active.index} />
+                  ) : active && effectiveView === "json" ? (
+                    <JsonView export={active} />
+                  ) : active && effectiveView === "bytes" ? (
+                    <BytesPane
+                      key={epoch}
+                      gamePath={gamePath}
+                      container={container}
+                      entry={entry}
+                      exportIndex={active.index}
+                    />
+                  ) : active && effectiveView === "script" ? (
+                    <ScriptPane
+                      key={`${epoch}:${active.index}:${scriptFocus?.offset ?? ""}`}
+                      gamePath={gamePath}
+                      container={container}
+                      entry={entry}
+                      exportIndex={active.index}
+                      exportNames={exportNames}
+                      focus={scriptFocus?.index === selected ? scriptFocus.offset : null}
+                      onOpen={openScript}
+                    />
+                  ) : active && treeRows.length > 0 ? (
+                    <InheritedContext.Provider value={inheritedValues}>
+                      <PropertyTree rows={treeRows} />
+                    </InheritedContext.Provider>
+                  ) : (
+                    <div className="min-h-0 min-w-0 flex-1 overflow-auto">
+                      <p className="p-6 text-center text-sm text-muted-foreground">
+                        {active && inheritedCount > 0 ? (
+                          <>
+                            Stores no properties. {inheritedCount} declared{" "}
+                            {inheritedCount === 1
+                              ? "property inherits its value"
+                              : "properties inherit their values"}
+                            .{" "}
+                            <button
+                              className="underline hover:text-foreground"
+                              onClick={() => toggleInherited(true)}
+                            >
+                              Show inherited
+                            </button>
+                          </>
+                        ) : active &&
+                          pkg.unversioned_properties &&
+                          active.properties.length === 0 &&
+                          active.status.state !== "failed" ? (
+                          "This class declares no properties of its own."
+                        ) : (
+                          "This export stores no properties."
+                        )}
+                      </p>
+                    </div>
+                  )}
+
+                  {!showPackage &&
+                    active?.trailing_hex &&
+                    active.status.state !== "payload" &&
+                    effectiveView !== "bytes" && (
+                      <details className="shrink-0 border-t border-border">
+                        <summary className="cursor-pointer px-3 py-1.5 text-[11px] text-muted-foreground hover:text-foreground">
+                          Undecoded bytes
+                        </summary>
+                        <pre className="max-h-40 overflow-auto px-3 pb-3 font-mono text-[10px] leading-relaxed text-muted-foreground">
+                          {active.trailing_hex}
+                        </pre>
+                      </details>
+                    )}
                 </div>
               </div>
             )}
-          </div>
 
-          {/* Outside the loaded branch on purpose: a save re-reads the asset, and the notice has to
-            outlive that. */}
-          {edits.modCopy && !edits.onModCopy && onOpenCopy && (
-            <div className="flex shrink-0 items-center gap-2 border-b border-border bg-warn/10 px-3 py-1.5 text-[11px]">
-              <AlertTriangle size={13} className="shrink-0 text-warn" />
-              <span className="min-w-0 truncate">
-                {previewContainerFilename(edits.modName, edits.saveTarget)} already holds an edited
-                copy of this asset. Edits made here would start over from this one.
-              </span>
-              <Button
-                size="sm"
-                variant="outline"
-                className="ml-auto h-6 shrink-0"
-                onClick={() => edits.modCopy && onOpenCopy(edits.modCopy)}
-              >
-                Open the edited copy
-              </Button>
-            </div>
-          )}
-
-          {(edits.dirty || edits.notice) && (
-            <EditBar
-              edits={edits}
-              gamePath={gamePath}
-              gameRunning={gameRunning}
-              onOpenCopy={onOpenCopy}
-            />
-          )}
-
-          {busy && (
-            <div className="flex flex-1 items-center justify-center gap-2 text-sm text-muted-foreground">
-              <Loader2 size={15} className="animate-spin" /> Reading asset
-            </div>
-          )}
-
-          {!busy && error && (
-            <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
-              <AlertTriangle size={26} className="text-amber-400/70" />
-              {needsMappings ? (
-                <>
-                  <p className="max-w-lg text-sm text-foreground">
-                    This asset needs a .usmap mappings file.
-                  </p>
-                  <p className="max-w-lg text-xs text-muted-foreground">
-                    Marvel Rivals ships packages with unversioned properties, so their property
-                    names and types are not stored in the asset itself. Assets saved out of the
-                    editor keep that information and open without a mappings file.
-                  </p>
-                  <Button size="sm" variant="outline" onClick={onOpenSettings}>
-                    Set the mappings file
-                  </Button>
-                </>
-              ) : (
-                <p className="max-w-2xl break-words text-sm text-muted-foreground">{error}</p>
-              )}
-            </div>
-          )}
-
-          {!busy && pkg && (
-            <div className="flex min-h-0 min-w-0 flex-1">
-              <div className="w-[240px] shrink-0 overflow-y-auto border-r border-border">
-                <Tip content={pkg.package_name} side="right">
-                  <button
-                    onClick={() => setShowPackage(true)}
-                    className={cn(
-                      "flex w-full flex-col gap-0.5 border-b border-border px-3 py-2 text-left transition-colors",
-                      showPackage ? "bg-muted" : "hover:bg-muted/50"
-                    )}
-                  >
-                    <span className="flex items-center gap-1.5">
-                      <Package size={11} className="shrink-0 text-muted-foreground" />
-                      <span className="truncate font-mono text-[11px] text-foreground">
-                        {pkg.package_name.split("/").pop()}
-                      </span>
-                    </span>
-                    <span className="truncate text-[10px] text-muted-foreground">
-                      {pkg.names.length} names · {pkg.imports.length} imports · {pkg.exports.length}{" "}
-                      exports
-                    </span>
-                  </button>
-                </Tip>
-                {pkg.exports.map((exp, index) => (
-                  <ContextMenu key={exp.index}>
-                    <ContextMenuTrigger asChild>
-                      <button
-                        onClick={() => {
-                          if (index === selected) {
-                            setShowPackage(false);
-                            return;
-                          }
-                          guarded(() => {
-                            discard();
-                            setSelected(index);
-                            setShowPackage(false);
-                          });
-                        }}
-                        className={cn(
-                          "flex w-full flex-col gap-0.5 border-b border-border/40 py-2 pr-3 pl-6 text-left transition-colors",
-                          !showPackage && index === selected ? "bg-muted" : "hover:bg-muted/50"
-                        )}
-                      >
-                        <span className="flex items-center gap-1.5">
-                          <span className="truncate font-mono text-[11px] text-foreground">
-                            {exp.object_name}
-                          </span>
-                          {exp.data_table && <Table2 size={11} className="shrink-0 text-sky-400" />}
-                        </span>
-                        <span className="flex items-center gap-1.5">
-                          <span className="truncate text-[10px] text-muted-foreground">
-                            {exp.class_name}
-                          </span>
-                          <StatusBadge
-                            status={exp.status}
-                            note={exp.note}
-                            undecoded={exp.undecoded}
-                          />
-                        </span>
-                      </button>
-                    </ContextMenuTrigger>
-                    <ContextMenuContent>
-                      <ContextMenuItem
-                        disabled={!!structuralLock}
-                        onSelect={() => askRemoval(exp.index)}
-                      >
-                        <Trash2 size={14} />
-                        Remove export…
-                      </ContextMenuItem>
-                      <ContextMenuItem
-                        disabled={!!resetLockOf(exp, structuralLock)}
-                        onSelect={() => setAsk({ kind: "reset", index: exp.index })}
-                      >
-                        <RotateCcw size={14} />
-                        Reset to defaults…
-                      </ContextMenuItem>
-                    </ContextMenuContent>
-                  </ContextMenu>
-                ))}
-              </div>
-
-              <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-                {unreadWithoutMappings && (
-                  <div className="flex shrink-0 items-center gap-3 border-b border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-300">
-                    <span className="min-w-0 flex-1">
-                      No mappings file is loaded. This asset stores its own property types, so its
-                      values still read, but what some engine classes keep after them is only read
-                      with one. Those are likely the unexplained bytes here.
-                    </span>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="h-6 shrink-0"
-                      onClick={onOpenSettings}
+            <AlertDialog
+              open={edits.pendingReplace !== null}
+              onOpenChange={(open) => !open && edits.cancelReplace()}
+            >
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>
+                    {edits.pendingReplace?.pak} already holds an edited copy
+                  </AlertDialogTitle>
+                  <AlertDialogDescription>
+                    {`To build on the edits saved there, open that copy and make ${
+                      edits.count === 1 ? "this change" : "these changes"
+                    } in it; unsaved changes here point into this copy's bytes and do not carry over. Starting over writes ${fileName} as it is here plus ${
+                      edits.pendingReplace?.structural || edits.count === 1
+                        ? "this change"
+                        : `these ${edits.count} changes`
+                    }, and the edits saved there earlier are lost.`}
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel>Keep it</AlertDialogCancel>
+                  {edits.modCopy && onOpenCopy && (
+                    <AlertDialogAction
+                      onClick={() => {
+                        const copy = edits.modCopy;
+                        edits.cancelReplace();
+                        if (copy) onOpenCopy(copy);
+                      }}
                     >
-                      Set the mappings file
-                    </Button>
-                  </div>
-                )}
-                {pkg.schema_fixups && pkg.schema_fixups.length > 0 && (
-                  <div className="shrink-0 border-b border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-300">
-                    Your mappings file declares{" "}
-                    {pkg.schema_fixups.map((f) => `${f.struct_name}.${f.property}`).join(", ")},
-                    which this build does not store. It was skipped so the rest of the asset reads
-                    correctly.
-                  </div>
-                )}
-
-                {!showPackage && active?.status.state === "failed" && (
-                  <div className="shrink-0 border-b border-red-500/30 bg-red-500/10 px-3 py-2 text-[11px] text-red-300">
-                    {active.status.reason}
-                  </div>
-                )}
-
-                {showPackage ? (
-                  <PackageView
-                    pkg={pkg}
-                    edits={edits}
-                    lock={structuralLock}
-                    bytes={bytesActions}
-                    onSelectExport={(index) => {
-                      if (index === selected) {
-                        setShowPackage(false);
-                        return;
-                      }
-                      guarded(() => {
-                        discard();
-                        setSelected(index);
-                        setShowPackage(false);
-                      });
-                    }}
-                    onRemove={askRemoval}
-                    onReset={(index) => setAsk({ kind: "reset", index })}
-                    onDuplicate={(index) => setAsk({ kind: "duplicate", index })}
-                    onRename={(index) =>
-                      setAsk({
-                        kind: "rename",
-                        index,
-                        name: pkg.exports[index].object_name,
-                        plan: null,
-                        error: null,
-                      })
-                    }
-                    onMove={(index) => {
-                      const outer = pkg.exports[index].outer_index;
-                      setAsk({
-                        kind: "move",
-                        index,
-                        outer: outer > 0 ? outer - 1 : null,
-                        plan: null,
-                        error: null,
-                      });
-                    }}
-                    onFlags={(index) => setAsk({ kind: "flags", index, set: 0, clear: 0 })}
-                    onRetype={(index) =>
-                      setAsk({ kind: "retype", index, class: null, plan: null, error: null })
-                    }
-                    onCopyOut={(index) => {
-                      const exp = pkg.exports[index];
-                      clipboard.copy({
-                        container,
-                        entry,
-                        export: index,
-                        name: exp.object_name,
-                        className: exp.class_name,
-                        path: exp.path,
-                      });
-                      edits.report(
-                        `${exp.object_name} is ready to paste into another package`,
-                        "ok"
-                      );
-                    }}
-                    clipboard={clipboard.held}
-                    onPaste={() => {
-                      if (!clipboard.held) return;
-                      setAsk({
-                        kind: "paste",
-                        held: clipboard.held,
-                        outer: null,
-                        name: clipboard.held.name,
-                        plan: null,
-                        error: null,
-                      });
-                    }}
-                    onDeps={(index) =>
-                      setAsk({
-                        kind: "deps",
-                        index,
-                        runs: pkg.dependencies?.[index] ?? {
-                          serialize_before_serialize: [],
-                          create_before_serialize: [],
-                          serialize_before_create: [],
-                          create_before_create: [],
-                        },
-                        plan: null,
-                        error: null,
-                      })
-                    }
-                    onDropImport={askDropImport}
-                    onCompactNames={askCompactNames}
-                    onSaveAs={() => setSavingAs(true)}
-                    onAddObject={(outer) => setAddingObject({ outer })}
-                    onAddComponent={(node) => setAddingComponent(node)}
-                    onRemoveComponent={(node) => setRemovingComponent(node)}
-                    onAddParentComponent={() => setAddingParentComponent(true)}
-                  />
-                ) : active && effectiveView === "table" && active.data_table ? (
-                  <DataTableGrid table={active.data_table} exportIndex={active.index} />
-                ) : active && effectiveView === "strings" && active.string_table ? (
-                  <StringTableView table={active.string_table} exportIndex={active.index} />
-                ) : active && effectiveView === "json" ? (
-                  <JsonView export={active} />
-                ) : active && effectiveView === "bytes" ? (
-                  <BytesPane
-                    key={epoch}
-                    gamePath={gamePath}
-                    container={container}
-                    entry={entry}
-                    exportIndex={active.index}
-                  />
-                ) : active && effectiveView === "script" ? (
-                  <ScriptPane
-                    key={`${epoch}:${active.index}:${scriptFocus?.offset ?? ""}`}
-                    gamePath={gamePath}
-                    container={container}
-                    entry={entry}
-                    exportIndex={active.index}
-                    exportNames={exportNames}
-                    focus={scriptFocus?.index === selected ? scriptFocus.offset : null}
-                    onOpen={openScript}
-                  />
-                ) : active && treeRows.length > 0 ? (
-                  <InheritedContext.Provider value={inheritedValues}>
-                    <PropertyTree rows={treeRows} />
-                  </InheritedContext.Provider>
-                ) : (
-                  <div className="min-h-0 min-w-0 flex-1 overflow-auto">
-                    <p className="p-6 text-center text-sm text-muted-foreground">
-                      {active && inheritedCount > 0 ? (
-                        <>
-                          Stores no properties. {inheritedCount} declared{" "}
-                          {inheritedCount === 1
-                            ? "property inherits its value"
-                            : "properties inherit their values"}
-                          .{" "}
-                          <button
-                            className="underline hover:text-foreground"
-                            onClick={() => toggleInherited(true)}
-                          >
-                            Show inherited
-                          </button>
-                        </>
-                      ) : active &&
-                        pkg.unversioned_properties &&
-                        active.properties.length === 0 &&
-                        active.status.state !== "failed" ? (
-                        "This class declares no properties of its own."
-                      ) : (
-                        "This export stores no properties."
-                      )}
-                    </p>
-                  </div>
-                )}
-
-                {!showPackage &&
-                  active?.trailing_hex &&
-                  active.status.state !== "payload" &&
-                  effectiveView !== "bytes" && (
-                    <details className="shrink-0 border-t border-border">
-                      <summary className="cursor-pointer px-3 py-1.5 text-[11px] text-muted-foreground hover:text-foreground">
-                        Undecoded bytes
-                      </summary>
-                      <pre className="max-h-40 overflow-auto px-3 pb-3 font-mono text-[10px] leading-relaxed text-muted-foreground">
-                        {active.trailing_hex}
-                      </pre>
-                    </details>
+                      Open the edited copy
+                    </AlertDialogAction>
                   )}
-              </div>
-            </div>
-          )}
+                  <AlertDialogAction
+                    onClick={() => void edits.save({ replace: true })}
+                    className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                  >
+                    Start over
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
 
-          <AlertDialog
-            open={edits.pendingReplace !== null}
-            onOpenChange={(open) => !open && edits.cancelReplace()}
-          >
-            <AlertDialogContent>
-              <AlertDialogHeader>
-                <AlertDialogTitle>
-                  {edits.pendingReplace?.pak} already holds an edited copy
-                </AlertDialogTitle>
-                <AlertDialogDescription>
-                  {`To build on the edits saved there, open that copy and make ${
-                    edits.count === 1 ? "this change" : "these changes"
-                  } in it; unsaved changes here point into this copy's bytes and do not carry over. Starting over writes ${fileName} as it is here plus ${
-                    edits.pendingReplace?.structural || edits.count === 1
-                      ? "this change"
-                      : `these ${edits.count} changes`
-                  }, and the edits saved there earlier are lost.`}
-                </AlertDialogDescription>
-              </AlertDialogHeader>
-              <AlertDialogFooter>
-                <AlertDialogCancel>Keep it</AlertDialogCancel>
-                {edits.modCopy && onOpenCopy && (
+            <AlertDialog
+              open={edits.pendingDrift !== null}
+              onOpenChange={(open) => !open && edits.cancelDrift()}
+            >
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>
+                    {fileName} has changed since these edits were made
+                  </AlertDialogTitle>
+                  <AlertDialogDescription>
+                    {edits.pendingDrift?.message} Saving anyway writes each edit where it now lands.
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel>Cancel</AlertDialogCancel>
+                  <AlertDialogAction
+                    onClick={() => void edits.save({ allowDrift: true })}
+                    className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                  >
+                    Save anyway
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
+
+            <AlertDialog
+              open={edits.pendingMissing !== null}
+              onOpenChange={(open) => !open && edits.cancelMissing()}
+            >
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>
+                    {edits.pendingMissing?.unchecked
+                      ? "These edits could not be checked"
+                      : "These edits point at nothing"}
+                  </AlertDialogTitle>
+                  <AlertDialogDescription className="whitespace-pre-line">
+                    {edits.pendingMissing?.message}
+                    {"\n\n"}
+                    {edits.pendingMissing?.unchecked
+                      ? "The script was compiled for what it held there. Something that does not fit can break the code around it or crash the game. Save anyway only if you know the two are used the same way."
+                      : "The game finds nothing there: an import loads as nothing, and a text shows a placeholder. Save anyway only if a mod loaded alongside this one provides it."}
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel>Cancel</AlertDialogCancel>
                   <AlertDialogAction
                     onClick={() => {
-                      const copy = edits.modCopy;
-                      edits.cancelReplace();
-                      if (copy) onOpenCopy(copy);
+                      const pending = edits.pendingMissing;
+                      void edits.save(
+                        pending?.unchecked
+                          ? { ...pending.options, allowUnchecked: true }
+                          : { ...pending?.options, allowMissing: true }
+                      );
                     }}
+                    className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
                   >
-                    Open the edited copy
+                    Save anyway
                   </AlertDialogAction>
-                )}
-                <AlertDialogAction
-                  onClick={() => void edits.save({ replace: true })}
-                  className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-                >
-                  Start over
-                </AlertDialogAction>
-              </AlertDialogFooter>
-            </AlertDialogContent>
-          </AlertDialog>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
 
-          <AlertDialog
-            open={edits.pendingDrift !== null}
-            onOpenChange={(open) => !open && edits.cancelDrift()}
-          >
-            <AlertDialogContent>
-              <AlertDialogHeader>
-                <AlertDialogTitle>
-                  {fileName} has changed since these edits were made
-                </AlertDialogTitle>
-                <AlertDialogDescription>
-                  {edits.pendingDrift?.message} Saving anyway writes each edit where it now lands.
-                </AlertDialogDescription>
-              </AlertDialogHeader>
-              <AlertDialogFooter>
-                <AlertDialogCancel>Cancel</AlertDialogCancel>
-                <AlertDialogAction
-                  onClick={() => void edits.save({ allowDrift: true })}
-                  className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-                >
-                  Save anyway
-                </AlertDialogAction>
-              </AlertDialogFooter>
-            </AlertDialogContent>
-          </AlertDialog>
+            {pkg && savingAs && (
+              <SaveAsDialog pkg={pkg} edits={edits} onClose={() => setSavingAs(false)} />
+            )}
 
-          <AlertDialog
-            open={edits.pendingMissing !== null}
-            onOpenChange={(open) => !open && edits.cancelMissing()}
-          >
-            <AlertDialogContent>
-              <AlertDialogHeader>
-                <AlertDialogTitle>
-                  {edits.pendingMissing?.unchecked
-                    ? "These edits could not be checked"
-                    : "These edits point at nothing"}
-                </AlertDialogTitle>
-                <AlertDialogDescription className="whitespace-pre-line">
-                  {edits.pendingMissing?.message}
-                  {"\n\n"}
-                  {edits.pendingMissing?.unchecked
-                    ? "The script was compiled for what it held there. Something that does not fit can break the code around it or crash the game. Save anyway only if you know the two are used the same way."
-                    : "The game finds nothing there: an import loads as nothing, and a text shows a placeholder. Save anyway only if a mod loaded alongside this one provides it."}
-                </AlertDialogDescription>
-              </AlertDialogHeader>
-              <AlertDialogFooter>
-                <AlertDialogCancel>Cancel</AlertDialogCancel>
-                <AlertDialogAction
-                  onClick={() => {
-                    const pending = edits.pendingMissing;
-                    void edits.save(
-                      pending?.unchecked
-                        ? { ...pending.options, allowUnchecked: true }
-                        : { ...pending?.options, allowMissing: true }
-                    );
-                  }}
-                  className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-                >
-                  Save anyway
-                </AlertDialogAction>
-              </AlertDialogFooter>
-            </AlertDialogContent>
-          </AlertDialog>
+            {pkg && addingComponent !== null && (
+              <AddComponentDialog
+                pkg={pkg}
+                edits={edits}
+                node={addingComponent}
+                onClose={() => setAddingComponent(null)}
+              />
+            )}
 
-          {pkg && savingAs && (
-            <SaveAsDialog pkg={pkg} edits={edits} onClose={() => setSavingAs(false)} />
-          )}
+            {pkg && addingParentComponent && (
+              <ParentComponentDialog
+                edits={edits}
+                gamePath={gamePath}
+                container={container}
+                entry={entry}
+                onClose={() => setAddingParentComponent(false)}
+              />
+            )}
 
-          {pkg && addingComponent !== null && (
-            <AddComponentDialog
-              pkg={pkg}
-              edits={edits}
-              node={addingComponent}
-              onClose={() => setAddingComponent(null)}
-            />
-          )}
+            {pkg && removingComponent !== null && (
+              <RemoveComponentDialog
+                pkg={pkg}
+                edits={edits}
+                node={removingComponent}
+                onClose={() => setRemovingComponent(null)}
+              />
+            )}
 
-          {pkg && addingParentComponent && (
-            <ParentComponentDialog
-              edits={edits}
-              gamePath={gamePath}
-              container={container}
-              entry={entry}
-              onClose={() => setAddingParentComponent(false)}
-            />
-          )}
+            {pkg && addingObject && (
+              <AddObjectDialog
+                pkg={pkg}
+                edits={edits}
+                outer={addingObject.outer}
+                onClose={() => setAddingObject(null)}
+              />
+            )}
 
-          {pkg && removingComponent !== null && (
-            <RemoveComponentDialog
-              pkg={pkg}
-              edits={edits}
-              node={removingComponent}
-              onClose={() => setRemovingComponent(null)}
-            />
-          )}
+            {pkg && (
+              <StructuralDialog
+                ask={ask}
+                pkg={pkg}
+                modName={edits.modName}
+                saveTarget={edits.saveTarget}
+                saving={edits.saving}
+                indexing={indexing}
+                onBuildIndex={(index) => void buildIndex(index)}
+                onRenamePlan={askRenamePlan}
+                onMovePlan={askMovePlan}
+                onRetypePlan={askRetypePlan}
+                onDependencyPlan={askDependencyPlan}
+                onPastePlan={askPastePlan}
+                onPaste={paste}
+                onClose={() => setAsk(null)}
+                onConfirm={(structural) => {
+                  setAsk(null);
+                  void edits.save({ structural });
+                }}
+              />
+            )}
 
-          {pkg && addingObject && (
-            <AddObjectDialog
-              pkg={pkg}
-              edits={edits}
-              outer={addingObject.outer}
-              onClose={() => setAddingObject(null)}
-            />
-          )}
-
-          {pkg && (
-            <StructuralDialog
-              ask={ask}
-              pkg={pkg}
-              modName={edits.modName}
-              saveTarget={edits.saveTarget}
-              saving={edits.saving}
-              indexing={indexing}
-              onBuildIndex={(index) => void buildIndex(index)}
-              onRenamePlan={askRenamePlan}
-              onMovePlan={askMovePlan}
-              onRetypePlan={askRetypePlan}
-              onDependencyPlan={askDependencyPlan}
-              onPastePlan={askPastePlan}
-              onPaste={paste}
-              onClose={() => setAsk(null)}
-              onConfirm={(structural) => {
-                setAsk(null);
-                void edits.save({ structural });
-              }}
-            />
-          )}
-
-          <AlertDialog
-            open={confirmLeave !== null}
-            onOpenChange={(open) => !open && setConfirmLeave(null)}
-          >
-            <AlertDialogContent>
-              <AlertDialogHeader>
-                <AlertDialogTitle>Discard unsaved changes?</AlertDialogTitle>
-                <AlertDialogDescription>
-                  Edits that have not been saved as a mod will be lost.
-                </AlertDialogDescription>
-              </AlertDialogHeader>
-              <AlertDialogFooter>
-                <AlertDialogCancel>Keep editing</AlertDialogCancel>
-                <AlertDialogAction
-                  onClick={() => {
-                    const leave = confirmLeave;
-                    setConfirmLeave(null);
-                    leave?.();
-                  }}
-                  className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-                >
-                  Discard
-                </AlertDialogAction>
-              </AlertDialogFooter>
-            </AlertDialogContent>
-          </AlertDialog>
-        </div>
+            <AlertDialog
+              open={confirmLeave !== null}
+              onOpenChange={(open) => !open && setConfirmLeave(null)}
+            >
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>Discard unsaved changes?</AlertDialogTitle>
+                  <AlertDialogDescription>
+                    Edits that have not been saved as a mod will be lost.
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel>Keep editing</AlertDialogCancel>
+                  <AlertDialogAction
+                    onClick={() => {
+                      const leave = confirmLeave;
+                      setConfirmLeave(null);
+                      leave?.();
+                    }}
+                    className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                  >
+                    Discard
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
+          </div>
+        </PackageContext.Provider>
       </TaggedContext.Provider>
     </EditSessionContext.Provider>
   );

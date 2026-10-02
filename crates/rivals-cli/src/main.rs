@@ -482,7 +482,7 @@ struct AssetSetArgs {
     /// `set-element`, `insert` and `remove` act on the container element at `--index`, and
     /// `set-key` gives the map pair there the key `--key`. In a set or a map, `insert` takes the
     /// new element's key from `--key`, or from `--value`. `reorder` puts the elements in the
-    /// order `--order` gives.
+    /// order `--order` gives. `set-raw` replaces the value's bytes with `--hex`.
     #[arg(long, value_name = "OP", default_value = "set")]
     op: String,
 
@@ -499,6 +499,11 @@ struct AssetSetArgs {
     /// element to the front.
     #[arg(long, value_name = "INDICES", value_delimiter = ',')]
     order: Option<Vec<u32>>,
+
+    /// For `set-raw`, the value's new bytes as hex digits, two to a byte, at any length. Spaces
+    /// are ignored.
+    #[arg(long, value_name = "HEX")]
+    hex: Option<String>,
 
     /// The new value.
     #[arg(
@@ -2896,9 +2901,12 @@ fn value_op(args: &AssetSetArgs) -> Result<rivals_uasset::EditOp, String> {
         "reorder" => whole(EditOp::Reorder {
             order: args.order.clone().ok_or("--op reorder needs --order")?,
         }),
+        "set-raw" => whole(EditOp::SetRaw {
+            hex: args.hex.clone().ok_or("--op set-raw needs --hex")?,
+        }),
         other => Err(format!(
             "--op {other} is not an edit this command makes: use set, clear, store, unset, \
-             set-element, insert, remove, set-key or reorder"
+             set-element, insert, remove, set-key, reorder or set-raw"
         )),
     }
 }
@@ -4054,6 +4062,11 @@ mod parse_tests {
         );
         refused(&["--op", "set-key", "--index", "2"], "needs --key");
         refused(&["--op", "reorder"], "needs --order");
+        refused(&["--op", "set-raw"], "needs --hex");
+        assert!(matches!(
+            op(&["--op", "set-raw", "--hex", "0a 00 00 00"]),
+            Ok(EditOp::SetRaw { hex }) if hex == "0a 00 00 00"
+        ));
         assert!(matches!(
             op(&["--op", "set-key", "--index", "1", "--key", "-k"]),
             Ok(EditOp::SetKey { index: 1, text }) if text == "-k"

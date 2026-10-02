@@ -67,6 +67,8 @@ pub const NAMES: &[&str] = &[
     "SoftClassProperty",
     "Sparse",
     "MulticastSparseDelegateProperty",
+    "Mystery",
+    "SomeFutureProperty",
 ];
 
 pub fn index_of(value: &str) -> i32 {

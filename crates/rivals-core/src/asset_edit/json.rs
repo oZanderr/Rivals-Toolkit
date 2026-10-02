@@ -438,7 +438,8 @@ mod tests {
                 {"offset": 48, "name": "Radius", "kind": "float", "op": "clear"},
                 {"offset": 64, "name": "Extra", "kind": "unset", "op": "store"},
                 {"offset": 80, "name": "Scores", "kind": "map", "op": "set_key", "index": 1, "text": "Z"},
-                {"offset": 96, "name": "Tags", "kind": "array", "op": "reorder", "order": [2, 0, 1]}
+                {"offset": 96, "name": "Tags", "kind": "array", "op": "reorder", "order": [2, 0, 1]},
+                {"offset": 112, "name": "Blob", "kind": "struct", "op": "set_raw", "hex": "0a000000"}
             ],
             "imports": [
                 {"op": "retarget", "import": 2, "path": "/Game/A.A", "class": ["/Script/Engine", "Material"]},
@@ -466,7 +467,7 @@ mod tests {
             "duplicate_exports": [{"export": 2, "name": "Copy"}]
         }"#;
         let list: EditList = serde_json::from_str(sent).expect("the inspector's own shape");
-        assert_eq!(list.values.len(), 7);
+        assert_eq!(list.values.len(), 8);
         assert_eq!(list.imports.len(), 2);
         assert_eq!(list.rows.len(), 3);
         assert_eq!(list.strings.len(), 4);
@@ -476,7 +477,7 @@ mod tests {
         assert!(!list.is_empty());
         // Nothing to read from disk, so this is the whole conversion the save path makes.
         let edits = list.resolve(Path::new("")).expect("resolve");
-        assert_eq!(edits.values.len(), 7);
+        assert_eq!(edits.values.len(), 8);
         assert_eq!(edits.duplicate_exports[0].name, "Copy");
     }
 

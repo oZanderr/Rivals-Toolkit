@@ -1323,6 +1323,42 @@ fn class_soft_class_and_sparse_delegate_tags_read_and_edit() {
     );
 }
 
+/// A tag of a type nothing reads keeps its bytes as they are, and takes bytes typed for it at any
+/// length: the tag's size follows them.
+#[test]
+fn an_undecoded_tag_is_replaced_from_raw_hex() {
+    let mut e = Vec::new();
+    head(&mut e, "Mystery", "SomeFutureProperty", 4);
+    e.push(0);
+    e.extend_from_slice(&[1, 2, 3, 4]);
+    int(&mut e, "Damage", 99);
+    name(&mut e, "None");
+    e.extend_from_slice(&0i32.to_le_bytes());
+    let (asset, exports) = package_of(e);
+    let mystery = |p: &ParsedPackage| match &find(top(p), "Mystery").value {
+        PropertyValue::Struct { fields, .. } => fields[0].clone(),
+        other => panic!("{other:?}"),
+    };
+    let before = parse(&asset, &exports);
+    assert!(matches!(
+        mystery(&before).value,
+        PropertyValue::Undecoded { bytes: 4, .. }
+    ));
+    let (after, ..) = apply_to(&asset, &exports, |p| {
+        vec![edit_of(
+            &mystery(p),
+            EditOp::SetRaw {
+                hex: "AA BB CC DD EE".into(),
+            },
+        )]
+    });
+    assert!(matches!(
+        mystery(&after).value,
+        PropertyValue::Undecoded { bytes: 5, .. }
+    ));
+    assert_eq!(find(top(&after), "Damage").value.summary(), "99");
+}
+
 /// Storing an absent struct, array or map adds its tag holding the empty form, which reads back
 /// empty.
 #[test]

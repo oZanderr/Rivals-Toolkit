@@ -84,6 +84,36 @@ pub fn render(bytes: &[u8], base: u64, limit: Option<usize>) -> String {
     out.trim_end().to_string()
 }
 
+/// Bytes typed as hex digits, two to a byte, in either case. Spaces, line breaks and a leading
+/// `0x` are ignored.
+pub(crate) fn parse(text: &str) -> Result<Vec<u8>, String> {
+    let text = text.trim();
+    let text = text
+        .strip_prefix("0x")
+        .or_else(|| text.strip_prefix("0X"))
+        .unwrap_or(text);
+    let digits: Vec<u8> = text.bytes().filter(|c| !c.is_ascii_whitespace()).collect();
+    if let Some(bad) = digits.iter().find(|c| !c.is_ascii_hexdigit()) {
+        return Err(format!(
+            "{} is not a hex digit",
+            String::from_utf8_lossy(&[*bad])
+        ));
+    }
+    if !digits.len().is_multiple_of(2) {
+        return Err(format!(
+            "{} hex digits are an odd number; every byte takes two",
+            digits.len()
+        ));
+    }
+    Ok(digits
+        .chunks(2)
+        .map(|pair| {
+            let digit = |c: u8| (c as char).to_digit(16).unwrap_or(0) as u8;
+            digit(pair[0]) << 4 | digit(pair[1])
+        })
+        .collect())
+}
+
 fn byte_at(bytes: &[u8], base: u64, offset: u64) -> Option<u8> {
     bytes
         .get(usize::try_from(offset.checked_sub(base)?).ok()?)
@@ -135,6 +165,17 @@ mod tests {
     fn printable_bytes_show_in_the_text_column() {
         let rows = rows(b"Hi\0", 0);
         assert_eq!(rows[0].ascii.trim_end(), "Hi.");
+    }
+
+    #[test]
+    fn raw_hex_takes_spaces_and_either_case() {
+        assert_eq!(
+            parse("0x0aFf 10\n2b").expect("hex"),
+            [0x0A, 0xFF, 0x10, 0x2B]
+        );
+        assert_eq!(parse("").expect("nothing"), Vec::<u8>::new());
+        assert!(parse("abc").expect_err("odd").contains("odd"));
+        assert!(parse("zz").expect_err("not hex").contains("z is not"));
     }
 
     #[test]

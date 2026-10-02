@@ -1287,7 +1287,7 @@ fn read_instanced_struct(
                             PropertyEntry {
                                 name: UNDECODED_FIELD.into(),
                                 element: None,
-                                span: None,
+                                span: Some((payload_start, payload_finish)),
                                 slot: None,
                                 value: PropertyValue::Undecoded {
                                     reason,

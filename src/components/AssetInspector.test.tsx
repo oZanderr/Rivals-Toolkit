@@ -490,6 +490,37 @@ describe("AssetInspector instanced structs", () => {
   });
 });
 
+describe("AssetInspector raw bytes", () => {
+  it("replaces a value's bytes starting from what it holds", async () => {
+    mock = tauri({
+      ...labelPackage(),
+      exports: [
+        exp(0, "Settings", "SettingsData", [entry("Count", { kind: "int", value: 3 }, 40)]),
+      ],
+    }).on("value_bytes", () => [3, 0, 0, 0]);
+    installTauri(mock);
+    mount();
+    const user = userEvent.setup();
+    const menu = await menuOf(user, "Count");
+    await user.click(within(menu).getByRole("menuitem", { name: /Edit bytes/ }));
+    const dialog = await screen.findByRole("alertdialog");
+    const bytes = await within(dialog).findByDisplayValue("03 00 00 00");
+    expect(mock.callsTo("value_bytes")[0]).toMatchObject({ start: 40, end: 44 });
+    const replace = within(dialog).getByRole("button", { name: "Replace" }) as HTMLButtonElement;
+    expect(replace.disabled).toBe(true);
+    await user.clear(bytes);
+    await user.type(bytes, "05 00 00 00 00");
+    expect(within(dialog).getByText("5 bytes, where it holds 4.")).toBeTruthy();
+    await user.click(replace);
+    await user.click(await screen.findByRole("button", { name: /Save as mod/ }));
+    await waitFor(() =>
+      expect(lastSave().values).toEqual([
+        { offset: 40, name: "Count", kind: "int", op: "set_raw", hex: "05 00 00 00 00" },
+      ])
+    );
+  });
+});
+
 describe("AssetInspector keys and moves", () => {
   it("renames a map key from its own row", async () => {
     mock = tauri(containersPackage());
