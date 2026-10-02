@@ -197,8 +197,11 @@ export function PakTweaks({ gamePath, isActive }: Props) {
   const [scanning, setScanning] = useState(false);
   const [loading, setLoading] = useState(false);
   const [applying, setApplying] = useState(false);
-  const [notice, setNotice] = useState<{ msg: string; type: "ok" | "err" | "info" } | null>(null);
-  const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [notice, setNotice] = useState<{
+    msg: string;
+    type: "ok" | "err" | "info";
+    duration: number;
+  } | null>(null);
   const pakCache = useRef<Map<string, PakCacheEntry>>(new Map());
   // The pak the newest load was started for. Detection reads every config layer, which on a mod
   // shipping hundreds of megabytes of INI takes over a second, and the pak list stays clickable
@@ -232,11 +235,15 @@ export function PakTweaks({ gamePath, isActive }: Props) {
     return `${modsPart} (${removedPart})`;
   };
 
-  const showNotice = (msg: string, type: "ok" | "err" | "info", duration = 4000) => {
-    if (noticeTimer.current) clearTimeout(noticeTimer.current);
-    setNotice({ msg, type });
-    noticeTimer.current = setTimeout(() => setNotice(null), duration);
-  };
+  const showNotice = (msg: string, type: "ok" | "err" | "info", duration = 4000) =>
+    setNotice({ msg, type, duration });
+
+  // A notice clears itself after its time; a newer one starts the clock again.
+  useEffect(() => {
+    if (!notice) return;
+    const timer = setTimeout(() => setNotice(null), notice.duration);
+    return () => clearTimeout(timer);
+  }, [notice]);
 
   useEffect(() => {
     scanRef.current = scan;
@@ -332,17 +339,18 @@ export function PakTweaks({ gamePath, isActive }: Props) {
     queueSetting(id, newEnabled, currentState?.current_value ?? null);
   }
 
-  const refreshPresets = async () => {
-    try {
-      const list = await invoke<TweakPreset[]>("list_tweak_profiles");
-      setPresets(list);
-      setSelectedPreset((prev) => (list.some((p) => p.name === prev) ? prev : ""));
-    } catch {
-      setPresets([]);
-      setSelectedPreset("");
-      setAppliedPresetAt(null);
-    }
-  };
+  const refreshPresets = () =>
+    invoke<TweakPreset[]>("list_tweak_profiles").then(
+      (list) => {
+        setPresets(list);
+        setSelectedPreset((prev) => (list.some((p) => p.name === prev) ? prev : ""));
+      },
+      () => {
+        setPresets([]);
+        setSelectedPreset("");
+        setAppliedPresetAt(null);
+      }
+    );
 
   useEffect(() => {
     refreshPresets();
@@ -350,12 +358,10 @@ export function PakTweaks({ gamePath, isActive }: Props) {
   }, []);
 
   // Clear stale selection when current preset disappears from list
-  useEffect(() => {
-    if (selectedPreset && !presets.some((p) => p.name === selectedPreset)) {
-      setSelectedPreset("");
-      setAppliedPresetAt(null);
-    }
-  }, [presets, selectedPreset]);
+  if (selectedPreset && !presets.some((p) => p.name === selectedPreset)) {
+    setSelectedPreset("");
+    setAppliedPresetAt(null);
+  }
 
   function buildCurrentSettings(): TweakSetting[] {
     return definitions.map((def) => {
@@ -459,14 +465,16 @@ export function PakTweaks({ gamePath, isActive }: Props) {
     }
   }
 
-  // Auto-reapply when the selected preset is modified on another tab.
-  useEffect(() => {
-    if (!selectedPreset || appliedPresetAt == null || !selectedPak) return;
-    const preset = presets.find((p) => p.name === selectedPreset);
-    if (!preset || preset.modified_at <= appliedPresetAt) return;
-    applyPresetToCurrentPak(preset);
-    showNotice(`Preset "${preset.name}" was updated, reapplied`, "info", 5000);
-  }, [presets, selectedPreset, appliedPresetAt, selectedPak]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Auto-reapply when the selected preset is modified on another tab. Applying it records the
+  // time it was applied, so this runs once for each change.
+  const changedPreset =
+    selectedPreset && appliedPresetAt != null && selectedPak
+      ? presets.find((p) => p.name === selectedPreset && p.modified_at > appliedPresetAt)
+      : undefined;
+  if (changedPreset) {
+    applyPresetToCurrentPak(changedPreset);
+    showNotice(`Preset "${changedPreset.name}" was updated, reapplied`, "info", 5000);
+  }
 
   async function deleteSelectedPreset() {
     if (!selectedPreset) return;

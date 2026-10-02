@@ -234,19 +234,26 @@ export function Settings({
   const syncHeroNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Sync draft when parent gamePath changes externally (e.g. detect, initial load)
-  useEffect(() => {
+  const [syncedGamePath, setSyncedGamePath] = useState(gamePath);
+  if (gamePath !== syncedGamePath) {
+    setSyncedGamePath(gamePath);
     setDraftGamePath(gamePath);
     setPathError(null);
-  }, [gamePath]);
+  }
+
+  // With no path there is no launcher setting to show, and nothing to read the next one from.
+  if (
+    !draftGamePath &&
+    (draftSkipLauncher !== null || savedSkipLauncher !== null || skipLauncherError !== null)
+  ) {
+    setDraftSkipLauncher(null);
+    setSavedSkipLauncher(null);
+    setSkipLauncherError(null);
+  }
 
   // Load skip-launcher whenever the draft path changes
   useEffect(() => {
-    if (!draftGamePath) {
-      setDraftSkipLauncher(null);
-      setSavedSkipLauncher(null);
-      setSkipLauncherError(null);
-      return;
-    }
+    if (!draftGamePath) return;
     let cancelled = false;
     invoke<boolean>("get_skip_launcher", { gameRoot: draftGamePath })
       .then((v) => {
@@ -267,11 +274,10 @@ export function Settings({
     };
   }, [draftGamePath]);
 
+  if (!draftGamePath && bypassKind !== null) setBypassKind(null);
+
   useEffect(() => {
-    if (!draftGamePath) {
-      setBypassKind(null);
-      return;
-    }
+    if (!draftGamePath) return;
     let cancelled = false;
     invoke<BypassKind>("get_signature_bypass_kind", { gameRoot: draftGamePath })
       .then((v) => {
@@ -444,14 +450,10 @@ export function Settings({
       .catch(() => setCharacterDataInfo(null));
   }, []);
 
-  const refreshTweakProfiles = async () => {
-    try {
-      const list = await invoke<TweakProfile[]>("list_tweak_profiles");
-      setTweakProfiles(list);
-    } catch {
-      setTweakProfiles([]);
-    }
-  };
+  const refreshTweakProfiles = () =>
+    invoke<TweakProfile[]>("list_tweak_profiles").then(setTweakProfiles, () =>
+      setTweakProfiles([])
+    );
 
   useEffect(() => {
     refreshTweakProfiles();

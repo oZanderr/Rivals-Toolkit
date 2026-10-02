@@ -67,11 +67,16 @@ function App() {
     [manualUpdateInfo, autoUpdateInfo]
   );
 
-  useEffect(() => {
-    if (!autoUpdateInfo?.update_available) return;
-    if (installInfo === undefined) return;
+  // The automatic check offers each update it finds once, as soon as the install is known.
+  const [offeredUpdate, setOfferedUpdate] = useState<UpdateInfo | null>(null);
+  if (
+    autoUpdateInfo?.update_available &&
+    installInfo !== undefined &&
+    offeredUpdate !== autoUpdateInfo
+  ) {
+    setOfferedUpdate(autoUpdateInfo);
     setUpdateDialogOpen(true);
-  }, [autoUpdateInfo, installInfo]);
+  }
 
   const handleManualUpdateFound = useCallback((info: UpdateInfo) => {
     setManualUpdateInfo(info);
@@ -155,12 +160,10 @@ function App() {
     setActiveTab("pak-manager");
   }, []);
 
-  useEffect(() => {
-    setMountedTabs((prev) => {
-      if (prev.has(activeTab)) return prev;
-      return new Set(prev).add(activeTab);
-    });
-  }, [activeTab]);
+  // A tab stays mounted once shown, so switching back keeps its state.
+  if (!mountedTabs.has(activeTab)) {
+    setMountedTabs((prev) => new Set(prev).add(activeTab));
+  }
 
   useEffect(() => {
     getVersion()
@@ -283,7 +286,10 @@ function App() {
                   activeTab !== "ini-editor" && "hidden"
                 )}
               >
+                {/* Keyed by the game, so another install starts it afresh: no paks, entries
+                    or edits carried over from the last one. */}
                 <PakIniEditor
+                  key={gamePath}
                   gamePath={gamePath}
                   isActive={activeTab === "ini-editor"}
                   gameRunning={gameBlocking}

@@ -69,7 +69,8 @@ export function GameUserSettingsTweaks() {
   const [savedEnabled, setSavedEnabled] = useState<Record<string, boolean>>({});
   const [savedValues, setSavedValues] = useState<Record<string, string>>({});
   const [status, setStatus] = useState<{ msg: string; type: StatusType } | null>(null);
-  const [detecting, setDetecting] = useState(false);
+  // The tab looks for the file as it opens.
+  const [detecting, setDetecting] = useState(true);
   const statusTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const showStatus = useCallback((msg: string, type: StatusType = "info") => {
@@ -124,21 +125,20 @@ export function GameUserSettingsTweaks() {
     [detectTweaks]
   );
 
-  const detectPath = useCallback(async () => {
-    setDetecting(true);
-    try {
-      const p = await invoke<string>("get_game_user_settings_path");
-      setFilePath(p);
-      await loadFile(p);
-    } catch (e) {
-      showStatus(String(e), "err");
-    } finally {
-      setDetecting(false);
-    }
-  }, [loadFile, showStatus]);
+  const detectPath = useCallback(
+    () =>
+      invoke<string>("get_game_user_settings_path")
+        .then(async (p) => {
+          setFilePath(p);
+          await loadFile(p);
+        })
+        .catch((e: unknown) => showStatus(String(e), "err"))
+        .finally(() => setDetecting(false)),
+    [loadFile, showStatus]
+  );
 
   useEffect(() => {
-    detectPath();
+    void detectPath();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- initial mount only
   }, []);
 

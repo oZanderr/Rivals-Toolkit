@@ -473,6 +473,7 @@ export function AssetManager({
   }, [pakList, selectedPak, selectedIsVanilla]);
 
   // Virtualizer for the contents list
+  // eslint-disable-next-line react-hooks/incompatible-library
   const contentsVirtualizer = useVirtualizer({
     count: visible.length,
     getScrollElement: () => contentsScrollRef.current,

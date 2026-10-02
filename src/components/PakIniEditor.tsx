@@ -457,13 +457,12 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
   // Counted off the live CodeMirror document rather than a React copy of it, and
   // debounced. Holding every match position costs tens of megabytes on a large INI
   // with a common needle, and navigation finds its own matches from the cursor.
-  const [matchInfo, setMatchInfo] = useState<MatchInfo>(EMPTY_MATCH_INFO);
+  const [counted, setMatchInfo] = useState<MatchInfo>(EMPTY_MATCH_INFO);
+  // A closed or empty search shows no matches, whatever was counted last.
+  const matchInfo = searchOpen && searchTerm ? counted : EMPTY_MATCH_INFO;
 
   useEffect(() => {
-    if (!searchOpen || !searchTerm) {
-      setMatchInfo(EMPTY_MATCH_INFO);
-      return;
-    }
+    if (!searchOpen || !searchTerm) return;
     const timer = setTimeout(() => {
       const view = editorViewRef.current;
       if (!view) return;
@@ -1209,8 +1208,11 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
     // tells CM to render around that document position so the viewport isn't
     // left blank, and works even with search open (which is what we want when
     // iterating matches and tab-hopping).
+    // The same record for the life of the editor, held here so the cleanup writes where this
+    // effect read.
+    const scrollPositions = entryScrollRef.current;
     if (scrollKey !== null) {
-      const savedPos = entryScrollRef.current[scrollKey];
+      const savedPos = scrollPositions[scrollKey];
       if (savedPos !== undefined && savedPos > 0) {
         view.dispatch({
           // The cursor moves with the viewport so find-next resumes from what is on
@@ -1224,7 +1226,7 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
     return () => {
       if (scrollKey !== null && stateKey !== null) {
         const block = view.lineBlockAtHeight(view.scrollDOM.scrollTop);
-        entryScrollRef.current[scrollKey] = block.from;
+        scrollPositions[scrollKey] = block.from;
         cacheEditorState(stateKey, view.state, activeEntry ?? "");
       }
       view.destroy();
@@ -1309,21 +1311,6 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- fire-once after scan populates paks
   }, [paks, selectedPak]);
-
-  // Reset scan flag when game path changes
-  useEffect(() => {
-    hasScanned.current = false;
-    setPaks([]);
-    setSelectedPak(null);
-    setActiveEntry(null);
-    setContents({});
-    setDirtySet(new Set());
-    onDiskRef.current = new Set();
-    editorStatesRef.current.clear();
-    setPendingDeletes(new Set());
-    loadTokenRef.current = {};
-    inFlightRef.current.clear();
-  }, [gamePath]);
 
   return (
     <div className="relative flex flex-1 min-h-0 w-full flex-col gap-4">

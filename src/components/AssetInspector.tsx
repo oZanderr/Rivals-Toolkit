@@ -2324,20 +2324,25 @@ function CallVerdict({
   value: string;
   preview: PreviewCall;
 }) {
-  const [result, setResult] = useState<CallPreview | string | null>(null);
+  // Each answer is kept with the value it was for, so one still arriving for an earlier value
+  // shows as a check in progress rather than as this value's verdict.
+  const asked = `${statement}:${at}:${value}`;
+  const [answer, setAnswer] = useState<{ asked: string; result: CallPreview | string } | null>(
+    null
+  );
 
   useEffect(() => {
     let cancelled = false;
-    setResult(null);
     preview(statement, at, value).then(
-      (found) => !cancelled && setResult(found),
-      (e) => !cancelled && setResult(String(e))
+      (found) => !cancelled && setAnswer({ asked, result: found }),
+      (e) => !cancelled && setAnswer({ asked, result: String(e) })
     );
     return () => {
       cancelled = true;
     };
-  }, [preview, statement, at, value]);
+  }, [preview, statement, at, value, asked]);
 
+  const result = answer?.asked === asked ? answer.result : null;
   if (result === null) {
     return <Loader2 size={10} className="ml-0.5 animate-spin text-muted-foreground" />;
   }
@@ -2502,6 +2507,7 @@ function BytesPane({
   }, [gamePath, container, entry, exportIndex]);
 
   const rows = view?.rows ?? [];
+  // eslint-disable-next-line react-hooks/incompatible-library
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scrollRef.current,

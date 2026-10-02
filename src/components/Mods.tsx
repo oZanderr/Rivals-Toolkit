@@ -228,32 +228,31 @@ export function Mods({
   }, [gameRunning]);
 
   const refresh = useCallback(
-    async (silent = false) => {
-      if (!gamePath) return;
-      try {
-        const s = await invoke<ModsStatus>("get_mods_status", { gameRoot: gamePath });
-        setModsStatus(s);
-        if (!silent) showNotice("Mods refreshed", "ok", 4000);
-        else if (s.conflicts_resolved > 0)
-          showNotice(
-            `Removed ${s.conflicts_resolved} outdated disabled mod${s.conflicts_resolved !== 1 ? "s" : ""} (replaced by enabled version)`,
-            "info"
-          );
-        // Check for asset-level conflicts between enabled mods (skipped if user disabled the setting).
-        const enabledMods = s.mod_entries.filter((m) => m.enabled);
-        const conflictCheckEnabled = await invoke<boolean>("get_mod_conflict_check_enabled").catch(
-          () => true
-        );
-        if (conflictCheckEnabled && enabledMods.length >= 2) {
-          invoke<ConflictReport>("check_mod_conflicts", { gameRoot: gamePath })
-            .then(setConflictReport)
-            .catch(() => setConflictReport(null));
-        } else {
-          setConflictReport(null);
-        }
-      } catch (e: unknown) {
-        showNotice(String(e), "err");
-      }
+    (silent = false) => {
+      if (!gamePath) return Promise.resolve();
+      return invoke<ModsStatus>("get_mods_status", { gameRoot: gamePath })
+        .then(async (s) => {
+          setModsStatus(s);
+          if (!silent) showNotice("Mods refreshed", "ok", 4000);
+          else if (s.conflicts_resolved > 0)
+            showNotice(
+              `Removed ${s.conflicts_resolved} outdated disabled mod${s.conflicts_resolved !== 1 ? "s" : ""} (replaced by enabled version)`,
+              "info"
+            );
+          // Check for asset-level conflicts between enabled mods (skipped if user disabled the setting).
+          const enabledMods = s.mod_entries.filter((m) => m.enabled);
+          const conflictCheckEnabled = await invoke<boolean>(
+            "get_mod_conflict_check_enabled"
+          ).catch(() => true);
+          if (conflictCheckEnabled && enabledMods.length >= 2) {
+            invoke<ConflictReport>("check_mod_conflicts", { gameRoot: gamePath })
+              .then(setConflictReport)
+              .catch(() => setConflictReport(null));
+          } else {
+            setConflictReport(null);
+          }
+        })
+        .catch((e: unknown) => showNotice(String(e), "err"));
     },
     [gamePath, showNotice]
   );
@@ -261,14 +260,10 @@ export function Mods({
     refreshRef.current = refresh;
   }, [refresh]);
 
-  const refreshProfiles = useCallback(async () => {
-    try {
-      const p = await invoke<ModProfile[]>("list_mod_profiles");
-      setProfiles(p);
-    } catch {
-      setProfiles([]);
-    }
-  }, []);
+  const refreshProfiles = useCallback(
+    () => invoke<ModProfile[]>("list_mod_profiles").then(setProfiles, () => setProfiles([])),
+    []
+  );
 
   useEffect(() => {
     if (gamePath) refresh(true);
@@ -323,16 +318,19 @@ export function Mods({
   }, [loadKnownHeroes]);
 
   // Drop selected entries that no longer exist after a refresh.
-  useEffect(() => {
-    if (!modsStatus) return;
-    setSelected((prev) => {
-      if (prev.size === 0) return prev;
-      const alive = new Set(modsStatus.mod_entries.map((e) => e.full_name));
-      const next = new Set<string>();
-      for (const name of prev) if (alive.has(name)) next.add(name);
-      return next.size === prev.size ? prev : next;
-    });
-  }, [modsStatus]);
+  const [prunedFor, setPrunedFor] = useState(modsStatus);
+  if (modsStatus !== prunedFor) {
+    setPrunedFor(modsStatus);
+    if (modsStatus) {
+      setSelected((prev) => {
+        if (prev.size === 0) return prev;
+        const alive = new Set(modsStatus.mod_entries.map((e) => e.full_name));
+        const next = new Set<string>();
+        for (const name of prev) if (alive.has(name)) next.add(name);
+        return next.size === prev.size ? prev : next;
+      });
+    }
+  }
 
   // Drag-and-drop: accept .pak and archive files dropped anywhere on the window.
   useEffect(() => {
