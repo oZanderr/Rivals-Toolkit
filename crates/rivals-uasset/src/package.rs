@@ -1165,11 +1165,14 @@ fn parse_one_inner(
     let mut struct_definition = None;
     let mut defaults = Vec::new();
     let mut super_struct_at = None;
-    if !block_consumed
-        && cursor.remaining() > 0
-        && let Some(mappings) = ctx.mappings
-    {
-        let chain = mappings.ancestry(&class_name);
+    if !block_consumed && cursor.remaining() > 0 {
+        // The engine's own struct classes lay out the same in every package, so a package read
+        // without mappings, such as one cooked with tagged properties, still has its classes and
+        // functions walked.
+        let chain = match ctx.mappings.map(|m| m.ancestry(&class_name)) {
+            Some(chain) if !chain.is_empty() => chain,
+            _ => engine_struct_chain(&class_name).to_vec(),
+        };
         if chain.contains(&"Class")
             || chain.contains(&"Function")
             || chain.contains(&"ScriptStruct")
@@ -1609,10 +1612,158 @@ fn hex_preview_at(cursor: &Cursor<'_>) -> String {
     )
 }
 
+/// The class chain, root first, of an engine class that is itself a struct: a function, a
+/// class, a Blueprint's generated class or a script struct. Empty for anything else.
+fn engine_struct_chain(class_name: &str) -> &'static [&'static str] {
+    const FUNCTION: &[&str] = &["Object", "Field", "Struct", "Function"];
+    const CLASS: &[&str] = &["Object", "Field", "Struct", "Class"];
+    const BLUEPRINT: &[&str] = &[
+        "Object",
+        "Field",
+        "Struct",
+        "Class",
+        "BlueprintGeneratedClass",
+    ];
+    match class_name {
+        "Function" => FUNCTION,
+        "DelegateFunction" => &["Object", "Field", "Struct", "Function", "DelegateFunction"],
+        "SparseDelegateFunction" => &[
+            "Object",
+            "Field",
+            "Struct",
+            "Function",
+            "DelegateFunction",
+            "SparseDelegateFunction",
+        ],
+        "Class" => CLASS,
+        "BlueprintGeneratedClass" => BLUEPRINT,
+        "WidgetBlueprintGeneratedClass" => &[
+            "Object",
+            "Field",
+            "Struct",
+            "Class",
+            "BlueprintGeneratedClass",
+            "WidgetBlueprintGeneratedClass",
+        ],
+        "AnimBlueprintGeneratedClass" => &[
+            "Object",
+            "Field",
+            "Struct",
+            "Class",
+            "BlueprintGeneratedClass",
+            "AnimBlueprintGeneratedClass",
+        ],
+        "ScriptStruct" => &["Object", "Field", "Struct", "ScriptStruct"],
+        "UserDefinedStruct" => &[
+            "Object",
+            "Field",
+            "Struct",
+            "ScriptStruct",
+            "UserDefinedStruct",
+        ],
+        _ => &[],
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// A package cooked with tagged properties reads without mappings, and its functions are still
+    /// walked for their fields and bytecode: the engine's own struct classes need no schema.
+    #[test]
+    fn a_tagged_function_reads_whole_without_mappings() {
+        use retoc::legacy_asset::{EPackageFlags, FObjectImport, FPackageNameMap};
+        use retoc::zen::FPackageIndex;
+
+        let names = [
+            "None",
+            "/Script/CoreUObject",
+            "Package",
+            "Class",
+            "Function",
+            "Run",
+        ];
+        let name = |value: &str| retoc::legacy_asset::FMinimalName {
+            index: names.iter().position(|n| *n == value).expect("named") as i32,
+            number: 0,
+        };
+        let import = |class: &str, outer: i32, object: &str| FObjectImport {
+            class_package: name("/Script/CoreUObject"),
+            class_name: name(class),
+            outer_index: FPackageIndex { index: outer },
+            object_name: name(object),
+            is_optional: false,
+        };
+        let mut body = Vec::new();
+        body.extend_from_slice(&0i64.to_le_bytes()); // the tagged list's `None`
+        body.extend_from_slice(&0i32.to_le_bytes()); // no object guid
+        for word in [0i32, 0, 0, 3, 3] {
+            // no super, no children, no fields, three bytes of bytecode loaded and stored
+            body.extend_from_slice(&word.to_le_bytes());
+        }
+        body.extend_from_slice(&[0x04, 0x0B, 0x53]); // Return Nothing, EndOfScript
+        for word in [0i32, 0, 0] {
+            // FunctionFlags, EventGraphFunction, EventGraphCallOffset
+            body.extend_from_slice(&word.to_le_bytes());
+        }
+        let mut summary = retoc::legacy_asset::FLegacyPackageFileSummary {
+            package_name: "/Game/TestPackage".to_string(),
+            ..Default::default()
+        };
+        summary.versioning_info.package_file_version =
+            FALLBACK_ENGINE_VERSION.package_file_version();
+        summary.versioning_info.total_header_size = 1024;
+        summary.package_flags =
+            EPackageFlags::Cooked as u32 | EPackageFlags::FilterEditorOnly as u32;
+        let header = FLegacyPackageHeader {
+            summary,
+            name_map: FPackageNameMap::create_from_names(
+                names.iter().map(|n| (*n).to_string()).collect(),
+            ),
+            imports: vec![
+                import("Package", 0, "/Script/CoreUObject"),
+                import("Class", -1, "Function"),
+            ],
+            exports: vec![retoc::legacy_asset::FObjectExport {
+                object_name: name("Run"),
+                class_index: FPackageIndex { index: -2 },
+                serial_offset: 0,
+                serial_size: body.len() as i64,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut asset = std::io::Cursor::new(Vec::new());
+        header
+            .serialize(&mut asset, Some(1024), &retoc::logging::Log::no_log())
+            .expect("header");
+        let parsed = parse_package(
+            &AssetBundle {
+                asset: &asset.into_inner(),
+                exports: &body,
+            },
+            None,
+        )
+        .expect("parsed");
+        let run = &parsed.exports[0];
+        assert!(
+            matches!(
+                run.status,
+                ExportStatus::Payload {
+                    kind: "bytecode",
+                    ..
+                }
+            ),
+            "{:?} {:?}",
+            run.status,
+            run.note
+        );
+        let script = run.script.as_ref().expect("a script");
+        assert_eq!(script.statements.len(), 2);
+        assert!(run.signature.is_some());
+    }
 
     #[test]
     fn a_hex_preview_wraps_every_sixteen_bytes_and_labels_the_offsets() {

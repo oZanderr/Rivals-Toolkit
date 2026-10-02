@@ -8108,8 +8108,8 @@ export default function AssetInspector({
                   <div className="flex shrink-0 items-center gap-3 border-b border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-300">
                     <span className="min-w-0 flex-1">
                       No mappings file is loaded. This asset stores its own property types, so its
-                      values still read, but the layouts of its classes and functions, their fields
-                      and bytecode, are only read with one. Those are the unexplained bytes here.
+                      values still read, but what some engine classes keep after them is only read
+                      with one. Those are likely the unexplained bytes here.
                     </span>
                     <Button
                       size="sm"
