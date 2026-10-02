@@ -73,6 +73,9 @@ pub struct EditList {
     /// Save imports that point at nothing the game or an enabled mod has. Set by the caller.
     #[serde(skip)]
     pub allow_missing: bool,
+    /// Save script edits pointing at something whose kind could not be confirmed. Set by the caller.
+    #[serde(skip)]
+    pub allow_unchecked: bool,
 }
 
 /// New bytes for one bulk data resource, as a file to read them from.
@@ -199,6 +202,7 @@ impl EditList {
             expect: self.expect,
             allow_drift: self.allow_drift,
             allow_missing: self.allow_missing,
+            allow_unchecked: self.allow_unchecked,
         })
     }
 }

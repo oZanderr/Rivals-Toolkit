@@ -53,6 +53,11 @@ impl Existence {
 /// How a refusal over missing objects starts, so a caller can offer to go ahead anyway.
 pub const MISSING: &str = "Nothing is at the path these edits point at";
 
+/// How a refusal starts when a script edit points at something whose kind could not be confirmed
+/// to be what the script held, so a caller can offer to go ahead anyway.
+pub const UNCHECKED: &str =
+    "These edits point a script at something that could not be confirmed to fit it";
+
 /// [`objects_exist`] for one path.
 pub fn object_exists(game_root: &str, container: &str, path: &str) -> Existence {
     objects_exist(game_root, container, &[path.to_string()])

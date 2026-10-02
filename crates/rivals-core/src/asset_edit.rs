@@ -1193,7 +1193,391 @@ fn patch_pass(
             .notes
             .extend(check_new_table_keys(request, mappings, parsed, &after)?);
     }
+    if !request.changes.allow_unchecked {
+        check_script_objects(request, mappings, parsed, &after)?;
+    }
+    check_script_calls(request, mappings, parsed)?;
     Ok((patched, after))
+}
+
+/// Refuses a call a script edit pointed at a function that does not take what the call passes or
+/// give back what it keeps: the code around it was compiled for the old one. A Blueprint function
+/// says what it takes in its own package. A native one says nothing in cooked data, so a call
+/// pointed at one is not checked, and is refused like any call that cannot be told unless
+/// unchecked calls are allowed.
+fn check_script_calls(
+    request: &AssetEditRequest<'_>,
+    mappings: Option<&Mappings>,
+    before: &rivals_uasset::ParsedPackage,
+) -> Result<(), String> {
+    let mut doubts = Vec::new();
+    for edit in &request.changes.scripts {
+        let Some(at) = edit.at else {
+            continue;
+        };
+        let new = edit.value.trim();
+        let Some(judged) = judge_call(
+            request,
+            mappings,
+            before,
+            edit.export,
+            edit.statement,
+            at,
+            new,
+        ) else {
+            continue;
+        };
+        match judged.fit {
+            rivals_uasset::Fit::Fits => {}
+            rivals_uasset::Fit::Mismatch(reason) => {
+                return Err(format!(
+                    "{} cannot call {new} instead: {reason}",
+                    judged.callee
+                ));
+            }
+            rivals_uasset::Fit::Unknown(reason) => {
+                doubts.push(format!("{} -> {new}: {reason}", judged.callee));
+            }
+        }
+    }
+    if doubts.is_empty() || request.changes.allow_unchecked {
+        return Ok(());
+    }
+    Err(format!(
+        "{}:\n  {}\nSave anyway if you know the new function takes what the call passes and gives back what it keeps.",
+        crate::object_check::UNCHECKED,
+        doubts.join("\n  ")
+    ))
+}
+
+/// What a call would meet pointed at another function, before anything is saved.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CallPreview {
+    /// The function the call names now.
+    pub callee: String,
+    /// What the function the call names now takes and gives back, written out, or what the call
+    /// passes and keeps when the function does not say.
+    pub was: Option<String>,
+    /// What the new function takes and gives back, when its own records say.
+    pub now: Option<String>,
+    /// `fits`, `mismatch` or `unknown`, as a save would find it.
+    pub verdict: &'static str,
+    pub reason: Option<String>,
+}
+
+/// How the call starting at `at` in the statement at `statement` would fare pointed at `new`:
+/// the check a save makes, without saving.
+pub fn preview_call(
+    request: &AssetEditRequest<'_>,
+    mappings: Option<&Mappings>,
+    export: u32,
+    statement: u32,
+    at: u32,
+    new: &str,
+) -> Result<CallPreview, String> {
+    let (_, parsed) = read_package(request, mappings)?;
+    let judged = judge_call(
+        request,
+        mappings,
+        &parsed,
+        export,
+        statement,
+        at,
+        new.trim(),
+    )
+    .ok_or_else(|| format!("no call starts at 0x{at:04X} in export {export}"))?;
+    let (verdict, reason) = match judged.fit {
+        rivals_uasset::Fit::Fits => ("fits", None),
+        rivals_uasset::Fit::Mismatch(reason) => ("mismatch", Some(reason)),
+        rivals_uasset::Fit::Unknown(reason) => ("unknown", Some(reason)),
+    };
+    Ok(CallPreview {
+        callee: judged.callee,
+        was: Some(rivals_uasset::render_call_shape(&judged.was)),
+        now: judged.now.as_ref().map(rivals_uasset::render_call_shape),
+        verdict,
+        reason,
+    })
+}
+
+/// A call held against the function a retarget points it at.
+struct Judged {
+    callee: String,
+    /// The old function's shape, or what the call passes and keeps when that is not known.
+    was: rivals_uasset::CallShape,
+    now: Option<rivals_uasset::CallShape>,
+    fit: rivals_uasset::Fit,
+}
+
+/// How the call starting at `at` fares pointed at `new`. What it passes and keeps is read off the
+/// call itself; the old function's shape fills in only what the call cannot say, such as an
+/// argument built by another call, or a value it uses without keeping. Only a Blueprint function
+/// says what it takes, so a call pointed at a native one is not checked.
+fn judge_call(
+    request: &AssetEditRequest<'_>,
+    mappings: Option<&Mappings>,
+    before: &rivals_uasset::ParsedPackage,
+    export: u32,
+    statement: u32,
+    at: u32,
+    new: &str,
+) -> Option<Judged> {
+    let script = before
+        .exports
+        .iter()
+        .find(|found| found.index == export)?
+        .script
+        .as_ref()?;
+    let call = rivals_uasset::call_at(script, statement, at)?;
+    let (site, use_) = rivals_uasset::site_at(before, export, statement, at, mappings)?;
+    let by_name = call.opcode.contains("Virtual");
+    let old = blueprint_shape(request, mappings, before, &call.callee, by_name);
+    let now = blueprint_shape(request, mappings, before, new, by_name);
+    let passed = passed_shape(&site, use_, old.as_ref());
+    let owner = |path: &str| path.split(':').next().unwrap_or(path).to_string();
+    let own_function = |path: &str| before.exports.iter().any(|export| export.path == path);
+    let mut fit = match &now {
+        Some(shape) => rivals_uasset::compare_calls(&passed, shape, use_, mappings),
+        None if new.starts_with("/Script/") => rivals_uasset::Fit::Unknown(format!(
+            "{new} is a native function, and the game's files do not record what one takes, so the call is not checked"
+        )),
+        None if by_name => rivals_uasset::Fit::Unknown(format!(
+            "{new} is not one of this Blueprint's own functions, so what it takes is not known"
+        )),
+        None => rivals_uasset::Fit::Unknown(format!(
+            "what {new} takes could not be read from its package"
+        )),
+    };
+    if fit == rivals_uasset::Fit::Fits {
+        fit = match call.opcode {
+            // A Blueprint function, which is all a check can fit, is never native and static.
+            "CallMath" => rivals_uasset::Fit::Mismatch(format!(
+                "a CallMath reaches only a native static function, and {new} is a Blueprint function"
+            )),
+            "LocalFinalFunction" | "FinalFunction"
+                if owner(new) != owner(&call.callee) && !own_function(new) =>
+            {
+                rivals_uasset::Fit::Unknown(format!(
+                    "{new} belongs to another class than {}, which the object it is called on was compiled for",
+                    call.callee
+                ))
+            }
+            _ => rivals_uasset::Fit::Fits,
+        };
+    }
+    Some(Judged {
+        callee: call.callee,
+        was: old.unwrap_or(passed),
+        now,
+        fit,
+    })
+}
+
+/// What a call passes, one type per argument as the call itself shows it, the old function's
+/// where it shows nothing; and the type its value is kept in, or the old function's return when
+/// it is used without being kept.
+fn passed_shape(
+    site: &rivals_uasset::CallSite,
+    use_: rivals_uasset::CallUse,
+    old: Option<&rivals_uasset::CallShape>,
+) -> rivals_uasset::CallShape {
+    let mut passed = rivals_uasset::CallShape {
+        args: site.args.clone(),
+        inputs: site.inputs.clone(),
+        returns: None,
+    };
+    if let Some(old) = old
+        && old.args.len() == passed.args.len()
+    {
+        for (arg, was) in passed.args.iter_mut().zip(&old.args) {
+            if arg.is_none() {
+                arg.clone_from(was);
+            }
+        }
+    }
+    let kept = (use_ == rivals_uasset::CallUse::Kept)
+        .then(|| site.returns.clone())
+        .flatten();
+    passed.returns = kept.or_else(|| old.and_then(|old| old.returns.clone()));
+    passed
+}
+
+/// What a Blueprint function takes and gives back, from its own field records, in this package or
+/// in another. A virtual call names its function bare, so only this class's own functions can be
+/// found that way. A native function has no records, which is `None` too.
+fn blueprint_shape(
+    request: &AssetEditRequest<'_>,
+    mappings: Option<&Mappings>,
+    parsed: &rivals_uasset::ParsedPackage,
+    callee: &str,
+    by_name: bool,
+) -> Option<rivals_uasset::CallShape> {
+    let own = |export: &rivals_uasset::ParsedExport| {
+        export
+            .signature
+            .as_ref()
+            .map(rivals_uasset::shape_of_signature)
+    };
+    if by_name {
+        return parsed
+            .exports
+            .iter()
+            .find(|export| export.object_name == callee && export.signature.is_some())
+            .and_then(own);
+    }
+    if callee.starts_with("/Script/") {
+        return None;
+    }
+    if let Some(found) = parsed.exports.iter().find(|export| export.path == callee) {
+        return own(found);
+    }
+    let (package, _) = callee.split_once('.')?;
+    let container = if request.container.to_ascii_lowercase().ends_with(".utoc") {
+        request.container
+    } else {
+        "pakchunk0-Windows.utoc"
+    };
+    let loaded = asset::load_bundle(
+        request.game_root,
+        container,
+        package,
+        asset::AssetSource::Utoc,
+    )
+    .ok()?;
+    let other = rivals_uasset::parse_package(
+        &AssetBundle {
+            asset: &loaded.asset_file_buffer,
+            exports: &loaded.exports_file_buffer,
+        },
+        mappings,
+    )
+    .ok()?;
+    other
+        .exports
+        .iter()
+        .find(|export| export.path == callee)
+        .and_then(own)
+}
+
+/// Refuses an object constant a script edit pointed at an object of another class than the one it
+/// held: the code around it was compiled for that class. An import the package already had is
+/// checked as the patch is made; this reads a new one's own package to see what it is.
+fn check_script_objects(
+    request: &AssetEditRequest<'_>,
+    mappings: Option<&Mappings>,
+    before: &rivals_uasset::ParsedPackage,
+    after: &rivals_uasset::ParsedPackage,
+) -> Result<(), String> {
+    let class_of = |parsed: &rivals_uasset::ParsedPackage, index: i32| -> Option<String> {
+        if index < 0 {
+            parsed
+                .imports
+                .get((-index - 1) as usize)
+                .map(|import| import.class_name.clone())
+        } else if index > 0 {
+            parsed
+                .exports
+                .get((index - 1) as usize)
+                .map(|export| export.class_name.clone())
+        } else {
+            None
+        }
+    };
+    let had: std::collections::HashSet<&str> = before
+        .imports
+        .iter()
+        .map(|import| import.path.as_str())
+        .collect();
+    let mut doubts = Vec::new();
+    for edit in &request.changes.scripts {
+        let Some(at) = edit.at else {
+            continue;
+        };
+        let held = before
+            .exports
+            .iter()
+            .find(|export| export.index == edit.export)
+            .and_then(|export| export.script.as_ref())
+            .and_then(|script| rivals_uasset::expression_starting(script, edit.statement, at));
+        let now = after
+            .exports
+            .iter()
+            .find(|export| export.index == edit.export)
+            .and_then(|export| export.script.as_ref())
+            .and_then(|script| rivals_uasset::expression_starting(script, edit.statement, at));
+        let (
+            Some(rivals_uasset::Expr::ObjectConst { object: was }),
+            Some(rivals_uasset::Expr::ObjectConst { object: is }),
+        ) = (held, now)
+        else {
+            continue;
+        };
+        let Some(path) = is.path.as_deref() else {
+            continue;
+        };
+        if is.index >= 0 || had.contains(path) {
+            continue;
+        }
+        let Some(wanted) = class_of(before, was.index) else {
+            continue;
+        };
+        match actual_class(request, mappings, path) {
+            Some(found) if found == wanted => {}
+            Some(found) => doubts.push(format!(
+                "{path} is a {found}, where the script held a {wanted} there"
+            )),
+            None => doubts.push(format!(
+                "what kind of object {path} is could not be read, and the script held a {wanted} there"
+            )),
+        }
+    }
+    if doubts.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "{}:\n  {}\nPoint it at an object of the same class, or save anyway if the code around it only needs what the two have in common.",
+        crate::object_check::UNCHECKED,
+        doubts.join("\n  ")
+    ))
+}
+
+/// The class of the object at `path`: a native default object is named after its class, and an
+/// object in a package is read from that package.
+fn actual_class(
+    request: &AssetEditRequest<'_>,
+    mappings: Option<&Mappings>,
+    path: &str,
+) -> Option<String> {
+    let (package, _) = path.split_once('.')?;
+    if package.starts_with("/Script/") {
+        let leaf = path.rsplit(['.', ':']).next()?;
+        return leaf.strip_prefix("Default__").map(str::to_string);
+    }
+    let container = if request.container.to_ascii_lowercase().ends_with(".utoc") {
+        request.container
+    } else {
+        "pakchunk0-Windows.utoc"
+    };
+    let loaded = asset::load_bundle(
+        request.game_root,
+        container,
+        package,
+        asset::AssetSource::Utoc,
+    )
+    .ok()?;
+    let parsed = rivals_uasset::parse_package(
+        &AssetBundle {
+            asset: &loaded.asset_file_buffer,
+            exports: &loaded.exports_file_buffer,
+        },
+        mappings,
+    )
+    .ok()?;
+    parsed
+        .exports
+        .into_iter()
+        .find(|export| export.path == path)
+        .map(|export| export.class_name)
 }
 
 /// Refuses a text the patch pointed at a string table entry the table does not hold: the game
@@ -4204,6 +4588,9 @@ mod game_data_tests {
         ("CURVE_ANIM_BP", CURVE_ANIM_BP),
         ("INSTANCED", INSTANCED),
         ("LEVEL", LEVEL),
+        ("CONSTRAINT_EMITTER", CONSTRAINT_EMITTER),
+        ("PLAYER_CONTROLLER", PLAYER_CONTROLLER),
+        ("DEBUG_AUDIO_ABILITY", DEBUG_AUDIO_ABILITY),
         ("HOOP_BLUEPRINT", HOOP_BLUEPRINT),
         ("STRING_TABLE", STRING_TABLE),
         ("STRUCT", STRUCT),
@@ -7065,6 +7452,17 @@ mod game_data_tests {
     }
 
     const LEVEL: &str = "Marvel/Content/Marvel/Maps/Battle/SimpleSelectHeroLevel.umap";
+    /// A physics constraint's Blueprint: an event graph ten event stubs enter, three Delays resume
+    /// in and Timelines drive, with one `NoObject` argument inside a context early on.
+    const CONSTRAINT_EMITTER: &str = "Marvel/Content/Marvel/Environment/Common/Reusable/BluePrint/Constrain/BP_ConstraintEmitter.uasset";
+    /// The player controller, whose `IsActiveAbility` branches once on a cast and calls the array
+    /// library through its default object.
+    const PLAYER_CONTROLLER: &str =
+        "Marvel/Content/Marvel/Blueprints/LevelGameplay/Base/MarvelPlayerControllerBP.uasset";
+    /// A debug widget whose `Initialize Anim Events` formats a text constant and holds plain strings
+    /// a widening rewrites.
+    const DEBUG_AUDIO_ABILITY: &str =
+        "Marvel/Content/Marvel/UI/Blueprints/Audio/Debug/WBP_DebugAudioAbility.uasset";
     /// A blueprint class in its own package, whose default object stores values under it.
     const HOOP_BLUEPRINT: &str = "Marvel/Content/Marvel/AbilitySystem/Common/GameAbility/MarvelEmoteBasketBallHoop_BP.uasset";
     const STRING_TABLE: &str = "Marvel/Content/Marvel/Data/StringTable/104_Currency_ST.uasset";
@@ -11879,8 +12277,9 @@ mod game_data_tests {
         assert_eq!(script.statements.len(), 3);
     }
 
-    /// A constant inside a function is changed where it sits: the script keeps its length, its
-    /// size words and its statements, and reads the new value back.
+    /// The level's begin play event passes its event graph the offset it starts at, as a constant.
+    /// It is changed where it sits, to where another statement starts, and the script keeps its
+    /// length, its size words and its statements; an offset that is no statement's is refused.
     #[test]
     fn a_script_constant_is_changed_in_place() {
         let Some(fixture) = Fixture::open(LEVEL) else {
@@ -11901,16 +12300,30 @@ mod game_data_tests {
             ),
             "{first:?}"
         );
-
-        let (patched, after) = fixture.apply_changes(PackageEdits {
+        let graph = before
+            .exports
+            .iter()
+            .find(|e| e.object_name.starts_with("ExecuteUbergraph_"))
+            .and_then(|e| e.script.as_ref())
+            .expect("the level's event graph");
+        let other = graph
+            .statements
+            .iter()
+            .map(|statement| statement.offset)
+            .find(|offset| *offset != 0 && *offset != 411)
+            .expect("another statement in the event graph");
+        let entry = |value: String| PackageEdits {
             scripts: vec![ScriptConstEdit {
                 export: event.index,
                 statement: 0,
                 constant: 0,
-                value: "1000".to_string(),
+                value,
+                ..ScriptConstEdit::default()
             }],
             ..Default::default()
-        });
+        };
+
+        let (patched, after) = fixture.apply_changes(entry(other.to_string()));
         let now = export_at(&after, event.index);
         let script = now.script.as_ref().expect("still disassembles");
         assert!(script.complete(), "{:?}", script.stopped);
@@ -11921,7 +12334,7 @@ mod game_data_tests {
         assert!(
             matches!(
                 first.as_slice(),
-                [rivals_uasset::Expr::IntConst { value: 1000, .. }]
+                [rivals_uasset::Expr::IntConst { value, .. }] if *value as u32 == other
             ),
             "{first:?}"
         );
@@ -11931,7 +12344,19 @@ mod game_data_tests {
                 patched.applied[0].before.as_str(),
                 patched.applied[0].after.as_str()
             ),
-            ("411", "1000")
+            ("411", other.to_string().as_str())
+        );
+
+        let refused = match preview_edits(
+            &fixture.request_changes(entry("1000".to_string())),
+            Some(&fixture.schema),
+        ) {
+            Ok(_) => panic!("an entry that is no statement's should be refused"),
+            Err(err) => err,
+        };
+        assert!(
+            refused.contains("is not where a statement starts"),
+            "{refused}"
         );
 
         let request = fixture.request_changes(PackageEdits {
@@ -11940,6 +12365,7 @@ mod game_data_tests {
                 statement: 15,
                 constant: 0,
                 value: "1".to_string(),
+                ..ScriptConstEdit::default()
             }],
             ..Default::default()
         });
@@ -13335,5 +13761,387 @@ mod game_data_tests {
             Err(error) => error,
         };
         assert!(error.contains("NoSuchProperty"), "{error}");
+    }
+
+    fn function<'a>(
+        parsed: &'a rivals_uasset::ParsedPackage,
+        name: &str,
+    ) -> &'a rivals_uasset::ParsedExport {
+        parsed
+            .exports
+            .iter()
+            .find(|export| export.object_name == name || export.object_name.starts_with(name))
+            .unwrap_or_else(|| panic!("no function {name}"))
+    }
+
+    /// The first expression of `kind` in a script: its statement's offset and its own.
+    fn first_slot(
+        script: &rivals_uasset::Script,
+        kind: rivals_uasset::SlotKind,
+        token: &str,
+    ) -> (u32, u32) {
+        rivals_uasset::script_lines(script)
+            .into_iter()
+            .find_map(|line| {
+                line.expressions
+                    .iter()
+                    .find(|slot| slot.kind == kind && slot.token == token)
+                    .map(|slot| (line.offset, slot.at))
+            })
+            .unwrap_or_else(|| panic!("no {token} in the script"))
+    }
+
+    /// Giving the event graph's `NoObject` an object constant's room moves every event entry and
+    /// latent resume point past it by what it grew once loaded, and leaves those before it.
+    #[test]
+    fn an_event_graph_grows_and_its_entries_and_resume_points_follow() {
+        let Some(fixture) = Fixture::open(CONSTRAINT_EMITTER) else {
+            return;
+        };
+        let before = fixture.parse();
+        let graph = function(&before, "ExecuteUbergraph_");
+        let script = graph.script.as_ref().expect("a script");
+        assert!(script.resize_lock().is_none(), "{:?}", script.resize_lock());
+        let (statement, at) = first_slot(script, rivals_uasset::SlotKind::Object, "NoObject");
+        let scripts = |parsed: &rivals_uasset::ParsedPackage| {
+            parsed
+                .exports
+                .iter()
+                .filter_map(|e| Some((e.object_name.clone(), e.script.clone()?)))
+                .collect::<Vec<_>>()
+        };
+        let entries = |parsed: &rivals_uasset::ParsedPackage| {
+            let held = scripts(parsed);
+            rivals_uasset::ubergraph_entries(
+                held.iter().map(|(name, script)| (name.as_str(), script)),
+            )
+            .remove(&graph.object_name)
+            .unwrap_or_default()
+        };
+        let resumes = |parsed: &rivals_uasset::ParsedPackage| {
+            let script = function(parsed, "ExecuteUbergraph_")
+                .script
+                .clone()
+                .expect("a script");
+            rivals_uasset::script_lines(&script)
+                .into_iter()
+                .filter(|line| line.text.contains("LatentActionInfo"))
+                .flat_map(|line| line.targets)
+                .collect::<Vec<_>>()
+        };
+        let was_entries = entries(&before);
+        let was_resumes = resumes(&before);
+        assert_eq!(was_entries.len(), 10, "{was_entries:?}");
+        assert_eq!(was_resumes.len(), 3, "{was_resumes:?}");
+
+        let (patched, after) = fixture.apply_changes(PackageEdits {
+            scripts: vec![ScriptConstEdit {
+                export: graph.index,
+                statement,
+                at: Some(at),
+                widen: true,
+                ..ScriptConstEdit::default()
+            }],
+            ..Default::default()
+        });
+        let grown = function(&after, "ExecuteUbergraph_")
+            .script
+            .as_ref()
+            .expect("a script");
+        assert_eq!(
+            (grown.buffer_size, grown.storage_size),
+            (script.buffer_size + 8, script.storage_size + 4)
+        );
+        let moved = |offset: u32| if offset > at { offset + 8 } else { offset };
+        assert_eq!(
+            entries(&after),
+            was_entries
+                .iter()
+                .map(|(offset, name)| (moved(*offset), name.clone()))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            resumes(&after),
+            was_resumes
+                .iter()
+                .map(|offset| moved(*offset))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            patched
+                .applied
+                .iter()
+                .any(|applied| applied.name.ends_with("script layout")),
+            "{:?}",
+            patched.applied
+        );
+    }
+
+    /// `IsActiveAbility`'s branch on its cast is fixed both ways without the script moving: never
+    /// jumping aims it at its own fall-through, always jumping leaves the test behind a jump.
+    #[test]
+    fn a_branch_is_fixed_either_way_in_place() {
+        let Some(fixture) = Fixture::open(PLAYER_CONTROLLER) else {
+            return;
+        };
+        let before = fixture.parse();
+        let export = function(&before, "IsActiveAbility");
+        let script = export.script.as_ref().expect("a script");
+        let (statement, at) = first_slot(script, rivals_uasset::SlotKind::Condition, "JumpIfNot");
+        let fix = |value: &str| {
+            fixture.apply_changes(PackageEdits {
+                scripts: vec![ScriptConstEdit {
+                    export: export.index,
+                    statement,
+                    at: Some(at),
+                    value: value.into(),
+                    ..ScriptConstEdit::default()
+                }],
+                ..Default::default()
+            })
+        };
+        let line = |parsed: &rivals_uasset::ParsedPackage, offset: u32| {
+            let script = function(parsed, "IsActiveAbility")
+                .script
+                .clone()
+                .expect("a script");
+            rivals_uasset::script_lines(&script)
+                .into_iter()
+                .find(|line| line.offset == offset)
+                .map(|line| line.text)
+                .unwrap_or_default()
+        };
+        let (_, never) = fix("true");
+        let next = rivals_uasset::script_lines(script)
+            .into_iter()
+            .map(|line| line.offset)
+            .find(|offset| *offset > statement)
+            .expect("a statement after the branch");
+        assert!(
+            line(&never, statement).starts_with(&format!("Jump 0x{next:04X} unless")),
+            "{}",
+            line(&never, statement)
+        );
+        let (_, always) = fix("false");
+        assert!(
+            line(&always, statement).starts_with("Jump 0x")
+                && !line(&always, statement).contains("unless"),
+            "{}",
+            line(&always, statement)
+        );
+        assert_eq!(
+            line(&always, statement + 5),
+            "LocalVariable(K2Node_DynamicCast_bSuccess)"
+        );
+    }
+
+    /// An object constant pointed at an object of another class is held back until the save says
+    /// it knows what it is doing; one of the same class goes through.
+    #[test]
+    fn an_object_constant_of_another_class_is_unchecked() {
+        let Some(fixture) = Fixture::open(PLAYER_CONTROLLER) else {
+            return;
+        };
+        let before = fixture.parse();
+        let export = function(&before, "IsActiveAbility");
+        let script = export.script.as_ref().expect("a script");
+        let (statement, at) = first_slot(script, rivals_uasset::SlotKind::Object, "ObjectConst");
+        let edit = |value: &str, allow_unchecked| PackageEdits {
+            scripts: vec![ScriptConstEdit {
+                export: export.index,
+                statement,
+                at: Some(at),
+                value: value.into(),
+                ..ScriptConstEdit::default()
+            }],
+            allow_unchecked,
+            ..Default::default()
+        };
+        let other = "/Script/Engine.Default__KismetSystemLibrary";
+        let refused = match preview_edits(
+            &fixture.request_changes(edit(other, false)),
+            Some(&fixture.schema),
+        ) {
+            Ok(_) => panic!("a library of another class should be held back"),
+            Err(error) => error,
+        };
+        assert!(
+            refused.starts_with(crate::object_check::UNCHECKED),
+            "{refused}"
+        );
+        assert!(refused.contains("is a KismetSystemLibrary"), "{refused}");
+        let (_, after) = fixture.apply_changes(edit(other, true));
+        let script = function(&after, "IsActiveAbility")
+            .script
+            .clone()
+            .expect("a script");
+        assert!(rivals_uasset::script_lines(&script).iter().any(|line| {
+            line.text
+                .contains("Object(/Script/Engine.Default__KismetSystemLibrary)")
+        }),);
+    }
+
+    /// A text constant in a script takes UE's literal syntax: a table the package never named is
+    /// imported for it, a key the table does not hold is refused as missing, and the script moves
+    /// to make room for whichever form it ends up in.
+    #[test]
+    fn a_script_text_is_pointed_at_a_string_table() {
+        let Some(fixture) = Fixture::open(DEBUG_AUDIO_ABILITY) else {
+            return;
+        };
+        let before = fixture.parse();
+        let export = function(&before, "Initialize Anim Events");
+        let script = export.script.as_ref().expect("a script");
+        let (statement, at) = first_slot(script, rivals_uasset::SlotKind::Text, "TextConst");
+        let edit = |value: &str| PackageEdits {
+            scripts: vec![ScriptConstEdit {
+                export: export.index,
+                statement,
+                at: Some(at),
+                value: value.into(),
+                ..ScriptConstEdit::default()
+            }],
+            ..Default::default()
+        };
+        let table = "/Game/Marvel/Data/StringTable/111_ModeSelection_ST.111_ModeSelection_ST";
+        let (_, after) =
+            fixture.apply_changes(edit(&format!("LOCTABLE(\"{table}\", \"Text_QuickMode\")")));
+        assert!(after.imports.iter().any(|import| import.path == table));
+        let missing = match preview_edits(
+            &fixture.request_changes(edit(&format!("LOCTABLE(\"{table}\", \"NoSuchKey\")"))),
+            Some(&fixture.schema),
+        ) {
+            Ok(_) => panic!("a key the table lacks should be refused"),
+            Err(error) => error,
+        };
+        assert!(
+            missing.starts_with(crate::object_check::MISSING),
+            "{missing}"
+        );
+        let (_, after) = fixture.apply_changes(edit("INVTEXT(\"TOOLKIT\")"));
+        let script = function(&after, "Initialize Anim Events")
+            .script
+            .clone()
+            .expect("a script");
+        assert!(
+            rivals_uasset::script_lines(&script)
+                .iter()
+                .any(|line| line.text.contains("Text(\"TOOLKIT\")"))
+        );
+    }
+
+    /// Every literal in a widget's functions widened at once: nothing means anything else, every
+    /// offset after each one moves, and the save's own checks hold every script to that.
+    #[test]
+    fn every_literal_in_a_widget_widens_and_verifies() {
+        let Some(fixture) = Fixture::open(DEBUG_AUDIO_ABILITY) else {
+            return;
+        };
+        let before = fixture.parse();
+        let scripts = rivals_uasset::widening_edits(&before, None, false);
+        assert!(scripts.len() >= 8, "{}", scripts.len());
+        let (patched, _) = fixture.apply_changes(PackageEdits {
+            scripts,
+            ..Default::default()
+        });
+        assert!(
+            patched
+                .applied
+                .iter()
+                .any(|applied| applied.name.ends_with("script layout"))
+        );
+    }
+
+    /// A native function's parameters are in no cooked file, so a call pointed at one is not
+    /// checked: the save asks first, and goes ahead when told to. What the call passes is still read
+    /// off the call itself.
+    #[test]
+    fn a_native_call_is_retargeted_only_when_told_to_save_anyway() {
+        let Some(fixture) = Fixture::open(PLAYER_CONTROLLER) else {
+            return;
+        };
+        let before = fixture.parse();
+        let export = function(&before, "IsActiveAbility");
+        let script = export.script.as_ref().expect("a script");
+        let (statement, at) = first_slot(script, rivals_uasset::SlotKind::Call, "CallMath");
+        let edit = |value: &str, allow_unchecked: bool| PackageEdits {
+            scripts: vec![ScriptConstEdit {
+                export: export.index,
+                statement,
+                at: Some(at),
+                value: value.into(),
+                ..ScriptConstEdit::default()
+            }],
+            allow_unchecked,
+            ..Default::default()
+        };
+        let less = "/Script/Engine.KismetMathLibrary:Less_IntInt";
+        let refused = match preview_edits(
+            &fixture.request_changes(edit(less, false)),
+            Some(&fixture.schema),
+        ) {
+            Ok(_) => panic!("a call that cannot be checked should ask first"),
+            Err(error) => error,
+        };
+        assert!(
+            refused.starts_with(crate::object_check::UNCHECKED)
+                && refused.contains("native function"),
+            "{refused}"
+        );
+        let (_, after) = fixture.apply_changes(edit(less, true));
+        let script = function(&after, "IsActiveAbility")
+            .script
+            .clone()
+            .expect("a script");
+        assert!(
+            rivals_uasset::script_lines(&script)
+                .iter()
+                .any(|line| line.text.contains("KismetMathLibrary:Less_IntInt(")),
+        );
+        let preview = preview_call(
+            &fixture.request_changes(PackageEdits::default()),
+            Some(&fixture.schema),
+            export.index,
+            statement,
+            at,
+            less,
+        )
+        .expect("previewed");
+        assert_eq!(preview.verdict, "unknown", "{preview:?}");
+        assert_eq!(preview.was.as_deref(), Some("(Int, Int) -> Bool"));
+        assert_eq!(preview.now, None);
+    }
+
+    /// A Blueprint function says what it takes in its own records, so a call pointed at one that
+    /// takes something else is refused outright: here an event taking a text pointed at one taking
+    /// a string.
+    #[test]
+    fn a_blueprint_call_is_refused_for_a_function_of_another_shape() {
+        let Some(fixture) = Fixture::open(PLAYER_CONTROLLER) else {
+            return;
+        };
+        let before = fixture.parse();
+        let export = function(&before, "ExecuteUbergraph_MarvelPlayerControllerBP");
+        let script = export.script.as_ref().expect("a script");
+        let (statement, at) = first_slot(script, rivals_uasset::SlotKind::Call, "VirtualFunction");
+        let request = fixture.request_changes(PackageEdits::default());
+        let preview = |value: &str| {
+            preview_call(
+                &request,
+                Some(&fixture.schema),
+                export.index,
+                statement,
+                at,
+                value,
+            )
+            .expect("previewed")
+        };
+        let other = preview("ShowMessageToChatPanel");
+        assert_eq!(other.callee, "EventTellClientMsg");
+        assert_eq!(other.verdict, "mismatch", "{other:?}");
+        assert_eq!(other.was.as_deref(), Some("(Text)"));
+        assert_eq!(other.now.as_deref(), Some("(Str)"));
+        let elsewhere = preview("NoSuchFunction");
+        assert_eq!(elsewhere.verdict, "unknown", "{elsewhere:?}");
     }
 }

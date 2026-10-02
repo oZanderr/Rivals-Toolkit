@@ -16,7 +16,7 @@ use retoc::zen::FPackageIndex;
 
 use crate::datatable::{DataTable, DataTableLayout, DataTableRow, RowSpan};
 use crate::header_edit::{ImportEdit, Tables, add_import, apply_import_edit};
-use crate::kismet::{self, Expr};
+use crate::kismet;
 use crate::mappings::Mappings;
 use crate::package::ExportStatus;
 use crate::package::{
@@ -144,17 +144,37 @@ pub struct PayloadEdit {
     pub bytes: Vec<u8>,
 }
 
-/// A literal constant inside a function's bytecode given a new value at its own width, addressed
-/// the way the disassembly prints it: the statement's loaded offset and which literal in it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A change inside a function's bytecode, addressed the way the disassembly prints it: the
+/// statement's loaded offset, then either the expression's own loaded offset or which literal in
+/// the statement. What the value does follows from what is there: a literal takes it, an object
+/// constant points at it, and a `JumpIfNot` or `PopExecutionFlowIfNot` statement takes `true` or
+/// `false` as the condition it acts on from then on.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ScriptConstEdit {
     pub export: u32,
     /// The statement's loaded offset, as the disassembly prints at the start of its line.
     pub statement: u32,
-    /// Which literal in that statement, counted from 0 in bytecode order.
+    /// Which literal in that statement, counted from 0 in bytecode order. Unused when `at` names
+    /// the expression.
     #[serde(default)]
     pub constant: u32,
+    /// The loaded offset the expression starts at, which names an object constant, a condition's
+    /// statement or any literal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<u32>,
     pub value: String,
+    /// The expression as the disassembly showed it when the edit was made. A script that reads
+    /// otherwise there has changed since, and the edit is refused rather than landing elsewhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub was: Option<String>,
+    /// Write the literal in its widest form with the same meaning, such as `IntZero` as an
+    /// `IntConst` of 0, instead of setting a value. Moves everything after it, and nothing else.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub widen: bool,
+    /// The reverse of `widen`: write the literal in its narrowest form with the same meaning, such
+    /// as an `IntConst` of 0 as `IntZero`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub narrow: bool,
 }
 
 /// Everything one save changes: values inside exports, the import table they point into, or the
@@ -211,6 +231,8 @@ pub struct PackageEdits {
     pub allow_drift: bool,
     /// Save imports that point at a path neither the game nor an enabled mod has.
     pub allow_missing: bool,
+    /// Save script edits that point at an object or a function whose kind could not be confirmed.
+    pub allow_unchecked: bool,
 }
 
 /// A value for a field inside a struct that stores nothing yet or inside an element the same save
@@ -271,9 +293,19 @@ impl Expected {
         }
     }
 
-    /// The key a script edit's expected constant is filed under.
+    /// The key a script edit's expected constant is filed under: `export:statement:constant`, or
+    /// `export:statement@at` for an edit that names its expression by offset.
     pub fn script_key(edit: &ScriptConstEdit) -> String {
-        format!("{}:{}:{}", edit.export, edit.statement, edit.constant)
+        match edit.at {
+            Some(at) => format!("{}:{}@{at}", edit.export, edit.statement),
+            None => format!("{}:{}:{}", edit.export, edit.statement, edit.constant),
+        }
+    }
+
+    /// The key a script's sizes are filed under. Every offset in a script that has changed size
+    /// may name something else, so a script edit holds the script to the sizes it was made at.
+    pub fn script_size_key(export: u32) -> String {
+        format!("{export}:size")
     }
 
     fn merge(&mut self, other: Expected) {
@@ -361,10 +393,8 @@ pub fn check_expectations(parsed: &ParsedPackage, edits: &PackageEdits) -> Resul
             ));
         }
     }
+    let mut sized: Vec<u32> = Vec::new();
     for edit in &edits.scripts {
-        let Some(was) = expect.scripts.get(&Expected::script_key(edit)) else {
-            continue;
-        };
         let Some(script) = parsed
             .exports
             .get(edit.export as usize)
@@ -372,6 +402,32 @@ pub fn check_expectations(parsed: &ParsedPackage, edits: &PackageEdits) -> Resul
         else {
             continue;
         };
+        if !sized.contains(&edit.export) {
+            sized.push(edit.export);
+            if let Some(was) = expect.scripts.get(&Expected::script_size_key(edit.export))
+                && *was != script_sizes(script)
+            {
+                drift.push(format!(
+                    "the script of export {} was {was} bytes loaded/stored, and is now {}",
+                    edit.export,
+                    script_sizes(script)
+                ));
+            }
+        }
+        let Some(was) = expect.scripts.get(&Expected::script_key(edit)) else {
+            continue;
+        };
+        if let Some(at) = edit.at {
+            let now = kismet::expression_starting(script, edit.statement, at).map(kismet::render);
+            if now.as_deref() != Some(was.as_str()) {
+                drift.push(format!(
+                    "the expression at 0x{at:04X} in export {} was {was}, and is now {}",
+                    edit.export,
+                    now.as_deref().unwrap_or("gone")
+                ));
+            }
+            continue;
+        }
         let Ok(old) = kismet::literal_at(script, edit.statement, edit.constant) else {
             continue;
         };
@@ -508,10 +564,26 @@ pub fn expectations(parsed: &ParsedPackage, edits: &PackageEdits) -> Expected {
         }
     }
     for edit in &edits.scripts {
-        let old = parsed
+        let script = parsed
             .exports
             .get(edit.export as usize)
-            .and_then(|export| export.script.as_ref())
+            .and_then(|export| export.script.as_ref());
+        if let Some(script) = script {
+            expect
+                .scripts
+                .insert(Expected::script_size_key(edit.export), script_sizes(script));
+        }
+        if let Some(at) = edit.at {
+            if let Some(found) =
+                script.and_then(|script| kismet::expression_starting(script, edit.statement, at))
+            {
+                expect
+                    .scripts
+                    .insert(Expected::script_key(edit), kismet::render(found));
+            }
+            continue;
+        }
+        let old = script
             .and_then(|script| kismet::literal_at(script, edit.statement, edit.constant).ok());
         if let Some(slot) = old.and_then(|old| kismet::literal_slots(old).into_iter().next()) {
             expect
@@ -520,6 +592,11 @@ pub fn expectations(parsed: &ParsedPackage, edits: &PackageEdits) -> Expected {
         }
     }
     expect
+}
+
+/// A script's loaded and stored sizes, as its drift key holds them.
+fn script_sizes(script: &kismet::Script) -> String {
+    format!("{}/{}", script.buffer_size, script.storage_size)
 }
 
 /// A value as an edit would type it, for the kinds that can be compared that way.
@@ -585,6 +662,7 @@ impl PackageEdits {
         self.expect.merge(other.expect);
         self.allow_drift |= other.allow_drift;
         self.allow_missing |= other.allow_missing;
+        self.allow_unchecked |= other.allow_unchecked;
     }
 
     /// Whether this asks for nothing at all, so a caller can refuse before reading the package.
@@ -940,6 +1018,7 @@ pub fn patch_package_with(
             expect: Expected::default(),
             allow_drift: false,
             allow_missing: false,
+            allow_unchecked: false,
             ..edits.clone()
         };
         if !alone.is_empty() {
@@ -964,6 +1043,7 @@ pub fn patch_package_with(
             expect: Expected::default(),
             allow_drift: false,
             allow_missing: false,
+            allow_unchecked: false,
             ..edits.clone()
         };
         if !alone.is_empty() || edits.add_components.len() > 1 {
@@ -1013,6 +1093,7 @@ pub fn patch_package_with(
             expect: Expected::default(),
             allow_drift: false,
             allow_missing: false,
+            allow_unchecked: false,
             ..edits.clone()
         };
         if !alone.is_empty() {
@@ -1753,8 +1834,21 @@ pub fn patch_package_with(
         }
     }
 
-    // Payloads and bulk data are replaced whole; the bulk table follows their new sizes.
-    let payload_out = payload_splices(parsed, edits, &package)?;
+    // Payloads and bulk data are replaced whole; the bulk table follows their new sizes. A
+    // replacement script is read against the imports and names this save leaves, which is what
+    // lets it name an import the same save adds.
+    let with_imports;
+    let measured = if edits.payloads.is_empty() {
+        &package
+    } else {
+        with_imports = retoc::legacy_asset::FLegacyPackageHeader {
+            name_map: tables.names.clone(),
+            imports: tables.imports.clone(),
+            ..package.clone()
+        };
+        &with_imports
+    };
+    let payload_out = payload_splices(parsed, edits, measured, &mut object_links)?;
     for (splice, done) in payload_out {
         pending.push(Pending {
             splice,
@@ -1762,13 +1856,16 @@ pub fn patch_package_with(
         });
         applied_imports.push(done);
     }
-    for (splice, done) in script_splices(parsed, edits, &mut tables.names)? {
+    let scripts = crate::script_edit::script_splices(parsed, edits, &mut tables, &package)?;
+    object_links.extend(scripts.links);
+    notes.extend(scripts.notes);
+    for splice in scripts.splices {
         pending.push(Pending {
             splice,
             order: (0, 0),
         });
-        applied_imports.push(done);
     }
+    applied_imports.extend(scripts.applied);
     let bulk_out = bulk_edits(bundle, &package, sidecars, edits)?;
     for splice in bulk_out.splices {
         pending.push(Pending {
@@ -2951,7 +3048,7 @@ pub fn payload_lock(
 }
 
 /// Where an export's payload sits: after the properties, to the export's end.
-fn payload_range(export: &ParsedExport) -> Option<(u64, u64)> {
+pub(crate) fn payload_range(export: &ParsedExport) -> Option<(u64, u64)> {
     match &export.status {
         ExportStatus::Payload {
             consumed,
@@ -2967,11 +3064,12 @@ fn payload_range(export: &ParsedExport) -> Option<(u64, u64)> {
 
 /// One splice per payload edit, over exactly the payload's bytes.
 /// The two size words a replacement script needs: the size it takes once loaded, then its stored
-/// length. `None` when it does not disassemble, which is when its loaded size is unknowable.
+/// length, with every object it names and where, counted from its first byte. `None` when it does
+/// not disassemble, which is when its loaded size is unknowable.
 fn bytecode_size_words(
     bytes: &[u8],
     package: &retoc::legacy_asset::FLegacyPackageHeader,
-) -> Option<[u8; 8]> {
+) -> Option<([u8; 8], Vec<crate::props::IndexRef>)> {
     let ctx = crate::props::Ctx {
         mappings: None,
         header: package,
@@ -2988,107 +3086,16 @@ fn bytecode_size_words(
     let mut words = [0u8; 8];
     words[..4].copy_from_slice(&script.decoded_size.to_le_bytes());
     words[4..].copy_from_slice(&(bytes.len() as u32).to_le_bytes());
-    Some(words)
+    Some((words, scratch.references))
 }
 
-/// One narrow splice per script constant: the value bytes after the token, nothing else, so a
-/// script keeps its length, its size words and every jump in it. A name that is new to the
-/// package goes into `names`, which is how the header learns to grow.
-fn script_splices(
-    parsed: &ParsedPackage,
-    edits: &PackageEdits,
-    names: &mut FPackageNameMap,
-) -> Result<Vec<(Splice, AppliedEdit)>, String> {
-    let mut out = Vec::with_capacity(edits.scripts.len());
-    let mut seen: Vec<(u32, u64)> = Vec::new();
-    for edit in &edits.scripts {
-        let export = parsed
-            .exports
-            .iter()
-            .find(|e| e.index == edit.export)
-            .ok_or_else(|| format!("no export {}", edit.export))?;
-        if edits.payloads.iter().any(|p| p.export == edit.export) {
-            return Err(format!(
-                "{} is given a whole new payload in this save, so a constant inside it cannot also be set",
-                export.object_name
-            ));
-        }
-        let script = export.script.as_ref().ok_or_else(|| {
-            format!(
-                "export {} ({}) carries no bytecode this reader measured",
-                edit.export, export.class_name
-            )
-        })?;
-        if let Some(stop) = &script.stopped {
-            return Err(format!(
-                "{}'s bytecode did not disassemble whole ({}), so no constant in it can be trusted to sit where the walk says",
-                export.object_name, stop.reason
-            ));
-        }
-        let old = kismet::literal_at(script, edit.statement, edit.constant)?;
-        let new = kismet::with_value(old, &edit.value)?;
-        let bytes = kismet::literal_bytes(&new, names)?;
-        let width = kismet::stored_width(old);
-        if bytes.len() as u64 != width {
-            return Err(format!(
-                "{} takes {width} byte(s) and the new value {} would take {}; a script constant can only be replaced at its own width",
-                kismet::literal_kind(old),
-                kismet::render(&new),
-                bytes.len()
-            ));
-        }
-        let at = match old {
-            Expr::IntConst { at, .. }
-            | Expr::Int64Const { at, .. }
-            | Expr::UInt64Const { at, .. }
-            | Expr::FloatConst { at, .. }
-            | Expr::DoubleConst { at, .. }
-            | Expr::ByteConst { at, .. }
-            | Expr::StringConst { at, .. }
-            | Expr::UnicodeStringConst { at, .. }
-            | Expr::NameConst { at, .. }
-            | Expr::Numbers { at, .. } => *at,
-            other => {
-                return Err(format!(
-                    "{} has no value bytes to write",
-                    kismet::literal_kind(other)
-                ));
-            }
-        };
-        if seen.contains(&(edit.export, at)) {
-            return Err(format!(
-                "{} constant {} at 0x{:04X} is set twice in one save",
-                export.object_name, edit.constant, edit.statement
-            ));
-        }
-        seen.push((edit.export, at));
-        out.push((
-            Splice {
-                start: at + 1,
-                end: at + 1 + width,
-                bytes,
-            },
-            AppliedEdit {
-                name: format!(
-                    "{} script constant {} at 0x{:04X}",
-                    export.object_name, edit.constant, edit.statement
-                ),
-                offset: at,
-                offset_after: at,
-                element: None,
-                elements_after: None,
-                before: kismet::render(old),
-                after: kismet::render(&new),
-            },
-        ));
-    }
-    Ok(out)
-}
-
+/// One splice per payload edit, and for a script, the objects the new bytecode names: the cook gives
+/// an export an edge on every object its script names, so a replacement takes the same.
 fn payload_splices(
     parsed: &ParsedPackage,
     edits: &PackageEdits,
     package: &retoc::legacy_asset::FLegacyPackageHeader,
+    links: &mut Vec<(u64, i32)>,
 ) -> Result<Vec<(Splice, AppliedEdit)>, String> {
     let mut out = Vec::with_capacity(edits.payloads.len());
     let mut seen = Vec::new();
@@ -3121,7 +3128,14 @@ fn payload_splices(
             // Both halves are needed: what the replacement takes once loaded, and where the words
             // saying so sit. Without either, only a replacement of the same length is safe.
             let sized = export.script.as_ref().and_then(|script| {
-                bytecode_size_words(&edit.bytes, package).map(|words| (script.sizes_at, words))
+                bytecode_size_words(&edit.bytes, package).map(|(words, references)| {
+                    links.extend(
+                        references
+                            .iter()
+                            .map(|reference| (start + reference.at, reference.index)),
+                    );
+                    (script.sizes_at, words)
+                })
             });
             // The event stubs call into the event graph at fixed offsets, and latent actions resume
             // at them. Nothing rewrites those, so the graph keeps its size in both measures.
@@ -3131,7 +3145,7 @@ fn payload_splices(
                 let was = export.script.as_ref().map(|script| script.buffer_size);
                 if edit.bytes.len() as u64 != end - start || (loaded.is_some() && loaded != was) {
                     return Err(format!(
-                        "{}: this is the event graph, which the event stubs and latent actions point into at fixed offsets that are not rewritten, so its replacement has to keep its size",
+                        "{}: this is the event graph, which the event stubs and latent actions point into at offsets nothing can map onto new bytes, so a replacement has to keep its size. Change what is inside it with script-set instead, which moves everything pointing into it",
                         export.object_name
                     ));
                 }
@@ -4509,72 +4523,6 @@ fn channel_at<'a>(
     Ok(layout)
 }
 
-/// Replays the key edits over each channel as it was read and holds the patched channel to the
-/// result: the frames in order with the added ones in, the removed ones out and the moved and
-/// retimed ones where they were sent, an added key reading the value it was given, and a copied
-/// or moved key reading the value it came with.
-/// A script constant reads back as the value asked for, and the script around it is untouched:
-/// same length, same size words, same statements, disassembled whole.
-fn verify_script_edits(
-    before: &ParsedPackage,
-    after: &ParsedPackage,
-    edits: &PackageEdits,
-) -> Result<(), String> {
-    for edit in &edits.scripts {
-        let was = before.exports.iter().find(|e| e.index == edit.export);
-        let is = after.exports.iter().find(|e| e.index == edit.export);
-        let (was, is) = match (was, is) {
-            (Some(was), Some(is)) => (was, is),
-            _ => return Err(format!("export {} did not read back", edit.export)),
-        };
-        let (was_script, is_script) = match (&was.script, &is.script) {
-            (Some(was_script), Some(is_script)) => (was_script, is_script),
-            _ => {
-                return Err(format!(
-                    "{} no longer carries bytecode after patching",
-                    is.object_name
-                ));
-            }
-        };
-        if let Some(stop) = &is_script.stopped {
-            return Err(format!(
-                "{}'s script stopped after patching: {}",
-                is.object_name, stop.reason
-            ));
-        }
-        if (
-            is_script.buffer_size,
-            is_script.storage_size,
-            is_script.statements.len(),
-        ) != (
-            was_script.buffer_size,
-            was_script.storage_size,
-            was_script.statements.len(),
-        ) {
-            return Err(format!(
-                "{}'s script changed shape after patching a constant in it",
-                is.object_name
-            ));
-        }
-        let wanted = kismet::with_value(
-            kismet::literal_at(was_script, edit.statement, edit.constant)?,
-            &edit.value,
-        )?;
-        let got = kismet::literal_at(is_script, edit.statement, edit.constant)?;
-        if kismet::render(got) != kismet::render(&wanted) {
-            return Err(format!(
-                "{} constant {} at 0x{:04X} reads back as {} rather than {}",
-                is.object_name,
-                edit.constant,
-                edit.statement,
-                kismet::render(got),
-                kismet::render(&wanted)
-            ));
-        }
-    }
-    Ok(())
-}
-
 fn verify_keys(
     before: &ParsedPackage,
     after: &ParsedPackage,
@@ -5268,7 +5216,7 @@ pub fn verify_patch(
         }
     }
     verify_keys(before, after, edits)?;
-    verify_script_edits(before, after, edits)?;
+    crate::script_edit::verify(before, after, edits)?;
     for edit in &edits.bulk {
         let index = edit.resource as usize;
         let (was, is) = match (before.resources.get(index), after.resources.get(index)) {
@@ -5344,6 +5292,17 @@ pub fn verify_patch(
                         edit.bytes.len()
                     ));
                 }
+            }
+            // A script replaced at another length was let through because it disassembled, so
+            // it has to read back whole.
+            if let (Some(was), Some(is)) = (&old.script, &new.script)
+                && was.storage_size as usize != edit.bytes.len()
+                && let Some(stop) = &is.stopped
+            {
+                return Err(format!(
+                    "{}'s replacement script stops decoding after patching: {}",
+                    old.object_name, stop.reason
+                ));
             }
         }
         if edits.reset_exports.contains(&old.index) {
@@ -7248,7 +7207,7 @@ fn take_string<'a>(data: &'a [u8], at: &mut usize) -> Result<&'a [u8], String> {
 
 /// An object reference is an index into this package's import and export tables, so only something
 /// the package already names can be pointed at. `None` is index zero.
-fn encode_object(
+pub(crate) fn encode_object(
     text: &str,
     package: &retoc::legacy_asset::FLegacyPackageHeader,
     tables: &mut Tables,
@@ -7290,7 +7249,7 @@ fn encode_object(
 
 /// The import or export a path names, in either the dotted form or the slash-joined one the reader
 /// renders, or `None` when nothing matches.
-fn object_index(
+pub(crate) fn object_index(
     package: &retoc::legacy_asset::FLegacyPackageHeader,
     tables: &Tables,
     path: &str,
@@ -9468,92 +9427,6 @@ mod tests {
 
     /// A replacement that disassembles knows the space it will take once loaded, so it may be any
     /// length and the two words in front of the script are rewritten to match.
-    /// A script constant becomes one splice over its value bytes and nothing else; the wrong
-    /// index, a form with no value bytes, and a payload for the same export are all refused.
-    #[test]
-    fn a_script_constant_is_spliced_at_its_own_width() {
-        let mut names = FPackageNameMap::create();
-        let mut parsed = two_export_package();
-        parsed.exports[1].status = ExportStatus::Payload {
-            consumed: 4,
-            payload_bytes: 14,
-            kind: "bytecode",
-        };
-        let start = parsed.exports[1].serial_offset as u64 + 4;
-        let call = |literal: Expr| Expr::FinalCall {
-            name: "LocalFinalFunction",
-            function: crate::kismet::ObjectRef {
-                index: -1,
-                path: None,
-            },
-            params: vec![literal],
-        };
-        let script = |literal: Expr| crate::kismet::Script {
-            buffer_size: 18,
-            storage_size: 14,
-            decoded_size: 18,
-            sizes_at: start - 8,
-            start,
-            end: start + 14,
-            statements: vec![crate::kismet::Statement {
-                offset: 0,
-                at: start,
-                expr: call(literal),
-            }],
-            stopped: None,
-            names: Vec::new(),
-        };
-        parsed.exports[1].script = Some(script(Expr::IntConst {
-            value: 411,
-            at: start + 5,
-        }));
-
-        let edits = PackageEdits {
-            scripts: vec![ScriptConstEdit {
-                export: 1,
-                statement: 0,
-                constant: 0,
-                value: "1000".to_string(),
-            }],
-            ..Default::default()
-        };
-        let out = script_splices(&parsed, &edits, &mut names).expect("one splice");
-        assert_eq!(out.len(), 1);
-        assert_eq!((out[0].0.start, out[0].0.end), (start + 6, start + 10));
-        assert_eq!(out[0].0.bytes, 1000i32.to_le_bytes().to_vec());
-        assert_eq!(
-            (out[0].1.before.as_str(), out[0].1.after.as_str()),
-            ("411", "1000")
-        );
-        assert_eq!(out[0].1.offset, start + 5);
-
-        let wrong = PackageEdits {
-            scripts: vec![ScriptConstEdit {
-                export: 1,
-                statement: 0,
-                constant: 1,
-                value: "1".to_string(),
-            }],
-            ..Default::default()
-        };
-        let err = script_splices(&parsed, &wrong, &mut names).expect_err("no second literal");
-        assert!(err.contains("[0] IntConst 411"), "{err}");
-
-        let with_payload = PackageEdits {
-            payloads: vec![PayloadEdit {
-                export: 1,
-                bytes: vec![0x53],
-            }],
-            ..edits.clone()
-        };
-        let err = script_splices(&parsed, &with_payload, &mut names).expect_err("payload too");
-        assert!(err.contains("whole new payload"), "{err}");
-
-        parsed.exports[1].script = Some(script(Expr::Simple { name: "IntZero" }));
-        let err = script_splices(&parsed, &edits, &mut names).expect_err("no value bytes");
-        assert!(err.contains("one-byte form"), "{err}");
-    }
-
     #[test]
     fn bytecode_that_disassembles_is_replaced_at_any_length() {
         let header = retoc::legacy_asset::FLegacyPackageHeader::default();
@@ -9574,6 +9447,9 @@ mod tests {
             statements: Vec::new(),
             stopped: None,
             names: Vec::new(),
+            spans: Vec::new(),
+            fixups: Vec::new(),
+            resize_locks: Vec::new(),
         });
 
         // Four Nothings and the end marker: five bytes stored and five once loaded.
@@ -9584,7 +9460,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let out = payload_splices(&parsed, &longer, &header).expect("any length");
+        let out = payload_splices(&parsed, &longer, &header, &mut Vec::new()).expect("any length");
         assert_eq!(out.len(), 2, "the size words and the script itself");
         assert_eq!((out[0].0.start, out[0].0.end), (start - 8, start));
         assert_eq!(out[0].0.bytes, vec![5, 0, 0, 0, 5, 0, 0, 0]);
@@ -9603,7 +9479,8 @@ mod tests {
             }],
             ..Default::default()
         };
-        let err = payload_splices(&parsed, &garbage, &header).expect_err("unknown size");
+        let err =
+            payload_splices(&parsed, &garbage, &header, &mut Vec::new()).expect_err("unknown size");
         assert!(err.contains("does not disassemble"), "{err}");
     }
 
@@ -9630,6 +9507,7 @@ mod tests {
             &parsed,
             &same,
             &retoc::legacy_asset::FLegacyPackageHeader::default(),
+            &mut Vec::new(),
         )
         .expect("same length");
         assert_eq!((out[0].0.start, out[0].0.end), (start, start + 4));
@@ -9645,6 +9523,7 @@ mod tests {
             &parsed,
             &longer,
             &retoc::legacy_asset::FLegacyPackageHeader::default(),
+            &mut Vec::new(),
         )
         .expect_err("length");
         assert!(err.contains("own length, 4 bytes"), "{err}");

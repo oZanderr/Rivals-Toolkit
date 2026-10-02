@@ -238,6 +238,11 @@ impl Mappings {
         false
     }
 
+    /// Whether the mappings know an enum by this name.
+    pub fn has_enum(&self, name: &str) -> bool {
+        self.enums.contains_key(name)
+    }
+
     /// The class chain from the most distant ancestor down to `name`, which is the order
     /// `Super::Serialize` runs in and therefore the order class tails appear on disk.
     pub fn ancestry(&self, name: &str) -> Vec<&str> {
@@ -270,6 +275,19 @@ impl Mappings {
             current = entry.super_struct.clone()?;
         }
         None
+    }
+
+    /// The property `name` that `owner` or one of its ancestors declares.
+    pub fn member(&self, owner: &str, name: &str) -> Option<&Property> {
+        self.ancestry(owner).into_iter().find_map(|step| {
+            let index = *self.structs.get(step)?;
+            self.inner
+                .structs
+                .get(index as usize)?
+                .properties
+                .iter()
+                .find(|property| property.name == name)
+        })
     }
 
     /// Copies of the entries from `name` up to its root, for a mappings that has to carry a

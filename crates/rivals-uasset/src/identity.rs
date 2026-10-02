@@ -507,33 +507,35 @@ fn collect_edits(entries: &[PropertyEntry], rename: &PathRename, edits: &mut Vec
     }
 }
 
-/// The strings in bytecode that name the package, rewritten to name it by its new name where the
-/// new one is as long as the old: a string in bytecode cannot change length without moving every
-/// jump after it.
+/// The strings in bytecode that name the package, rewritten to name it by its new name. One of
+/// another length moves everything after it in its script, which a script that has to keep its
+/// size cannot do, so that one is left as it was.
 pub fn identity_script_edits(parsed: &ParsedPackage, rename: &PathRename) -> Vec<ScriptConstEdit> {
     let mut edits = Vec::new();
     for (export, statement, slot, renamed) in script_strings(parsed, rename) {
-        if same_length(slot.kind, &slot.value, &renamed) {
+        if same_length(slot.kind, &slot.value, &renamed) || can_resize(parsed, export) {
             edits.push(ScriptConstEdit {
                 export,
                 statement,
                 constant: slot.index,
                 value: renamed,
+                ..ScriptConstEdit::default()
             });
         }
     }
     edits
 }
 
-/// What saving under the new name leaves naming the old one: a bytecode string of another length,
-/// a map key, and whatever a payload the reader does not follow holds.
+/// What saving under the new name leaves naming the old one: a bytecode string of another length
+/// in a script that has to keep its size, a map key, and whatever a payload the reader does not
+/// follow holds.
 pub fn identity_leftovers(parsed: &ParsedPackage, rename: &PathRename) -> Vec<String> {
     let mut notes = Vec::new();
     for (export, statement, slot, renamed) in script_strings(parsed, rename) {
-        if !same_length(slot.kind, &slot.value, &renamed) {
+        if !same_length(slot.kind, &slot.value, &renamed) && !can_resize(parsed, export) {
             notes.push(format!(
-                "{} still names {} in a string in its bytecode at {statement:#06X}: a bytecode \
-                 string cannot change length",
+                "{} still names {} in a string in its bytecode at {statement:#06X}: its script \
+                 has to keep its size, and the new name is another length",
                 parsed.exports[export as usize].object_name, rename.from
             ));
         }
@@ -585,6 +587,15 @@ fn script_strings(
         }
     }
     found
+}
+
+/// Whether the script of `export` may change length.
+fn can_resize(parsed: &ParsedPackage, export: u32) -> bool {
+    parsed
+        .exports
+        .get(export as usize)
+        .and_then(|export| export.script.as_ref())
+        .is_some_and(|script| script.resize_lock().is_none())
 }
 
 fn same_length(kind: &str, was: &str, now: &str) -> bool {

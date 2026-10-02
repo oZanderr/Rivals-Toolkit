@@ -40,6 +40,11 @@ fn placeholder_package() -> String {
     PLACEHOLDER_CLASS.0.to_string()
 }
 
+/// The class an import takes when nothing says what it is.
+pub(crate) fn placeholder_class_name() -> &'static str {
+    PLACEHOLDER_CLASS.1
+}
+
 fn placeholder_name() -> String {
     PLACEHOLDER_CLASS.1.to_string()
 }

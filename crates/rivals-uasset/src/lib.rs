@@ -1,6 +1,7 @@
 //! Decodes Unreal Engine 5 package export data into readable property trees using a .usmap schema.
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 
+mod call_shape;
 mod component;
 mod copy;
 mod datatable;
@@ -20,8 +21,15 @@ mod niagara;
 mod package;
 mod props;
 mod reader;
+mod relocate;
 mod remove;
 mod renumber;
+mod script_edit;
+pub use call_shape::{
+    CallShape, CallSite, Fit, compare as compare_calls, render as render_call_shape,
+    shape_of_signature, site_at,
+};
+pub use script_edit::{narrowing_edits, widening_edits};
 mod stringtable;
 mod structs;
 mod tagged;
@@ -73,8 +81,10 @@ pub use import_remove::{
     unused_imports,
 };
 pub use kismet::{
-    Expr, LiteralSlot, ObjectRef, PropertyRef, Script, ScriptLine, ScriptStop, Statement,
-    SwitchCase, Term, TermKind, TextLiteral, call_sites, callee_name, literals, render_script,
+    CallInfo, CallUse, Expr, ExpressionSlot, LiteralSlot, ObjectRef, PropertyRef, ResizeLock,
+    Script, ScriptCensus, ScriptLine, ScriptStop, SlotKind, Statement, SwitchCase, Term, TermKind,
+    TextLiteral, call_at, call_expr_at, call_sites, callee_name, census as script_census,
+    children as expression_children, expression_at, expression_starting, literals, render_script,
     script_lines, statement_terms, token_name, ubergraph_entries,
 };
 pub use mappings::{Mappings, Schema, SchemaFixups, SchemaSlot, kind_name};

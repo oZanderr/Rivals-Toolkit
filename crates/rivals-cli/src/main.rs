@@ -82,6 +82,11 @@ struct Cli {
     #[arg(long, global = true)]
     allow_missing: bool,
 
+    /// Save script edits that point an object constant or a call at something whose kind cannot
+    /// be confirmed to match what the script held there.
+    #[arg(long, global = true)]
+    allow_unchecked: bool,
+
     /// Save an asset write under this package name instead of the asset's own, such as
     /// `/Game/Mods/MyThing/DA_Sword`: a new asset, or a replacement for the asset at that path.
     #[arg(long = "as", global = true, value_name = "PACKAGE")]
@@ -142,10 +147,15 @@ enum AssetCmd {
     /// Print the field records a class or struct export declares
     Fields(FieldsArgs),
     /// Disassemble the bytecode a function or class export stores.
-    Script(FieldsArgs),
-    /// Change a literal constant inside a function's bytecode, at its own width, and write the
-    /// result into a mod pak.
+    Script(ScriptArgs),
+    /// Change something inside a function's bytecode, a literal, an object constant or a branch's
+    /// condition, and write the result into a mod pak.
     ScriptSet(ScriptSetArgs),
+    /// Rewrite every literal in a function, or in every function of the package, in its widest
+    /// form with the same meaning, and write the result into a mod pak. Nothing behaves
+    /// differently, but every offset after each literal moves, which checks in game that a
+    /// script can change size safely.
+    ScriptWiden(ScriptWidenArgs),
     /// Change a stored value and write the result into a mod pak.
     Set(AssetSetArgs),
     /// Set the same properties by name across every package a filter matches, in one mod.
@@ -274,6 +284,53 @@ struct HexArgs {
     /// Start at this file offset instead of the export's start.
     #[arg(long, value_name = "OFFSET", value_parser = parse_offset)]
     from: Option<u64>,
+}
+
+#[derive(Args)]
+struct ScriptWidenArgs {
+    #[command(flatten)]
+    asset: AssetArgs,
+
+    /// Export index of the one function to widen, as `asset info` prints it.
+    #[arg(
+        long,
+        value_name = "N",
+        conflicts_with = "all",
+        required_unless_present = "all"
+    )]
+    export: Option<u32>,
+
+    /// Widen every function in the package.
+    #[arg(long)]
+    all: bool,
+
+    /// Mod pak to write into, created in `~mods` if it does not exist. Defaults to the name the
+    /// desktop app last saved into, then to `AssetEdits`.
+    #[arg(long, value_name = "NAME")]
+    mod_name: Option<String>,
+
+    /// Overwrite an edited copy of this asset that the mod pak already holds.
+    #[arg(long)]
+    replace: bool,
+
+    /// Patch and verify, report what would change, and write nothing.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Args)]
+struct ScriptArgs {
+    #[command(flatten)]
+    asset: AssetArgs,
+
+    /// Export index of the function or class, as `asset info` prints it.
+    #[arg(long, value_name = "N")]
+    export: u32,
+
+    /// Under each statement, list everything in it an edit can address, by the offset it starts
+    /// at: literals, object constants, texts, calls and conditions.
+    #[arg(long)]
+    expressions: bool,
 }
 
 #[derive(Args)]
@@ -820,8 +877,8 @@ struct ScriptSetArgs {
     #[arg(long, value_name = "N")]
     export: u32,
 
-    /// The statement holding the constant, by the offset `asset script` prints at the start of
-    /// its line.
+    /// The statement holding what is changed, by the offset `asset script` prints at the start
+    /// of its line.
     #[arg(long, value_name = "OFFSET", value_parser = parse_offset)]
     statement: u64,
 
@@ -829,8 +886,38 @@ struct ScriptSetArgs {
     #[arg(long = "const", value_name = "K", default_value_t = 0)]
     constant: u32,
 
-    /// The new value in the constant's own kind: an integer, a number, a string, a name, or
-    /// `x,y,z` for a vector. It must fit the bytes the old value took.
+    /// The expression to change, by the offset it starts at, as `asset script --expressions`
+    /// lists them.
+    #[arg(long, value_name = "OFFSET", value_parser = parse_offset, conflicts_with_all = ["object", "text", "call", "condition"])]
+    at: Option<u64>,
+
+    /// The K-th object constant in the statement, counted from 0 left to right.
+    #[arg(long, value_name = "K", conflicts_with_all = ["text", "call", "condition"])]
+    object: Option<u32>,
+
+    /// The K-th text in the statement, counted from 0 left to right. It takes UE's text literal
+    /// syntax, `INVTEXT("...")`, `NSLOCTEXT("ns", "key", "...")` or `LOCTABLE("/Game/...", "key")`,
+    /// or a plain string: a new source for a text that has one, `Table:Key` to repoint a string
+    /// table text, and otherwise the words to show in every language.
+    #[arg(long, value_name = "K", conflicts_with_all = ["call", "condition"])]
+    text: Option<u32>,
+
+    /// The K-th call in the statement, counted from 0 left to right, pointed at another function:
+    /// a final call takes the function's path as the disassembly prints it, a virtual call takes
+    /// a bare name. The new function has to take the same arguments and give back what the call
+    /// keeps, as its package or the game's own calls to it show.
+    #[arg(long, value_name = "K", conflicts_with = "condition")]
+    call: Option<u32>,
+
+    /// Fix the condition of the statement, a `JumpIfNot` or `PopExecutionFlowIfNot`, as always
+    /// `true` or always `false` with `--value`.
+    #[arg(long)]
+    condition: bool,
+
+    /// The new value. A literal takes its own kind: an integer, a number, a string, a name, or
+    /// `x,y,z` for a vector, at the width the old value took. `True`/`False` and a condition take
+    /// `true` or `false`; an object constant takes the object's path as the disassembly prints
+    /// it, or `None`.
     #[arg(long, value_name = "TEXT", allow_hyphen_values = true)]
     value: String,
 
@@ -939,6 +1026,12 @@ struct AuditArgs {
     /// Report progress to stderr while scanning.
     #[arg(long)]
     progress: bool,
+
+    /// Widen every literal in every script that can change size, in memory, and hold the result
+    /// to what relocation promises: every offset into each script moved with the code it named.
+    /// Each literal is then narrowed back, which has to give the package's own bytes again.
+    #[arg(long)]
+    relocation_check: bool,
 }
 
 #[derive(Args)]
@@ -1174,6 +1267,7 @@ fn run(cli: &Cli) -> Result<(), String> {
         Command::Asset(AssetCmd::Fields(a)) => asset_fields(cli, &app, a),
         Command::Asset(AssetCmd::Script(a)) => asset_script(cli, &app, a),
         Command::Asset(AssetCmd::ScriptSet(a)) => asset_script_set(cli, &app, a),
+        Command::Asset(AssetCmd::ScriptWiden(a)) => asset_script_widen(cli, &app, a),
         Command::Asset(AssetCmd::Set(a)) => asset_set(cli, &app, a),
         Command::Asset(AssetCmd::Sweep(a)) => asset_sweep(cli, &app, a),
         Command::Asset(AssetCmd::Import(a)) => asset_import(cli, &app, a),
@@ -1910,6 +2004,7 @@ fn asset_request<'a>(
             .unwrap_or_default(),
         layer: cli.layer,
         allow_missing: cli.allow_missing,
+        allow_unchecked: cli.allow_unchecked,
         save_as: cli.save_as.as_deref(),
         keep_object_names: cli.keep_object_names,
         keep_referencers: cli.keep_referencers,
@@ -2204,11 +2299,39 @@ fn asset_imports_table(
     })
 }
 
-fn asset_script(cli: &Cli, app: &settings::AppSettings, args: &FieldsArgs) -> Result<(), String> {
+fn asset_script_widen(
+    cli: &Cli,
+    app: &settings::AppSettings,
+    args: &ScriptWidenArgs,
+) -> Result<(), String> {
+    let root = resolve::game_root(cli.game_root.as_deref(), app)?;
+    let request = asset_request(cli, app, &args.asset, &root);
+    let export = if args.all { None } else { args.export };
+    if args.dry_run {
+        let applied = asset::preview_script_widen(&request, export)?;
+        return emit(cli, &applied, || {
+            for done in &applied {
+                outln!("would set {}: {} -> {}", done.name, done.before, done.after);
+            }
+        });
+    }
+    if !cli.force && rivals_core::game_status::should_block_for_game() {
+        return Err(rivals_core::game_status::game_running_error());
+    }
+    let message = asset::script_widen(
+        &request,
+        export,
+        mod_name_of(app, args.mod_name.as_deref()),
+        args.replace,
+    )?;
+    emit(cli, &message, || outln!("{message}"))
+}
+
+fn asset_script(cli: &Cli, app: &settings::AppSettings, args: &ScriptArgs) -> Result<(), String> {
     let root = resolve::game_root(cli.game_root.as_deref(), app)?;
     let report = asset::script(&asset_request(cli, app, &args.asset, &root), args.export)?;
     emit(cli, &report, || {
-        asset::print_script(&report, &mut |line| outln!("{line}"))
+        asset::print_script(&report, args.expressions, &mut |line| outln!("{line}"))
     })
 }
 
@@ -2225,11 +2348,37 @@ fn asset_script_set(
             args.statement
         )
     })?;
+    let by_kind = [
+        (args.object, rivals_uasset::SlotKind::Object),
+        (args.text, rivals_uasset::SlotKind::Text),
+        (args.call, rivals_uasset::SlotKind::Call),
+    ]
+    .into_iter()
+    .find_map(|(nth, kind)| nth.map(|nth| (kind, nth)));
+    let at = match (args.at, by_kind, args.condition) {
+        (Some(at), _, _) => Some(
+            u32::try_from(at).map_err(|_| format!("{at:#X} is not an offset a script can hold"))?,
+        ),
+        (None, Some((kind, nth)), _) => {
+            let report = asset::script(&request, args.export)?;
+            Some(rivals_uasset::expression_at(
+                &report.script,
+                statement,
+                kind,
+                nth,
+            )?)
+        }
+        (None, None, true) => Some(statement),
+        (None, None, false) => None,
+    };
     let edit = rivals_uasset::ScriptConstEdit {
         export: args.export,
         statement,
         constant: args.constant,
+        at,
         value: args.value.clone(),
+        was: None,
+        ..Default::default()
     };
     if args.dry_run {
         let applied = asset::preview_script_set(&request, edit)?;
@@ -2545,6 +2694,7 @@ fn asset_apply(
             layer: cli.layer,
             allow_drift: args.allow_drift,
             allow_missing: cli.allow_missing,
+            allow_unchecked: cli.allow_unchecked,
             dry_run: args.dry_run,
             target: cli.target.map(Into::into).or(app.asset_save_target),
         },
@@ -3376,6 +3526,7 @@ fn asset_audit(cli: &Cli, app: &settings::AppSettings, args: &AuditArgs) -> Resu
             cli.usmap.as_deref(),
             app.usmap_path.as_deref(),
             args.skip_blueprint,
+            args.relocation_check,
             tick,
         )?,
         (None, None) => return Err("pass either --container or --dir".into()),

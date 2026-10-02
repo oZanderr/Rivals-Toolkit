@@ -401,8 +401,37 @@ pub fn table_references(parsed: &ParsedPackage) -> std::collections::BTreeSet<(S
                 collect_tables(&row.fields, &mut found);
             }
         }
+        if let Some(script) = &export.script {
+            for statement in &script.statements {
+                collect_script_tables(&statement.expr, &mut found);
+            }
+        }
     }
     found
+}
+
+/// The table entries the texts a script builds name.
+fn collect_script_tables(
+    expr: &rivals_uasset::Expr,
+    found: &mut std::collections::BTreeSet<(String, String)>,
+) {
+    use rivals_uasset::{Expr, TextLiteral};
+    let text = |expr: &Expr| match expr {
+        Expr::StringConst { value, .. } | Expr::UnicodeStringConst { value, .. } => {
+            Some(value.clone())
+        }
+        _ => None,
+    };
+    if let Expr::TextConst {
+        text: TextLiteral::StringTable { table_id, key, .. },
+    } = expr
+        && let (Some(table_id), Some(key)) = (text(table_id), text(key))
+    {
+        found.insert((table_id, key));
+    }
+    for child in rivals_uasset::expression_children(expr) {
+        collect_script_tables(child, found);
+    }
 }
 
 fn collect_tables(

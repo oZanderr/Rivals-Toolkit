@@ -128,6 +128,85 @@ pub struct ParsedExport {
     pub defaults: Vec<PropertyEntry>,
 }
 
+#[cfg(test)]
+impl ParsedPackage {
+    /// A package holding these exports and nothing else, for tests that build them by hand.
+    pub(crate) fn of_exports(exports: Vec<ParsedExport>) -> Self {
+        Self {
+            info: PackageInfo {
+                package_name: "/Game/Test".into(),
+                cooked: true,
+                unversioned_properties: true,
+                name_count: 0,
+                import_count: 0,
+                export_count: exports.len(),
+            },
+            names: Vec::new(),
+            imports: Vec::new(),
+            exports,
+            dependencies: None,
+            unresolved_structs: Vec::new(),
+            property_kinds: Default::default(),
+            schema_fixups: Vec::new(),
+            missing_schemas: Vec::new(),
+            header_check: Default::default(),
+            odd_headers: Vec::new(),
+            containers: Vec::new(),
+            unset: Vec::new(),
+            references: Vec::new(),
+            string_tables: Vec::new(),
+            instanced: Vec::new(),
+            tables: Vec::new(),
+            channels: Vec::new(),
+            native_leaves: Vec::new(),
+            tag_bounds: Vec::new(),
+            tagged_absent: Vec::new(),
+            script_tokens: Default::default(),
+            text_histories: Default::default(),
+            text_flags: Default::default(),
+            twins: Vec::new(),
+            resources: Vec::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl ParsedExport {
+    /// An export with nothing in it, for tests to fill in what they need.
+    pub(crate) fn blank(index: u32) -> Self {
+        Self {
+            index,
+            object_name: String::new(),
+            class_name: String::new(),
+            serial_offset: 0,
+            serial_size: 0,
+            outer_index: 0,
+            class_index: 0,
+            super_index: 0,
+            template_index: 0,
+            object_flags: 0,
+            generate_public_hash: false,
+            path: String::new(),
+            status: ExportStatus::Complete,
+            properties: Vec::new(),
+            properties_end: None,
+            schema_slots: None,
+            data_table: None,
+            string_table: None,
+            struct_definition: None,
+            signature: None,
+            trailing_hex: String::new(),
+            note: None,
+            script: None,
+            undecoded: Vec::new(),
+            defaults: Vec::new(),
+            super_struct_at: None,
+            name_refs: Vec::new(),
+            names_complete: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct PackageInfo {
     pub package_name: String,
@@ -752,9 +831,10 @@ fn parse_exports(
         declared_slots: options.declared_slots,
         ..Default::default()
     };
-    let exports = (0..header.exports.len())
+    let mut exports: Vec<ParsedExport> = (0..header.exports.len())
         .map(|index| parse_one(bundle, header, &ctx, index as u32, tagged, &mut diagnostics))
         .collect();
+    crate::kismet::settle_resize_locks(&mut exports);
     (exports, diagnostics)
 }
 

@@ -17,11 +17,10 @@ const FUNC_NET: u32 = 0x0000_0040;
 /// `FField::FlagsPrivate`, which sits between the field's type and its name.
 const FIELD_FLAGS_BYTES: usize = 4;
 
-/// `ElementSize`, `PropertyFlags` and `RepIndex`, which follow `ArrayDim`. Only the flags are kept,
-/// for what they say about a function's parameters.
+/// `ElementSize`, `PropertyFlags` and `RepIndex`, which follow `ArrayDim`. The size and the flags
+/// are kept, for what they say about a function's parameters.
 #[cfg(test)]
 const FIELD_TAIL_BYTES: usize = 4 + 8 + 2;
-const ELEMENT_SIZE_BYTES: usize = 4;
 const REP_INDEX_BYTES: usize = 2;
 
 /// `CPF_Parm`, `CPF_OutParm`, `CPF_ReturnParm` and `CPF_ReferenceParm`.
@@ -31,18 +30,47 @@ const CPF_RETURN_PARM: u64 = 0x400;
 const CPF_REFERENCE_PARM: u64 = 0x0800_0000;
 
 /// A function's parameters and locals, read from the field records its export declares.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct FunctionSignature {
     pub params: Vec<FunctionField>,
     pub locals: Vec<FunctionField>,
+    /// `FunctionFlags`: static, native, net and the rest.
+    pub flags: u32,
+    /// `EventGraphFunction` and `EventGraphCallOffset`: where an event stub would enter its event
+    /// graph directly, when the engine is built to. Zero everywhere this game was seen.
+    #[serde(skip)]
+    pub event_graph: i32,
+    #[serde(skip)]
+    pub event_graph_offset: i32,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct FunctionField {
     pub name: String,
-    /// The type as a reader would write it: `Str`, `Array<Str>`, `S_MeshEntry`.
+    /// The type as a reader would write it: `Str`, `Array<Str>`, `S_MeshEntry`, an object type
+    /// with its class, `Object<Texture2D>`, and a class reference with its metaclass,
+    /// `Class<Actor>`.
     pub kind: String,
     pub role: FieldRole,
+    /// `ElementSize`: how many bytes one value takes once loaded.
+    #[serde(skip)]
+    pub element_size: i32,
+}
+
+/// What a field record says beyond its schema: its loaded size, and the class each object type
+/// in it names, in the order they appear.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FieldDetail {
+    pub element_size: i32,
+    pub classes: Vec<NamedClass>,
+}
+
+/// The class an object type in a field record names, when it resolves, and whether the field
+/// holds a class itself, as `TSubclassOf` does, rather than an object of that class.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct NamedClass {
+    pub name: Option<String>,
+    pub of_class: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -57,10 +85,10 @@ pub enum FieldRole {
 }
 
 impl FunctionSignature {
-    fn of(fields: &[Property], flags: &[u64]) -> Self {
+    fn of(fields: &[Property], flags: &[u64], details: &[FieldDetail]) -> Self {
         let mut params = Vec::new();
         let mut locals = Vec::new();
-        for (field, &flag) in fields.iter().zip(flags) {
+        for ((field, &flag), detail) in fields.iter().zip(flags).zip(details) {
             let role = if flag & CPF_PARM == 0 {
                 FieldRole::Local
             } else if flag & CPF_RETURN_PARM != 0 {
@@ -74,8 +102,9 @@ impl FunctionSignature {
             };
             let entry = FunctionField {
                 name: field.name.clone(),
-                kind: type_text(&field.inner),
+                kind: type_text_with(&field.inner, &mut detail.classes.iter()),
                 role,
+                element_size: detail.element_size,
             };
             if role == FieldRole::Local {
                 locals.push(entry);
@@ -83,7 +112,11 @@ impl FunctionSignature {
                 params.push(entry);
             }
         }
-        Self { params, locals }
+        Self {
+            params,
+            locals,
+            ..Self::default()
+        }
     }
 
     /// `Name(In: T, ref R: T) -> Out: T`, with several outputs in parentheses.
@@ -113,7 +146,43 @@ impl FunctionSignature {
 }
 
 /// A field's type written out in full, containers included.
-fn type_text(inner: &PropertyInner) -> String {
+/// [`type_text`] with each object type followed by the class it names, taken in order. A class
+/// reference reads `Class` or `SoftClass`, so it is never taken for an object of its metaclass.
+fn type_text_with<'a>(
+    inner: &PropertyInner,
+    classes: &mut impl Iterator<Item = &'a NamedClass>,
+) -> String {
+    match inner {
+        PropertyInner::Object
+        | PropertyInner::WeakObject
+        | PropertyInner::LazyObject
+        | PropertyInner::SoftObject
+        | PropertyInner::Interface => {
+            let named = classes.next();
+            let kind = match (inner, named.is_some_and(|named| named.of_class)) {
+                (PropertyInner::Object, true) => "Class",
+                (PropertyInner::SoftObject, true) => "SoftClass",
+                _ => crate::mappings::kind_name(inner),
+            };
+            match named.and_then(|named| named.name.as_deref()) {
+                Some(class) => format!("{kind}<{class}>"),
+                None => kind.to_string(),
+            }
+        }
+        PropertyInner::Array { inner } => format!("Array<{}>", type_text_with(inner, classes)),
+        PropertyInner::Set { key } => format!("Set<{}>", type_text_with(key, classes)),
+        PropertyInner::Map { key, value } => {
+            let key = type_text_with(key, classes);
+            format!("Map<{key}, {}>", type_text_with(value, classes))
+        }
+        PropertyInner::Optional { inner } => {
+            format!("Optional<{}>", type_text_with(inner, classes))
+        }
+        other => type_text(other),
+    }
+}
+
+pub(crate) fn type_text(inner: &PropertyInner) -> String {
     match inner {
         PropertyInner::Struct { name } => name.clone(),
         PropertyInner::Enum { name, inner } if name.is_empty() => type_text(inner),
@@ -245,10 +314,13 @@ pub(crate) fn scan_struct_tail(
     }
     let mut properties = Vec::new();
     let mut flags = Vec::new();
+    let mut details = Vec::new();
+    let mut function_tail = None;
     for ordinal in 0..read_count(cursor, "UStruct child properties")? {
-        let (field, flag) = read_flagged_field(cursor, header, ordinal, &mut references)?;
+        let (field, flag, detail) = read_flagged_field(cursor, header, ordinal, &mut references)?;
         properties.push(field);
         flags.push(flag);
+        details.push(detail);
     }
     // Bytecode is stored behind its size, so it can be stepped over without being understood.
     let sizes_at = cursor.file_offset();
@@ -309,8 +381,9 @@ pub(crate) fn scan_struct_tail(
         if flags & FUNC_NET != 0 {
             cursor.skip(2)?;
         }
-        take_index(cursor, &mut references)?;
-        cursor.skip(4)?;
+        let event_graph = take_index(cursor, &mut references)?;
+        let event_graph_offset = cursor.read_i32()?;
+        function_tail = Some((flags, event_graph, event_graph_offset));
     } else if chain.contains(&"ScriptStruct") {
         // `UScriptStruct::Serialize` adds the struct flags. A Blueprint struct then writes its
         // default instance, which the caller reads with the fields scanned above; its guid is one
@@ -333,9 +406,15 @@ pub(crate) fn scan_struct_tail(
             cursor.remaining()
         )));
     }
-    let signature = chain
-        .contains(&"Function")
-        .then(|| FunctionSignature::of(&properties, &flags));
+    let signature = chain.contains(&"Function").then(|| {
+        let mut signature = FunctionSignature::of(&properties, &flags, &details);
+        if let Some((flags, event_graph, offset)) = function_tail {
+            signature.flags = flags;
+            signature.event_graph = event_graph;
+            signature.event_graph_offset = offset;
+        }
+        signature
+    });
     Ok(StructTail {
         references,
         bytecode,
@@ -433,34 +512,46 @@ fn mappings_from_structs_with(mut structs: Vec<Struct>, parents: Option<&Mapping
     Mappings::from_structs(structs)
 }
 
-/// Records appear in the order UE rebuilds `PropertyLink`, which is the order the unversioned
-/// header indexes into, so the running ordinal is the schema index.
-fn read_field(
-    cursor: &mut Cursor<'_>,
-    header: &FLegacyPackageHeader,
-    ordinal: usize,
-    references: &mut Vec<IndexRef>,
-) -> Result<Property, String> {
-    Ok(read_flagged_field(cursor, header, ordinal, references)?.0)
-}
-
-/// A field record with its `PropertyFlags`.
+/// A field record with its `PropertyFlags` and what else it says about its type. Records appear in
+/// the order UE rebuilds `PropertyLink`, which is the order the unversioned header indexes into, so
+/// the running ordinal is the schema index.
 fn read_flagged_field(
     cursor: &mut Cursor<'_>,
     header: &FLegacyPackageHeader,
     ordinal: usize,
     references: &mut Vec<IndexRef>,
-) -> Result<(Property, u64), String> {
+) -> Result<(Property, u64, FieldDetail), String> {
+    let mut classes = Vec::new();
+    let (property, flags, element_size) =
+        read_field_into(cursor, header, ordinal, references, &mut classes)?;
+    Ok((
+        property,
+        flags,
+        FieldDetail {
+            element_size,
+            classes,
+        },
+    ))
+}
+
+/// A field record, adding the class each object type in it names to `classes`.
+fn read_field_into(
+    cursor: &mut Cursor<'_>,
+    header: &FLegacyPackageHeader,
+    ordinal: usize,
+    references: &mut Vec<IndexRef>,
+    classes: &mut Vec<NamedClass>,
+) -> Result<(Property, u64, i32), String> {
     let kind = cursor.read_name(&header.name_map)?;
     let name = cursor.read_name(&header.name_map)?;
     cursor.skip(FIELD_FLAGS_BYTES)?;
     let array_dim = cursor.read_i32()?;
-    cursor.skip(ELEMENT_SIZE_BYTES)?;
+    let element_size = cursor.read_i32()?;
     let flags = cursor.read_u64()?;
     cursor.skip(REP_INDEX_BYTES)?;
     let _rep_notify = cursor.read_name(&header.name_map)?;
     let _replication_condition = cursor.read_u8()?;
-    let inner = read_kind(&kind, cursor, header, references)?;
+    let inner = read_kind(&kind, cursor, header, references, classes)?;
     let property = Property {
         name,
         array_dim: u8::try_from(array_dim.clamp(1, i32::from(u8::MAX)))
@@ -468,7 +559,7 @@ fn read_flagged_field(
         index: u16::try_from(ordinal).map_err(|_| cursor.err("too many fields"))?,
         inner,
     };
-    Ok((property, flags))
+    Ok((property, flags, element_size))
 }
 
 /// The per-type tail. An unknown type name is fatal rather than guessed: reading the wrong width
@@ -478,7 +569,16 @@ fn read_kind(
     cursor: &mut Cursor<'_>,
     header: &FLegacyPackageHeader,
     references: &mut Vec<IndexRef>,
+    classes: &mut Vec<NamedClass>,
 ) -> Result<PropertyInner, String> {
+    // Every object type takes its place in the list, named or not, so an unresolved class never
+    // hands its slot to the next one.
+    let mut class = |index: i32, of_class: bool| {
+        classes.push(NamedClass {
+            name: object_name(header, index),
+            of_class,
+        });
+    };
     let inner = match kind {
         // A `TEnumAsByte` is a byte property carrying an enum, and the mappings represent it as an
         // enum too. The distinction is not cosmetic: inside a container an enum is written as its
@@ -507,35 +607,36 @@ fn read_kind(
         "NameProperty" => PropertyInner::Name,
         "TextProperty" => PropertyInner::Text,
         "ObjectProperty" => {
-            take_index(cursor, references)?;
+            class(take_index(cursor, references)?, false);
             PropertyInner::Object
         }
         "WeakObjectProperty" => {
-            take_index(cursor, references)?;
+            class(take_index(cursor, references)?, false);
             PropertyInner::WeakObject
         }
         "LazyObjectProperty" => {
-            take_index(cursor, references)?;
+            class(take_index(cursor, references)?, false);
             PropertyInner::LazyObject
         }
         "InterfaceProperty" => {
-            take_index(cursor, references)?;
+            class(take_index(cursor, references)?, false);
             PropertyInner::Interface
         }
         "SoftObjectProperty" => {
-            take_index(cursor, references)?;
+            class(take_index(cursor, references)?, false);
             PropertyInner::SoftObject
         }
         // A class reference names a second type, the metaclass, after the property class. Measured
         // on `SoftClassProperty`; `ClassProperty` is the same shape one level up the hierarchy.
+        // What a class reference may hold is its metaclass, which is the one worth naming.
         "ClassProperty" => {
             take_index(cursor, references)?;
-            take_index(cursor, references)?;
+            class(take_index(cursor, references)?, true);
             PropertyInner::Object
         }
         "SoftClassProperty" => {
             take_index(cursor, references)?;
-            take_index(cursor, references)?;
+            class(take_index(cursor, references)?, true);
             PropertyInner::SoftObject
         }
         // Delegates name the function whose signature they carry.
@@ -562,21 +663,21 @@ fn read_kind(
         "EnumProperty" => {
             let index = take_index(cursor, references)?;
             let name = object_name(header, index).unwrap_or_default();
-            let underlying = read_nested(cursor, header, references)?;
+            let underlying = read_nested(cursor, header, references, classes)?;
             PropertyInner::Enum {
                 inner: Box::new(underlying),
                 name,
             }
         }
         "ArrayProperty" => PropertyInner::Array {
-            inner: Box::new(read_nested(cursor, header, references)?),
+            inner: Box::new(read_nested(cursor, header, references, classes)?),
         },
         "SetProperty" => PropertyInner::Set {
-            key: Box::new(read_nested(cursor, header, references)?),
+            key: Box::new(read_nested(cursor, header, references, classes)?),
         },
         "MapProperty" => {
-            let key = read_nested(cursor, header, references)?;
-            let value = read_nested(cursor, header, references)?;
+            let key = read_nested(cursor, header, references, classes)?;
+            let value = read_nested(cursor, header, references, classes)?;
             PropertyInner::Map {
                 key: Box::new(key),
                 value: Box::new(value),
@@ -592,8 +693,11 @@ fn read_nested(
     cursor: &mut Cursor<'_>,
     header: &FLegacyPackageHeader,
     references: &mut Vec<IndexRef>,
+    classes: &mut Vec<NamedClass>,
 ) -> Result<PropertyInner, String> {
-    Ok(read_field(cursor, header, 0, references)?.inner)
+    Ok(read_field_into(cursor, header, 0, references, classes)?
+        .0
+        .inner)
 }
 
 fn object_name(header: &FLegacyPackageHeader, index: i32) -> Option<String> {
@@ -627,6 +731,8 @@ mod tests {
         "Index",
         "Label",
         "Scratch",
+        "ClassProperty",
+        "Kind",
     ];
 
     fn header() -> FLegacyPackageHeader {
@@ -680,12 +786,46 @@ mod tests {
         assert_eq!(signature.locals[0].name, "Scratch");
     }
 
+    /// A class reference names its metaclass after its own class, and reads as a class, not as an
+    /// object of the metaclass.
+    #[test]
+    fn a_class_reference_reads_as_a_class() {
+        let mut out = Vec::new();
+        i32s(&mut out, &[0, 0, 2]); // no super, no children, two fields
+        name(&mut out, "ObjectProperty");
+        name(&mut out, "Target");
+        i32s(&mut out, &[0, 1, 8]);
+        out.extend_from_slice(&CPF_PARM.to_le_bytes());
+        out.extend_from_slice(&[0, 0]);
+        name(&mut out, "None");
+        out.push(0);
+        i32s(&mut out, &[0]); // PropertyClass, unresolved
+        name(&mut out, "ClassProperty");
+        name(&mut out, "Kind");
+        i32s(&mut out, &[0, 1, 8]);
+        out.extend_from_slice(&CPF_PARM.to_le_bytes());
+        out.extend_from_slice(&[0, 0]);
+        name(&mut out, "None");
+        out.push(0);
+        i32s(&mut out, &[0, 0]); // PropertyClass, MetaClass
+        i32s(&mut out, &[0, 0]); // no bytecode
+        i32s(&mut out, &[0, 0, 0]);
+        let mut cursor = Cursor::new(&out, 0);
+        let tail = scan_struct_tail(&mut cursor, &header(), &["Function"]).expect("tail");
+        let signature = tail.signature.expect("signature");
+        assert_eq!(
+            signature.render("Spawn"),
+            "Spawn(Target: Object, Kind: Class)"
+        );
+    }
+
     #[test]
     fn a_reference_parameter_is_an_input_marked_ref() {
         let field = |name: &str, role| FunctionField {
             name: name.into(),
             kind: "Array<Str>".into(),
             role,
+            element_size: 16,
         };
         let signature = FunctionSignature {
             params: vec![
@@ -694,6 +834,7 @@ mod tests {
                 field("Count", FieldRole::Return),
             ],
             locals: Vec::new(),
+            ..FunctionSignature::default()
         };
         assert_eq!(
             signature.render("SortPaks"),

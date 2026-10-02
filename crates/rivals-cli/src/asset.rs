@@ -29,6 +29,8 @@ pub struct Request<'a> {
     pub layer: bool,
     /// Save imports that point at nothing the game or an enabled mod has.
     pub allow_missing: bool,
+    /// Save script edits that point at something whose kind could not be confirmed.
+    pub allow_unchecked: bool,
     /// Save writes under this package name instead of the asset's own.
     pub save_as: Option<&'a str>,
     /// With `save_as`, keep the names of the objects named after the package.
@@ -93,6 +95,7 @@ fn edit_request<'a>(
     mut changes: PackageEdits,
 ) -> AssetEditRequest<'a> {
     changes.allow_missing |= request.allow_missing;
+    changes.allow_unchecked |= request.allow_unchecked;
     if changes.save_as.is_none() {
         changes.save_as = request.save_as.map(|package| rivals_uasset::SaveAs {
             package: package.to_string(),
@@ -498,6 +501,43 @@ pub fn script_set(
     )
 }
 
+/// The edits that widen every literal in `export`'s script, or in every script of the package.
+fn widening(request: &Request<'_>, export: Option<u32>) -> Result<PackageEdits, String> {
+    let parsed = parse(request)?;
+    let scripts = rivals_uasset::widening_edits(&parsed, export, false);
+    if scripts.is_empty() {
+        return Err("no literal there has a wider form, or the script has to keep its size".into());
+    }
+    Ok(PackageEdits {
+        scripts,
+        ..Default::default()
+    })
+}
+
+/// Widens every literal in a function, or in every function of the package, into a mod.
+pub fn script_widen(
+    request: &Request<'_>,
+    export: Option<u32>,
+    mod_name: &str,
+    replace: bool,
+) -> Result<String, String> {
+    write_edits(request, mod_name, replace, widening(request, export)?)
+}
+
+/// What `script_widen` would change, patched and verified in memory without writing anything.
+pub fn preview_script_widen(
+    request: &Request<'_>,
+    export: Option<u32>,
+) -> Result<Vec<rivals_uasset::AppliedEdit>, String> {
+    let schema = mappings::resolve(request.usmap, request.configured_usmap)
+        .and_then(|path| mappings::load(&path))
+        .ok();
+    let changes = widening(request, export)?;
+    let (patched, _) =
+        asset_edit::preview_edits(&edit_request(request, "", changes), schema.as_deref())?;
+    Ok(patched.applied)
+}
+
 /// What `script_set` would change, patched and verified in memory without writing anything.
 pub fn preview_script_set(
     request: &Request<'_>,
@@ -775,6 +815,8 @@ pub struct ApplyOverrides<'a> {
     pub allow_drift: bool,
     /// Save imports that point at nothing the game or an enabled mod has.
     pub allow_missing: bool,
+    /// Save script edits that point at something whose kind could not be confirmed.
+    pub allow_unchecked: bool,
     /// Patch and verify every item, then write nothing.
     pub dry_run: bool,
     /// What to write, when the command line said. An item's own target wins otherwise.
@@ -1009,6 +1051,7 @@ fn resolve_item(
     let mut changes = file.edits.clone().resolve(base)?;
     changes.allow_drift = overrides.allow_drift;
     changes.allow_missing = overrides.allow_missing;
+    changes.allow_unchecked = overrides.allow_unchecked;
     Ok((
         ApplyKey {
             mod_name: String::new(),
@@ -1908,7 +1951,7 @@ pub fn script(request: &Request<'_>, export: u32) -> Result<ScriptReport, String
     })
 }
 
-pub fn print_script(report: &ScriptReport, out: &mut impl FnMut(String)) {
+pub fn print_script(report: &ScriptReport, expressions: bool, out: &mut impl FnMut(String)) {
     let script = &report.script;
     out(format!(
         "{} ({})  {} bytes stored, {} loaded, {} statement(s){}",
@@ -1942,16 +1985,35 @@ pub fn print_script(report: &ScriptReport, out: &mut impl FnMut(String)) {
             .collect();
         out(format!("called by: {}", callers.join(", ")));
     }
+    if script.complete()
+        && let Some(lock) = script.resize_lock()
+    {
+        out(format!("keeps its size: {lock}"));
+    }
     out(String::new());
-    for line in rivals_uasset::render_script(script).lines() {
-        let offset = line
-            .strip_prefix("0x")
-            .and_then(|rest| rest.split_whitespace().next())
-            .and_then(|hex| u32::from_str_radix(hex, 16).ok());
-        for (_, event) in report.entries.iter().filter(|(at, _)| Some(*at) == offset) {
+    for line in rivals_uasset::script_lines(script) {
+        for (_, event) in report.entries.iter().filter(|(at, _)| *at == line.offset) {
             out(format!("        -- {event} --"));
         }
-        out(line.to_string());
+        out(format!("0x{:04X}  {}", line.offset, line.text));
+        if expressions {
+            for slot in &line.expressions {
+                out(format!(
+                    "          0x{:04X}  {:<9} {:<18} {}",
+                    slot.at,
+                    slot.kind.label(),
+                    slot.token,
+                    slot.text
+                ));
+            }
+        }
+    }
+    // The walk's own account of where it stopped closes the listing.
+    for stop in rivals_uasset::render_script(script)
+        .lines()
+        .filter(|line| line.starts_with("!!"))
+    {
+        out(stop.to_string());
     }
 }
 
@@ -2475,6 +2537,9 @@ pub struct AuditReport {
     pub script_stop_examples: Vec<ClassExamples>,
     /// Every bytecode token read, so a token this build adds shows up as `unknown`.
     pub script_tokens: Vec<Count>,
+    /// What a change of script size relies on, and every place it does not hold.
+    pub relocation: Vec<Count>,
+    pub relocation_examples: Vec<ClassExamples>,
 }
 
 #[derive(Serialize)]
@@ -2757,6 +2822,7 @@ pub fn audit(
     usmap: Option<&str>,
     configured_usmap: Option<&str>,
     skip_blueprint: bool,
+    relocation_check: bool,
     mut progress: impl FnMut(usize, usize),
 ) -> Result<AuditReport, String> {
     let path = mappings::resolve(usmap, configured_usmap)?;
@@ -2770,6 +2836,7 @@ pub fn audit(
     let total = limit.map_or(packages.len(), |l| l.min(packages.len()));
 
     let mut acc = Accumulator::new(container.to_string(), skip_blueprint);
+    acc.relocation_check = relocation_check;
     acc.report.mappings_warning = mappings::drift_warning(game_root, &path);
     let converter = asset::PackageConverter::new(&*store);
     for (index, (package_id, path)) in packages.iter().take(total).enumerate() {
@@ -2810,6 +2877,9 @@ fn is_blueprint_class(class_name: &str) -> bool {
 
 struct Accumulator {
     skip_blueprint: bool,
+    /// Widen every script in memory, verify the result and narrow it back, as `--relocation-check`
+    /// asks.
+    relocation_check: bool,
     report: AuditReport,
     kinds: BTreeMap<String, usize>,
     failures: BTreeMap<String, usize>,
@@ -2828,6 +2898,8 @@ struct Accumulator {
     undecoded: BTreeMap<String, usize>,
     undecoded_examples: BTreeMap<String, Vec<String>>,
     stops: BTreeMap<String, usize>,
+    relocation: BTreeMap<String, usize>,
+    relocation_examples: BTreeMap<String, Vec<String>>,
     stop_examples: BTreeMap<String, Vec<String>>,
     tokens: BTreeMap<String, usize>,
     shapes: BTreeMap<String, usize>,
@@ -2837,6 +2909,7 @@ impl Accumulator {
     fn new(source: String, skip_blueprint: bool) -> Self {
         Self {
             skip_blueprint,
+            relocation_check: false,
             report: AuditReport {
                 container: source,
                 mappings_warning: None,
@@ -2886,6 +2959,8 @@ impl Accumulator {
                 scripts_stopped: 0,
                 script_stops: Vec::new(),
                 script_stop_examples: Vec::new(),
+                relocation: Vec::new(),
+                relocation_examples: Vec::new(),
                 script_tokens: Vec::new(),
             },
             kinds: BTreeMap::new(),
@@ -2906,6 +2981,8 @@ impl Accumulator {
             undecoded_examples: BTreeMap::new(),
             stops: BTreeMap::new(),
             stop_examples: BTreeMap::new(),
+            relocation: BTreeMap::new(),
+            relocation_examples: BTreeMap::new(),
             tokens: BTreeMap::new(),
             shapes: BTreeMap::new(),
         }
@@ -3083,6 +3160,111 @@ impl Accumulator {
                 }
             }
         }
+        if self.relocation_check {
+            self.check_relocation(asset, exports, schema, source, &parsed);
+        }
+        let census = rivals_uasset::script_census(&parsed);
+        for (line, count) in census.counts {
+            *self.relocation.entry(line).or_default() += count;
+        }
+        for (line, detail) in census.examples {
+            let seen = self.relocation_examples.entry(line).or_default();
+            if seen.len() < PARTIAL_EXAMPLES {
+                seen.push(format!("{}{detail}", source.entry));
+            }
+        }
+    }
+
+    /// Widens every literal in the package's scripts in memory and verifies the patch the way a
+    /// save is verified, counting each package that holds up and each that does not.
+    fn check_relocation(
+        &mut self,
+        asset: &[u8],
+        exports: &[u8],
+        schema: &Mappings,
+        source: &PackageSource<'_>,
+        parsed: &rivals_uasset::ParsedPackage,
+    ) {
+        let scripts = rivals_uasset::widening_edits(parsed, None, true);
+        if scripts.is_empty() {
+            return;
+        }
+        let widened = scripts.len();
+        let changes = PackageEdits {
+            scripts,
+            ..Default::default()
+        };
+        let checked = rivals_uasset::patch_package_with(
+            &AssetBundle { asset, exports },
+            rivals_uasset::Sidecars {
+                bulk: None,
+                optional_bulk: None,
+            },
+            parsed,
+            &changes,
+            Some(schema),
+        )
+        .and_then(|patched| {
+            let after = schema_synth::parse_package_checked(
+                &AssetBundle {
+                    asset: &patched.asset,
+                    exports: &patched.exports,
+                },
+                Some(schema),
+                source,
+            )?;
+            rivals_uasset::verify_patch(parsed, &after, &changes, &patched.applied)?;
+            // Narrowing each literal back has to give the bytes the package started as: every
+            // offset the widening moved moves back to exactly where it was.
+            let narrowing = PackageEdits {
+                scripts: rivals_uasset::narrowing_edits(parsed, &after),
+                ..Default::default()
+            };
+            if narrowing.scripts.len() != widened {
+                return Err(format!(
+                    "{} of the {widened} widened literals narrow back",
+                    narrowing.scripts.len()
+                ));
+            }
+            let back = rivals_uasset::patch_package_with(
+                &AssetBundle {
+                    asset: &patched.asset,
+                    exports: &patched.exports,
+                },
+                rivals_uasset::Sidecars {
+                    bulk: None,
+                    optional_bulk: None,
+                },
+                &after,
+                &narrowing,
+                Some(schema),
+            )?;
+            same_bytes("header", asset, &back.asset)?;
+            same_bytes("exports", exports, &back.exports)
+        });
+        match checked {
+            Ok(()) => {
+                *self
+                    .relocation
+                    .entry(
+                        "relocation check: packages widened, verified and narrowed back byte for byte"
+                            .to_string(),
+                    )
+                    .or_default() += 1;
+                *self
+                    .relocation
+                    .entry("relocation check: literals widened".to_string())
+                    .or_default() += widened;
+            }
+            Err(reason) => {
+                let line = format!("relocation check failed: {}", short_reason(&reason));
+                *self.relocation.entry(line.clone()).or_default() += 1;
+                let seen = self.relocation_examples.entry(line).or_default();
+                if seen.len() < PARTIAL_EXAMPLES {
+                    seen.push(format!("{}: {reason}", source.entry));
+                }
+            }
+        }
     }
 
     fn finish(mut self) -> AuditReport {
@@ -3150,6 +3332,20 @@ impl Accumulator {
             })
             .collect();
         self.report.script_tokens = rank_all(self.tokens);
+        self.report.relocation = rank_all(self.relocation);
+        self.report.relocation_examples = self
+            .report
+            .relocation
+            .iter()
+            .filter_map(|line| {
+                self.relocation_examples
+                    .remove(&line.name)
+                    .map(|examples| ClassExamples {
+                        name: line.name.clone(),
+                        examples,
+                    })
+            })
+            .collect();
         self.report.undecoded_causes = rank_all(self.undecoded);
         self.report.undecoded_examples = self
             .report
@@ -3261,6 +3457,23 @@ fn text_history_label(history: i8) -> &'static str {
 }
 
 /// Collapse per-asset detail (offsets, row numbers) so the histogram groups real causes.
+/// Where two runs of bytes that should match first part.
+fn same_bytes(what: &str, was: &[u8], now: &[u8]) -> Result<(), String> {
+    if was == now {
+        return Ok(());
+    }
+    let at = was
+        .iter()
+        .zip(now)
+        .position(|(a, b)| a != b)
+        .unwrap_or(was.len().min(now.len()));
+    Err(format!(
+        "the {what} came back {} bytes long where it was {}, first differing at {at:#X}",
+        now.len(),
+        was.len()
+    ))
+}
+
 fn short_reason(reason: &str) -> String {
     let trimmed = reason.split(" at offset ").next().unwrap_or(reason);
     let trimmed = match trimmed.find("): ") {
@@ -3343,6 +3556,12 @@ pub fn print_audit(report: &AuditReport, out: &mut impl FnMut(String)) {
         print_counts("script stops", &report.script_stops, out);
         print_examples("script stop examples", &report.script_stop_examples, out);
         print_counts("bytecode tokens", &report.script_tokens, out);
+        print_counts("bytecode relocation", &report.relocation, out);
+        print_examples(
+            "bytecode relocation examples",
+            &report.relocation_examples,
+            out,
+        );
     }
     if report.undecoded_payloads > 0 {
         out(String::new());

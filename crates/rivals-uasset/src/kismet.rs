@@ -45,6 +45,72 @@ pub struct Script {
     /// Where each name the statements hold was read from, when the walk was whole.
     #[serde(skip)]
     pub names: Vec<u64>,
+    /// Where every expression sits, in the order they start, which is the order [`children`]
+    /// visits them in.
+    #[serde(skip)]
+    pub spans: Vec<Span>,
+    /// Every field that holds a code offset or a length of code, which a change of size has to
+    /// rewrite.
+    #[serde(skip)]
+    pub fixups: Vec<Fixup>,
+    /// Why this script has to keep its size, when it does, first reason first. An edit that keeps
+    /// every byte where it was is unaffected.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub resize_locks: Vec<ResizeLock>,
+}
+
+/// Where one expression sits, both in the file and in the loaded bytes jumps count in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Span {
+    pub token: u8,
+    pub at: u64,
+    pub end_at: u64,
+    pub offset: u32,
+    pub end_offset: u32,
+}
+
+/// Which instruction a code offset belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FixupSource {
+    Jump,
+    JumpIfNot,
+    PushFlow,
+    SwitchEnd,
+    SwitchNext,
+    /// An `Offset` constant: a latent action's resume point.
+    Linkage,
+    ContextSkip,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FixupKind {
+    /// A loaded offset into a script: this one, or the function `resumes` names when a latent
+    /// action resumes somewhere else.
+    Absolute {
+        target: u32,
+        resumes: Option<String>,
+    },
+    /// The loaded length of the code from `from` to `to`.
+    Relative { from: u32, to: u32 },
+}
+
+/// A four-byte field holding a code offset or length.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fixup {
+    /// Where the field sits in the file.
+    pub at: u64,
+    pub source: FixupSource,
+    pub kind: FixupKind,
+}
+
+/// Why a script cannot change size: something holds an offset into it that a resize could not
+/// follow, or one of its own offsets does not say what the decoder expects.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ResizeLock {
+    /// A short category the audit counts by.
+    pub kind: &'static str,
+    pub reason: String,
 }
 
 impl Script {
@@ -55,6 +121,18 @@ impl Script {
 
     pub fn script_len(&self) -> usize {
         self.statements.len()
+    }
+
+    /// Why the script cannot change size, when it cannot: it did not decode whole, or something
+    /// holds an offset into it that a resize could not follow.
+    pub fn resize_lock(&self) -> Option<String> {
+        if let Some(stop) = &self.stopped {
+            return Some(format!(
+                "the script stops decoding at 0x{:04X}: {}",
+                stop.offset, stop.reason
+            ));
+        }
+        self.resize_locks.first().map(|lock| lock.reason.clone())
     }
 }
 
@@ -459,9 +537,31 @@ struct Reader<'a, 'b> {
     last_token: u8,
     last_token_offset: u32,
     last_token_at: u64,
+    spans: Vec<Span>,
+    fixups: Vec<Fixup>,
+    locks: Vec<ResizeLock>,
 }
 
 impl<'a, 'b> Reader<'a, 'b> {
+    fn lock(&mut self, kind: &'static str, reason: String) {
+        self.locks.push(ResizeLock { kind, reason });
+    }
+
+    /// A four-byte code offset, recorded so a resize can rewrite it.
+    fn code_offset(&mut self, source: FixupSource) -> Result<u32, String> {
+        let at = self.cursor.file_offset();
+        let target = self.u32v()?;
+        self.fixups.push(Fixup {
+            at,
+            source,
+            kind: FixupKind::Absolute {
+                target,
+                resumes: None,
+            },
+        });
+        Ok(target)
+    }
+
     fn stop(&self, reason: String) -> ScriptStop {
         ScriptStop {
             offset: self.last_token_offset,
@@ -620,13 +720,26 @@ impl<'a, 'b> Reader<'a, 'b> {
         self.last_token_offset = offset;
         self.last_token_at = at;
         self.count_token(token);
+        let slot = self.spans.len();
+        self.spans.push(Span {
+            token,
+            at,
+            end_at: at,
+            offset,
+            end_offset: offset,
+        });
         self.depth += 1;
-        let value = self.body(token, at);
+        let value = self.body(token, at, offset);
         self.depth -= 1;
+        let (end_at, end_offset) = (self.cursor.file_offset(), self.offset);
+        if let Some(span) = self.spans.get_mut(slot) {
+            span.end_at = end_at;
+            span.end_offset = end_offset;
+        }
         value
     }
 
-    fn body(&mut self, token: u8, at: u64) -> Result<Expr, String> {
+    fn body(&mut self, token: u8, at: u64, offset: u32) -> Result<Expr, String> {
         let named = |token: u8| token_name(token).unwrap_or("Unknown");
         Ok(match token {
             0x00 | 0x01 | 0x02 | 0x48 | 0x6C => Expr::Variable {
@@ -637,10 +750,10 @@ impl<'a, 'b> Reader<'a, 'b> {
                 value: self.boxed()?,
             },
             0x06 => Expr::Jump {
-                target: self.u32v()?,
+                target: self.code_offset(FixupSource::Jump)?,
             },
             0x07 => Expr::JumpIfNot {
-                target: self.u32v()?,
+                target: self.code_offset(FixupSource::JumpIfNot)?,
                 condition: self.boxed()?,
             },
             0x09 => Expr::Assert {
@@ -671,23 +784,56 @@ impl<'a, 'b> Reader<'a, 'b> {
                 property: self.property()?,
                 value: self.u8v()?,
             },
-            0x12 | 0x19 | 0x1A => Expr::Context {
-                name: named(token),
-                object: self.boxed()?,
-                skip: self.u32v()?,
-                property: self.property()?,
-                member: self.boxed()?,
-            },
+            0x12 | 0x19 | 0x1A => {
+                let object = self.boxed()?;
+                let skip_at = self.cursor.file_offset();
+                let skip = self.u32v()?;
+                let property = self.property()?;
+                // The skip is how far a null context jumps over the member, counted from after
+                // the property, so it is the member's own loaded length.
+                let from = self.offset;
+                let member = self.boxed()?;
+                let to = self.offset;
+                self.fixups.push(Fixup {
+                    at: skip_at,
+                    source: FixupSource::ContextSkip,
+                    kind: FixupKind::Relative { from, to },
+                });
+                if skip != to - from {
+                    self.lock(
+                        "context skip",
+                        format!(
+                            "the context at 0x{offset:04X} skips {skip} bytes where its member takes {}",
+                            to - from
+                        ),
+                    );
+                }
+                Expr::Context {
+                    name: named(token),
+                    object,
+                    skip,
+                    property,
+                    member,
+                }
+            }
             0x13 | 0x2E | 0x52 | 0x54 | 0x55 => Expr::Cast {
                 name: named(token),
                 class: self.object()?,
                 value: self.boxed()?,
             },
             0x17 => Expr::SelfRef,
-            0x18 => Expr::Skip {
-                skip: self.u32v()?,
-                value: self.boxed()?,
-            },
+            0x18 => {
+                self.lock(
+                    "skip",
+                    format!(
+                        "an EX_Skip at 0x{offset:04X} holds a length the compiler never writes, so nothing says how it would move"
+                    ),
+                );
+                Expr::Skip {
+                    skip: self.u32v()?,
+                    value: self.boxed()?,
+                }
+            }
             0x1B | 0x45 => Expr::VirtualCall {
                 name: named(token),
                 function: self.name()?,
@@ -739,11 +885,20 @@ impl<'a, 'b> Reader<'a, 'b> {
                 at,
             },
             0x29 => Expr::TextConst { text: self.text()? },
-            0x2F => Expr::StructConst {
-                struct_type: self.object()?,
-                size: self.i32v()?,
-                fields: self.until(0x30)?,
-            },
+            0x2F => {
+                let struct_type = self.object()?;
+                let size = self.i32v()?;
+                let first = self.fixups.len();
+                let fields = self.until(0x30)?;
+                if is_latent_info(&struct_type) {
+                    self.claim_linkage(first, &fields, offset);
+                }
+                Expr::StructConst {
+                    struct_type,
+                    size,
+                    fields,
+                }
+            }
             0x31 => Expr::SetArray {
                 array: self.boxed()?,
                 items: self.until(0x32)?,
@@ -807,17 +962,36 @@ impl<'a, 'b> Reader<'a, 'b> {
                 value: self.boxed()?,
             },
             0x4C => Expr::PushExecutionFlow {
-                target: self.u32v()?,
+                target: self.code_offset(FixupSource::PushFlow)?,
             },
-            0x4E => Expr::ComputedJump {
-                target: self.boxed()?,
-            },
+            0x4E => {
+                let target = self.boxed()?;
+                // An event graph dispatches on the offset its stubs pass in, which the package
+                // pass accounts for before it lifts this; any other computed jump goes wherever a
+                // variable says, and nothing can follow that.
+                if is_entry_point(&target) {
+                    self.lock(
+                        ENTRY_DISPATCH,
+                        format!(
+                            "the jump at 0x{offset:04X} enters at the offset its event stubs pass in"
+                        ),
+                    );
+                } else {
+                    self.lock(
+                        "computed jump",
+                        format!(
+                            "the computed jump at 0x{offset:04X} goes wherever a variable says"
+                        ),
+                    );
+                }
+                Expr::ComputedJump { target }
+            }
             0x4F | 0x51 | 0x5D | 0x67 | 0x6D => Expr::Unary {
                 name: named(token),
                 value: self.boxed()?,
             },
             0x5B => Expr::SkipOffsetConst {
-                value: self.u32v()?,
+                value: self.code_offset(FixupSource::Linkage)?,
             },
             0x5C | 0x62 => Expr::DelegateOp {
                 name: named(token),
@@ -834,7 +1008,7 @@ impl<'a, 'b> Reader<'a, 'b> {
                 delegate: self.boxed()?,
                 params: self.until(0x16)?,
             },
-            0x69 => self.switch()?,
+            0x69 => self.switch(offset)?,
             0x6A => {
                 let event = self.u8v()?;
                 // Only an inline event carries a name of its own.
@@ -883,25 +1057,98 @@ impl<'a, 'b> Reader<'a, 'b> {
         })
     }
 
-    fn switch(&mut self) -> Result<Expr, String> {
+    /// Each case names where the next one starts and the switch names where it ends, both as
+    /// offsets that have to be exactly the end of what precedes them.
+    fn switch(&mut self, offset: u32) -> Result<Expr, String> {
         let cases = self.u16v()?;
-        let end = self.u32v()?;
+        let end = self.code_offset(FixupSource::SwitchEnd)?;
         let index = self.boxed()?;
         let mut out = Vec::with_capacity(usize::from(cases));
         for _ in 0..cases {
+            let value = self.expr()?;
+            let next = self.code_offset(FixupSource::SwitchNext)?;
+            let result = self.expr()?;
+            if next != self.offset {
+                self.lock(
+                    "switch offset",
+                    format!(
+                        "a case of the switch at 0x{offset:04X} says the next starts at 0x{next:04X}, not 0x{:04X}",
+                        self.offset
+                    ),
+                );
+            }
             out.push(SwitchCase {
-                value: self.expr()?,
-                next: self.u32v()?,
-                result: self.expr()?,
+                value,
+                next,
+                result,
             });
+        }
+        let default = self.boxed()?;
+        if end != self.offset {
+            self.lock(
+                "switch offset",
+                format!(
+                    "the switch at 0x{offset:04X} says it ends at 0x{end:04X}, not 0x{:04X}",
+                    self.offset
+                ),
+            );
         }
         Ok(Expr::SwitchValue {
             end,
             index,
             cases: out,
-            default: self.boxed()?,
+            default,
         })
     }
+
+    /// A latent action carries its resume point as an `Offset` constant, and the function it
+    /// resumes by name beside it: the offset counts in that function's code, not this one's.
+    fn claim_linkage(&mut self, first: usize, fields: &[Expr], offset: u32) {
+        let function = fields.iter().find_map(|field| match field {
+            Expr::NameConst {
+                name: "NameConst",
+                value,
+                ..
+            } => Some(value.clone()),
+            _ => None,
+        });
+        match (fields.first(), function) {
+            // A latent action that calls back through a delegate has no resume point at all.
+            (Some(Expr::IntConst { value: -1, .. }), _) => {}
+            (Some(Expr::SkipOffsetConst { .. }), Some(function)) => {
+                if let Some(fixup) = self.fixups[first..]
+                    .iter_mut()
+                    .find(|fixup| fixup.source == FixupSource::Linkage)
+                    && let FixupKind::Absolute { resumes, .. } = &mut fixup.kind
+                {
+                    *resumes = Some(function);
+                }
+            }
+            _ => self.lock(
+                "latent action",
+                format!(
+                    "the latent action at 0x{offset:04X} does not carry its resume point as an Offset constant beside the function it resumes"
+                ),
+            ),
+        }
+    }
+}
+
+/// The lock an event graph's dispatch takes until the package pass has accounted for every stub.
+const ENTRY_DISPATCH: &str = "event graph entry";
+
+/// The parameter an event graph dispatches on.
+fn is_entry_point(target: &Expr) -> bool {
+    matches!(target, Expr::Variable { property, .. } if property.path == "EntryPoint")
+}
+
+/// `FLatentActionInfo`, whose `Linkage` is a code offset.
+fn is_latent_info(struct_type: &ObjectRef) -> bool {
+    struct_type
+        .path
+        .as_deref()
+        .and_then(|path| path.rsplit(['.', ':', '/']).next())
+        == Some("LatentActionInfo")
 }
 
 /// Walks one script. `buffer_size` is the loaded size the export declares; passing `None` skips
@@ -925,6 +1172,9 @@ pub(crate) fn read_script(
         last_token: 0,
         last_token_offset: 0,
         last_token_at: start,
+        spans: Vec::new(),
+        fixups: Vec::new(),
+        locks: Vec::new(),
     };
     let mut statements = Vec::new();
     let mut stopped = None;
@@ -951,10 +1201,14 @@ pub(crate) fn read_script(
         )));
     }
     let mut names = reader.cursor.take_names();
+    let (spans, fixups, mut locks) = (reader.spans, reader.fixups, reader.locks);
     if stopped.is_some() {
         // A script that did not decode whole may have named its objects at the wrong offsets.
         diagnostics.references.truncate(mark);
         names.clear();
+    }
+    if stopped.is_none() {
+        locks.extend(stray_targets(&spans, &fixups, decoded_size));
     }
     Script {
         buffer_size: buffer_size.unwrap_or(decoded_size),
@@ -966,7 +1220,476 @@ pub(crate) fn read_script(
         statements,
         stopped,
         names,
+        spans,
+        fixups,
+        resize_locks: locks,
     }
+}
+
+/// A jump into the middle of an expression would land somewhere else once anything before it
+/// moves, so every place this script jumps to in itself has to be where an expression starts, or
+/// its very end. A switch's offsets are the ends of its arms instead, which the walk checks
+/// exactly as it reads them.
+fn stray_targets(spans: &[Span], fixups: &[Fixup], end: u32) -> Vec<ResizeLock> {
+    let starts = expression_starts(spans);
+    fixups
+        .iter()
+        .filter(|fixup| {
+            !matches!(
+                fixup.source,
+                FixupSource::SwitchEnd | FixupSource::SwitchNext
+            )
+        })
+        .filter_map(|fixup| match &fixup.kind {
+            FixupKind::Absolute {
+                target,
+                resumes: None,
+            } if *target != end && !starts.contains(target) => Some(ResizeLock {
+                kind: "stray target",
+                reason: format!(
+                    "an offset at file {:#X} names 0x{target:04X}, where no expression starts",
+                    fixup.at
+                ),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+fn expression_starts(spans: &[Span]) -> std::collections::HashSet<u32> {
+    spans.iter().map(|span| span.offset).collect()
+}
+
+/// Visits every expression of a script with its span and the expression it sits in, in the order
+/// the decoder recorded the spans.
+pub fn visit_spans<'a, F>(script: &'a Script, visit: &mut F)
+where
+    F: FnMut(&'a Expr, &'a Span, Option<&'a Expr>),
+{
+    let mut next = 0;
+    for statement in &script.statements {
+        visit_tree(&statement.expr, None, &script.spans, &mut next, visit);
+    }
+}
+
+fn visit_tree<'a, F>(
+    expr: &'a Expr,
+    parent: Option<&'a Expr>,
+    spans: &'a [Span],
+    next: &mut usize,
+    visit: &mut F,
+) where
+    F: FnMut(&'a Expr, &'a Span, Option<&'a Expr>),
+{
+    let Some(span) = spans.get(*next) else {
+        return;
+    };
+    *next += 1;
+    visit(expr, span, parent);
+    for child in children(expr) {
+        visit_tree(child, Some(expr), spans, next, visit);
+    }
+}
+
+/// A function's script, with what the package pass needs to know about it.
+#[derive(Debug, Clone, Copy)]
+pub struct Function<'a> {
+    /// The export's index in the package.
+    pub export: u32,
+    pub name: &'a str,
+    pub script: &'a Script,
+    /// `EventGraphFunction` and `EventGraphCallOffset` from the function's tail.
+    pub event_graph: (i32, i32),
+}
+
+impl Function<'_> {
+    /// How the package's bytecode names this export.
+    fn package_index(&self) -> i32 {
+        self.export as i32 + 1
+    }
+
+    /// An event graph's code is entered at offsets its stubs pass in, which is what makes those
+    /// stubs' literals part of its layout.
+    pub fn is_event_graph(&self) -> bool {
+        self.name.starts_with("ExecuteUbergraph")
+    }
+}
+
+/// An event stub's entry: the integer it passes its event graph, which is an offset into it.
+#[derive(Debug, Clone)]
+pub struct Entry {
+    /// The stub's export.
+    pub export: u32,
+    /// Where the literal sits.
+    pub span: Span,
+    pub offset: u32,
+}
+
+/// Everything outside a function's own code that holds an offset into it.
+#[derive(Debug, Clone, Default)]
+pub struct Inbound {
+    pub entries: Vec<Entry>,
+    /// Latent resume points another function's code holds: that function's export, and the field.
+    pub linkages: Vec<(u32, Fixup)>,
+    /// References to an event graph that might carry an offset nothing here can follow.
+    pub unclassified: Vec<String>,
+}
+
+/// The integer an event stub passes its event graph, in whichever form the compiler chose for it.
+pub fn entry_value(expr: &Expr) -> Option<u32> {
+    match expr {
+        Expr::IntConst { value, .. } => u32::try_from(*value).ok(),
+        Expr::ByteConst {
+            name: "IntConstByte",
+            value,
+            ..
+        } => Some(u32::from(*value)),
+        Expr::Simple { name: "IntZero" } => Some(0),
+        Expr::Simple { name: "IntOne" } => Some(1),
+        _ => None,
+    }
+}
+
+/// What in `functions` holds an offset into `target`.
+pub fn inbound(functions: &[Function<'_>], target: &Function<'_>) -> Inbound {
+    let mut out = Inbound::default();
+    let own = target.package_index();
+    let event_graph = target.is_event_graph();
+    let calls_target = |expr: &Expr| match expr {
+        Expr::FinalCall { function, .. } => function.index == own,
+        Expr::VirtualCall { function, .. } => function == target.name,
+        _ => false,
+    };
+    for function in functions {
+        for fixup in &function.script.fixups {
+            if function.export != target.export
+                && let FixupKind::Absolute {
+                    resumes: Some(name),
+                    ..
+                } = &fixup.kind
+                && name == target.name
+            {
+                out.linkages.push((function.export, fixup.clone()));
+            }
+        }
+        if !event_graph {
+            continue;
+        }
+        if function.event_graph.0 == own && function.event_graph.1 != 0 {
+            out.unclassified.push(format!(
+                "{} enters {} directly at {}",
+                function.name, target.name, function.event_graph.1
+            ));
+        }
+        let mut visit = |expr: &Expr, span: &Span, parent: Option<&Expr>| {
+            if let Some(call) = parent.filter(|call| calls_target(call))
+                && let Expr::FinalCall { params, .. } | Expr::VirtualCall { params, .. } = call
+                && params
+                    .first()
+                    .is_some_and(|first| std::ptr::eq(first, expr))
+                && let Some(offset) = entry_value(expr)
+            {
+                out.entries.push(Entry {
+                    export: function.export,
+                    span: *span,
+                    offset,
+                });
+            }
+            let strange = match expr {
+                Expr::FinalCall { params, .. } | Expr::VirtualCall { params, .. }
+                    if calls_target(expr) =>
+                {
+                    !matches!(params.as_slice(), [only] if entry_value(only).is_some())
+                }
+                Expr::ObjectConst { object } => object.index == own,
+                Expr::NameConst { value, .. } => {
+                    value == target.name && !parent.is_some_and(is_latent_struct)
+                }
+                Expr::BindDelegate { function: name, .. } => name == target.name,
+                Expr::StringConst { value, .. } | Expr::UnicodeStringConst { value, .. } => {
+                    value.contains(target.name)
+                }
+                _ => false,
+            };
+            if strange {
+                out.unclassified.push(format!(
+                    "{} names {} in `{}`",
+                    function.name,
+                    target.name,
+                    render(expr)
+                ));
+            }
+        };
+        visit_spans(function.script, &mut visit);
+    }
+    out
+}
+
+fn is_latent_struct(expr: &Expr) -> bool {
+    matches!(expr, Expr::StructConst { struct_type, .. } if is_latent_info(struct_type))
+}
+
+/// Settles which scripts can change size once the whole package has been read. An event graph's
+/// dispatch is fine once every stub entering it is accounted for; anything else pointing into it,
+/// or an offset landing mid-expression, locks it.
+pub(crate) fn settle_resize_locks(exports: &mut [crate::package::ParsedExport]) {
+    let mut changes: Vec<(usize, Vec<ResizeLock>)> = Vec::new();
+    {
+        let functions = functions_of(exports);
+        for (position, target) in exports.iter().enumerate() {
+            let Some(target) = functions.iter().find(|f| f.export == target.index) else {
+                continue;
+            };
+            let script = target.script;
+            let found = inbound(&functions, target);
+            let mut locks: Vec<ResizeLock> = script
+                .resize_locks
+                .iter()
+                .filter(|lock| !(target.is_event_graph() && lock.kind == ENTRY_DISPATCH))
+                .cloned()
+                .collect();
+            let starts = expression_starts(&script.spans);
+            let lands = |offset: u32| offset == script.decoded_size || starts.contains(&offset);
+            let own_linkages = script.fixups.iter().filter(|fixup| {
+                matches!(&fixup.kind, FixupKind::Absolute { resumes: Some(name), .. } if name == target.name)
+            });
+            for fixup in own_linkages.chain(found.linkages.iter().map(|(_, fixup)| fixup)) {
+                if let FixupKind::Absolute { target: offset, .. } = fixup.kind
+                    && !lands(offset)
+                {
+                    locks.push(ResizeLock {
+                        kind: "stray target",
+                        reason: format!(
+                            "a latent action resumes {} at 0x{offset:04X}, where no expression starts",
+                            target.name
+                        ),
+                    });
+                }
+            }
+            for entry in &found.entries {
+                if !lands(entry.offset) {
+                    locks.push(ResizeLock {
+                        kind: "stray target",
+                        reason: format!(
+                            "an event enters {} at 0x{:04X}, where no expression starts",
+                            target.name, entry.offset
+                        ),
+                    });
+                }
+            }
+            locks.extend(found.unclassified.into_iter().map(|reason| ResizeLock {
+                kind: "event graph reference",
+                reason,
+            }));
+            if locks != script.resize_locks {
+                changes.push((position, locks));
+            }
+        }
+    }
+    for (position, locks) in changes {
+        if let Some(script) = exports[position].script.as_mut() {
+            script.resize_locks = locks;
+        }
+    }
+}
+
+/// What the audit counts about a package's bytecode: the shapes relocation relies on, and every
+/// place they do not hold.
+#[derive(Debug, Clone, Default)]
+pub struct ScriptCensus {
+    pub counts: BTreeMap<String, usize>,
+    /// `(line, "#export: detail")`, for the lines worth an example.
+    pub examples: Vec<(String, String)>,
+}
+
+impl ScriptCensus {
+    fn count(&mut self, line: &str) {
+        *self.counts.entry(line.to_string()).or_default() += 1;
+    }
+
+    fn note(&mut self, line: &str, export: u32, detail: String) {
+        self.count(line);
+        self.examples
+            .push((line.to_string(), format!("#{export}: {detail}")));
+    }
+}
+
+/// Counts what relocation relies on across one package's scripts.
+pub fn census(parsed: &crate::package::ParsedPackage) -> ScriptCensus {
+    let mut out = ScriptCensus::default();
+    let functions = functions_of(&parsed.exports);
+    let local_names: std::collections::HashSet<&str> =
+        functions.iter().map(|function| function.name).collect();
+    for function in &functions {
+        let script = function.script;
+        if script.resize_locks.is_empty() {
+            out.count("scripts that can change size");
+        }
+        let mut kinds: Vec<&str> = script.resize_locks.iter().map(|lock| lock.kind).collect();
+        kinds.sort_unstable();
+        kinds.dedup();
+        for kind in kinds {
+            if let Some(lock) = script.resize_locks.iter().find(|lock| lock.kind == kind) {
+                out.note(
+                    &format!("locked: {kind}"),
+                    function.export,
+                    lock.reason.clone(),
+                );
+            }
+        }
+        if function.is_event_graph() {
+            out.count("event graphs");
+            let found = inbound(&functions, function);
+            for entry in &found.entries {
+                out.count(&format!(
+                    "event entries carried by {}",
+                    token_name(entry.span.token).unwrap_or("unknown")
+                ));
+            }
+            for _ in &found.linkages {
+                out.count("latent resume points held by another function");
+            }
+        }
+        if function.event_graph.1 != 0 {
+            out.note(
+                "functions entering an event graph directly",
+                function.export,
+                format!("at {}", function.event_graph.1),
+            );
+        }
+        for fixup in &script.fixups {
+            match (&fixup.source, &fixup.kind) {
+                (
+                    FixupSource::Linkage,
+                    FixupKind::Absolute {
+                        resumes: Some(_), ..
+                    },
+                ) => {
+                    out.count("latent resume points");
+                }
+                (FixupSource::Linkage, _) => {
+                    out.note(
+                        "Offset constants outside a latent action",
+                        function.export,
+                        format!("file {:#X}", fixup.at),
+                    );
+                }
+                _ => {}
+            }
+        }
+        let mut visit = |expr: &Expr, span: &Span, _: Option<&Expr>| match expr {
+            Expr::TextConst { .. } => out.note(
+                "text constants",
+                function.export,
+                format!("at 0x{:04X} {}", span.offset, render(expr)),
+            ),
+            Expr::StringConst { value, .. } if value.chars().any(|c| u32::from(c) > 0x7F) => {
+                out.note(
+                    "StringConsts holding a byte above 0x7F",
+                    function.export,
+                    format!("{value:?}"),
+                );
+            }
+            Expr::FinalCall {
+                function: callee, ..
+            } if callee.index < 0
+                && callee
+                    .path
+                    .as_deref()
+                    .is_some_and(|path| callee_name(path).starts_with("ExecuteUbergraph")) =>
+            {
+                out.note(
+                    "calls into another package's event graph",
+                    function.export,
+                    render(expr),
+                );
+            }
+            Expr::VirtualCall {
+                function: callee, ..
+            } if callee.starts_with("ExecuteUbergraph")
+                && !local_names.contains(callee.as_str()) =>
+            {
+                out.note(
+                    "calls into another package's event graph",
+                    function.export,
+                    render(expr),
+                );
+            }
+            _ => {}
+        };
+        visit_spans(script, &mut visit);
+        script_import_edges(parsed, function, &mut out);
+    }
+    out
+}
+
+/// Whether the imports a script names sit in its export's dependency runs, which says whether a
+/// script edit naming a new object has to add an edge the way a property edit does.
+fn script_import_edges(
+    parsed: &crate::package::ParsedPackage,
+    function: &Function<'_>,
+    out: &mut ScriptCensus,
+) {
+    let Some(runs) = parsed
+        .dependencies
+        .as_ref()
+        .and_then(|runs| runs.get(function.export as usize))
+    else {
+        return;
+    };
+    let script = function.script;
+    let mut seen = std::collections::HashSet::new();
+    for reference in &parsed.references {
+        if reference.at < script.start || reference.at >= script.end || reference.index >= 0 {
+            continue;
+        }
+        if !seen.insert(reference.index) {
+            continue;
+        }
+        let Some(import) = parsed.imports.get((-reference.index - 1) as usize) else {
+            continue;
+        };
+        // Native objects and whole packages never take an edge in an IoStore package.
+        if import.path.starts_with("/Script/") || import.outer_index == 0 {
+            continue;
+        }
+        let line = if runs.create_before_serialize.contains(&reference.index) {
+            "script imports with a create-before-serialize edge"
+        } else if runs.serialize_before_serialize.contains(&reference.index) {
+            "script imports with a serialize-before-serialize edge"
+        } else if runs.create_before_create.contains(&reference.index)
+            || runs.serialize_before_create.contains(&reference.index)
+        {
+            "script imports with another edge"
+        } else {
+            "script imports with no edge"
+        };
+        if line.ends_with("no edge") {
+            out.note(line, function.export, import.path.clone());
+        } else {
+            out.count(line);
+        }
+    }
+}
+
+/// Every export holding a script that decoded whole, as the package pass sees it.
+pub fn functions_of(exports: &[crate::package::ParsedExport]) -> Vec<Function<'_>> {
+    exports
+        .iter()
+        .filter_map(|export| {
+            let script = export.script.as_ref().filter(|script| script.complete())?;
+            let event_graph = export
+                .signature
+                .as_ref()
+                .map_or((0, 0), |s| (s.event_graph, s.event_graph_offset));
+            Some(Function {
+                export: export.index,
+                name: export.object_name.as_str(),
+                script,
+                event_graph,
+            })
+        })
+        .collect()
 }
 
 /// One statement as a viewer shows it, with every offset it can send execution to.
@@ -983,6 +1706,322 @@ pub struct ScriptLine {
     /// The constants in this statement that can take a new value in place.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub literals: Vec<LiteralSlot>,
+    /// Everything in this statement an edit can address by where it starts.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub expressions: Vec<ExpressionSlot>,
+}
+
+/// What an addressed edit does at an expression.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SlotKind {
+    /// A constant, or a one-byte form like `True` or `IntZero`.
+    Literal,
+    /// An object constant, or `NoObject`.
+    Object,
+    Text,
+    Call,
+    /// A `JumpIfNot` or `PopExecutionFlowIfNot` statement, whose condition an edit can fix.
+    Condition,
+}
+
+impl SlotKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            SlotKind::Literal => "literal",
+            SlotKind::Object => "object",
+            SlotKind::Text => "text",
+            SlotKind::Call => "call",
+            SlotKind::Condition => "condition",
+        }
+    }
+}
+
+/// An expression an edit can address by the loaded offset it starts at.
+#[derive(Debug, Clone, Serialize)]
+pub struct ExpressionSlot {
+    pub at: u32,
+    pub kind: SlotKind,
+    /// The instruction, such as `IntConst` or `JumpIfNot`.
+    pub token: &'static str,
+    /// The expression as the disassembly shows it, which is what an edit's `was` holds.
+    pub text: String,
+    /// What it holds as an edit would type it: a literal's value, an object's path, a text in
+    /// UE's literal syntax, the function a call names. Nothing for a condition.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+}
+
+/// The string a text part holds.
+pub(crate) fn string_of(expr: &Expr) -> &str {
+    match expr {
+        Expr::StringConst { value, .. } | Expr::UnicodeStringConst { value, .. } => value,
+        _ => "",
+    }
+}
+
+/// A text constant in UE's literal syntax, as an edit would type it.
+pub(crate) fn text_form(expr: &Expr) -> String {
+    use crate::text_literal::TextLiteral as Typed;
+    let Expr::TextConst { text } = expr else {
+        return render(expr);
+    };
+    let typed = match text {
+        TextLiteral::Empty => Typed::Invariant(String::new()),
+        TextLiteral::Invariant { source } | TextLiteral::Literal { source } => {
+            Typed::Invariant(string_of(source).to_string())
+        }
+        TextLiteral::Localized {
+            source,
+            key,
+            namespace,
+        } => Typed::Localized {
+            namespace: string_of(namespace).to_string(),
+            key: string_of(key).to_string(),
+            source: string_of(source).to_string(),
+        },
+        TextLiteral::StringTable { table_id, key, .. } => Typed::Table {
+            table_id: string_of(table_id).to_string(),
+            key: string_of(key).to_string(),
+        },
+    };
+    crate::text_literal::format(&typed)
+}
+
+/// What an expression an edit can address holds, as the edit would type it.
+fn slot_value(expr: &Expr, kind: SlotKind) -> Option<String> {
+    match kind {
+        SlotKind::Literal => match expr {
+            Expr::Simple { name: "True" } => Some("true".into()),
+            Expr::Simple { name: "False" } => Some("false".into()),
+            Expr::Simple { name: "IntZero" } => Some("0".into()),
+            Expr::Simple { name: "IntOne" } => Some("1".into()),
+            literal => literal_value(literal),
+        },
+        SlotKind::Object => Some(match expr {
+            Expr::ObjectConst { object } => object.path.clone().unwrap_or_else(|| "None".into()),
+            _ => "None".into(),
+        }),
+        SlotKind::Text => Some(text_form(expr)),
+        SlotKind::Call => match expr {
+            Expr::FinalCall { function, .. } => function.path.clone(),
+            Expr::VirtualCall { function, .. } => Some(function.clone()),
+            _ => None,
+        },
+        SlotKind::Condition => None,
+    }
+}
+
+/// What an edit can do at `expr`, which starts a statement when `top` is set.
+fn slot_kind(expr: &Expr, top: bool) -> Option<SlotKind> {
+    match expr {
+        Expr::ObjectConst { .. } | Expr::Simple { name: "NoObject" } => Some(SlotKind::Object),
+        Expr::TextConst { .. } => Some(SlotKind::Text),
+        Expr::FinalCall { .. } | Expr::VirtualCall { .. } => Some(SlotKind::Call),
+        Expr::JumpIfNot { .. }
+        | Expr::Unary {
+            name: "PopExecutionFlowIfNot",
+            ..
+        } if top => Some(SlotKind::Condition),
+        literal if is_literal(literal) => Some(SlotKind::Literal),
+        _ => None,
+    }
+}
+
+/// Every expression of each statement with its span, statement by statement.
+pub(crate) fn nodes_by_statement(script: &Script) -> Vec<Vec<(&Expr, Span)>> {
+    let mut next = 0;
+    script
+        .statements
+        .iter()
+        .map(|statement| {
+            let mut out = Vec::new();
+            visit_tree(
+                &statement.expr,
+                None,
+                &script.spans,
+                &mut next,
+                &mut |expr, span, _| out.push((expr, *span)),
+            );
+            out
+        })
+        .collect()
+}
+
+/// The expressions an edit can address in each statement.
+fn slots_of(nodes: &[(&Expr, Span)]) -> Vec<ExpressionSlot> {
+    nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(position, (expr, span))| {
+            let kind = slot_kind(expr, position == 0)?;
+            Some(ExpressionSlot {
+                at: span.offset,
+                kind,
+                token: token_name(span.token).unwrap_or("unknown"),
+                text: render(expr),
+                value: slot_value(expr, kind),
+            })
+        })
+        .collect()
+}
+
+/// Where the `nth` expression of `kind` in the statement at `statement` starts, counted from 0 in
+/// bytecode order. A miss lists what the statement does hold.
+pub fn expression_at(
+    script: &Script,
+    statement: u32,
+    kind: SlotKind,
+    nth: u32,
+) -> Result<u32, String> {
+    let position = script
+        .statements
+        .iter()
+        .position(|s| s.offset == statement)
+        .ok_or_else(|| format!("no statement starts at 0x{statement:04X}"))?;
+    let nodes = nodes_by_statement(script);
+    let slots = slots_of(&nodes[position]);
+    let of_kind: Vec<&ExpressionSlot> = slots.iter().filter(|slot| slot.kind == kind).collect();
+    of_kind.get(nth as usize).map(|slot| slot.at).ok_or_else(|| {
+        let listing: Vec<String> = slots
+            .iter()
+            .map(|slot| format!("  0x{:04X} {} {}", slot.at, slot.kind.label(), slot.text))
+            .collect();
+        format!(
+            "the statement at 0x{statement:04X} holds {} {}(s), so there is no {} {nth}; it holds:\n{}",
+            of_kind.len(),
+            kind.label(),
+            kind.label(),
+            listing.join("\n")
+        )
+    })
+}
+
+/// A call as a retarget sees it: the token it is made with, the function it names, how many
+/// arguments it passes, and what becomes of what it returns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallInfo {
+    pub opcode: &'static str,
+    /// A final call's function path, or the name a virtual call looks up.
+    pub callee: String,
+    pub arity: usize,
+    pub use_: CallUse,
+}
+
+/// What a statement does with the value a call returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CallUse {
+    /// The call is the statement, alone or behind the object it is made on.
+    Discarded,
+    /// A `Let` stores it, possibly through the object the call is made on.
+    Kept,
+    /// Something else takes it: an argument, a condition, a context's object.
+    Consumed,
+}
+
+/// How the statement `root` uses the value of `call`, one of its expressions, and the variable it
+/// is kept in when a `Let` keeps it. A call made on another object sits under that object's
+/// `Context`, so `Let X = Target.Fn()` keeps the value as surely as `Let X = Fn()` does.
+pub fn call_use<'a>(root: &'a Expr, call: &Expr) -> (CallUse, Option<&'a Expr>) {
+    let through = |mut expr: &'a Expr| {
+        while let Expr::Context { member, .. } = expr {
+            if std::ptr::eq(expr, call) {
+                break;
+            }
+            expr = member;
+        }
+        expr
+    };
+    if std::ptr::eq(through(root), call) {
+        return (CallUse::Discarded, None);
+    }
+    if let Expr::Let {
+        variable, value, ..
+    } = root
+        && std::ptr::eq(through(value), call)
+    {
+        return (CallUse::Kept, Some(variable));
+    }
+    (CallUse::Consumed, None)
+}
+
+/// The call starting at loaded offset `at` in the statement at `statement`, with what becomes of
+/// its value and the variable a `Let` keeps it in.
+pub fn call_expr_at(
+    script: &Script,
+    statement: u32,
+    at: u32,
+) -> Option<(&Expr, CallUse, Option<&Expr>)> {
+    let position = script
+        .statements
+        .iter()
+        .position(|s| s.offset == statement)?;
+    let root = &script.statements[position].expr;
+    let mut next = script
+        .spans
+        .iter()
+        .position(|span| span.at == script.statements[position].at)?;
+    let mut found = None;
+    visit_tree(
+        root,
+        None,
+        &script.spans,
+        &mut next,
+        &mut |expr, span, _| {
+            if found.is_none()
+                && span.offset == at
+                && matches!(expr, Expr::FinalCall { .. } | Expr::VirtualCall { .. })
+            {
+                found = Some(expr);
+            }
+        },
+    );
+    let call = found?;
+    let (use_, kept_in) = call_use(root, call);
+    Some((call, use_, kept_in))
+}
+
+/// The call starting at loaded offset `at` in the statement at `statement`.
+pub fn call_at(script: &Script, statement: u32, at: u32) -> Option<CallInfo> {
+    let (call, use_, _) = call_expr_at(script, statement, at)?;
+    match call {
+        Expr::FinalCall {
+            name,
+            function,
+            params,
+        } => Some(CallInfo {
+            opcode: name,
+            callee: function.path.clone().unwrap_or_default(),
+            arity: params.len(),
+            use_,
+        }),
+        Expr::VirtualCall {
+            name,
+            function,
+            params,
+        } => Some(CallInfo {
+            opcode: name,
+            callee: function.clone(),
+            arity: params.len(),
+            use_,
+        }),
+        _ => None,
+    }
+}
+
+/// The expression starting at loaded offset `at` in the statement at `statement`.
+pub fn expression_starting(script: &Script, statement: u32, at: u32) -> Option<&Expr> {
+    let position = script
+        .statements
+        .iter()
+        .position(|s| s.offset == statement)?;
+    nodes_by_statement(script)
+        .into_iter()
+        .nth(position)?
+        .into_iter()
+        .find(|(_, span)| span.offset == at)
+        .map(|(expr, _)| expr)
 }
 
 /// A constant a viewer can offer for editing, addressed the way a script edit names it.
@@ -993,9 +2032,26 @@ pub struct LiteralSlot {
     pub kind: &'static str,
     /// The value as an edit would type it.
     pub value: String,
-    /// For a string, the length a replacement has to keep, since the bytes cannot grow.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub length: Option<usize>,
+}
+
+/// A literal's value as an edit would type it, for the kinds with value bytes.
+fn literal_value(literal: &Expr) -> Option<String> {
+    Some(match literal {
+        Expr::IntConst { value, .. } => value.to_string(),
+        Expr::Int64Const { value, .. } => value.to_string(),
+        Expr::UInt64Const { value, .. } => value.to_string(),
+        Expr::FloatConst { value, .. } => value.to_string(),
+        Expr::DoubleConst { value, .. } => value.to_string(),
+        Expr::ByteConst { value, .. } => value.to_string(),
+        Expr::StringConst { value, .. } | Expr::UnicodeStringConst { value, .. } => value.clone(),
+        Expr::NameConst { value, .. } => value.clone(),
+        Expr::Numbers { values, .. } => values
+            .iter()
+            .map(f64::to_string)
+            .collect::<Vec<_>>()
+            .join(", "),
+        _ => return None,
+    })
 }
 
 /// The literals of `expr` a script edit can rewrite, with their index among all its literals.
@@ -1004,33 +2060,10 @@ pub fn literal_slots(expr: &Expr) -> Vec<LiteralSlot> {
         .into_iter()
         .enumerate()
         .filter_map(|(index, literal)| {
-            let (value, length) = match literal {
-                Expr::IntConst { value, .. } => (value.to_string(), None),
-                Expr::Int64Const { value, .. } => (value.to_string(), None),
-                Expr::UInt64Const { value, .. } => (value.to_string(), None),
-                Expr::FloatConst { value, .. } => (value.to_string(), None),
-                Expr::DoubleConst { value, .. } => (value.to_string(), None),
-                Expr::ByteConst { value, .. } => (value.to_string(), None),
-                Expr::StringConst { value, .. } => (value.clone(), Some(value.chars().count())),
-                Expr::UnicodeStringConst { value, .. } => {
-                    (value.clone(), Some(value.encode_utf16().count()))
-                }
-                Expr::NameConst { value, .. } => (value.clone(), None),
-                Expr::Numbers { values, .. } => (
-                    values
-                        .iter()
-                        .map(f64::to_string)
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                    None,
-                ),
-                _ => return None,
-            };
             Some(LiteralSlot {
                 index: index as u32,
                 kind: literal_kind(literal),
-                value,
-                length,
+                value: literal_value(literal)?,
             })
         })
         .collect()
@@ -1038,10 +2071,12 @@ pub fn literal_slots(expr: &Expr) -> Vec<LiteralSlot> {
 
 /// Every statement rendered on its own, alongside the offsets it links to.
 pub fn script_lines(script: &Script) -> Vec<ScriptLine> {
+    let nodes = nodes_by_statement(script);
     script
         .statements
         .iter()
-        .map(|statement| {
+        .enumerate()
+        .map(|(position, statement)| {
             let mut targets = Vec::new();
             flow_targets(&statement.expr, &mut targets);
             targets.dedup();
@@ -1057,6 +2092,7 @@ pub fn script_lines(script: &Script) -> Vec<ScriptLine> {
                 targets,
                 calls,
                 literals: literal_slots(&statement.expr),
+                expressions: nodes.get(position).map(|n| slots_of(n)).unwrap_or_default(),
             }
         })
         .collect()
@@ -1279,7 +2315,7 @@ fn collect_literals<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
 }
 
 /// The expressions `expr` holds, in the order their bytes sit in.
-fn children(expr: &Expr) -> Vec<&Expr> {
+pub fn children(expr: &Expr) -> Vec<&Expr> {
     let mut out: Vec<&Expr> = Vec::new();
     match expr {
         Expr::Return { value }
@@ -1366,6 +2402,168 @@ fn children(expr: &Expr) -> Vec<&Expr> {
         _ => {}
     }
     out
+}
+
+/// [`children`], for rewriting them in place.
+pub(crate) fn children_mut(expr: &mut Expr) -> Vec<&mut Expr> {
+    let mut out: Vec<&mut Expr> = Vec::new();
+    match expr {
+        Expr::Return { value }
+        | Expr::Skip { value, .. }
+        | Expr::Conversion { value, .. }
+        | Expr::Unary { value, .. }
+        | Expr::Member { value, .. }
+        | Expr::Cast { value, .. } => out.push(value),
+        Expr::JumpIfNot { condition, .. } | Expr::Assert { condition, .. } => out.push(condition),
+        Expr::Let {
+            variable, value, ..
+        } => {
+            out.push(variable);
+            out.push(value);
+        }
+        Expr::Context { object, member, .. } => {
+            out.push(object);
+            out.push(member);
+        }
+        Expr::VirtualCall { params, .. } | Expr::FinalCall { params, .. } => out.extend(params),
+        Expr::StructConst { fields, .. } => out.extend(fields),
+        Expr::SetArray { array, items } => {
+            out.push(array);
+            out.extend(items);
+        }
+        Expr::SetContainer { target, items, .. } => {
+            out.push(target);
+            out.extend(items);
+        }
+        Expr::ContainerConst { items, .. } | Expr::MapConst { items, .. } => out.extend(items),
+        Expr::ComputedJump { target } => out.push(target),
+        Expr::DelegateOp {
+            delegate, value, ..
+        } => {
+            out.push(delegate);
+            out.push(value);
+        }
+        Expr::BindDelegate {
+            delegate, object, ..
+        } => {
+            out.push(delegate);
+            out.push(object);
+        }
+        Expr::CallMulticastDelegate {
+            delegate, params, ..
+        } => {
+            out.push(delegate);
+            out.extend(params);
+        }
+        Expr::SwitchValue {
+            index,
+            cases,
+            default,
+            ..
+        } => {
+            out.push(index);
+            for case in cases {
+                out.push(&mut case.value);
+                out.push(&mut case.result);
+            }
+            out.push(default);
+        }
+        Expr::ArrayGetByRef { array, index } => {
+            out.push(array);
+            out.push(index);
+        }
+        Expr::TextConst { text } => match text {
+            TextLiteral::Empty => {}
+            TextLiteral::Localized {
+                source,
+                key,
+                namespace,
+            } => {
+                out.push(source);
+                out.push(key);
+                out.push(namespace);
+            }
+            TextLiteral::Invariant { source } | TextLiteral::Literal { source } => out.push(source),
+            TextLiteral::StringTable { table_id, key, .. } => {
+                out.push(table_id);
+                out.push(key);
+            }
+        },
+        _ => {}
+    }
+    out
+}
+
+/// Visits every expression in pre-order, the order the decoder records spans in, for rewriting.
+pub(crate) fn visit_mut(expr: &mut Expr, visit: &mut impl FnMut(&mut Expr)) {
+    visit(expr);
+    for child in children_mut(expr) {
+        visit_mut(child, visit);
+    }
+}
+
+/// A statement as a comparison should see it: where its bytes sit in the file, and the path an
+/// object resolves to, are left out, so a script that moved compares equal to itself. So are the
+/// lengths a context and a switch hold, which the decoder measures against the code they cover
+/// and locks the script over when they disagree. The debug form keeps every other operand, a float
+/// as its exact value and a NaN as one.
+pub fn shape(expr: &Expr) -> String {
+    let mut copy = expr.clone();
+    visit_mut(&mut copy, &mut |node| {
+        match node {
+            Expr::Context { skip, .. } => *skip = 0,
+            Expr::SwitchValue { end, cases, .. } => {
+                *end = 0;
+                for case in cases {
+                    case.next = 0;
+                }
+            }
+            _ => {}
+        }
+        match node {
+            Expr::IntConst { at, .. }
+            | Expr::Int64Const { at, .. }
+            | Expr::UInt64Const { at, .. }
+            | Expr::FloatConst { at, .. }
+            | Expr::DoubleConst { at, .. }
+            | Expr::ByteConst { at, .. }
+            | Expr::StringConst { at, .. }
+            | Expr::UnicodeStringConst { at, .. }
+            | Expr::NameConst { at, .. }
+            | Expr::Numbers { at, .. } => *at = 0,
+            _ => {}
+        }
+        for object in objects_mut(node) {
+            object.path = None;
+        }
+    });
+    format!("{copy:?}")
+}
+
+/// The object operands an expression holds itself, not those of its children.
+fn objects_mut(expr: &mut Expr) -> Vec<&mut ObjectRef> {
+    match expr {
+        Expr::Variable { property, .. }
+        | Expr::BitFieldConst { property, .. }
+        | Expr::PropertyConst { property }
+        | Expr::Member { property, .. }
+        | Expr::ContainerConst { property, .. } => vec![&mut property.owner],
+        Expr::Let {
+            property: Some(property),
+            ..
+        } => vec![&mut property.owner],
+        Expr::Context { property, .. } => vec![&mut property.owner],
+        Expr::MapConst { key, value, .. } => vec![&mut key.owner, &mut value.owner],
+        Expr::Cast { class, .. } => vec![class],
+        Expr::FinalCall { function, .. } => vec![function],
+        Expr::ObjectConst { object } => vec![object],
+        Expr::StructConst { struct_type, .. } => vec![struct_type],
+        Expr::CallMulticastDelegate { signature, .. } => vec![signature],
+        Expr::TextConst {
+            text: TextLiteral::StringTable { table, .. },
+        } => vec![table],
+        _ => Vec::new(),
+    }
 }
 
 /// The token name of a literal, as the disassembly and the refusals call it.
@@ -1862,10 +3060,20 @@ mod tests {
     use super::*;
     use retoc::legacy_asset::{FLegacyPackageHeader, FPackageNameMap};
 
-    const NAMES: &[&str] = &["None", "EntryPoint", "Damage", "OnFired", "Target"];
+    const NAMES: &[&str] = &[
+        "None",
+        "EntryPoint",
+        "Damage",
+        "OnFired",
+        "Target",
+        "LatentActionInfo",
+        "ExecuteUbergraph_X",
+    ];
 
     /// Index -1: the one import every test names, so an object operand resolves to a path.
     const TARGET: i32 = -1;
+    /// Index -2: `LatentActionInfo`, the struct a latent action's resume point travels in.
+    const LATENT_INFO: i32 = -2;
 
     fn header() -> FLegacyPackageHeader {
         let index = NAMES
@@ -1880,13 +3088,28 @@ mod tests {
             name_map: FPackageNameMap::create_from_names(
                 NAMES.iter().map(|n| (*n).to_string()).collect(),
             ),
-            imports: vec![retoc::legacy_asset::FObjectImport {
-                class_package: none,
-                class_name: none,
-                outer_index: retoc::zen::FPackageIndex::create_null(),
-                object_name: retoc::legacy_asset::FMinimalName { index, number: 0 },
-                is_optional: false,
-            }],
+            imports: vec![
+                retoc::legacy_asset::FObjectImport {
+                    class_package: none,
+                    class_name: none,
+                    outer_index: retoc::zen::FPackageIndex::create_null(),
+                    object_name: retoc::legacy_asset::FMinimalName { index, number: 0 },
+                    is_optional: false,
+                },
+                retoc::legacy_asset::FObjectImport {
+                    class_package: none,
+                    class_name: none,
+                    outer_index: retoc::zen::FPackageIndex::create_null(),
+                    object_name: retoc::legacy_asset::FMinimalName {
+                        index: NAMES
+                            .iter()
+                            .position(|n| *n == "LatentActionInfo")
+                            .expect("the struct name") as i32,
+                        number: 0,
+                    },
+                    is_optional: false,
+                },
+            ],
             ..Default::default()
         }
     }
@@ -2352,6 +3575,9 @@ mod tests {
                 .collect(),
             stopped: None,
             names: Vec::new(),
+            spans: Vec::new(),
+            fixups: Vec::new(),
+            resize_locks: Vec::new(),
         }
     }
 
@@ -2495,11 +3721,8 @@ mod tests {
             ],
         );
         let slots = literal_slots(&expr);
-        let seen: Vec<(u32, &str, Option<usize>)> = slots
-            .iter()
-            .map(|s| (s.index, s.value.as_str(), s.length))
-            .collect();
-        assert_eq!(seen, [(1, "Keys.txt", Some(8)), (2, "7", None)]);
+        let seen: Vec<(u32, &str)> = slots.iter().map(|s| (s.index, s.value.as_str())).collect();
+        assert_eq!(seen, [(1, "Keys.txt"), (2, "7")]);
     }
 
     #[test]
@@ -2544,5 +3767,294 @@ mod tests {
                 "{token:#04X} decodes but has no name"
             );
         }
+    }
+
+    fn kinds(script: &Script) -> Vec<&'static str> {
+        script.resize_locks.iter().map(|lock| lock.kind).collect()
+    }
+
+    fn absolute(fixup: &Fixup) -> Option<(u32, Option<&str>)> {
+        match &fixup.kind {
+            FixupKind::Absolute { target, resumes } => Some((*target, resumes.as_deref())),
+            FixupKind::Relative { .. } => None,
+        }
+    }
+
+    /// Each offset field is recorded where its four bytes sit, so a resize can rewrite it, and a
+    /// jump that lands where no expression starts keeps the script at its size.
+    #[test]
+    fn offset_fields_are_recorded_where_they_sit() {
+        let mut data = vec![0x4C];
+        data.extend_from_slice(&0x0Au32.to_le_bytes());
+        data.push(0x06);
+        data.extend_from_slice(&0x05u32.to_le_bytes());
+        data.push(0x53);
+        let (script, _) = decode(&data, None);
+        assert_eq!(
+            script
+                .fixups
+                .iter()
+                .map(|f| (f.at, f.source, absolute(f)))
+                .collect::<Vec<_>>(),
+            [
+                (1, FixupSource::PushFlow, Some((0x0A, None))),
+                (6, FixupSource::Jump, Some((0x05, None))),
+            ]
+        );
+        assert!(script.resize_locks.is_empty(), "{:?}", script.resize_locks);
+
+        data[1..5].copy_from_slice(&0x07u32.to_le_bytes());
+        let (stray, _) = decode(&data, None);
+        assert_eq!(kinds(&stray), ["stray target"]);
+    }
+
+    /// A switch's offsets name the ends of its arms, which the walk checks as it reads them.
+    #[test]
+    fn a_switch_names_the_ends_of_its_arms() {
+        let switch = |next: u32, end: u32| {
+            let mut data = vec![0x69];
+            data.extend_from_slice(&1u16.to_le_bytes());
+            data.extend_from_slice(&end.to_le_bytes());
+            data.push(0x1D);
+            data.extend_from_slice(&7i32.to_le_bytes());
+            data.push(0x1D);
+            data.extend_from_slice(&7i32.to_le_bytes());
+            data.extend_from_slice(&next.to_le_bytes());
+            data.push(0x26);
+            data.push(0x25);
+            data.push(0x53);
+            decode(&data, None).0
+        };
+        let good = switch(22, 23);
+        assert!(good.resize_locks.is_empty(), "{:?}", good.resize_locks);
+        assert_eq!(
+            good.fixups.iter().map(|f| f.source).collect::<Vec<_>>(),
+            [FixupSource::SwitchEnd, FixupSource::SwitchNext]
+        );
+        assert_eq!(kinds(&switch(0x20, 23)), ["switch offset"]);
+        assert_eq!(kinds(&switch(22, 0x30)), ["switch offset"]);
+    }
+
+    /// A context's skip is the loaded length of its member, recorded as the span it measures.
+    #[test]
+    fn a_context_skip_is_its_members_loaded_length() {
+        let context = |skip: u32| {
+            let mut data = vec![0x19, 0x17];
+            data.extend_from_slice(&skip.to_le_bytes());
+            field_path(&mut data, "Damage", TARGET);
+            data.push(0x00);
+            field_path(&mut data, "Damage", TARGET);
+            data.push(0x53);
+            decode(&data, None).0
+        };
+        let good = context(9);
+        assert!(good.resize_locks.is_empty(), "{:?}", good.resize_locks);
+        assert_eq!(
+            good.fixups[0].kind,
+            FixupKind::Relative { from: 14, to: 23 }
+        );
+        assert_eq!(kinds(&context(8)), ["context skip"]);
+    }
+
+    fn latent(linkage: &[u8]) -> Vec<u8> {
+        let mut data = vec![0x2F];
+        data.extend_from_slice(&LATENT_INFO.to_le_bytes());
+        data.extend_from_slice(&32i32.to_le_bytes());
+        data.extend_from_slice(linkage);
+        data.push(0x1D);
+        data.extend_from_slice(&5i32.to_le_bytes());
+        data.push(0x21);
+        name_bytes(&mut data, "ExecuteUbergraph_X");
+        data.extend_from_slice(&[0x17, 0x30, 0x53]);
+        data
+    }
+
+    /// A latent action's resume point counts in the function its struct names, and one that calls
+    /// back through a delegate instead has no resume point at all.
+    #[test]
+    fn a_latent_action_resumes_the_function_it_names() {
+        let mut offset = vec![0x5B];
+        offset.extend_from_slice(&0x40u32.to_le_bytes());
+        let (script, _) = decode(&latent(&offset), None);
+        assert_eq!(
+            script.fixups.iter().map(absolute).collect::<Vec<_>>(),
+            [Some((0x40, Some("ExecuteUbergraph_X")))]
+        );
+        assert!(script.resize_locks.is_empty(), "{:?}", script.resize_locks);
+
+        let mut none = vec![0x1D];
+        none.extend_from_slice(&(-1i32).to_le_bytes());
+        let (script, _) = decode(&latent(&none), None);
+        assert!(script.resize_locks.is_empty(), "{:?}", script.resize_locks);
+
+        let mut plain = vec![0x1D];
+        plain.extend_from_slice(&0x40i32.to_le_bytes());
+        let (script, _) = decode(&latent(&plain), None);
+        assert_eq!(kinds(&script), ["latent action"]);
+    }
+
+    /// An event graph's dispatch waits for the package pass; any other computed jump is final.
+    #[test]
+    fn only_an_event_graph_dispatch_waits_for_its_stubs() {
+        let jump = |variable: &str| {
+            let mut data = vec![0x4E, 0x00];
+            field_path(&mut data, variable, 0);
+            data.push(0x53);
+            decode(&data, None).0
+        };
+        assert_eq!(kinds(&jump("EntryPoint")), [ENTRY_DISPATCH]);
+        assert_eq!(kinds(&jump("Damage")), ["computed jump"]);
+    }
+
+    #[test]
+    fn every_expression_has_a_span_in_visiting_order() {
+        let mut data = vec![0x46];
+        data.extend_from_slice(&TARGET.to_le_bytes());
+        data.push(0x1D);
+        data.extend_from_slice(&411i32.to_le_bytes());
+        data.extend_from_slice(&[0x16, 0x04, 0x0B, 0x53]);
+        let (script, _) = decode(&data, Some(18));
+        let mut seen = Vec::new();
+        visit_spans(&script, &mut |expr, span, _| {
+            seen.push((render(expr), span.offset, span.end_offset))
+        });
+        assert_eq!(seen.len(), script.spans.len());
+        assert_eq!(
+            seen,
+            [
+                ("LocalFinalFunction Target(411)".to_string(), 0, 15),
+                ("411".to_string(), 9, 14),
+                ("Return Nothing".to_string(), 15, 17),
+                ("Nothing".to_string(), 16, 17),
+                ("EndOfScript".to_string(), 17, 18),
+            ]
+        );
+    }
+
+    fn function(index: u32, name: &str, data: &[u8]) -> crate::package::ParsedExport {
+        let (script, _) = decode(data, None);
+        assert!(script.complete(), "{:?}", script.stopped);
+        crate::package::ParsedExport {
+            object_name: name.into(),
+            script: Some(script),
+            ..crate::package::ParsedExport::blank(index)
+        }
+    }
+
+    /// An event graph `ExecuteUbergraph_X` that dispatches on its entry point and returns at 0x0A,
+    /// and a stub entering it at `entry`.
+    fn event_graph_and_stub(entry: i32, extra: &[u8]) -> Vec<crate::package::ParsedExport> {
+        let mut graph = vec![0x4E, 0x00];
+        field_path(&mut graph, "EntryPoint", 0);
+        graph.extend_from_slice(&[0x04, 0x0B, 0x53]);
+        let mut stub = vec![0x45];
+        name_bytes(&mut stub, "ExecuteUbergraph_X");
+        stub.push(0x1D);
+        stub.extend_from_slice(&entry.to_le_bytes());
+        stub.push(0x16);
+        stub.extend_from_slice(extra);
+        stub.extend_from_slice(&[0x04, 0x0B, 0x53]);
+        vec![
+            function(0, "ExecuteUbergraph_X", &graph),
+            function(1, "ReceiveBeginPlay", &stub),
+        ]
+    }
+
+    /// The package pass lifts an event graph's dispatch lock once every stub entering it lands on
+    /// an expression, and locks it for a stub that does not or for any other mention of it.
+    #[test]
+    fn an_event_graph_resizes_once_every_entry_into_it_is_accounted_for() {
+        let mut exports = event_graph_and_stub(10, &[]);
+        settle_resize_locks(&mut exports);
+        let graph = exports[0].script.as_ref().expect("a script");
+        assert!(graph.resize_locks.is_empty(), "{:?}", graph.resize_locks);
+        let functions = functions_of(&exports);
+        let found = inbound(&functions, &functions[0]);
+        assert_eq!(
+            found
+                .entries
+                .iter()
+                .map(|e| (e.export, e.offset, e.span.token))
+                .collect::<Vec<_>>(),
+            [(1, 10, 0x1D)]
+        );
+
+        let mut exports = event_graph_and_stub(3, &[]);
+        settle_resize_locks(&mut exports);
+        assert_eq!(
+            kinds(exports[0].script.as_ref().expect("a script")),
+            ["stray target"]
+        );
+
+        let mut named = vec![0x21];
+        name_bytes(&mut named, "ExecuteUbergraph_X");
+        let mut exports = event_graph_and_stub(10, &named);
+        settle_resize_locks(&mut exports);
+        assert_eq!(
+            kinds(exports[0].script.as_ref().expect("a script")),
+            ["event graph reference"]
+        );
+    }
+
+    /// A `Let` keeps a call's value even through the object the call is made on; a call passed on
+    /// as an argument is consumed, and one that is the whole statement is discarded.
+    #[test]
+    fn a_call_kept_through_its_object_is_kept() {
+        let reference = |path: &str| PropertyRef {
+            path: path.into(),
+            owner: ObjectRef {
+                index: 0,
+                path: None,
+            },
+        };
+        let call = || Expr::FinalCall {
+            name: "FinalFunction",
+            function: ObjectRef {
+                index: -1,
+                path: Some("/Script/Engine.Actor:GetOwner".into()),
+            },
+            params: Vec::new(),
+        };
+        let variable = Expr::Variable {
+            name: "LocalVariable",
+            property: reference("Owner"),
+        };
+        let through = Expr::Let {
+            name: "LetObj",
+            property: None,
+            variable: Box::new(variable),
+            value: Box::new(Expr::Context {
+                name: "Context",
+                object: Box::new(Expr::SelfRef),
+                skip: 0,
+                property: reference("ReturnValue"),
+                member: Box::new(call()),
+            }),
+        };
+        let Expr::Let { value, .. } = &through else {
+            unreachable!()
+        };
+        let Expr::Context { member, .. } = value.as_ref() else {
+            unreachable!()
+        };
+        let (use_, kept_in) = call_use(&through, member);
+        assert_eq!(use_, CallUse::Kept);
+        assert!(matches!(kept_in, Some(Expr::Variable { .. })));
+
+        let alone = call();
+        assert_eq!(call_use(&alone, &alone).0, CallUse::Discarded);
+
+        let outer = Expr::FinalCall {
+            name: "FinalFunction",
+            function: ObjectRef {
+                index: -2,
+                path: Some("/Script/Engine.Actor:SetOwner".into()),
+            },
+            params: vec![call()],
+        };
+        let Expr::FinalCall { params, .. } = &outer else {
+            unreachable!()
+        };
+        assert_eq!(call_use(&outer, &params[0]).0, CallUse::Consumed);
     }
 }
