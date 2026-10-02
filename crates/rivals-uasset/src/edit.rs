@@ -36,7 +36,7 @@ use retoc::legacy_asset::FObjectExport;
 ///
 /// A defaulted value occupies no bytes, so its offset is shared with whatever is stored next. The
 /// name and element index are what tell the two apart.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ValueEdit {
     pub offset: u64,
     #[serde(rename = "name")]
@@ -51,7 +51,7 @@ pub struct ValueEdit {
     pub op: EditOp,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum EditOp {
     /// Replace a stored value, or give a defaulted or unset one a value of its own.

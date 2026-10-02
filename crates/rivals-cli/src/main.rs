@@ -324,7 +324,9 @@ struct SweepArgs {
     #[arg(long, value_name = "CLASS")]
     class: Option<String>,
 
-    /// `Name=Value`: every property with that name, at any depth, takes that value. Repeatable.
+    /// `Name=Value`: every property with that name, at any depth, takes that value. Over an array,
+    /// `Name=[a, b, c]` makes it hold exactly those elements (quote one that holds a comma) and
+    /// `Name[2]=Value` sets one element. Repeatable.
     #[arg(long = "set", value_name = "NAME=VALUE", required = true)]
     sets: Vec<String>,
 

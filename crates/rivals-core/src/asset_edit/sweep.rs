@@ -11,7 +11,8 @@ use std::sync::Arc;
 use retoc::iostore::IoStoreTrait;
 use retoc::legacy_asset::FSerializedAssetBundle;
 use rivals_uasset::{
-    EditOp, Mappings, PackageEdits, PatchedBundle, PropertyEntry, PropertyValue, ValueEdit, kind_of,
+    EditOp, FieldSet, Mappings, PackageEdits, PatchedBundle, PropertyEntry, PropertyValue,
+    ValueEdit, kind_of, same_enumerator,
 };
 
 use super::{AssetEditRequest, SaveOptions, SaveTarget};
@@ -20,10 +21,91 @@ use crate::asset::{self, AssetSource};
 /// One property name and the value every match takes.
 #[derive(Debug, Clone)]
 pub struct SweepSet {
-    /// Matched against a property's name at any depth, case-insensitively.
+    /// Matched against a property's name at any depth, case-insensitively. `Name[2]` names one
+    /// element of an array.
     pub name: String,
-    /// Written in the value's own kind, as [`EditOp::Set`] reads it.
+    /// Written in the value's own kind, as [`EditOp::Set`] reads it. Over an array, `[a, b, c]`
+    /// is the whole list it holds afterwards.
     pub text: String,
+}
+
+impl SweepSet {
+    /// The property name, and the array element the name picks out.
+    fn target(&self) -> (&str, Option<u32>) {
+        let name = self.name.trim();
+        if let Some(open) = name.rfind('[')
+            && let Some(index) = name[open + 1..]
+                .strip_suffix(']')
+                .and_then(|inside| inside.trim().parse::<u32>().ok())
+        {
+            return (name[..open].trim_end(), Some(index));
+        }
+        (name, None)
+    }
+
+    /// The elements `[a, b, c]` lists, or `None` when the text is not a list. An element holding
+    /// a comma or a bracket is quoted, with `\"` and `\\` inside the quotes.
+    fn list(&self) -> Option<Result<Vec<String>, String>> {
+        let inner = self.text.trim().strip_prefix('[')?.strip_suffix(']')?;
+        Some(list_items(inner))
+    }
+}
+
+fn list_items(inner: &str) -> Result<Vec<String>, String> {
+    let mut items = Vec::new();
+    let mut chars = inner.chars().peekable();
+    loop {
+        while chars.next_if(|c| c.is_whitespace()).is_some() {}
+        if chars.peek().is_none() {
+            if !items.is_empty() {
+                return Err("a list ends with a comma".into());
+            }
+            return Ok(items);
+        }
+        let mut item = String::new();
+        if chars.next_if_eq(&'"').is_some() {
+            loop {
+                match chars.next() {
+                    Some('"') => break,
+                    Some('\\') => match chars.next() {
+                        Some(escaped @ ('"' | '\\')) => item.push(escaped),
+                        Some(other) => {
+                            return Err(format!("\\{other} is not an escape a list takes"));
+                        }
+                        None => return Err("a quoted element is never closed".into()),
+                    },
+                    Some(other) => item.push(other),
+                    None => return Err("a quoted element is never closed".into()),
+                }
+            }
+            while chars.next_if(|c| c.is_whitespace()).is_some() {}
+        } else {
+            while let Some(c) = chars.next_if(|c| *c != ',') {
+                item.push(c);
+            }
+            item = item.trim_end().to_string();
+        }
+        items.push(item);
+        match chars.next() {
+            None => return Ok(items),
+            Some(',') => {}
+            Some(other) => {
+                return Err(format!(
+                    "{other} follows a quoted element; put a comma between elements"
+                ));
+            }
+        }
+    }
+}
+
+/// Refuses a list that cannot be read before any package is.
+fn check_sets(sets: &[SweepSet]) -> Result<(), String> {
+    for set in sets {
+        if let Some(Err(reason)) = set.list() {
+            return Err(format!("{}={}: {reason}", set.name, set.text));
+        }
+    }
+    Ok(())
 }
 
 pub struct SweepRequest<'a> {
@@ -101,21 +183,31 @@ fn matches_in(entries: &[PropertyEntry], sets: &[SweepSet], found: &mut Vec<Matc
     for entry in entries {
         if let Some(set) = sets
             .iter()
-            .find(|set| set.name.eq_ignore_ascii_case(&entry.name))
+            .find(|set| set.target().0.eq_ignore_ascii_case(&entry.name))
         {
             let kind = kind_of(&entry.value);
+            let stored = entry.span.filter(|span| span.1 > span.0);
+            if let (Some(span), PropertyValue::Array { items }) = (stored, &entry.value)
+                && let Some(found_here) = array_match(entry, span.0, items, set)
+            {
+                found.push(found_here);
+                walk_value(&entry.value, sets, found);
+                continue;
+            }
             // A defaulted or unset slot occupies no bytes, and writing one would turn a value the
             // object inherits into one it states. A sweep changes what an asset says, never what
             // it leaves to its archetype.
-            match entry.span.filter(|span| span.1 > span.0) {
-                Some(span) if settable(&kind) => found.push(Match::Set {
-                    offset: span.0,
-                    name: entry.name.clone(),
-                    element: entry.element,
-                    kind,
-                    before: entry.value.summary(),
-                    text: set.text.clone(),
-                }),
+            match stored {
+                Some(span) if settable(&kind) && set.target().1.is_none() => {
+                    found.push(Match::Set {
+                        offset: span.0,
+                        name: entry.name.clone(),
+                        element: entry.element,
+                        kind,
+                        before: entry.value.clone(),
+                        text: set.text.clone(),
+                    })
+                }
                 Some(_) => found.push(Match::Unsupported {
                     name: entry.name.clone(),
                     kind,
@@ -127,6 +219,53 @@ fn matches_in(entries: &[PropertyEntry], sets: &[SweepSet], found: &mut Vec<Matc
         }
         walk_value(&entry.value, sets, found);
     }
+}
+
+/// What a set does to a stored array: one element by index, or the whole list typed as
+/// `[a, b, c]`. `None` when the set is neither, which leaves the array to the scalar rules.
+fn array_match(
+    entry: &PropertyEntry,
+    offset: u64,
+    items: &[PropertyValue],
+    set: &SweepSet,
+) -> Option<Match> {
+    let element_kinds: Vec<String> = items.iter().map(kind_of).collect();
+    if let Some(bad) = element_kinds.iter().find(|kind| !settable(kind)) {
+        let shape = if set.target().1.is_some() || set.list().is_some() {
+            format!("array of {bad}")
+        } else {
+            "array".to_string()
+        };
+        return Some(Match::Unsupported {
+            name: entry.name.clone(),
+            kind: shape,
+        });
+    }
+    if let (_, Some(index)) = set.target() {
+        let Some(item) = items.get(index as usize) else {
+            return Some(Match::Unsupported {
+                name: format!("{}[{index}]", entry.name),
+                kind: format!("past the end of {} elements", items.len()),
+            });
+        };
+        return Some(Match::Elements {
+            offset,
+            name: entry.name.clone(),
+            element: entry.element,
+            before: vec![item.clone()],
+            wanted: Vec::new(),
+            only: Some((index, set.text.clone())),
+        });
+    }
+    let wanted = set.list()?.ok()?;
+    Some(Match::Elements {
+        offset,
+        name: entry.name.clone(),
+        element: entry.element,
+        before: items.to_vec(),
+        wanted,
+        only: None,
+    })
 }
 
 fn walk_value(value: &PropertyValue, sets: &[SweepSet], found: &mut Vec<Match>) {
@@ -154,8 +293,18 @@ enum Match {
         name: String,
         element: Option<u32>,
         kind: String,
-        before: String,
+        before: PropertyValue,
         text: String,
+    },
+    /// An array of values the sweep writes: element `only` set alone, or its elements made the
+    /// `wanted` list by setting the ones both have, dropping the surplus and adding the rest.
+    Elements {
+        offset: u64,
+        name: String,
+        element: Option<u32>,
+        before: Vec<PropertyValue>,
+        wanted: Vec<String>,
+        only: Option<(u32, String)>,
     },
     /// Matched by name, but of a kind the sweep will not write. Carried through rather than
     /// dropped so the report can say why a filter that looked right changed nothing.
@@ -167,7 +316,22 @@ enum Match {
 
 /// Whether a value already reads as what the sweep would write. Numbers are compared as numbers,
 /// since `0` and `0.0` are the same value written two ways.
-fn already_set(before: &str, text: &str) -> bool {
+fn already_set(before: &PropertyValue, text: &str) -> bool {
+    let text = text.trim();
+    // An enum holds both a name and a number, and either is how it is typed.
+    if let PropertyValue::Enum {
+        value,
+        name,
+        enum_type,
+    } = before
+        && (name
+            .as_deref()
+            .is_some_and(|name| same_enumerator(enum_type.as_deref(), name, text))
+            || text.parse::<i64>().is_ok_and(|typed| typed == *value))
+    {
+        return true;
+    }
+    let before = before.summary();
     match (before.parse::<f64>(), text.parse::<f64>()) {
         (Ok(before), Ok(text)) => before == text,
         _ => before == text,
@@ -190,18 +354,84 @@ impl Skipped {
     }
 }
 
+/// The edits an array match comes to. An added element is a copy of its neighbour until a field
+/// set gives it its own value, once the add has landed, at the index it ends up at.
+fn element_edits(held: Match, out: &mut PackageEdits) {
+    let Match::Elements {
+        offset,
+        name,
+        element,
+        before,
+        wanted,
+        only,
+    } = held
+    else {
+        return;
+    };
+    let edit = |op: EditOp| ValueEdit {
+        offset,
+        expect_name: name.clone(),
+        expect_element: element,
+        expect_kind: "array".to_string(),
+        op,
+    };
+    if let Some((index, text)) = only {
+        if !before.first().is_some_and(|was| already_set(was, &text)) {
+            out.values.push(edit(EditOp::SetElement { index, text }));
+        }
+        return;
+    }
+    let held = before.len();
+    for (index, (was, text)) in before.iter().zip(&wanted).enumerate() {
+        if !already_set(was, text) {
+            out.values.push(edit(EditOp::SetElement {
+                index: index as u32,
+                text: text.clone(),
+            }));
+        }
+    }
+    for index in wanted.len()..held {
+        out.values.push(edit(EditOp::Remove {
+            index: index as u32,
+        }));
+    }
+    for (added, text) in wanted.iter().enumerate().skip(held) {
+        out.values.push(edit(EditOp::Insert {
+            index: held as u32,
+            key: None,
+        }));
+        out.field_sets.push(FieldSet {
+            offset,
+            expect_name: name.clone(),
+            expect_element: element,
+            path: vec![format!("[{added}]")],
+            text: text.clone(),
+        });
+    }
+}
+
 /// The edits one package takes, and the matches it could not write.
 fn edits_for<'a>(
     exports: impl Iterator<Item = &'a [PropertyEntry]>,
     sets: &[SweepSet],
     skipped: &mut Skipped,
-) -> Vec<ValueEdit> {
+) -> PackageEdits {
     let mut found = Vec::new();
     for properties in exports {
         matches_in(properties, sets, &mut found);
     }
+    let mut out = PackageEdits::default();
     let mut edits: Vec<ValueEdit> = Vec::new();
+    // An array matched twice, through a struct and on its own, is edited once.
+    let mut arrays: Vec<u64> = Vec::new();
     for held in found {
+        if let Match::Elements { offset, .. } = held {
+            if !arrays.contains(&offset) {
+                arrays.push(offset);
+                element_edits(held, &mut out);
+            }
+            continue;
+        }
         let Match::Set {
             offset,
             name,
@@ -219,7 +449,7 @@ fn edits_for<'a>(
                         .or_default() += 1;
                 }
                 Match::Inherited { name } => *skipped.inherited.entry(name).or_default() += 1,
-                Match::Set { .. } => {}
+                Match::Set { .. } | Match::Elements { .. } => {}
             }
             continue;
         };
@@ -237,7 +467,10 @@ fn edits_for<'a>(
     }
     edits.sort_by_key(|edit| edit.offset);
     edits.dedup_by_key(|edit| edit.offset);
-    edits
+    edits.append(&mut out.values);
+    edits.sort_by_key(|edit| edit.offset);
+    out.values = edits;
+    out
 }
 
 /// A package patched and verified, on its way straight into the container.
@@ -278,6 +511,7 @@ pub fn sweep(
     if request.sets.is_empty() {
         return Err("No values to set".into());
     }
+    check_sets(&request.sets)?;
     if options.target != SaveTarget::IoStore {
         return Err(
             "A sweep writes an IoStore mod, since the game reads packages only from a container"
@@ -439,24 +673,23 @@ fn stage(
     {
         return Ok(Prepared::OtherClass);
     }
-    let edits = edits_for(
+    let changes = edits_for(
         parsed.exports.iter().map(|export| &export.properties[..]),
         &request.sets,
         skipped,
     );
-    if edits.is_empty() {
+    if changes.values.is_empty() && changes.field_sets.is_empty() {
         return Ok(Prepared::NothingToChange);
     }
-    edit.changes = PackageEdits {
-        values: edits,
-        ..PackageEdits::default()
-    };
+    edit.changes = changes;
     let (patched, loaded) = super::preview_read_edits(&edit, mappings, loaded, &parsed)?;
-    let changes = patched
+    let mut changes: Vec<String> = patched
         .applied
         .iter()
         .map(|applied| format!("{} = {} -> {}", applied.name, applied.before, applied.after))
         .collect();
+    // Each element an array grows by is its own insert, and each reports the length it ends at.
+    changes.dedup();
     Ok(Prepared::Ready(Box::new(Staged {
         // A loose file is read from disk, and the mod has to name it by the game's path.
         entry: super::save_entry(&edit)?,
@@ -594,7 +827,7 @@ mod tests {
         };
         assert_eq!(*offset, 40);
         assert_eq!(kind, "float");
-        assert_eq!(before, "5.0");
+        assert_eq!(before.summary(), "5.0");
     }
 
     #[test]
@@ -629,7 +862,9 @@ mod tests {
             .iter()
             .filter_map(|held| match held {
                 Match::Set { offset, .. } => Some(*offset),
-                Match::Unsupported { .. } | Match::Inherited { .. } => None,
+                Match::Elements { .. } | Match::Unsupported { .. } | Match::Inherited { .. } => {
+                    None
+                }
             })
             .collect();
         assert_eq!(offsets, vec![8, 20]);
@@ -698,7 +933,7 @@ mod tests {
     fn edits(properties: &[PropertyEntry], sets: &[SweepSet]) -> (Vec<ValueEdit>, Skips) {
         let mut skipped = Skipped::default();
         let edits = edits_for(std::iter::once(properties), sets, &mut skipped);
-        (edits, skipped)
+        (edits.values, skipped)
     }
 
     #[test]
@@ -899,7 +1134,7 @@ mod tests {
                 matches_in(&export.properties, &[set(property, "")], &mut found);
             }
             found.iter().find_map(|held| match held {
-                Match::Set { before, .. } => Some(before.clone()),
+                Match::Set { before, .. } => Some(before.summary()),
                 _ => None,
             })
         };
@@ -948,6 +1183,161 @@ mod tests {
 
     /// The same property reached twice, once as itself and once through its enclosing struct, is
     /// one value and has to be written once.
+    fn ints(values: &[i64]) -> PropertyValue {
+        PropertyValue::Array {
+            items: values
+                .iter()
+                .map(|value| PropertyValue::Int { value: *value })
+                .collect(),
+        }
+    }
+
+    fn sweep_package(sets: &[SweepSet]) -> (PackageEdits, Skips) {
+        let mut skipped = Skipped::default();
+        let properties = [entry("Counts", ints(&[1, 2, 3]), Some((40, 56)))];
+        let edits = edits_for(std::iter::once(&properties[..]), sets, &mut skipped);
+        (edits, skipped)
+    }
+
+    /// A list reads its elements as typed, a quoted one keeping its commas, and refuses one that
+    /// cannot be read before any package is.
+    #[test]
+    fn a_typed_list_reads_its_elements() {
+        let list = |text: &str| set("Counts", text).list();
+        assert_eq!(
+            list("[1, 2,3]"),
+            Some(Ok(vec!["1".into(), "2".into(), "3".into()]))
+        );
+        assert_eq!(list("[]"), Some(Ok(Vec::new())));
+        assert_eq!(
+            list(r#"["a, b", c, "say \"hi\""]"#),
+            Some(Ok(vec!["a, b".into(), "c".into(), "say \"hi\"".into()]))
+        );
+        assert_eq!(list("3"), None);
+        assert!(matches!(list("[1,]"), Some(Err(_))));
+        assert!(matches!(list(r#"["open]"#), Some(Err(_))));
+        assert!(check_sets(&[set("Counts", "[1,]")]).is_err());
+        assert_eq!(set("Counts[2]", "9").target(), ("Counts", Some(2)));
+        assert_eq!(set("Counts", "9").target(), ("Counts", None));
+    }
+
+    /// A list typed over an array sets the elements both have, drops the surplus, and adds the
+    /// rest, each added one given its value once the add has landed.
+    #[test]
+    fn an_array_becomes_the_list_typed_for_it() {
+        let (shrunk, _) = sweep_package(&[set("Counts", "[1, 5]")]);
+        assert_eq!(
+            shrunk
+                .values
+                .iter()
+                .map(|edit| edit.op.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                EditOp::SetElement {
+                    index: 1,
+                    text: "5".into()
+                },
+                EditOp::Remove { index: 2 },
+            ]
+        );
+        assert!(shrunk.field_sets.is_empty());
+
+        let (grown, _) = sweep_package(&[set("Counts", "[1, 2, 3, 4, 5]")]);
+        assert_eq!(
+            grown
+                .values
+                .iter()
+                .map(|edit| edit.op.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                EditOp::Insert {
+                    index: 3,
+                    key: None
+                };
+                2
+            ]
+        );
+        assert_eq!(
+            grown
+                .field_sets
+                .iter()
+                .map(|set| (set.path.clone(), set.text.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (vec!["[3]".to_string()], "4"),
+                (vec!["[4]".to_string()], "5")
+            ]
+        );
+
+        let (same, _) = sweep_package(&[set("Counts", "[1, 2, 3]")]);
+        assert!(same.values.is_empty() && same.field_sets.is_empty());
+    }
+
+    /// An enum is already what is typed when the name or the number matches, so neither form makes
+    /// the mod carry the asset for nothing.
+    #[test]
+    fn an_enum_typed_as_its_name_or_number_is_already_set() {
+        let mode = PropertyValue::Enum {
+            value: 15,
+            name: Some("EBind::Melee".into()),
+            enum_type: Some("EBind".into()),
+        };
+        assert!(already_set(&mode, "15"));
+        assert!(already_set(&mode, "EBind::Melee"));
+        assert!(already_set(&mode, "Melee"));
+        assert!(!already_set(&mode, "0"));
+        assert!(!already_set(&mode, "Ranged"));
+        assert!(already_set(&float(0.5), "0.50"));
+    }
+
+    /// `Name[i]` sets one element; an index past the end, or an array of a kind the sweep does not
+    /// write, is counted rather than written.
+    #[test]
+    fn one_element_is_set_by_its_index() {
+        let (edits, _) = sweep_package(&[set("Counts[1]", "9")]);
+        assert_eq!(
+            edits
+                .values
+                .iter()
+                .map(|edit| edit.op.clone())
+                .collect::<Vec<_>>(),
+            vec![EditOp::SetElement {
+                index: 1,
+                text: "9".into()
+            }]
+        );
+        let (edits, skipped) = sweep_package(&[set("Counts[7]", "9")]);
+        assert!(edits.values.is_empty());
+        assert!(
+            skipped
+                .unsupported
+                .keys()
+                .any(|key| key.contains("Counts[7]") && key.contains("past the end")),
+            "{:?}",
+            skipped.unsupported
+        );
+
+        let structs = PropertyValue::Array {
+            items: vec![PropertyValue::Struct {
+                name: "Point".into(),
+                fields: Vec::new(),
+            }],
+        };
+        let mut skipped = Skipped::default();
+        let properties = [entry("Points", structs, Some((8, 40)))];
+        let edits = edits_for(
+            std::iter::once(&properties[..]),
+            &[set("Points", "[1]")],
+            &mut skipped,
+        );
+        assert!(edits.values.is_empty());
+        assert!(
+            skipped.unsupported.contains_key("Points: array of struct"),
+            "{:?}",
+            skipped.unsupported
+        );
+    }
+
     #[test]
     fn one_offset_is_edited_once() {
         let shared = entry("Amplitude", float(3.0), Some((12, 16)));
