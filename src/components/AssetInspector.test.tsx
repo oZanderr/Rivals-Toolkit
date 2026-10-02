@@ -337,6 +337,69 @@ describe("AssetInspector text edits", () => {
   });
 });
 
+/** One export holding an array of two structs, which opens straight into its property tree. */
+function pointsPackage() {
+  const point = (x: number, at: number) => ({
+    kind: "struct",
+    name: "IntPoint",
+    fields: [entry("X", { kind: "int", value: x }, at)],
+  });
+  return {
+    ...labelPackage(),
+    exports: [
+      exp(0, "Settings", "SettingsData", [
+        {
+          name: "Points",
+          span: [40, 52],
+          value: { kind: "array", items: [point(1, 44), point(2, 48)] },
+        },
+      ]),
+    ],
+  };
+}
+
+/** Opens the context menu of the tree row reading `name`. */
+async function menuOf(user: ReturnType<typeof userEvent.setup>, name: string) {
+  await user.pointer({ keys: "[MouseRight]", target: await screen.findByText(name) });
+  return screen.findByRole("menu");
+}
+
+describe("AssetInspector container edits", () => {
+  it.each([
+    ["Remove this element", "[1]", { op: "remove", index: 1 }],
+    ["Duplicate element", "[0]", { op: "insert", index: 0 }],
+  ])("%s works on an element that is a struct", async (item, row, op) => {
+    mock = tauri(pointsPackage());
+    installTauri(mock);
+    mount();
+    const user = userEvent.setup();
+    const menu = await menuOf(user, row);
+    await user.click(within(menu).getByRole("menuitem", { name: new RegExp(item) }));
+    await user.click(await screen.findByRole("button", { name: /Save as mod/ }));
+    await waitFor(() =>
+      expect(lastSave().values).toEqual([{ offset: 40, name: "Points", kind: "array", ...op }])
+    );
+  });
+
+  it("will not add or drop an element while a value inside the container is edited", async () => {
+    mock = tauri(pointsPackage());
+    installTauri(mock);
+    mount();
+    const user = userEvent.setup();
+    await user.click(await screen.findByText("[0]"));
+    await user.click(await screen.findByText("1"));
+    const input = await screen.findByDisplayValue("1");
+    await user.clear(input);
+    await user.type(input, "5{Enter}");
+    const menu = await menuOf(user, "[1]");
+    expect(
+      within(menu)
+        .getByRole("menuitem", { name: /Remove this element/ })
+        .getAttribute("aria-disabled")
+    ).toBe("true");
+  });
+});
+
 const BRANCH = "Jump @0139 unless LocalVariable(bOk)";
 const CALL = "CallMath /Script/Engine.KismetMathLibrary:Greater_IntInt(LocalVariable(Count), 0)";
 

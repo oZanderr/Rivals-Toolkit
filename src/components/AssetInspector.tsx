@@ -1411,7 +1411,13 @@ function RowMenu({
     const containerKey = draftKey(container);
     const containerWithin = within.slice(0, -1);
     const held = session.drafts[containerKey]?.draft;
-    const structural = held !== undefined && isStructural(held);
+    // Adding or dropping an element moves every byte after it, so it waits for the edits inside
+    // the container rather than throwing them away. What the element holds does not matter: a
+    // struct or a delegate is copied or dropped whole.
+    const busy =
+      !!structuralLock(row, session) ||
+      (held !== undefined && isStructural(held)) ||
+      hasDraftsWithin(session, containerKey);
     return (
       <>
         <ContextMenuItem disabled={!!locked} onSelect={() => onEdit(key)}>
@@ -1420,14 +1426,14 @@ function RowMenu({
         </ContextMenuItem>
         <ContextMenuItem
           // A copy is only valid in an array: a set keys on its contents.
-          disabled={!!locked || structural || container.kind !== "array"}
+          disabled={busy || container.kind !== "array"}
           onSelect={() => session.setDraft(container, { op: "insert", index }, containerWithin)}
         >
           <Plus size={14} />
           Duplicate element
         </ContextMenuItem>
         <ContextMenuItem
-          disabled={!!locked || structural}
+          disabled={busy}
           onSelect={() => session.setDraft(container, { op: "remove", index }, containerWithin)}
         >
           <Minus size={14} />
