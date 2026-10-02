@@ -108,6 +108,10 @@ pub(crate) struct Settings {
     /// means English.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) text_culture: Option<String>,
+    /// Settings this build does not know, written back as they were read: another build of the
+    /// app, newer or older, may share this file, and saving here must not lose what it stored.
+    #[serde(flatten)]
+    pub(crate) others: serde_json::Map<String, serde_json::Value>,
 }
 
 fn default_true() -> bool {
@@ -133,6 +137,7 @@ impl Default for Settings {
             asset_mod_name: None,
             asset_save_target: None,
             text_culture: None,
+            others: serde_json::Map::new(),
         }
     }
 }
@@ -325,4 +330,31 @@ pub(crate) fn set_mod_conflict_check_enabled(
     let mut guard = state.lock().map_err(|e| e.to_string())?;
     guard.mod_conflict_check_enabled = enabled;
     guard.save()
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    /// A key this build does not know survives a load and a save, so two builds sharing the file
+    /// cannot drop each other's settings.
+    #[test]
+    fn a_setting_this_build_does_not_know_is_kept() {
+        let stored = r#"{
+            "game_path": "C:/Games/MarvelRivals",
+            "usmap_path": "C:/maps/a.usmap",
+            "some_later_setting": { "nested": [1, 2] }
+        }"#;
+        let settings: Settings = serde_json::from_str(stored).expect("read");
+        assert_eq!(settings.usmap_path.as_deref(), Some("C:/maps/a.usmap"));
+        assert!(settings.auto_check_updates);
+        let saved: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&settings).expect("write")).expect("json");
+        assert_eq!(
+            saved["some_later_setting"],
+            serde_json::json!({ "nested": [1, 2] })
+        );
+        assert_eq!(saved["game_path"], "C:/Games/MarvelRivals");
+    }
 }
