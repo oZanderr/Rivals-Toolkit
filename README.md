@@ -212,6 +212,7 @@ rivals-cli asset list  --container pakchunk0-Windows.utoc --filter DataTable
 rivals-cli asset info  --container pakchunk0-Windows.utoc --entry Marvel/Content/.../DT_Thing.uasset
 rivals-cli asset dump  --container ... --entry ... --declared      # the decoded property tree
 rivals-cli asset table --container ... --entry ...                 # a DataTable as rows
+rivals-cli asset table --container ... --entry ... --row NAME      # one row in full, nested values and all
 rivals-cli asset trace --container ... --entry ... --export 0      # the bytes each property took
 
 rivals-cli asset set --container ... --entry ...   --offset 0xBE6 --kind float --name Damage --value 42.5 --mod-name MyMod

@@ -139,7 +139,7 @@ enum AssetCmd {
     /// Print the decoded property tree.
     Dump(DumpArgs),
     /// Print a DataTable as rows.
-    Table(AssetArgs),
+    Table(TableArgs),
     /// Print the byte range every property consumed, to locate a desync.
     Trace(DumpArgs),
     /// Print one export's raw bytes at the offsets the trace reports.
@@ -331,6 +331,17 @@ struct ScriptArgs {
     /// at: literals, object constants, texts, calls and conditions.
     #[arg(long)]
     expressions: bool,
+}
+
+#[derive(Args)]
+struct TableArgs {
+    #[command(flatten)]
+    asset: AssetArgs,
+
+    /// Only this row, by name, printed in full with every nested struct, array and map. The JSON
+    /// output holds the nested values for every row either way.
+    #[arg(long, value_name = "NAME")]
+    row: Option<String>,
 }
 
 #[derive(Args)]
@@ -2071,9 +2082,13 @@ fn asset_dump(cli: &Cli, app: &settings::AppSettings, args: &DumpArgs) -> Result
     )
 }
 
-fn asset_table(cli: &Cli, app: &settings::AppSettings, args: &AssetArgs) -> Result<(), String> {
+fn asset_table(cli: &Cli, app: &settings::AppSettings, args: &TableArgs) -> Result<(), String> {
     let root = resolve::game_root(cli.game_root.as_deref(), app)?;
-    let report = asset::table(&asset_request(cli, app, args, &root), &culture(cli, app))?;
+    let report = asset::table(
+        &asset_request(cli, app, &args.asset, &root),
+        &culture(cli, app),
+        args.row.as_deref(),
+    )?;
     emit(cli, &report, || {
         asset::print_table(&report, &mut |line| outln!("{line}"));
     })
@@ -2081,35 +2096,29 @@ fn asset_table(cli: &Cli, app: &settings::AppSettings, args: &AssetArgs) -> Resu
 
 fn asset_trace(cli: &Cli, app: &settings::AppSettings, args: &DumpArgs) -> Result<(), String> {
     let root = resolve::game_root(cli.game_root.as_deref(), app)?;
-    let lines = asset::trace(&asset_request(cli, app, &args.asset, &root), args.export)?;
-    emit(cli, &lines, || {
-        for line in &lines {
-            outln!("{line}");
-        }
+    let entries = asset::trace(&asset_request(cli, app, &args.asset, &root), args.export)?;
+    emit(cli, &entries, || {
+        asset::print_trace(&entries, &mut |line| outln!("{line}"));
     })
 }
 
 fn asset_hex(cli: &Cli, app: &settings::AppSettings, args: &HexArgs) -> Result<(), String> {
     let root = resolve::game_root(cli.game_root.as_deref(), app)?;
-    let lines = asset::hex(
+    let rows = asset::hex(
         &asset_request(cli, app, &args.asset, &root),
         args.export,
         args.from,
     )?;
-    emit(cli, &lines, || {
-        for line in &lines {
-            outln!("{line}");
-        }
+    emit(cli, &rows, || {
+        asset::print_hex(&rows, &mut |line| outln!("{line}"));
     })
 }
 
 fn asset_fields(cli: &Cli, app: &settings::AppSettings, args: &FieldsArgs) -> Result<(), String> {
     let root = resolve::game_root(cli.game_root.as_deref(), app)?;
-    let lines = asset::fields(&asset_request(cli, app, &args.asset, &root), args.export)?;
-    emit(cli, &lines, || {
-        for line in &lines {
-            outln!("{line}");
-        }
+    let report = asset::fields(&asset_request(cli, app, &args.asset, &root), args.export)?;
+    emit(cli, &report, || {
+        asset::print_fields(&report, &mut |line| outln!("{line}"));
     })
 }
 
@@ -3417,10 +3426,10 @@ fn asset_names(cli: &Cli, app: &settings::AppSettings, args: &NamesArgs) -> Resu
         let message = format!("{message}\ndropped {} unused name(s)", unused.len());
         return emit(cli, &message, || outln!("{message}"));
     }
-    let lines = asset::names(&request)?;
-    emit(cli, &lines, || {
-        for line in &lines {
-            outln!("{line}");
+    let names = asset::names(&request)?;
+    emit(cli, &names, || {
+        for (index, name) in names.iter().enumerate() {
+            outln!("{index:4} {name}");
         }
     })
 }

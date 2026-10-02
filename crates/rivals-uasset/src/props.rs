@@ -558,7 +558,7 @@ pub(crate) fn read_property_block(
                 kind: kind_name(&slot.property.inner),
                 start,
                 end: cursor.file_offset(),
-                value: value.summary().chars().take(60).collect(),
+                value: value.summary(),
             });
         }
         let end = cursor.file_offset();

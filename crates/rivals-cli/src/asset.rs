@@ -1830,6 +1830,7 @@ pub fn print_import_plan(plan: &rivals_uasset::ImportRemovalPlan, out: &mut impl
     }
 }
 
+/// The package's name table, in order: a name's index is its place in the list.
 pub fn names(request: &Request<'_>) -> Result<Vec<String>, String> {
     let source = if request.container.is_empty() {
         AssetSource::Loose
@@ -1841,16 +1842,15 @@ pub fn names(request: &Request<'_>) -> Result<Vec<String>, String> {
         asset: &bundle.asset_file_buffer,
         exports: &bundle.exports_file_buffer,
     })?;
-    Ok(rivals_uasset::package_names(&header)
-        .into_iter()
-        .enumerate()
-        .map(|(i, n)| format!("{i:4} {n}"))
-        .collect())
+    Ok(rivals_uasset::package_names(&header))
 }
 
 /// Prints the byte range every property consumed, which is how a desync is located: the first
 /// range that does not line up with the next property is where the reader went wrong.
-pub fn trace(request: &Request<'_>, only: Option<u32>) -> Result<Vec<String>, String> {
+pub fn trace(
+    request: &Request<'_>,
+    only: Option<u32>,
+) -> Result<Vec<rivals_uasset::TraceEntry>, String> {
     let source = if request.container.is_empty() {
         AssetSource::Loose
     } else {
@@ -1879,22 +1879,27 @@ pub fn trace(request: &Request<'_>, only: Option<u32>) -> Result<Vec<String>, St
         Some(start..start + u64::try_from(export.serial_size).ok()?)
     });
     Ok(trace
-        .iter()
+        .into_iter()
         .filter(|e| window.as_ref().is_none_or(|w| w.contains(&e.start)))
-        .map(|e| {
-            format!(
-                "{:indent$}0x{:<6X}..0x{:<6X} {:>4}b  {:<14} {:<44} {}",
-                "",
-                e.start,
-                e.end,
-                e.end - e.start,
-                e.kind,
-                e.name.chars().take(44).collect::<String>(),
-                e.value,
-                indent = (e.depth as usize) * 2
-            )
-        })
         .collect())
+}
+
+/// The trace a line per property, indented by depth. A long name pushes its value along rather
+/// than being cut.
+pub fn print_trace(entries: &[rivals_uasset::TraceEntry], out: &mut impl FnMut(String)) {
+    for e in entries {
+        out(format!(
+            "{:indent$}0x{:<6X}..0x{:<6X} {:>4}b  {:<14} {:<44} {}",
+            "",
+            e.start,
+            e.end,
+            e.end - e.start,
+            e.kind,
+            e.name,
+            e.value,
+            indent = (e.depth as usize) * 2
+        ));
+    }
 }
 
 /// Raw bytes of one export, at the offsets traces and failure messages quote.
@@ -1913,6 +1918,10 @@ pub struct ScriptReport {
     pub signature: Option<rivals_uasset::FunctionSignature>,
     /// The functions in this package that call this one, with the offset of each call.
     pub callers: Vec<(String, u32)>,
+    /// Each statement as the disassembly prints it, with the offsets of what an edit can address
+    /// in it: its literals, object constants, texts, calls and conditions, as `script-set --at`
+    /// takes them, and where its jumps lead.
+    pub lines: Vec<rivals_uasset::ScriptLine>,
 }
 
 pub fn script(request: &Request<'_>, export: u32) -> Result<ScriptReport, String> {
@@ -1948,6 +1957,7 @@ pub fn script(request: &Request<'_>, export: u32) -> Result<ScriptReport, String
         entries,
         signature: found.signature.clone(),
         callers,
+        lines: rivals_uasset::script_lines(script),
     })
 }
 
@@ -2017,7 +2027,47 @@ pub fn print_script(report: &ScriptReport, expressions: bool, out: &mut impl FnM
     }
 }
 
-pub fn fields(request: &Request<'_>, export: u32) -> Result<Vec<String>, String> {
+/// The field records a class or struct export declares.
+#[derive(Serialize)]
+pub struct FieldsReport {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub super_struct: Option<String>,
+    pub fields: Vec<FieldRecord>,
+}
+
+#[derive(Serialize)]
+pub struct FieldRecord {
+    pub index: u16,
+    pub name: String,
+    /// The type as a reader would write it: `Int`, `Array<Vector>`, `Map<Name, Object>`.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// How many slots the one name covers: more than one for a static array.
+    pub array_dim: u8,
+}
+
+pub fn print_fields(report: &FieldsReport, out: &mut impl FnMut(String)) {
+    out(format!(
+        "{} : {}  ({} fields)",
+        report.name,
+        report.super_struct.as_deref().unwrap_or("-"),
+        report.fields.len()
+    ));
+    for field in &report.fields {
+        let dim = if field.array_dim > 1 {
+            format!("[{}]", field.array_dim)
+        } else {
+            String::new()
+        };
+        out(format!(
+            "  {:>4}  {}{dim}: {}",
+            field.index, field.name, field.kind
+        ));
+    }
+}
+
+pub fn fields(request: &Request<'_>, export: u32) -> Result<FieldsReport, String> {
     let parsed = parse(request)?;
     let found = parsed
         .exports
@@ -2030,27 +2080,27 @@ pub fn fields(request: &Request<'_>, export: u32) -> Result<Vec<String>, String>
             found.class_name
         ));
     };
-    let mut lines = vec![format!(
-        "{} : {}  ({} fields)",
-        definition.name,
-        definition.super_struct.as_deref().unwrap_or("-"),
-        definition.properties.len()
-    )];
-    for property in &definition.properties {
-        let dim = if property.array_dim > 1 {
-            format!("[{}]", property.array_dim)
-        } else {
-            String::new()
-        };
-        lines.push(format!(
-            "  {:>4}  {}{dim}: {:?}",
-            property.index, property.name, property.inner
-        ));
-    }
-    Ok(lines)
+    Ok(FieldsReport {
+        name: definition.name.clone(),
+        super_struct: definition.super_struct.clone(),
+        fields: definition
+            .properties
+            .iter()
+            .map(|property| FieldRecord {
+                index: property.index,
+                name: property.name.clone(),
+                kind: rivals_uasset::property_type_text(&property.inner),
+                array_dim: property.array_dim,
+            })
+            .collect(),
+    })
 }
 
-pub fn hex(request: &Request<'_>, export: u32, from: Option<u64>) -> Result<Vec<String>, String> {
+pub fn hex(
+    request: &Request<'_>,
+    export: u32,
+    from: Option<u64>,
+) -> Result<Vec<rivals_uasset::HexRow>, String> {
     let source = if request.container.is_empty() {
         AssetSource::Loose
     } else {
@@ -2067,8 +2117,13 @@ pub fn hex(request: &Request<'_>, export: u32, from: Option<u64>) -> Result<Vec<
     Ok(rivals_uasset::hex_rows(bytes, base)
         .into_iter()
         .filter(|row| from.is_none_or(|want| row.offset + rivals_uasset::ROW_BYTES as u64 > want))
-        .map(|row| format!("0x{:<8X} {}  {}", row.offset, row.hex, row.ascii))
         .collect())
+}
+
+pub fn print_hex(rows: &[rivals_uasset::HexRow], out: &mut impl FnMut(String)) {
+    for row in rows {
+        out(format!("0x{:<8X} {}  {}", row.offset, row.hex, row.ascii));
+    }
 }
 
 /// The language texts are shown in. One asked for by name has to exist; the default falls back to
@@ -2291,7 +2346,6 @@ fn print_entries(
     inherits: &Inherits<'_>,
     out: &mut impl FnMut(String),
 ) {
-    let pad = "  ".repeat(depth + 1);
     for entry in entries {
         let label = match entry.element {
             Some(index) => format!("{}[{index}]", entry.name),
@@ -2299,36 +2353,103 @@ fn print_entries(
         };
         if let (PropertyValue::Unset { .. }, Some(inherited)) = (&entry.value, inherits.at(&label))
         {
-            out(format!(
-                "{pad}{label}: {}  (inherited from {})",
-                shown(&inherited.value),
-                inherited.from
-            ));
+            let note = format!("  (inherited from {})", inherited.from);
+            print_value(
+                &label,
+                &inherited.value,
+                depth,
+                &Inherits::none(),
+                &note,
+                out,
+            );
             continue;
         }
-        match &entry.value {
-            PropertyValue::Struct { name, fields } if entry.value.summary().contains('{') => {
-                out(format!("{pad}{label}: {name}"));
-                print_entries(fields, depth + 1, &inherits.inside(&label), out);
+        print_value(
+            &label,
+            &entry.value,
+            depth,
+            &inherits.inside(&label),
+            "",
+            out,
+        );
+    }
+}
+
+/// One value under its label. A struct, a list or a map opens into a line for each field, item
+/// or entry beneath it, as deep as it goes; anything else is the one line. A list item is labelled
+/// by its index and a map entry by its key, or by `key` and `value` beneath it when the key is a
+/// struct of its own.
+fn print_value(
+    label: &str,
+    value: &PropertyValue,
+    depth: usize,
+    inherits: &Inherits<'_>,
+    note: &str,
+    out: &mut impl FnMut(String),
+) {
+    let pad = "  ".repeat(depth + 1);
+    // An item reads `[3] value`, as it always has; anything else `name: value`.
+    let line = |text: &str| {
+        if label.starts_with('[') {
+            format!("{pad}{label} {text}{note}")
+        } else {
+            format!("{pad}{label}: {text}{note}")
+        }
+    };
+    match value {
+        PropertyValue::Struct { name, fields } if value.summary().contains('{') => {
+            out(line(name));
+            print_entries(fields, depth + 1, inherits, out);
+        }
+        PropertyValue::Text { parts, .. } if !parts.is_empty() => {
+            out(line(&shown(value)));
+            print_entries(parts, depth + 1, &Inherits::none(), out);
+        }
+        PropertyValue::Array { items } | PropertyValue::Set { items } if !items.is_empty() => {
+            out(line(&format!("[{}]", items.len())));
+            for (index, item) in items.iter().enumerate() {
+                print_value(
+                    &format!("[{index}]"),
+                    item,
+                    depth + 1,
+                    &Inherits::none(),
+                    "",
+                    out,
+                );
             }
-            PropertyValue::Text { parts, .. } if !parts.is_empty() => {
-                out(format!("{pad}{label}: {}", shown(&entry.value)));
-                print_entries(parts, depth + 1, &Inherits::none(), out);
-            }
-            PropertyValue::Array { items } if !items.is_empty() => {
-                out(format!("{pad}{label}: [{}]", items.len()));
-                for (index, item) in items.iter().enumerate() {
-                    match item {
-                        PropertyValue::Struct { name, fields } if item.summary().contains('{') => {
-                            out(format!("{pad}  [{index}] {name}"));
-                            print_entries(fields, depth + 2, &Inherits::none(), out);
-                        }
-                        other => out(format!("{pad}  [{index}] {}", shown(other))),
-                    }
+        }
+        PropertyValue::Map { entries } if !entries.is_empty() => {
+            out(line(&format!("{{{} entries}}", entries.len())));
+            for entry in entries {
+                if opens(&entry.key) {
+                    out(format!("{pad}  {{entry}}"));
+                    let inner = Inherits::none();
+                    print_value("key", &entry.key, depth + 2, &inner, "", out);
+                    print_value("value", &entry.value, depth + 2, &inner, "", out);
+                } else {
+                    print_value(
+                        &shown(&entry.key),
+                        &entry.value,
+                        depth + 1,
+                        &Inherits::none(),
+                        "",
+                        out,
+                    );
                 }
             }
-            other => out(format!("{pad}{label}: {}", shown(other))),
         }
+        other => out(line(&shown(other))),
+    }
+}
+
+/// Whether a value prints over several lines rather than as one.
+fn opens(value: &PropertyValue) -> bool {
+    match value {
+        PropertyValue::Struct { .. } => value.summary().contains('{'),
+        PropertyValue::Text { parts, .. } => !parts.is_empty(),
+        PropertyValue::Array { items } | PropertyValue::Set { items } => !items.is_empty(),
+        PropertyValue::Map { entries } => !entries.is_empty(),
+        _ => false,
     }
 }
 
@@ -2337,10 +2458,22 @@ pub struct TableReport {
     pub export: u32,
     pub row_struct: String,
     pub columns: Vec<String>,
-    pub rows: Vec<BTreeMap<String, String>>,
+    /// Each row's values as plain JSON, nested values whole: see [`plain_value`].
+    pub rows: Vec<BTreeMap<String, serde_json::Value>>,
+    /// The same rows as one-line summaries, for the printed table.
+    #[serde(skip)]
+    pub summaries: Vec<BTreeMap<String, String>>,
+    /// One row was asked for, so it prints in full rather than as a line of the table.
+    #[serde(skip)]
+    pub picked: bool,
 }
 
-pub fn table(request: &Request<'_>, culture: &Culture) -> Result<TableReport, String> {
+/// A DataTable's rows, or with `row` only the row of that name.
+pub fn table(
+    request: &Request<'_>,
+    culture: &Culture,
+    row: Option<&str>,
+) -> Result<TableReport, String> {
     let mut parsed = parse(request)?;
     show_game_text(&mut parsed, request, culture)?;
     let export = parsed
@@ -2352,32 +2485,170 @@ pub fn table(request: &Request<'_>, culture: &Culture) -> Result<TableReport, St
         return Err("no data table in this asset".into());
     };
 
-    let rows = table
-        .rows
-        .iter()
-        .map(|row| {
-            let mut cells = BTreeMap::new();
-            cells.insert("__row".to_string(), row.name.clone());
-            for field in &row.fields {
-                let cell = match &field.value {
-                    PropertyValue::Text {
-                        display: Some(display),
-                        ..
-                    } => display.clone(),
-                    other => other.summary(),
-                };
-                cells.insert(field.label(), cell);
-            }
-            cells
-        })
-        .collect();
+    let picked: Vec<_> = match row {
+        Some(name) => table
+            .rows
+            .iter()
+            .filter(|candidate| candidate.name.eq_ignore_ascii_case(name.trim()))
+            .collect(),
+        None => table.rows.iter().collect(),
+    };
+    if let Some(name) = row
+        && picked.is_empty()
+    {
+        let some: Vec<&str> = table.rows.iter().take(5).map(|r| r.name.as_str()).collect();
+        return Err(format!(
+            "no row {name} in this table, which has {} rows, such as {}",
+            table.rows.len(),
+            some.join(", ")
+        ));
+    }
+    let mut rows = Vec::with_capacity(picked.len());
+    let mut summaries = Vec::with_capacity(picked.len());
+    for row in picked {
+        let mut values = BTreeMap::new();
+        let mut cells = BTreeMap::new();
+        values.insert(
+            "__row".to_string(),
+            serde_json::Value::String(row.name.clone()),
+        );
+        cells.insert("__row".to_string(), row.name.clone());
+        for field in &row.fields {
+            let cell = match &field.value {
+                PropertyValue::Text {
+                    display: Some(display),
+                    ..
+                } => display.clone(),
+                other => other.summary(),
+            };
+            values.insert(field.label(), plain_value(&field.value));
+            cells.insert(field.label(), cell);
+        }
+        rows.push(values);
+        summaries.push(cells);
+    }
 
     Ok(TableReport {
         export: export.index,
         row_struct: table.row_struct.clone(),
         columns: table.columns.clone(),
         rows,
+        summaries,
+        picked: row.is_some(),
     })
+}
+
+/// A value as plain JSON: a struct as an object of its fields, an array or set as a list, a map
+/// as an object when its keys are names, strings or numbers and as `{key, value}` pairs when they
+/// are not, a text as what the game shows, an enum by its name and an object by its path. A value
+/// the row holds at its default is that type's zero where its type says, and one it does not
+/// store at all is `null`.
+pub fn plain_value(value: &PropertyValue) -> serde_json::Value {
+    use serde_json::{Value, json};
+
+    let fields = |fields: &[rivals_uasset::PropertyEntry]| {
+        Value::Object(
+            fields
+                .iter()
+                .map(|field| (field.label(), plain_value(&field.value)))
+                .collect(),
+        )
+    };
+    match value {
+        PropertyValue::Bool { value } => Value::Bool(*value),
+        PropertyValue::Int { value } => json!(value),
+        PropertyValue::UInt { value } => json!(value),
+        PropertyValue::Byte { value } => json!(value),
+        PropertyValue::Float { value } => serde_json::Number::from_f64(*value)
+            .map_or_else(|| Value::String(value.to_string()), Value::Number),
+        PropertyValue::Str { value } | PropertyValue::Name { value } => {
+            Value::String(value.clone())
+        }
+        PropertyValue::Text {
+            display: Some(shown),
+            ..
+        }
+        | PropertyValue::Text {
+            value: Some(shown), ..
+        } => Value::String(shown.clone()),
+        PropertyValue::Enum {
+            name: Some(name), ..
+        } => Value::String(name.clone()),
+        PropertyValue::Enum { value, .. } => json!(value),
+        PropertyValue::Object { path, .. } => path.clone().map_or(Value::Null, Value::String),
+        PropertyValue::SoftObject { path } | PropertyValue::FieldPath { path } => {
+            Value::String(path.clone())
+        }
+        PropertyValue::LazyObject { guid } => Value::String(guid.clone()),
+        PropertyValue::Array { items } | PropertyValue::Set { items } => {
+            Value::Array(items.iter().map(plain_value).collect())
+        }
+        PropertyValue::Map { entries } => {
+            let keys: Option<Vec<String>> = entries.iter().map(|e| key_text(&e.key)).collect();
+            let unique = keys.as_ref().is_some_and(|keys| {
+                keys.iter().collect::<std::collections::HashSet<_>>().len() == keys.len()
+            });
+            match keys {
+                Some(keys) if unique => Value::Object(
+                    keys.into_iter()
+                        .zip(entries)
+                        .map(|(key, entry)| (key, plain_value(&entry.value)))
+                        .collect(),
+                ),
+                _ => Value::Array(
+                    entries
+                        .iter()
+                        .map(|e| json!({ "key": plain_value(&e.key), "value": plain_value(&e.value) }))
+                        .collect(),
+                ),
+            }
+        }
+        PropertyValue::Struct { fields: held, .. } => fields(held),
+        PropertyValue::Default {
+            fields: held,
+            declared,
+        } => {
+            if held.is_empty() {
+                zero_of(*declared)
+            } else {
+                fields(held)
+            }
+        }
+        PropertyValue::Unset { .. } => Value::Null,
+        other => Value::String(other.summary()),
+    }
+}
+
+/// A map key that can stand as a JSON object key.
+fn key_text(key: &PropertyValue) -> Option<String> {
+    Some(match key {
+        PropertyValue::Str { value } | PropertyValue::Name { value } => value.clone(),
+        PropertyValue::Enum {
+            name: Some(name), ..
+        } => name.clone(),
+        PropertyValue::Enum { value, .. } | PropertyValue::Int { value } => value.to_string(),
+        PropertyValue::UInt { value } => value.to_string(),
+        PropertyValue::Byte { value } => value.to_string(),
+        PropertyValue::Bool { value } => value.to_string(),
+        _ => return None,
+    })
+}
+
+/// What a value of a stored kind holds at its default.
+fn zero_of(declared: Option<&str>) -> serde_json::Value {
+    use serde_json::{Value, json};
+
+    match declared {
+        Some("Bool") => Value::Bool(false),
+        Some(
+            "Int" | "Int8" | "Int16" | "Int64" | "UInt16" | "UInt32" | "UInt64" | "Byte" | "Enum",
+        ) => json!(0),
+        Some("Float" | "Double") => json!(0.0),
+        Some("Str" | "Name" | "Text") => Value::String(String::new()),
+        Some("Array" | "Set") => Value::Array(Vec::new()),
+        Some("Map") => Value::Object(serde_json::Map::new()),
+        _ => Value::Null,
+    }
 }
 
 /// A missing table is nearly always a failed parse, so surface that instead of a bare "not found".
@@ -2391,6 +2662,18 @@ fn failure_reason(parsed: &ParsedPackage) -> String {
 }
 
 pub fn print_table(report: &TableReport, out: &mut impl FnMut(String)) {
+    if report.picked {
+        for row in &report.rows {
+            let name = row.get("__row").and_then(|n| n.as_str()).unwrap_or("?");
+            out(format!("{name} ({})", report.row_struct));
+            for column in &report.columns {
+                if let Some(value) = row.get(column) {
+                    print_tree(column, value, 1, out);
+                }
+            }
+        }
+        return;
+    }
     out(format!(
         "{} rows of {}",
         report.rows.len(),
@@ -2402,7 +2685,7 @@ pub fn print_table(report: &TableReport, out: &mut impl FnMut(String)) {
         .iter()
         .map(|h| {
             report
-                .rows
+                .summaries
                 .iter()
                 .map(|r| r.get(h).map_or(0, String::len))
                 .chain(std::iter::once(h.len()))
@@ -2431,13 +2714,39 @@ pub fn print_table(report: &TableReport, out: &mut impl FnMut(String)) {
     };
 
     out(line(headers.clone()));
-    for row in &report.rows {
+    for row in &report.summaries {
         out(line(
             headers
                 .iter()
                 .map(|h| row.get(h).cloned().unwrap_or_default())
                 .collect(),
         ));
+    }
+}
+
+/// One value of a row as an indented tree: a struct or map field per line under its name, a list
+/// item per line under its index.
+fn print_tree(name: &str, value: &serde_json::Value, depth: usize, out: &mut impl FnMut(String)) {
+    use serde_json::Value;
+
+    let pad = "  ".repeat(depth);
+    match value {
+        Value::Object(fields) if !fields.is_empty() => {
+            out(format!("{pad}{name}:"));
+            for (field, inner) in fields {
+                print_tree(field, inner, depth + 1, out);
+            }
+        }
+        Value::Array(items) if !items.is_empty() => {
+            out(format!("{pad}{name}: [{} items]", items.len()));
+            for (index, inner) in items.iter().enumerate() {
+                print_tree(&format!("[{index}]"), inner, depth + 1, out);
+            }
+        }
+        Value::Object(_) => out(format!("{pad}{name}: {{}}")),
+        Value::Array(_) => out(format!("{pad}{name}: []")),
+        Value::String(text) => out(format!("{pad}{name}: {text}")),
+        other => out(format!("{pad}{name}: {other}")),
     }
 }
 
@@ -4277,5 +4586,201 @@ mod tests {
         counts.insert("common".to_string(), 9);
         let ranked = rank(counts);
         assert_eq!(ranked[0].name, "common");
+    }
+
+    /// A row reads as plain JSON whole: nested structs as objects, lists, maps keyed by name or as
+    /// pairs, a default as its type's zero and an unstored value as null.
+    #[test]
+    fn a_table_value_reads_as_plain_nested_json() {
+        use rivals_uasset::MapEntry;
+        use serde_json::json;
+
+        let entry = |name: &str, value: PropertyValue| PropertyEntry {
+            name: name.into(),
+            element: None,
+            value,
+            span: None,
+            slot: None,
+        };
+        let skins = PropertyValue::Struct {
+            name: "SkinList".into(),
+            fields: vec![entry(
+                "SkinIDs",
+                PropertyValue::Array {
+                    items: vec![
+                        PropertyValue::Int { value: 309 },
+                        PropertyValue::Int { value: 312 },
+                    ],
+                },
+            )],
+        };
+        let row = PropertyValue::Struct {
+            name: "Row".into(),
+            fields: vec![
+                entry(
+                    "HeroSkinsMap",
+                    PropertyValue::Map {
+                        entries: vec![MapEntry {
+                            key: PropertyValue::Int { value: 1047 },
+                            value: skins.clone(),
+                        }],
+                    },
+                ),
+                entry(
+                    "ByStruct",
+                    PropertyValue::Map {
+                        entries: vec![MapEntry {
+                            key: skins,
+                            value: PropertyValue::Bool { value: true },
+                        }],
+                    },
+                ),
+                entry(
+                    "Slot",
+                    PropertyValue::Enum {
+                        value: 3,
+                        name: Some("HERO_UPGRADED_SKIN_FX".into()),
+                        enum_type: None,
+                    },
+                ),
+                entry(
+                    "Count",
+                    PropertyValue::Default {
+                        declared: Some("Int"),
+                        fields: Vec::new(),
+                    },
+                ),
+                entry(
+                    "Inherited",
+                    PropertyValue::Unset {
+                        declared: "Struct",
+                        enum_type: None,
+                        fields: Vec::new(),
+                    },
+                ),
+            ],
+        };
+        assert_eq!(
+            plain_value(&row),
+            json!({
+                "HeroSkinsMap": { "1047": { "SkinIDs": [309, 312] } },
+                "ByStruct": [{ "key": { "SkinIDs": [309, 312] }, "value": true }],
+                "Slot": "HERO_UPGRADED_SKIN_FX",
+                "Count": 0,
+                "Inherited": null
+            })
+        );
+    }
+
+    /// A dump opens every map, set and nested struct into lines beneath it: a map entry under its
+    /// key, or under `key` and `value` when the key is a struct of its own.
+    #[test]
+    fn a_dump_prints_maps_and_sets_whole() {
+        use rivals_uasset::MapEntry;
+
+        let entry = |name: &str, value: PropertyValue| PropertyEntry {
+            name: name.into(),
+            element: None,
+            value,
+            span: None,
+            slot: None,
+        };
+        // A string field keeps it from reading inline the way a vector does.
+        let point = |x: i64| PropertyValue::Struct {
+            name: "Point".into(),
+            fields: vec![
+                entry("X", PropertyValue::Int { value: x }),
+                entry(
+                    "Label",
+                    PropertyValue::Str {
+                        value: "spawn".into(),
+                    },
+                ),
+            ],
+        };
+        let entries = vec![
+            entry(
+                "Icons",
+                PropertyValue::Map {
+                    entries: vec![MapEntry {
+                        key: PropertyValue::Enum {
+                            value: 0,
+                            name: Some("EHeroRole::Tank".into()),
+                            enum_type: None,
+                        },
+                        value: PropertyValue::Str {
+                            value: "icon_front".into(),
+                        },
+                    }],
+                },
+            ),
+            entry(
+                "ByPoint",
+                PropertyValue::Map {
+                    entries: vec![MapEntry {
+                        key: point(1),
+                        value: PropertyValue::Bool { value: true },
+                    }],
+                },
+            ),
+            entry(
+                "Tags",
+                PropertyValue::Set {
+                    items: vec![PropertyValue::Name {
+                        value: "Hero".into(),
+                    }],
+                },
+            ),
+            entry(
+                "Points",
+                PropertyValue::Array {
+                    items: vec![point(2)],
+                },
+            ),
+        ];
+        let mut lines = Vec::new();
+        print_entries(&entries, 0, &Inherits::none(), &mut |line| lines.push(line));
+        assert_eq!(
+            lines,
+            [
+                "  Icons: {1 entries}",
+                "    EHeroRole::Tank: icon_front",
+                "  ByPoint: {1 entries}",
+                "    {entry}",
+                "      key: Point",
+                "        X: 1",
+                "        Label: spawn",
+                "      value: true",
+                "  Tags: [1]",
+                "    [0] Hero",
+                "  Points: [1]",
+                "    [0] Point",
+                "      X: 2",
+                "      Label: spawn",
+            ]
+        );
+    }
+
+    #[test]
+    fn field_records_print_their_types_as_a_reader_writes_them() {
+        let report = FieldsReport {
+            name: "Thing_C".into(),
+            super_struct: Some("Actor".into()),
+            fields: vec![FieldRecord {
+                index: 0,
+                name: "Offsets".into(),
+                kind: "Array<Vector>".into(),
+                array_dim: 2,
+            }],
+        };
+        let mut lines = Vec::new();
+        print_fields(&report, &mut |line| lines.push(line));
+        assert_eq!(
+            lines,
+            [
+                "Thing_C : Actor  (1 fields)",
+                "     0  Offsets[2]: Array<Vector>"
+            ]
+        );
     }
 }

@@ -182,7 +182,7 @@ fn type_text_with<'a>(
     }
 }
 
-pub(crate) fn type_text(inner: &PropertyInner) -> String {
+pub fn type_text(inner: &PropertyInner) -> String {
     match inner {
         PropertyInner::Struct { name } => name.clone(),
         PropertyInner::Enum { name, inner } if name.is_empty() => type_text(inner),
