@@ -1053,6 +1053,22 @@ fn text_of(edited: &Json) -> Option<String> {
             },
         },
         "soft_object" => field("path")?.as_str()?.to_string(),
+        "delegate" => {
+            let function = field("function")?.as_str()?;
+            match field("object").and_then(Json::as_str) {
+                Some(object) => format!("{object}::{function}"),
+                None if function == "None" => "None".to_string(),
+                None => format!("None::{function}"),
+            }
+        }
+        "field_path" => {
+            let path = field("path")?.as_str()?;
+            match field("owner").and_then(Json::as_str) {
+                Some(owner) => format!("{path} in {owner}"),
+                None => path.to_string(),
+            }
+        }
+        "lazy_object" => field("guid")?.as_str()?.to_string(),
         _ => return None,
     })
 }
@@ -1462,7 +1478,7 @@ mod tests {
             set(vec![PropertyValue::Name { value: "A".into() }]),
             json!({"kind": "set", "items": [
                 {"kind": "name", "value": "A"},
-                {"kind": "delegate", "object": null, "function": "F"},
+                {"kind": "struct", "name": "Point"},
             ]}),
         );
         assert!(out.edits.values.is_empty(), "{:?}", out.edits.values);
@@ -1641,8 +1657,9 @@ mod tests {
         assert!(matches!(&value(&out).op, EditOp::Set { text } if text == "Go"));
     }
 
+    /// A delegate, a field path and a lazy object are set from the text the dump renders them as.
     #[test]
-    fn a_changed_delegate_is_a_note() {
+    fn a_delegate_field_path_and_lazy_object_are_set_from_text() {
         let out = one(
             entry(
                 "OnFired",
@@ -1654,8 +1671,42 @@ mod tests {
             ),
             json!({"kind": "delegate", "object": "/Game/A.A_C", "function": "Other"}),
         );
-        assert!(out.edits.is_empty());
-        assert_eq!(out.notes.len(), 1);
+        assert!(matches!(&value(&out).op, EditOp::Set { text } if text == "/Game/A.A_C::Other"));
+        let out = one(
+            entry(
+                "OnFired",
+                PropertyValue::Delegate {
+                    object: Some("/Game/A.A_C".into()),
+                    function: "Handler".into(),
+                },
+                0x60,
+            ),
+            json!({"kind": "delegate", "function": "None"}),
+        );
+        assert!(matches!(&value(&out).op, EditOp::Set { text } if text == "None"));
+        let out = one(
+            entry(
+                "Watched",
+                PropertyValue::FieldPath {
+                    path: "A".into(),
+                    owner: Some("/Game/A.A_C".into()),
+                },
+                0x60,
+            ),
+            json!({"kind": "field_path", "path": "B", "owner": "/Game/B.B_C"}),
+        );
+        assert!(matches!(&value(&out).op, EditOp::Set { text } if text == "B in /Game/B.B_C"));
+        let out = one(
+            entry(
+                "Lazy",
+                PropertyValue::LazyObject {
+                    guid: "0".repeat(32),
+                },
+                0x60,
+            ),
+            json!({"kind": "lazy_object", "guid": "1".repeat(32)}),
+        );
+        assert!(matches!(&value(&out).op, EditOp::Set { text } if *text == "1".repeat(32)));
     }
 
     /// A property the edited dump dropped altogether is reported rather than treated as a removal,
@@ -1725,7 +1776,10 @@ mod tests {
                 object: Some("/Game/A.A_C".into()),
                 function: "OnFired".into(),
             },
-            PropertyValue::FieldPath { path: "A.B".into() },
+            PropertyValue::FieldPath {
+                path: "A.B".into(),
+                owner: Some("/Game/A.A_C".into()),
+            },
             PropertyValue::LazyObject {
                 guid: "00000000000000000000000000000000".into(),
             },
@@ -1890,21 +1944,25 @@ mod tests {
         assert!(out.notes[0].contains("Tags[0]"), "{}", out.notes[0]);
     }
 
-    /// A changed element no text can carry is a note, not a change dropped in silence.
+    /// A multicast delegate's bindings are a list, and a changed one is set through its index.
     #[test]
-    fn a_changed_element_with_no_text_form_is_noted() {
+    fn a_multicast_delegate_s_changed_element_is_set_by_index() {
         let delegate = |function: &str| PropertyValue::Delegate {
             object: Some("/Game/A.A_C".into()),
             function: function.into(),
         };
         let out = one(
-            array(vec![delegate("Handler")]),
+            array(vec![delegate("Handler"), delegate("Other")]),
             json!({"kind": "array", "items": [
-                {"kind": "delegate", "object": "/Game/A.A_C", "function": "Other"},
+                {"kind": "delegate", "object": "/Game/A.A_C", "function": "Handler"},
+                {"kind": "delegate", "object": null, "function": "Later"},
             ]}),
         );
-        assert!(out.edits.is_empty(), "{:?}", out.edits);
-        assert_eq!(out.notes.len(), 1, "{:?}", out.notes);
+        assert!(
+            matches!(&value(&out).op, EditOp::SetElement { index: 1, text } if text == "None::Later"),
+            "{:?}",
+            out.edits
+        );
     }
 
     /// A property the edited dump adds is not something a save can declare, so it is a note.

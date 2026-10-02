@@ -49,6 +49,10 @@ pub mod tagged_fixture;
 mod tails;
 pub mod text_literal;
 mod unversioned;
+#[cfg(test)]
+mod unversioned_edit_tests;
+#[cfg(test)]
+mod unversioned_fixture;
 mod ustruct;
 mod value;
 mod write;

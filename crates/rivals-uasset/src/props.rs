@@ -846,6 +846,15 @@ fn record_unset(
         PropertyInner::Array { inner } => {
             record_container(diagnostics, ctx, at, at, Vec::new(), inner, None)
         }
+        PropertyInner::MulticastDelegate => record_container(
+            diagnostics,
+            ctx,
+            at,
+            at,
+            Vec::new(),
+            &PropertyInner::Delegate,
+            None,
+        ),
         PropertyInner::Set { key } => {
             record_container(diagnostics, ctx, at, at, Vec::new(), key, None)
         }
@@ -891,6 +900,12 @@ fn unset_default(inner: &PropertyInner, ctx: &Ctx<'_>) -> Option<Vec<DefaultPart
         }
         PropertyInner::LazyObject => vec![0u8; 16],
         PropertyInner::FieldPath => vec![0u8; 8],
+        PropertyInner::Delegate => {
+            return Some(vec![
+                DefaultPart::Bytes(vec![0u8; 4]),
+                DefaultPart::NoneName,
+            ]);
+        }
         // Flags, the None history, and no culture-invariant string.
         PropertyInner::Text => {
             let mut out = vec![0u8; 4];
@@ -1041,9 +1056,14 @@ pub(crate) fn read_value(
         }
         // Declared by the mappings but never seen serialized, so the FUniqueObjectGuid layout
         // here is still unconfirmed against real bytes.
-        PropertyInner::LazyObject => PropertyValue::LazyObject {
-            guid: read_guid(cursor)?,
-        },
+        PropertyInner::LazyObject => {
+            diagnostics
+                .native_leaves
+                .push((cursor.file_offset(), NativeLeaf::Guid));
+            PropertyValue::LazyObject {
+                guid: read_guid(cursor)?,
+            }
+        }
         PropertyInner::SoftObject | PropertyInner::AssetObject => {
             let package = cursor.read_name(ctx.names())?;
             let asset = cursor.read_name(ctx.names())?;
@@ -1053,17 +1073,27 @@ pub(crate) fn read_value(
             }
         }
         PropertyInner::Delegate => read_delegate(cursor, ctx, diagnostics)?,
+        // The bindings are a list like an array's, so they are added and dropped like elements.
         PropertyInner::MulticastDelegate => {
+            let at = cursor.file_offset();
             let count = read_count(cursor, "multicast delegate")?;
             let mut items = Vec::with_capacity(count);
+            let mut elements = Vec::with_capacity(count);
             for _ in 0..count {
+                let start = cursor.file_offset();
                 items.push(read_delegate(cursor, ctx, diagnostics)?);
+                elements.push((start, cursor.file_offset()));
             }
+            let binding = PropertyInner::Delegate;
+            record_container(diagnostics, ctx, at, at, elements, &binding, None);
             PropertyValue::Array { items }
         }
         PropertyInner::FieldPath => {
-            let (path, _) = read_field_path(cursor, ctx, diagnostics)?;
-            PropertyValue::FieldPath { path }
+            let (path, owner) = read_field_path(cursor, ctx, diagnostics)?;
+            PropertyValue::FieldPath {
+                path,
+                owner: ctx.object_path(owner).map_err(|e| cursor.err(e))?,
+            }
         }
         PropertyInner::Enum { inner, name } => {
             let raw = match read_value(inner, cursor, ctx, diagnostics, depth + 1)? {
@@ -1725,12 +1755,14 @@ fn zero_value(inner: &PropertyInner, ctx: &Ctx<'_>) -> PropertyValue {
         PropertyInner::Name => PropertyValue::Name {
             value: "None".into(),
         },
-        PropertyInner::Object
-        | PropertyInner::WeakObject
-        | PropertyInner::Interface
-        | PropertyInner::LazyObject => PropertyValue::Object {
-            index: 0,
-            path: None,
+        PropertyInner::Object | PropertyInner::WeakObject | PropertyInner::Interface => {
+            PropertyValue::Object {
+                index: 0,
+                path: None,
+            }
+        }
+        PropertyInner::LazyObject => PropertyValue::LazyObject {
+            guid: "0".repeat(32),
         },
         PropertyInner::SoftObject | PropertyInner::AssetObject => PropertyValue::SoftObject {
             path: String::new(),
@@ -2157,7 +2189,9 @@ mod tests {
         data.extend_from_slice(&0i32.to_le_bytes());
         let (value, consumed) = read_one(&PropertyInner::FieldPath, &data).expect("field path");
         assert_eq!(consumed, 4 + 16 + 4);
-        assert!(matches!(value, PropertyValue::FieldPath { path } if path == "Outer.Inner"));
+        assert!(
+            matches!(value, PropertyValue::FieldPath { path, owner: None } if path == "Outer.Inner")
+        );
     }
 
     #[test]

@@ -2641,9 +2641,8 @@ pub fn plain_value(value: &PropertyValue) -> serde_json::Value {
         } => Value::String(name.clone()),
         PropertyValue::Enum { value, .. } => json!(value),
         PropertyValue::Object { path, .. } => path.clone().map_or(Value::Null, Value::String),
-        PropertyValue::SoftObject { path } | PropertyValue::FieldPath { path } => {
-            Value::String(path.clone())
-        }
+        PropertyValue::SoftObject { path } => Value::String(path.clone()),
+        PropertyValue::FieldPath { .. } => Value::String(value.summary()),
         PropertyValue::LazyObject { guid } => Value::String(guid.clone()),
         PropertyValue::Array { items } | PropertyValue::Set { items } => {
             Value::Array(items.iter().map(plain_value).collect())

@@ -87,9 +87,27 @@ export interface EditTarget {
   path?: string[];
 }
 
+/** A delegate as `Object::Function`, or a field path as `Path in Owner`: how each is typed. */
+export function referenceText(value: PropertyValue): string | undefined {
+  switch (value.kind) {
+    case "delegate":
+      if (value.object) return `${value.object}::${value.function}`;
+      return value.function === "None" ? "None" : `None::${value.function}`;
+    case "field_path":
+      return value.owner ? `${value.path} in ${value.owner}` : value.path;
+    default:
+      return undefined;
+  }
+}
+
 /** A value as an edit types it, for the kinds the backend can compare that way. */
 function valueText(value: PropertyValue | undefined): string | undefined {
   switch (value?.kind) {
+    case "delegate":
+    case "field_path":
+      return referenceText(value);
+    case "lazy_object":
+      return value.guid;
     case "str":
     case "name":
       return value.value;

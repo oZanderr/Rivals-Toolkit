@@ -673,6 +673,8 @@ fn value_text(value: &PropertyValue) -> Option<String> {
             name: Some(name), ..
         } => name.clone(),
         PropertyValue::Enum { value, .. } => value.to_string(),
+        PropertyValue::Delegate { .. } | PropertyValue::FieldPath { .. } => value.summary(),
+        PropertyValue::LazyObject { guid } => guid.clone(),
         _ => return None,
     };
     reads_back_as(value, &text).then_some(text)
@@ -1384,6 +1386,10 @@ pub fn patch_package_with(
                     };
                     let (value, flag) =
                         tagged_value(absent, text, &mut tables, &package, mappings)?;
+                    let declared = crate::props::typed_as(&absent.inner);
+                    if let Some(target) = declared_reference(declared, &value) {
+                        object_links.push((start, target));
+                    }
                     if matches!(absent.inner, usmap::PropertyInner::Text) {
                         link_text_tables(&value, start, &mut tables, &mut object_links)?;
                     }
@@ -2196,12 +2202,25 @@ fn check_whole_text_edits(parsed: &ParsedPackage, edits: &[ValueEdit]) -> Result
 /// The object a written reference points at, export or import, when the value is a hard reference
 /// that names one.
 fn object_reference(value: &PropertyValue, bytes: &[u8]) -> Option<i32> {
-    let object = matches!(value, PropertyValue::Object { .. })
-        || matches!(value, PropertyValue::Unset { declared, .. } if *declared == "Object");
-    if !object {
-        return None;
+    let declared = match value {
+        PropertyValue::Object { .. } => "Object",
+        PropertyValue::Delegate { .. } => "Delegate",
+        PropertyValue::FieldPath { .. } => "FieldPath",
+        PropertyValue::Unset { declared, .. } => declared,
+        _ => return None,
+    };
+    declared_reference(declared, bytes)
+}
+
+/// The object a value of a declared type points at, for the types written with one: a hard
+/// reference, a delegate's object, or a field path's owner.
+fn declared_reference(declared: &str, bytes: &[u8]) -> Option<i32> {
+    match declared {
+        "Delegate" => object_target(bytes.get(..4)?),
+        "FieldPath" => object_target(bytes.get(bytes.len().checked_sub(4)?..)?),
+        declared if is_object_kind(declared) => object_target(bytes),
+        _ => None,
     }
-    object_target(bytes)
 }
 
 /// The object a four-byte `FPackageIndex` names, export or import; `None` for a null.
@@ -3739,6 +3758,8 @@ fn encode_key(
         "Str" => Ok(encode_string(text)),
         "Object" | "WeakObject" | "Interface" => encode_object(text, package, tables, None),
         "SoftObject" | "AssetObject" => Ok(encode_soft_object(text, &mut tables.names)),
+        "LazyObject" => encode_native_leaf(NativeLeaf::Guid, text.trim(), &mut tables.names),
+        "FieldPath" => encode_field_path(text, &[], package, tables),
         "Int" | "Int8" | "Int16" | "Int64" => scalar(PropertyValue::Int { value: 0 }),
         "UInt16" | "UInt32" | "UInt64" => scalar(PropertyValue::UInt { value: 0 }),
         "Byte" => scalar(PropertyValue::Byte { value: 0 }),
@@ -3858,6 +3879,11 @@ fn tag_type(inner: &usmap::PropertyInner) -> Result<&'static str, String> {
         P::Set { .. } => "SetProperty",
         P::Map { .. } => "MapProperty",
         P::Enum { .. } => "EnumProperty",
+        P::Delegate => "DelegateProperty",
+        // Nothing in the mappings tells an inline list from a sparse one; a sparse one tagged as
+        // inline is skipped by the loader rather than misread.
+        P::MulticastDelegate => "MulticastInlineDelegateProperty",
+        P::FieldPath => "FieldPathProperty",
         other => {
             return Err(format!(
                 "a {} property cannot be written from nothing",
@@ -3950,6 +3976,13 @@ fn tagged_value(
                 out
             }
             P::Set { .. } | P::Map { .. } => vec![0u8; 8],
+            P::MulticastDelegate => 0i32.to_le_bytes().to_vec(),
+            P::FieldPath => vec![0u8; 8],
+            P::Delegate => {
+                let mut out = vec![0u8; 4];
+                out.extend(encode_name("None", &mut tables.names));
+                out
+            }
             _ => {
                 return Err(format!(
                     "{} holds a value; type one for it rather than storing it empty",
@@ -5045,11 +5078,6 @@ fn stored_default(
         ("Struct", Some("SoftObjectPath" | "SoftClassPath")) => encode_soft_object("", names),
         ("Struct", Some("TopLevelAssetPath")) => {
             let mut out = none(names);
-            out.extend_from_slice(&none(names));
-            out
-        }
-        ("Delegate", _) => {
-            let mut out = vec![0u8; 4];
             out.extend_from_slice(&none(names));
             out
         }
@@ -6677,8 +6705,86 @@ fn encode(value: &PropertyValue, text: &str, target: Target<'_>) -> Result<Vec<u
         PropertyValue::Object { index, .. } => {
             encode_object(text, target.package, target.tables, Some(*index))
         }
+        PropertyValue::Delegate { .. } => {
+            encode_delegate(text, target.was, target.package, target.tables)
+        }
+        PropertyValue::FieldPath { .. } => {
+            encode_field_path(text, target.was, target.package, target.tables)
+        }
+        PropertyValue::LazyObject { .. } => {
+            encode_native_leaf(NativeLeaf::Guid, text.trim(), &mut target.tables.names)
+        }
         _ => encode_scalar(value, text, target.width, target.declared),
     }
+}
+
+/// An `FScriptDelegate` from `Object::Function`: the object as a package index, then the
+/// function's name. `None` alone is a delegate with no function, and `None::Function` one bound to
+/// no object. An object keeps the class it had when it has to be imported.
+fn encode_delegate(
+    text: &str,
+    was: &[u8],
+    package: &retoc::legacy_asset::FLegacyPackageHeader,
+    tables: &mut Tables,
+) -> Result<Vec<u8>, String> {
+    let text = text.trim();
+    let (object, function) = match text.rsplit_once("::") {
+        Some((object, function)) => (object.trim(), function.trim()),
+        None if text.is_empty() || text.eq_ignore_ascii_case("none") => ("None", "None"),
+        None => {
+            return Err(format!(
+                "{text} is not a delegate: type the object and the function as Object::Function, \
+                 or None"
+            ));
+        }
+    };
+    if function.is_empty() {
+        return Err(format!("{text} names no function after its ::"));
+    }
+    if object.parse::<i32>().is_ok() {
+        return Err(format!(
+            "{object} is a table index; name the delegate's object by its path, or None"
+        ));
+    }
+    let current = was.get(..4).and_then(object_target);
+    let mut out = encode_object(object, package, tables, current)?;
+    out.extend(encode_name(function, &mut tables.names));
+    Ok(out)
+}
+
+/// An `FFieldPath` from `A.B in Object`: how many names lead to the property, the names, then the
+/// struct that owns the first. Typed without `in`, it keeps the owner it had.
+fn encode_field_path(
+    text: &str,
+    was: &[u8],
+    package: &retoc::legacy_asset::FLegacyPackageHeader,
+    tables: &mut Tables,
+) -> Result<Vec<u8>, String> {
+    let text = text.trim();
+    let (path, owner) = match text.rsplit_once(" in ") {
+        Some((path, owner)) => (path.trim(), Some(owner.trim())),
+        None => (text, None),
+    };
+    let names: Vec<&str> = match path {
+        "" => Vec::new(),
+        path => path.split('.').map(str::trim).collect(),
+    };
+    if names.iter().any(|name| name.is_empty()) {
+        return Err(format!("{path} has an empty name between its dots"));
+    }
+    let mut out = (names.len() as i32).to_le_bytes().to_vec();
+    for name in names {
+        out.extend(encode_name(name, &mut tables.names));
+    }
+    let held = was.len().checked_sub(4).and_then(|at| was.get(at..));
+    match owner {
+        Some(owner) => {
+            let current = held.and_then(object_target);
+            out.extend(encode_object(owner, package, tables, current)?);
+        }
+        None => out.extend_from_slice(held.unwrap_or(&[0; 4])),
+    }
+    Ok(out)
 }
 
 /// A number typed for an enum has to be one of its values, where the mappings know the enum:
@@ -6828,6 +6934,9 @@ fn encode_declared(declared: &str, text: &str, target: Target<'_>) -> Result<Vec
         "SoftObjectPath" | "SoftClassPath" => {
             Ok(encode_soft_object(text.trim(), &mut target.tables.names))
         }
+        "Delegate" => encode_delegate(text, &[], target.package, target.tables),
+        "FieldPath" => encode_field_path(text, &[], target.package, target.tables),
+        "LazyObject" => encode_native_leaf(NativeLeaf::Guid, text.trim(), &mut target.tables.names),
         other => Err(format!(
             "a {other} cannot be typed in; store it first and then edit what is inside"
         )),
@@ -7371,16 +7480,23 @@ fn parse<T: std::str::FromStr>(text: &str) -> Result<T, String> {
 fn reads_back_as(value: &PropertyValue, text: &str) -> bool {
     match value {
         // A guid reads back as its 32 hex digits, whatever case or dashes it was typed with.
-        PropertyValue::Str { value } => {
-            value == text
-                || (value.len() == 32
-                    && text
-                        .trim()
-                        .chars()
-                        .filter(|c| !matches!(c, '-' | '{' | '}'))
-                        .collect::<String>()
-                        .eq_ignore_ascii_case(value))
-        }
+        PropertyValue::Str { value } => value == text || same_guid(value, text),
+        PropertyValue::LazyObject { guid } => same_guid(guid, text),
+        PropertyValue::Delegate { object, function } => match text.trim().rsplit_once("::") {
+            Some((want, called)) => {
+                called.trim() == function && same_object(object.as_deref(), want.trim())
+            }
+            None => {
+                let want = text.trim();
+                object.is_none()
+                    && function == "None"
+                    && (want.is_empty() || want.eq_ignore_ascii_case("none"))
+            }
+        },
+        PropertyValue::FieldPath { path, owner } => match text.trim().rsplit_once(" in ") {
+            Some((want, owned)) => want.trim() == path && same_object(owner.as_deref(), owned),
+            None => text.trim() == path,
+        },
         PropertyValue::Name { value } => value == text.trim(),
         PropertyValue::SoftObject { path } => path == text.trim(),
         // A literal spells the whole text, so it reads back as the same kind of text holding the
@@ -7396,8 +7512,7 @@ fn reads_back_as(value: &PropertyValue, text: &str) -> bool {
         // Either separator convention may have been typed; only the segments have to agree.
         PropertyValue::Object { index, path } => {
             let want = text.trim();
-            path.as_deref()
-                .is_some_and(|path| path.replace(['.', ':'], "/") == want.replace(['.', ':'], "/"))
+            (path.is_some() && same_object(path.as_deref(), want))
                 || want.parse::<i32>().is_ok_and(|raw| raw == *index)
                 || (*index == 0 && (want.is_empty() || want.eq_ignore_ascii_case("none")))
         }
@@ -7427,6 +7542,27 @@ fn reads_back_as(value: &PropertyValue, text: &str) -> bool {
             .is_ok_and(|want| (want - *value).abs() <= want.abs() * 1e-6 + f32::EPSILON as f64),
         _ => false,
     }
+}
+
+/// Whether a typed path names the object a reference resolved to, with either separator
+/// convention, or nothing for `None`.
+fn same_object(resolved: Option<&str>, want: &str) -> bool {
+    let want = want.trim();
+    match resolved {
+        Some(path) => path.replace(['.', ':'], "/") == want.replace(['.', ':'], "/"),
+        None => want.is_empty() || want.eq_ignore_ascii_case("none"),
+    }
+}
+
+/// Whether a typed guid is the 32 hex digits read, whatever case or dashes it was typed with.
+fn same_guid(read: &str, text: &str) -> bool {
+    read.len() == 32
+        && text
+            .trim()
+            .chars()
+            .filter(|c| !matches!(c, '-' | '{' | '}'))
+            .collect::<String>()
+            .eq_ignore_ascii_case(read)
 }
 
 fn locate<'a>(parsed: &'a ParsedPackage, edit: &ValueEdit) -> Result<&'a PropertyEntry, String> {

@@ -1102,8 +1102,19 @@ fn a_tagged_block_lists_what_its_schema_declares_and_it_lacks() {
     assert_eq!(
         absent,
         [
-            "Extra", "Label", "On", "Mode", "Nested", "Items", "Scores", "Counts", "Chain",
-            "Caption"
+            "Extra",
+            "Label",
+            "On",
+            "Mode",
+            "Nested",
+            "Items",
+            "Scores",
+            "Counts",
+            "Chain",
+            "Caption",
+            "OnFired",
+            "OnChanged",
+            "Watched"
         ]
     );
     let inner = find(holder(&parsed), "Inner");
@@ -1166,6 +1177,111 @@ fn a_table_literal_for_an_absent_text_adds_its_tag_and_table() {
     );
     assert!(after.imports.iter().any(|import| import.path == MENU_TABLE));
     assert_eq!(find(holder(&after), "Count").value.summary(), "3");
+}
+
+/// A delegate, a multicast delegate and a field path the block lacks take tags of their own:
+/// typed, or stored empty and given a binding afterwards.
+#[test]
+fn delegate_multicast_and_field_path_tags_are_added_for_absent_properties() {
+    const HANDLER: &str = "/Game/Helpers.Helper::Handler";
+    let (asset, exports) = sparse_package();
+    let mappings = sparse_mappings();
+    let (after, asset, exports) = apply_declared(&asset, &exports, Some(&mappings), |p| {
+        vec![
+            edit_of(find(holder(p), "OnFired"), set(HANDLER)),
+            edit_of(find(holder(p), "OnChanged"), EditOp::Store),
+            edit_of(find(holder(p), "Watched"), set("Count.Inner")),
+        ]
+    })
+    .expect("added");
+    assert_eq!(find(holder(&after), "OnFired").value.summary(), HANDLER);
+    assert!(items_of(find(holder(&after), "OnChanged")).is_empty());
+    assert_eq!(
+        find(holder(&after), "Watched").value.summary(),
+        "Count.Inner"
+    );
+    assert!(
+        after
+            .imports
+            .iter()
+            .any(|import| import.path == "/Game/Helpers.Helper")
+    );
+
+    let (bound, ..) = apply_declared(&asset, &exports, Some(&mappings), |p| {
+        vec![edit_of(
+            find(holder(p), "OnChanged"),
+            EditOp::Insert {
+                index: 0,
+                key: None,
+            },
+        )]
+    })
+    .expect("bound");
+    let bindings = items_of(find(holder(&bound), "OnChanged"));
+    assert_eq!(bindings.len(), 1);
+    assert_eq!(bindings[0].summary(), "None");
+}
+
+/// A class, a soft class and a sparse delegate's tags read as the object, soft object and list of
+/// bindings they hold, and edit as those.
+#[test]
+fn class_soft_class_and_sparse_delegate_tags_read_and_edit() {
+    let mut e = Vec::new();
+    head(&mut e, "Kind", "ClassProperty", 4);
+    e.push(0);
+    e.extend_from_slice(&0i32.to_le_bytes());
+    let mut soft = Vec::new();
+    name(&mut soft, "/Game/A");
+    name(&mut soft, "B");
+    string(&mut soft, "");
+    head(&mut e, "Soft", "SoftClassProperty", soft.len());
+    e.push(0);
+    e.extend_from_slice(&soft);
+    let mut sparse = 1i32.to_le_bytes().to_vec();
+    sparse.extend_from_slice(&0i32.to_le_bytes());
+    name(&mut sparse, "Foo");
+    head(
+        &mut e,
+        "Sparse",
+        "MulticastSparseDelegateProperty",
+        sparse.len(),
+    );
+    e.push(0);
+    e.extend_from_slice(&sparse);
+    name(&mut e, "None");
+    e.extend_from_slice(&0i32.to_le_bytes());
+    let (asset, exports) = package_of(e);
+
+    let before = parse(&asset, &exports);
+    assert_eq!(find(top(&before), "Kind").value.summary(), "None");
+    assert_eq!(find(top(&before), "Soft").value.summary(), "/Game/A.B");
+    assert_eq!(
+        items_of(find(top(&before), "Sparse"))[0].summary(),
+        "None::Foo"
+    );
+
+    let (after, ..) = apply_to(&asset, &exports, |p| {
+        vec![
+            edit_of(find(top(p), "Kind"), set("/Game/Things.Thing_C")),
+            edit_of(find(top(p), "Soft"), set("/Game/C.D")),
+            edit_of(
+                find(top(p), "Sparse"),
+                EditOp::SetElement {
+                    index: 0,
+                    text: "/Game/Things.Thing_C::Fired".into(),
+                },
+            ),
+        ]
+    });
+    assert_eq!(
+        find(top(&after), "Kind").value.summary(),
+        "/Game/Things.Thing_C"
+    );
+    assert_eq!(find(top(&after), "Soft").value.summary(), "/Game/C.D");
+    assert_eq!(
+        items_of(find(top(&after), "Sparse"))[0].summary(),
+        "/Game/Things.Thing_C::Fired"
+    );
 }
 
 /// Storing an absent struct, array or map adds its tag holding the empty form, which reads back

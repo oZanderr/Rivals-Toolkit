@@ -586,16 +586,16 @@ fn simple_inner(type_name: &str) -> Option<PropertyInner> {
         "StrProperty" => PropertyInner::Str,
         "NameProperty" => PropertyInner::Name,
         "TextProperty" => PropertyInner::Text,
-        "ObjectProperty" => PropertyInner::Object,
+        "ObjectProperty" | "ClassProperty" => PropertyInner::Object,
         "WeakObjectProperty" => PropertyInner::WeakObject,
         "LazyObjectProperty" => PropertyInner::LazyObject,
-        "SoftObjectProperty" => PropertyInner::SoftObject,
+        "SoftObjectProperty" | "SoftClassProperty" => PropertyInner::SoftObject,
         "AssetObjectProperty" => PropertyInner::AssetObject,
         "InterfaceProperty" => PropertyInner::Interface,
         "DelegateProperty" => PropertyInner::Delegate,
-        "MulticastDelegateProperty" | "MulticastInlineDelegateProperty" => {
-            PropertyInner::MulticastDelegate
-        }
+        "MulticastDelegateProperty"
+        | "MulticastInlineDelegateProperty"
+        | "MulticastSparseDelegateProperty" => PropertyInner::MulticastDelegate,
         "FieldPathProperty" => PropertyInner::FieldPath,
         _ => return None,
     })

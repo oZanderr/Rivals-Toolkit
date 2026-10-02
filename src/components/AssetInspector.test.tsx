@@ -364,6 +364,60 @@ async function menuOf(user: ReturnType<typeof userEvent.setup>, name: string) {
   return screen.findByRole("menu");
 }
 
+/** One export holding a value of each kind typed in a form of its own. */
+function referencesPackage() {
+  return {
+    ...labelPackage(),
+    exports: [
+      exp(0, "Settings", "SettingsData", [
+        entry("Count", { kind: "uint", value: 3 }, 40),
+        entry("OnFired", { kind: "delegate", object: "/Game/A.A_C", function: "Handler" }, 50),
+        entry("Watched", { kind: "field_path", path: "Count", owner: "/Script/T.Thing" }, 60),
+        entry("Lazy", { kind: "lazy_object", guid: "0".repeat(32) }, 70),
+      ]),
+    ],
+  };
+}
+
+describe("AssetInspector reference edits", () => {
+  it("edits a uint, a delegate, a field path and a lazy object inline", async () => {
+    mock = tauri(referencesPackage());
+    installTauri(mock);
+    mount();
+    const user = userEvent.setup();
+    const retype = async (shown: string, typed: string) => {
+      await user.click(await screen.findByText(shown));
+      const input = await screen.findByDisplayValue(shown);
+      await user.clear(input);
+      await user.type(input, `${typed}{Enter}`);
+    };
+    await retype("3", "4");
+    await retype("/Game/A.A_C::Handler", "None");
+    await retype("Count in /Script/T.Thing", "Lazy");
+    await retype("0".repeat(32), "1".repeat(32));
+    await user.click(await screen.findByRole("button", { name: /Save as mod/ }));
+    await waitFor(() =>
+      expect(lastSave().values).toEqual(
+        expect.arrayContaining([
+          { offset: 40, name: "Count", kind: "uint", op: "set", text: "4" },
+          { offset: 50, name: "OnFired", kind: "delegate", op: "set", text: "None" },
+          { offset: 60, name: "Watched", kind: "field_path", op: "set", text: "Lazy" },
+          { offset: 70, name: "Lazy", kind: "lazy_object", op: "set", text: "1".repeat(32) },
+        ])
+      )
+    );
+    // Each is held to what it read, in the form it is typed in.
+    expect(lastSave().expect).toMatchObject({
+      values: {
+        "40": "3",
+        "50": "/Game/A.A_C::Handler",
+        "60": "Count in /Script/T.Thing",
+        "70": "0".repeat(32),
+      },
+    });
+  });
+});
+
 describe("AssetInspector container edits", () => {
   it.each([
     ["Remove this element", "[1]", { op: "remove", index: 1 }],

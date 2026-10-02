@@ -110,14 +110,19 @@ pub enum PropertyValue {
         path: String,
     },
     /// A bound UFunction. Kept distinct from a plain string so a delegate cannot be mistaken for
-    /// text in the property tree, in CSV output or in the JSON.
+    /// text in the property tree, in CSV output or in the JSON. Typed as `Object::Function`, with
+    /// `None` for the object of one bound to nothing, or `None` alone for one with no function.
     Delegate {
         #[serde(skip_serializing_if = "Option::is_none")]
         object: Option<String>,
         function: String,
     },
+    /// A property reached by name, typed as `A.B`, or `A.B in Object` to name the struct that
+    /// owns it as well.
     FieldPath {
         path: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        owner: Option<String>,
     },
     LazyObject {
         guid: String,
@@ -193,9 +198,13 @@ impl PropertyValue {
             Self::SoftObject { path } => path.clone(),
             Self::Delegate { object, function } => match object {
                 Some(object) => format!("{object}::{function}"),
-                None => function.clone(),
+                None if function == "None" => "None".into(),
+                None => format!("None::{function}"),
             },
-            Self::FieldPath { path } => path.clone(),
+            Self::FieldPath { path, owner } => match owner {
+                Some(owner) => format!("{path} in {owner}"),
+                None => path.clone(),
+            },
             Self::LazyObject { guid } => guid.clone(),
             Self::Array { items } => format!("[{} items]", items.len()),
             Self::Set { items } => format!("{{{} items}}", items.len()),
@@ -328,13 +337,25 @@ mod tests {
         assert_eq!(value.summary(), "/Game/BP_Thing.BP_Thing_C::OnFired");
     }
 
+    /// A delegate bound to nothing still says so, the way it is typed, and one with no function
+    /// either is `None` alone.
     #[test]
-    fn an_unbound_delegate_summarises_as_just_its_function_name() {
-        let value = PropertyValue::Delegate {
+    fn an_unbound_delegate_summarises_with_none_for_its_object() {
+        let value = |function: &str| PropertyValue::Delegate {
             object: None,
-            function: "OnFired".into(),
+            function: function.into(),
         };
-        assert_eq!(value.summary(), "OnFired");
+        assert_eq!(value("OnFired").summary(), "None::OnFired");
+        assert_eq!(value("None").summary(), "None");
+    }
+
+    #[test]
+    fn a_field_path_summarises_with_its_owner() {
+        let value = PropertyValue::FieldPath {
+            path: "Inner".into(),
+            owner: Some("/Game/A.A_C".into()),
+        };
+        assert_eq!(value.summary(), "Inner in /Game/A.A_C");
     }
 
     #[test]
@@ -383,7 +404,10 @@ mod tests {
                 object: None,
                 function: "F".into(),
             },
-            PropertyValue::FieldPath { path: "A".into() },
+            PropertyValue::FieldPath {
+                path: "A".into(),
+                owner: None,
+            },
             PropertyValue::LazyObject { guid: "0".into() },
             PropertyValue::Array { items: Vec::new() },
             PropertyValue::Set { items: Vec::new() },

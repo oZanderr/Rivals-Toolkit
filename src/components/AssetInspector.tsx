@@ -96,6 +96,7 @@ import {
   type EditTarget,
   type Structural,
   pathCheckText,
+  referenceText,
   usePathCheck,
   withWarnings,
   scriptTextTarget,
@@ -128,7 +129,7 @@ export type PropertyValue =
   | { kind: "object"; index: number; path?: string }
   | { kind: "soft_object"; path: string }
   | { kind: "delegate"; object?: string; function: string }
-  | { kind: "field_path"; path: string }
+  | { kind: "field_path"; path: string; owner?: string }
   | { kind: "lazy_object"; guid: string }
   | { kind: "array"; items: PropertyValue[] }
   | { kind: "set"; items: PropertyValue[] }
@@ -505,9 +506,8 @@ function summarise(value: PropertyValue, depth = 0): string {
     case "soft_object":
       return value.path;
     case "delegate":
-      return value.object ? `${value.object}::${value.function}` : value.function;
     case "field_path":
-      return value.path;
+      return referenceText(value) ?? "";
     case "lazy_object":
       return value.guid;
     case "array":
@@ -1646,7 +1646,7 @@ const PropertyRow = memo(function PropertyRow({ row, depth }: { row: TreeRow; de
             />
           </span>
         ) : (
-          <Tip content={fromHint ?? locked ?? (isUnset ? unsetHint : textHint(entry.value))}>
+          <Tip content={fromHint ?? locked ?? (isUnset ? unsetHint : valueHint(entry.value))}>
             <span
               className={cn(
                 "min-w-0 flex-1 break-all font-mono",
@@ -2770,6 +2770,9 @@ const EDITABLE_KINDS = new Set([
   "soft_object",
   "text",
   "object",
+  "delegate",
+  "field_path",
+  "lazy_object",
 ]);
 
 /** Kinds that hold elements, which are changed by adding or dropping rather than by retyping. */
@@ -2804,6 +2807,9 @@ const TYPEABLE_DECLARED = new Set([
   "UInt64",
   "Float",
   "Double",
+  "Delegate",
+  "FieldPath",
+  "LazyObject",
 ]);
 
 /** Declared kinds with no empty form worth storing: they need a value, so typing is the only way. */
@@ -2822,6 +2828,7 @@ const VALUE_ONLY_DECLARED = new Set([
   "UInt64",
   "Float",
   "Double",
+  "LazyObject",
 ]);
 
 const UNSET_HINT =
@@ -2882,9 +2889,19 @@ function editText(value: PropertyValue): string {
 const TEXT_FORMS =
   'Type LOCTABLE("Table", "Key") to show another string table entry, INVTEXT("Text") or plain text to show fixed text in every language, NSLOCTEXT("Namespace", "Key", "Source") for a localized text, or LOCGEN_TOUPPER(...) / LOCGEN_TOLOWER(...) around one. Plain text over a table entry stops following the table.';
 
-/** What a text row says on hover: what the game shows it from, and what an edit does to it. */
-function textHint(value: PropertyValue): string | null {
-  if (value.kind !== "text") return null;
+/** How the kinds typed in a form of their own are written, which their rows say on hover. */
+const TYPED_AS: Partial<Record<PropertyValue["kind"], string>> = {
+  delegate:
+    "Type Object::Function to bind it, None::Function for a function bound to no object, or None to empty it.",
+  field_path:
+    "Type Property or Struct.Property to name another property. Add ' in /Path/To.Owner' to change the struct that owns it, which it keeps otherwise.",
+  lazy_object: "Type the object's guid as 32 hex digits; dashes and braces are ignored.",
+};
+
+/** What a row says on hover: how its value is typed, and for a text, what the game shows it from
+ *  and what an edit does to it. */
+function valueHint(value: PropertyValue): string | null {
+  if (value.kind !== "text") return TYPED_AS[value.kind] ?? null;
   if (value.namespace !== undefined && value.key !== undefined && value.key !== "") {
     return `Source: ${value.value ?? ""} · Key: ${value.namespace}/${value.key} · An edit shows as typed in every language; the translations for this key stop applying. Type NSLOCTEXT("Namespace", "Key", "Source") to give it another key.`;
   }
@@ -7194,7 +7211,7 @@ function DataTableGrid({ table, exportIndex }: { table: DataTable; exportIndex: 
                       const trigger = <ContextMenuTrigger asChild>{cell}</ContextMenuTrigger>;
                       // The lock reason wins; otherwise a long value gets its full text, since the
                       // column is narrower than most strings.
-                      const about = field ? textHint(field.value) : null;
+                      const about = field ? valueHint(field.value) : null;
                       const hint =
                         locked && field
                           ? locked

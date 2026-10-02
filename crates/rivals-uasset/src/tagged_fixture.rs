@@ -61,6 +61,12 @@ pub const NAMES: &[&str] = &[
     "Count",
     "Inner",
     "Flag",
+    "Kind",
+    "ClassProperty",
+    "Soft",
+    "SoftClassProperty",
+    "Sparse",
+    "MulticastSparseDelegateProperty",
 ];
 
 pub fn index_of(value: &str) -> i32 {
@@ -222,6 +228,9 @@ pub fn sparse_mappings() -> Mappings {
                 ),
                 property("Chain", 11, struct_named("Level1")),
                 property("Caption", 12, PropertyInner::Text),
+                property("OnFired", 13, PropertyInner::Delegate),
+                property("OnChanged", 14, PropertyInner::MulticastDelegate),
+                property("Watched", 15, PropertyInner::FieldPath),
             ],
         },
         // Structs three deep, for previews and field sets that reach past two.
