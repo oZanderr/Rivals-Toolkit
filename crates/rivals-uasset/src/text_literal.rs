@@ -267,6 +267,10 @@ pub fn of_value(value: &PropertyValue) -> Option<TextLiteral> {
             inner: Box::new(of_value(&source.value)?),
         });
     }
+    // A pattern, a number, a moment or a generator: no literal spells one.
+    if !parts.is_empty() {
+        return None;
+    }
     let shown = value.clone().unwrap_or_default();
     Some(match namespace {
         Some(namespace) => TextLiteral::Localized {

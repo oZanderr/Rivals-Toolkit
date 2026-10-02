@@ -1452,10 +1452,10 @@ pub(crate) fn read_count(cursor: &mut Cursor<'_>, what: &str) -> Result<usize, S
     Ok(count)
 }
 
-/// `ETextHistoryType` decides the payload. Only the histories Rivals' packages use are decoded:
-/// none, base, number, transform and string table. The rest fail by name so the audit can rank
-/// them if one ever appears.
-fn read_text(
+/// `ETextHistoryType` decides the payload, laid out as UE 5.3 writes each. A text built from
+/// pieces keeps them as parts, each spanned so it edits in place, named after the history's own
+/// members; the text shows what they make. Layouts this reader is unsure of fail by name.
+pub(crate) fn read_text(
     cursor: &mut Cursor<'_>,
     ctx: &Ctx<'_>,
     diagnostics: &mut Diagnostics,
@@ -1488,15 +1488,141 @@ fn read_text(
             parts.push(spanned(cursor, "TransformType", byte_value)?);
             source
         }
-        // AsNumber, `FTextHistory_FormatNumber`: the source value, a full-word flag for the
-        // formatting options, the options, then the culture name.
-        4 => {
-            let source = read_format_argument(cursor, ctx, diagnostics, depth + 1)?;
-            if cursor.read_bool32()? {
-                cursor.skip(NUMBER_FORMATTING_OPTIONS_BYTES)?;
+        // NamedFormat, OrderedFormat and ArgumentFormat: the pattern, then its arguments.
+        1..=3 => {
+            let pattern = text_part(cursor, ctx, diagnostics, depth, "SourceFmt", &mut parts)?
+                .unwrap_or_default();
+            let at = cursor.file_offset();
+            let count = read_count(cursor, "format argument")?;
+            let mut fields = Vec::with_capacity(count);
+            let mut shown = Vec::with_capacity(count);
+            for position in 0..count {
+                let name = match history {
+                    2 => position.to_string(),
+                    _ => cursor.read_string()?,
+                };
+                // `FFormatArgumentData` writes its type as a byte, which is the same bits.
+                let kind = cursor.read_i8()?;
+                if history == 3 && kind == 1 {
+                    return Err(cursor.err(
+                        "an ArgumentFormat text holds an unsigned argument, whose layout this \
+                         reader is not sure of",
+                    ));
+                }
+                let value =
+                    argument_value(kind, cursor, ctx, diagnostics, depth, &name, &mut fields)?;
+                shown.push((name, value.unwrap_or_default()));
             }
-            let _culture = cursor.read_string()?;
-            Some(source)
+            parts.push(PropertyEntry {
+                name: "Arguments".into(),
+                element: None,
+                value: PropertyValue::Struct {
+                    name: "Arguments".into(),
+                    fields,
+                },
+                span: Some((at, cursor.file_offset())),
+                slot: None,
+            });
+            Some(format_pattern(&pattern, &shown))
+        }
+        // AsNumber, AsPercent and AsCurrency, `FTextHistory_FormatNumber`: a currency's code, the
+        // source value, a full-word flag for the formatting options, the options, then the
+        // culture.
+        4..=6 => {
+            if history == 6 {
+                parts.push(spanned(cursor, "CurrencyCode", string_value)?);
+            }
+            let kind = cursor.read_i8()?;
+            let source = argument_value(
+                kind,
+                cursor,
+                ctx,
+                diagnostics,
+                depth,
+                "SourceValue",
+                &mut parts,
+            )?;
+            if cursor.read_bool32()? {
+                parts.push(spanned(cursor, "FormatOptions", number_options)?);
+            }
+            parts.push(spanned(cursor, "TargetCulture", string_value)?);
+            source
+        }
+        // AsDate, AsTime and AsDateTime: the moment, the styles the history has, the time zone
+        // and the culture.
+        7..=9 => {
+            let moment = spanned(cursor, "SourceDateTime", |c| {
+                Ok(PropertyValue::Int {
+                    value: c.read_i64()?,
+                })
+            })?;
+            let shown = match moment.value {
+                PropertyValue::Int { value } => ticks_text(value),
+                _ => String::new(),
+            };
+            parts.push(moment);
+            let styles: &[&str] = match history {
+                7 => &["DateStyle"],
+                8 => &["TimeStyle"],
+                _ => &["DateStyle", "TimeStyle"],
+            };
+            for style in styles {
+                let part = spanned(cursor, style, |c| {
+                    Ok(PropertyValue::Int {
+                        value: i64::from(c.read_i8()?),
+                    })
+                })?;
+                // `EDateTimeStyle::Custom` brings a pattern of its own, written in a way this
+                // reader is not sure of.
+                if matches!(part.value, PropertyValue::Int { value: 5 }) {
+                    return Err(cursor.err(format!(
+                        "a {} text with a custom {style}, whose pattern this reader is not sure of",
+                        history_name(history)
+                    )));
+                }
+                parts.push(part);
+            }
+            parts.push(spanned(cursor, "TimeZone", string_value)?);
+            parts.push(spanned(cursor, "TargetCulture", string_value)?);
+            Some(shown)
+        }
+        // TextGenerator: the generator's type, then for any but `None` the bytes it reads back.
+        12 => {
+            let id = spanned(cursor, "GeneratorTypeID", |c| {
+                Ok(PropertyValue::Name {
+                    value: c.read_name(ctx.names())?,
+                })
+            })?;
+            let generator = id.value.summary();
+            parts.push(id);
+            if generator != "None" {
+                let at = cursor.file_offset();
+                let count = read_count(cursor, "generator content")?;
+                let mut items = Vec::with_capacity(count);
+                let mut elements = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let start = cursor.file_offset();
+                    items.push(byte_value(cursor)?);
+                    elements.push((start, cursor.file_offset()));
+                }
+                record_container(
+                    diagnostics,
+                    ctx,
+                    at,
+                    at,
+                    elements,
+                    &PropertyInner::Byte,
+                    None,
+                );
+                parts.push(PropertyEntry {
+                    name: "GeneratorContents".into(),
+                    element: None,
+                    value: PropertyValue::Array { items },
+                    span: Some((at, cursor.file_offset())),
+                    slot: None,
+                });
+            }
+            Some(format!("(generated by {generator})"))
         }
         11 => {
             diagnostics
@@ -1562,32 +1688,133 @@ fn byte_value(cursor: &mut Cursor<'_>) -> Result<PropertyValue, String> {
 
 /// `FNumberFormattingOptions`: two full-word bools, a rounding mode byte and four `int32` digit
 /// counts.
-pub(crate) const NUMBER_FORMATTING_OPTIONS_BYTES: usize = 4 + 4 + 1 + 4 * 4;
+fn number_options(cursor: &mut Cursor<'_>) -> Result<PropertyValue, String> {
+    let flag = |c: &mut Cursor<'_>| {
+        Ok(PropertyValue::Bool {
+            value: c.read_bool32()?,
+        })
+    };
+    let digits = |c: &mut Cursor<'_>| {
+        Ok(PropertyValue::Int {
+            value: i64::from(c.read_i32()?),
+        })
+    };
+    let mut fields = vec![
+        spanned(cursor, "AlwaysSign", flag)?,
+        spanned(cursor, "UseGrouping", flag)?,
+        spanned(cursor, "RoundingMode", |c| {
+            Ok(PropertyValue::Int {
+                value: i64::from(c.read_i8()?),
+            })
+        })?,
+    ];
+    for name in [
+        "MinimumIntegralDigits",
+        "MaximumIntegralDigits",
+        "MinimumFractionalDigits",
+        "MaximumFractionalDigits",
+    ] {
+        fields.push(spanned(cursor, name, digits)?);
+    }
+    Ok(PropertyValue::Struct {
+        name: "NumberFormattingOptions".into(),
+        fields,
+    })
+}
 
-/// `FFormatArgumentValue`: a type byte, then the value that type says.
-fn read_format_argument(
+/// The value of an `FFormatArgumentValue` or `FFormatArgumentData` of type `kind`, as a part named
+/// `name` spanning the value alone, so an edit keeps the type. Returns what it shows as.
+fn argument_value(
+    kind: i8,
     cursor: &mut Cursor<'_>,
     ctx: &Ctx<'_>,
     diagnostics: &mut Diagnostics,
     depth: u32,
-) -> Result<String, String> {
-    Ok(match cursor.read_i8()? {
-        0 => cursor.read_i64()?.to_string(),
-        1 => cursor.read_u64()?.to_string(),
-        2 => cursor.read_f32()?.to_string(),
-        3 => cursor.read_f64()?.to_string(),
-        4 => match read_text(cursor, ctx, diagnostics, depth)? {
-            PropertyValue::Text { value, .. } => value.unwrap_or_default(),
-            other => other.summary(),
-        },
-        5 => format!("gender {}", cursor.read_u8()?),
+    name: &str,
+    parts: &mut Vec<PropertyEntry>,
+) -> Result<Option<String>, String> {
+    let start = cursor.file_offset();
+    let (value, shown) = match kind {
+        0 => {
+            let value = cursor.read_i64()?;
+            (PropertyValue::Int { value }, value.to_string())
+        }
+        1 => {
+            let value = cursor.read_u64()?;
+            (PropertyValue::UInt { value }, value.to_string())
+        }
+        2 => {
+            let value = cursor.read_f32()?;
+            let shown = value.to_string();
+            (
+                PropertyValue::Float {
+                    value: f64::from(value),
+                },
+                shown,
+            )
+        }
+        3 => {
+            let value = cursor.read_f64()?;
+            (PropertyValue::Float { value }, value.to_string())
+        }
+        4 => return text_part(cursor, ctx, diagnostics, depth, name, parts),
+        5 => {
+            let value = cursor.read_u8()?;
+            (PropertyValue::Byte { value }, format!("gender {value}"))
+        }
         other => {
             return Err(cursor.err(format!("unknown FText format argument type {other}")));
         }
-    })
+    };
+    parts.push(PropertyEntry {
+        name: name.to_string(),
+        element: None,
+        value,
+        span: Some((start, cursor.file_offset())),
+        slot: None,
+    });
+    Ok(Some(shown))
 }
 
-fn history_name(history: i8) -> &'static str {
+/// A format pattern with each `{argument}` it names replaced by what that argument shows.
+pub(crate) fn format_pattern(pattern: &str, arguments: &[(String, String)]) -> String {
+    let mut out = pattern.to_string();
+    for (name, shown) in arguments {
+        out = out.replace(&format!("{{{name}}}"), shown);
+    }
+    out
+}
+
+/// An `FDateTime`'s ticks, the hundred-nanosecond steps since 0001-01-01, as the moment they name.
+pub(crate) fn ticks_text(ticks: i64) -> String {
+    const PER_SECOND: i64 = 10_000_000;
+    const PER_DAY: i64 = 86_400 * PER_SECOND;
+    let days = ticks.div_euclid(PER_DAY);
+    let seconds = ticks.rem_euclid(PER_DAY) / PER_SECOND;
+    // Days since 0001-01-01 counted from 0000-03-01, as the civil calendar computes them.
+    let z = days + 306;
+    let era = z.div_euclid(146_097);
+    let day_of_era = z.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * shifted + 2) / 5 + 1;
+    let month = if shifted < 10 {
+        shifted + 3
+    } else {
+        shifted - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02}",
+        seconds / 3600,
+        seconds / 60 % 60,
+        seconds % 60
+    )
+}
+
+pub(crate) fn history_name(history: i8) -> &'static str {
     match history {
         1 => "NamedFormat",
         2 => "OrderedFormat",
@@ -2266,6 +2493,42 @@ mod tests {
         assert!(err.contains("TOptional"), "{err}");
     }
 
+    /// A custom date or time style brings a pattern whose layout this reader is not sure of, so it
+    /// fails by name rather than reading on through it.
+    #[test]
+    fn a_custom_date_style_is_refused_by_name() {
+        let mut moment = 0i64.to_le_bytes().to_vec();
+        moment.push(5);
+        moment.extend_from_slice(&[0; 8]);
+        let error = read_one(&PropertyInner::Text, &text_bytes(7, &moment)).expect_err("refused");
+        assert!(error.contains("custom DateStyle"), "{error}");
+    }
+
+    #[test]
+    fn ticks_text() {
+        assert_eq!(super::ticks_text(0), "0001-01-01 00:00:00");
+        assert_eq!(
+            super::ticks_text(621_355_968_000_000_000),
+            "1970-01-01 00:00:00"
+        );
+        assert_eq!(
+            super::ticks_text(638_633_789_000_000_000),
+            "2024-10-01 11:28:20"
+        );
+    }
+
+    #[test]
+    fn format_pattern() {
+        let arguments = [
+            ("Name".to_string(), "Hulk".to_string()),
+            ("0".to_string(), "3".to_string()),
+        ];
+        assert_eq!(
+            super::format_pattern("{Name} smashes {0} times, {Missing}", &arguments),
+            "Hulk smashes 3 times, {Missing}"
+        );
+    }
+
     #[test]
     fn a_negative_container_count_is_rejected_before_it_is_used() {
         let data = (-1i32).to_le_bytes();
@@ -2282,19 +2545,16 @@ mod tests {
         assert!(err.contains("exceeds"), "{err}");
     }
 
+    /// A history no UE 5.3 text takes still fails by number, so the audit can rank it.
     #[test]
-    fn unsupported_text_histories_are_named_so_the_audit_can_rank_them() {
-        for (history, name) in [(1i8, "NamedFormat"), (5, "AsPercent"), (9, "AsDateTime")] {
-            let error = read_one(&PropertyInner::Text, &text_bytes(history, &[0; 16]))
-                .expect_err("not read");
-            assert!(
-                error.contains(&format!(
-                    "unsupported FText history type {history} ({name})"
-                )),
-                "{error}"
-            );
-        }
-        assert_eq!(history_name(99), "unknown");
+    fn an_unknown_history_still_fails_by_name() {
+        let error =
+            read_one(&PropertyInner::Text, &text_bytes(13, &[0; 16])).expect_err("not read");
+        assert!(
+            error.contains("unsupported FText history type 13 (unknown)"),
+            "{error}"
+        );
+        assert_eq!(history_name(9), "AsDateTime");
     }
 
     /// A header that skips past every slot the struct declares cannot be this struct's header, and

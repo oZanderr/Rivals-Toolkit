@@ -2991,6 +2991,10 @@ function valueHint(value: PropertyValue): string | null {
     return `Source: ${value.value ?? ""} · Key: ${value.namespace}/${value.key} · An edit shows as typed in every language; the translations for this key stop applying. Type NSLOCTEXT("Namespace", "Key", "Source") to give it another key.`;
   }
   if ((value.parts?.length ?? 0) > 0) {
+    // A pattern, a moment or a generator has no literal, and changes through its parts.
+    if (textLiteral(value) === null) {
+      return `Shows ${value.display ?? value.value ?? ""}, built from the parts under it; edit one of them.`;
+    }
     return `Shows ${value.display ?? value.value ?? ""}. ${TEXT_FORMS}`;
   }
   return null;

@@ -2396,7 +2396,7 @@ fn link_text_tables(
     tables: &mut Tables,
     links: &mut Vec<(u64, i32)>,
 ) -> Result<(), String> {
-    let (_, names_at) = text_extent(bytes, 0)?;
+    let (_, names_at) = text_extent(bytes, 0, &tables.names)?;
     for offset in names_at {
         let table = text_table_id(&bytes[offset - 5..], &tables.names)?;
         link_table(&table, at, tables, links)?;
@@ -7673,10 +7673,19 @@ fn encode_text(text: &str, was: &[u8], names: &mut FPackageNameMap) -> Result<Ve
         }
         // AsNumber, AsPercent and AsCurrency: only the source value changes; the formatting
         // options and the culture are copied through.
-        4 => return encode_formatted_number(text, was),
+        4..=6 => return encode_formatted_number(text, was),
+        // A text built from a pattern, a moment or a generator shows what its parts make, so a
+        // plain string says nothing about which part to change.
+        1..=3 | 7..=9 | 12 => {
+            return Err(format!(
+                "this is a {} text, built from parts; edit one of its parts, or type a literal \
+                 to replace it whole",
+                crate::props::history_name(history)
+            ));
+        }
         // A transformed text shows its source text cased, so the string goes to the source.
         10 => {
-            let (inner_end, _) = text_extent(was, 5)?;
+            let (inner_end, _) = text_extent(was, 5, names)?;
             out.extend_from_slice(&encode_text(text, &was[5..inner_end], names)?);
             out.extend_from_slice(&was[inner_end..]);
         }
@@ -7740,7 +7749,7 @@ fn build_text(
         TextLiteral::Transform { upper, inner } => {
             out.push(10);
             let source = if was.get(4).is_some_and(|&history| history as i8 == 10) {
-                &was[5..text_extent(was, 5)?.0]
+                &was[5..text_extent(was, 5, names)?.0]
             } else {
                 &FRESH_TEXT[..]
             };
@@ -7765,74 +7774,47 @@ fn text_table_id(was: &[u8], names: &FPackageNameMap) -> Result<String, String> 
 }
 
 /// Where the text starting at `start` ends, and where each string table name inside it sits,
-/// nested ones included. Mirrors the reader, for the histories it reads.
-fn text_extent(data: &[u8], start: usize) -> Result<(usize, Vec<usize>), String> {
-    let short = || "this text ends before its history does".to_string();
-    let word = |at: usize| -> Result<u32, String> {
-        data.get(at..at + 4)
-            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-            .ok_or_else(short)
+/// nested ones included: the reader's own walk of it, with `names` to read names by.
+fn text_extent(
+    data: &[u8],
+    start: usize,
+    names: &FPackageNameMap,
+) -> Result<(usize, Vec<usize>), String> {
+    let header = retoc::legacy_asset::FLegacyPackageHeader {
+        name_map: names.clone(),
+        ..Default::default()
     };
-    let history = *data.get(start + 4).ok_or_else(short)? as i8;
-    let mut at = start + 5;
-    let mut tables = Vec::new();
-    match history {
-        -1 => {
-            let has = word(at)?;
-            at += 4;
-            if has != 0 {
-                take_string(data, &mut at)?;
-            }
-        }
-        0 => {
-            for _ in 0..3 {
-                take_string(data, &mut at)?;
-            }
-        }
-        4 => {
-            let kind = *data.get(at).ok_or_else(short)? as i8;
-            at += 1;
-            match kind {
-                0 | 1 | 3 => at += 8,
-                2 => at += 4,
-                4 => {
-                    let (end, nested) = text_extent(data, at)?;
-                    tables.extend(nested);
-                    at = end;
-                }
-                5 => at += 1,
-                other => return Err(format!("unknown FText format argument type {other}")),
-            }
-            let has_options = word(at)?;
-            at += 4;
-            if has_options != 0 {
-                at += crate::props::NUMBER_FORMATTING_OPTIONS_BYTES;
-            }
-            take_string(data, &mut at)?;
-        }
-        10 => {
-            let (end, nested) = text_extent(data, at)?;
-            tables.extend(nested);
-            at = end + 1;
-        }
-        11 => {
-            tables.push(at);
-            at += 8;
-            take_string(data, &mut at)?;
-        }
-        other => return Err(format!("text with history type {other} cannot be walked")),
-    }
-    if at > data.len() {
-        return Err(short());
-    }
-    Ok((at, tables))
+    let ctx = crate::props::Ctx {
+        mappings: None,
+        header: &header,
+        fixups: None,
+        synth: None,
+        local: None,
+    };
+    let text = data
+        .get(start..)
+        .ok_or("this text starts past the bytes it is in")?;
+    let mut cursor = crate::reader::Cursor::new(text, start as u64);
+    let mut diagnostics = crate::props::Diagnostics::default();
+    crate::props::read_text(&mut cursor, &ctx, &mut diagnostics, 0)?;
+    let tables = diagnostics
+        .native_leaves
+        .iter()
+        .filter(|(_, leaf)| *leaf == NativeLeaf::StringTableId)
+        .map(|(at, _)| *at as usize)
+        .collect();
+    Ok((start + cursor.position(), tables))
 }
 
 /// `FTextHistory_FormatNumber` holds the number it formats as a typed `FFormatArgumentValue`, so
-/// the typed text is parsed in that argument's own type and written over the value alone.
+/// the typed text is parsed in that argument's own type and written over the value alone. A
+/// currency's code comes first and is copied through.
 fn encode_formatted_number(text: &str, was: &[u8]) -> Result<Vec<u8>, String> {
-    let mut out = was[..5].to_vec();
     let mut at = 5usize;
+    if was.get(4).is_some_and(|&history| history as i8 == 6) {
+        take_string(was, &mut at)?;
+    }
+    let mut out = was[..at].to_vec();
     let text = text.trim();
     let kind = *was
         .get(at)
@@ -8939,9 +8921,12 @@ mod tests {
     #[test]
     fn text_with_a_history_that_cannot_be_rebuilt_is_refused() {
         let mut was = vec![0u8; 4];
-        was.push(12);
+        was.push(13);
         let error = encode_text("hello", &was, &mut name_map()).expect_err("refused");
-        assert!(error.contains("history type 12"), "{error}");
+        assert!(error.contains("history type 13"), "{error}");
+        was[4] = 12;
+        let error = encode_text("hello", &was, &mut name_map()).expect_err("refused");
+        assert!(error.contains("TextGenerator"), "{error}");
         let error = encode_text("INVTEXT(\"open", &was, &mut name_map()).expect_err("refused");
         assert!(error.contains("never closed"), "{error}");
     }
@@ -9083,16 +9068,19 @@ mod tests {
         let mut names = name_map();
         let table = table_text_bytes(0, TABLE, "Play", &mut names);
         assert_eq!(
-            text_extent(&table, 0).expect("walk"),
+            text_extent(&table, 0, &names).expect("walk"),
             (table.len(), vec![5])
         );
         let nested = transform_text_bytes(0, &table, true);
         assert_eq!(
-            text_extent(&nested, 0).expect("walk"),
+            text_extent(&nested, 0, &names).expect("walk"),
             (nested.len(), vec![10])
         );
         let number = formatted_number(3, &2.0f64.to_le_bytes());
-        assert_eq!(text_extent(&number, 0).expect("walk").0, number.len());
+        assert_eq!(
+            text_extent(&number, 0, &names).expect("walk").0,
+            number.len()
+        );
         let mut formatted_text = vec![0u8; 4];
         formatted_text.push(4);
         formatted_text.push(4);
@@ -9100,7 +9088,7 @@ mod tests {
         formatted_text.extend_from_slice(&0u32.to_le_bytes());
         formatted_text.extend_from_slice(&encode_string(""));
         assert_eq!(
-            text_extent(&formatted_text, 0).expect("walk"),
+            text_extent(&formatted_text, 0, &names).expect("walk"),
             (formatted_text.len(), vec![11])
         );
         let empty = FRESH_TEXT
@@ -9108,8 +9096,8 @@ mod tests {
             .copied()
             .chain(0u32.to_le_bytes())
             .collect::<Vec<_>>();
-        assert_eq!(text_extent(&empty, 0).expect("walk").0, empty.len());
-        assert!(text_extent(&table[..table.len() - 1], 0).is_err());
+        assert_eq!(text_extent(&empty, 0, &names).expect("walk").0, empty.len());
+        assert!(text_extent(&table[..table.len() - 1], 0, &names).is_err());
     }
 
     fn table_text_value(table: &str, key: &str) -> PropertyValue {

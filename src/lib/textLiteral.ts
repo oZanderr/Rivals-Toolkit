@@ -20,6 +20,8 @@ export function textLiteral(value: PropertyValue): string | null {
     if (inner === null) return null;
     return `${transform.value === 1 ? "LOCGEN_TOUPPER" : "LOCGEN_TOLOWER"}(${inner})`;
   }
+  // A pattern, a number, a moment or a generator: no literal spells one.
+  if (value.parts?.length) return null;
   if (value.namespace !== undefined) {
     return `NSLOCTEXT(${quoted(value.namespace)}, ${quoted(value.key ?? "")}, ${quoted(value.value ?? "")})`;
   }

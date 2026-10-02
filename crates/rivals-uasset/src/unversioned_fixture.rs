@@ -33,6 +33,7 @@ pub const NAMES: &[&str] = &[
     "ScriptStruct",
     "Point",
     "Wrapper",
+    "Gen",
 ];
 
 /// Where the package's imports sit, as the package indices values point at.
@@ -189,6 +190,60 @@ pub fn slots() -> Vec<Slot> {
         slot("Holder", instanced_struct(), Held::Bytes(vec![0; 8])),
         slot("Spot", instanced_struct(), Held::Skipped),
         slot("ZeroSpot", instanced_struct(), Held::Zero),
+        text("Named", 1, &{
+            let mut args = 2i32.to_le_bytes().to_vec();
+            args.extend(string("Name"));
+            args.push(4);
+            args.extend(invariant("Hulk"));
+            args.extend(string("Count"));
+            args.push(0);
+            args.extend_from_slice(&3i64.to_le_bytes());
+            [invariant("{Name} has {Count}"), args].concat()
+        }),
+        text("Ordered", 2, &{
+            let mut args = 2i32.to_le_bytes().to_vec();
+            args.push(0);
+            args.extend_from_slice(&1i64.to_le_bytes());
+            args.push(3);
+            args.extend_from_slice(&2.5f64.to_le_bytes());
+            [invariant("{0} of {1}"), args].concat()
+        }),
+        text("ArgData", 3, &{
+            let mut args = 1i32.to_le_bytes().to_vec();
+            args.extend(string("Who"));
+            args.push(4);
+            args.extend(invariant("Thor"));
+            [invariant("{Who} wins"), args].concat()
+        }),
+        text("Percent", 5, &{
+            let mut number = vec![3u8];
+            number.extend_from_slice(&0.25f64.to_le_bytes());
+            number.extend_from_slice(&0u32.to_le_bytes());
+            number.extend(string(""));
+            number
+        }),
+        text("Money", 6, &{
+            let mut number = string("USD");
+            number.push(0);
+            number.extend_from_slice(&100i64.to_le_bytes());
+            number.extend_from_slice(&1u32.to_le_bytes());
+            number.extend_from_slice(&[0, 0, 0, 0, 1, 0, 0, 0, 0]);
+            for digits in [1i32, 9, 0, 2] {
+                number.extend_from_slice(&digits.to_le_bytes());
+            }
+            number.extend(string("en"));
+            number
+        }),
+        text("Day", 7, &moment(&[0])),
+        text("Clock", 8, &moment(&[1])),
+        text("Stamp", 9, &moment(&[1, 2])),
+        text("Generated", 12, &{
+            let mut generated = Vec::new();
+            name(&mut generated, "Gen");
+            generated.extend_from_slice(&3i32.to_le_bytes());
+            generated.extend_from_slice(&[1, 2, 3]);
+            generated
+        }),
         slot(
             "Nest",
             instanced_struct(),
@@ -198,6 +253,39 @@ pub fn slots() -> Vec<Slot> {
             )),
         ),
     ]
+}
+
+/// A text: no flags, `history`, then what the history holds.
+fn text(name: &'static str, history: i8, rest: &[u8]) -> Slot {
+    let mut bytes = 0u32.to_le_bytes().to_vec();
+    bytes.push(history as u8);
+    bytes.extend_from_slice(rest);
+    slot(name, PropertyInner::Text, Held::Bytes(bytes))
+}
+
+/// A culture-invariant text holding `value`.
+fn invariant(value: &str) -> Vec<u8> {
+    let mut out = 0u32.to_le_bytes().to_vec();
+    out.push(0xFF);
+    out.extend_from_slice(&1u32.to_le_bytes());
+    out.extend(string(value));
+    out
+}
+
+fn string(value: &str) -> Vec<u8> {
+    let mut out = (value.len() as i32 + 1).to_le_bytes().to_vec();
+    out.extend_from_slice(value.as_bytes());
+    out.push(0);
+    out
+}
+
+/// 2024-10-01 11:28:20, then the given styles, the time zone `UTC` and no culture.
+fn moment(styles: &[u8]) -> Vec<u8> {
+    let mut out = 638_633_789_000_000_000i64.to_le_bytes().to_vec();
+    out.extend_from_slice(styles);
+    out.extend(string("UTC"));
+    out.extend(string(""));
+    out
 }
 
 fn instanced_struct() -> PropertyInner {

@@ -514,16 +514,25 @@ fn diff_text(
         // A changed value is the whole text typed again; changed parts already say the same thing
         // when the value is what they read as, and anything else is two answers.
         if out.edits.values.len() > edits_before {
-            if edited_parts
-                .and_then(|items| parts_read_as(items))
-                .as_deref()
-                != Some(now)
+            if let Some(read) = edited_parts.and_then(|items| parts_read_as(items))
+                && read != now
             {
                 out.notes.push(format!(
                     "{label}: both the text and its parts changed, and they disagree; the part \
                      edits are kept"
                 ));
             }
+            return;
+        }
+        // A pattern, a moment or a generator shows what its parts make, so only a part says what
+        // changed. A number is typed whole.
+        let built = rivals_uasset::text_literal::of_value(before).is_none();
+        let number = parts.iter().any(|part| part.name == "SourceValue");
+        if built && !number {
+            out.notes.push(format!(
+                "{label}: this text is built from parts, so it changes through one of them, not \
+                 through what it shows"
+            ));
             return;
         }
         return push_edit(entry, whole, now.to_string(), label, out);
@@ -2316,6 +2325,58 @@ mod tests {
         assert!(matches!(&edit.op, EditOp::Set { text } if text == "/Script/CoreUObject.Vector"));
         assert_eq!(out.notes.len(), 1, "{:?}", out.notes);
         assert!(out.notes[0].contains("diff again"), "{}", out.notes[0]);
+    }
+
+    /// A format text changes through its parts, each at its own offset; what it shows changes
+    /// with them, and typed on its own is a note.
+    #[test]
+    fn a_format_text_s_part_is_set_at_its_own_offset() {
+        let part = |name: &str, value: PropertyValue, at: u64| PropertyEntry {
+            name: name.into(),
+            element: None,
+            span: Some((at, at + 8)),
+            value,
+            slot: None,
+        };
+        let pattern = |text: &str| PropertyValue::Text {
+            value: Some(text.into()),
+            parts: Vec::new(),
+            namespace: None,
+            key: None,
+            display: None,
+        };
+        let named = entry(
+            "Title",
+            PropertyValue::Text {
+                value: Some("Hulk wins".into()),
+                parts: vec![part("SourceFmt", pattern("{Who} wins"), 0x45)],
+                namespace: None,
+                key: None,
+                display: None,
+            },
+            0x40,
+        );
+        let out = one(
+            named.clone(),
+            json!({"kind": "text", "value": "Hulk loses", "parts": [
+                {"name": "SourceFmt", "value": {"kind": "text", "value": "{Who} loses"}},
+            ]}),
+        );
+        let edit = value(&out);
+        assert_eq!(
+            (edit.offset, edit.expect_name.as_str()),
+            (0x45, "SourceFmt")
+        );
+        assert!(out.notes.is_empty(), "{:?}", out.notes);
+
+        let out = one(
+            named,
+            json!({"kind": "text", "value": "Hulk loses", "parts": [
+                {"name": "SourceFmt", "value": {"kind": "text", "value": "{Who} wins"}},
+            ]}),
+        );
+        assert!(out.edits.is_empty(), "{:?}", out.edits);
+        assert!(out.notes[0].contains("built from parts"), "{:?}", out.notes);
     }
 
     /// The text form the dump renders is the one an edit carries, so a whole float keeps the
