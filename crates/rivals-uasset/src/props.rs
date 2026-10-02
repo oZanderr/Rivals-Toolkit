@@ -315,6 +315,8 @@ pub enum NativeLeaf {
     MarvelSoftObjectPath,
     /// The name of the string table a text shows an entry of, which the package has to import.
     StringTableId,
+    /// The word a `NavAgentSelector` packs its sixteen bools into. Each bool spans the whole word.
+    AgentBits,
 }
 
 /// A tagged property's tag from its name to the end of its value, keyed by where its entry's span

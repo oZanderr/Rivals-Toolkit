@@ -372,3 +372,66 @@ fn a_lazy_object_takes_a_guid_in_any_spelling() {
         "0000000A0000000B0000000C0000000D"
     );
 }
+
+/// The field reached from `parsed`'s property `name` down through `path`.
+fn field<'a>(parsed: &'a ParsedPackage, name: &str, path: &[&str]) -> &'a PropertyEntry {
+    let mut entry = find(top(parsed), name);
+    for step in path {
+        let PropertyValue::Struct { fields, .. } = &entry.value else {
+            panic!("{} is not a struct", entry.name);
+        };
+        entry = find(fields, step);
+    }
+    entry
+}
+
+/// The fields of native layouts that used to be read-only edit in place, all in one save.
+#[test]
+fn read_only_native_fields_now_edit_in_place() {
+    let edits: [(&str, &[&str], &str); 7] = [
+        ("When", &["Ticks"], "200"),
+        ("Transform", &["M23"], "2.5"),
+        ("Bounds", &["IsValid"], "false"),
+        ("Ball", &["W"], "9.5"),
+        ("Key", &["Time"], "1.5"),
+        ("Key", &["InterpMode"], "2"),
+        ("Range", &["UpperBound", "Value"], "60"),
+    ];
+    let after = apply(|p| {
+        edits
+            .iter()
+            .map(|(name, path, text)| edit_of(field(p, name, path), set(text)))
+            .collect()
+    });
+    for (name, path, text) in edits {
+        assert_eq!(
+            field(&after, name, path).value.summary(),
+            text,
+            "{name}.{path:?}"
+        );
+    }
+    assert_eq!(
+        field(&after, "Bounds", &["Max", "X"]).value.summary(),
+        "1.0"
+    );
+}
+
+/// Two of a `NavAgentSelector`'s bits share one word, and change together in one save.
+#[test]
+fn two_nav_agent_bits_change_in_one_save() {
+    let after = apply(|p| {
+        vec![
+            edit_of(field(p, "Agents", &["bSupportsAgent0"]), set("false")),
+            edit_of(field(p, "Agents", &["bSupportsAgent1"]), set("true")),
+        ]
+    });
+    let on: Vec<String> = match &find(top(&after), "Agents").value {
+        PropertyValue::Struct { fields, .. } => fields
+            .iter()
+            .filter(|bit| matches!(bit.value, PropertyValue::Bool { value: true }))
+            .map(|bit| bit.name.clone())
+            .collect(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(on, ["bSupportsAgent1", "bSupportsAgent3"]);
+}

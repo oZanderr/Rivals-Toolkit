@@ -106,7 +106,47 @@ pub fn slots() -> Vec<Slot> {
         slot("Listeners", PropertyInner::MulticastDelegate, Held::Skipped),
         slot("Path", PropertyInner::FieldPath, Held::Skipped),
         slot("ZeroLazy", PropertyInner::LazyObject, Held::Zero),
+        native("When", "DateTime", 100i64.to_le_bytes().to_vec()),
+        native("Transform", "Matrix", doubles(&[1.0; 16])),
+        native("Bounds", "Box", {
+            let mut bounds = doubles(&[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]);
+            bounds.push(1);
+            bounds
+        }),
+        native("Ball", "Sphere", doubles(&[0.0, 0.0, 0.0, 4.0])),
+        native("Key", "RichCurveKey", {
+            let mut key = vec![0u8, 1, 2];
+            for value in [0.5f32, 1.0, 0.0, 0.0, 0.0, 0.0] {
+                key.extend_from_slice(&value.to_le_bytes());
+            }
+            key
+        }),
+        native("Range", "MovieSceneFrameRange", {
+            let mut range = Vec::new();
+            for (kind, frame) in [(1i8, 0i32), (2, 30)] {
+                range.push(kind as u8);
+                range.extend_from_slice(&frame.to_le_bytes());
+            }
+            range
+        }),
+        native(
+            "Agents",
+            "NavAgentSelector",
+            0b1001u32.to_le_bytes().to_vec(),
+        ),
     ]
+}
+
+fn native(name: &'static str, kind: &str, bytes: Vec<u8>) -> Slot {
+    let inner = PropertyInner::Struct { name: kind.into() };
+    slot(name, inner, Held::Bytes(bytes))
+}
+
+fn doubles(values: &[f64]) -> Vec<u8> {
+    values
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect()
 }
 
 /// The export's bytes: the header naming what it stores, the values, and no object guid.

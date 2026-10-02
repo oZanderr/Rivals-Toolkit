@@ -104,7 +104,7 @@ pub(crate) fn read_native(
         // reaches the disk.
         "SerializablePropertySoftPath" => serializable_property_soft_path(cursor, ctx, diagnostics),
         "GameplayTagContainer" => gameplay_tag_container(cursor, ctx, diagnostics),
-        "NavAgentSelector" => nav_agent_selector(cursor),
+        "NavAgentSelector" => nav_agent_selector(cursor, diagnostics),
         "RichCurveKey" => rich_curve_key(cursor),
         "MovieSceneFrameRange" => frame_range(cursor, name),
         "PerPlatformFloat" => per_platform(cursor, name, PerPlatform::Float),
@@ -300,56 +300,53 @@ fn bytes(cursor: &mut Cursor<'_>, name: &str, labels: &[&str]) -> Result<Propert
 }
 
 fn ticks(cursor: &mut Cursor<'_>, name: &str, label: &str) -> Result<PropertyValue, String> {
-    let value = cursor.read_i64()?;
-    Ok(build(
-        name,
-        vec![entry(label, PropertyValue::Int { value })],
-    ))
+    let ticks = scalar(cursor, label, |c| {
+        Ok(PropertyValue::Int {
+            value: c.read_i64()?,
+        })
+    })?;
+    Ok(build(name, vec![ticks]))
 }
 
 fn matrix(cursor: &mut Cursor<'_>, name: &str, wide: bool) -> Result<PropertyValue, String> {
     let mut fields = Vec::with_capacity(16);
     for index in 0..16 {
-        let value = if wide {
-            cursor.read_f64()?
-        } else {
-            f64::from(cursor.read_f32()?)
-        };
-        fields.push(entry(
+        fields.push(scalar(
+            cursor,
             &format!("M{}{}", index / 4, index % 4),
-            PropertyValue::Float { value },
-        ));
+            |c| {
+                let value = if wide {
+                    c.read_f64()?
+                } else {
+                    f64::from(c.read_f32()?)
+                };
+                Ok(PropertyValue::Float { value })
+            },
+        )?);
     }
     Ok(build(name, fields))
 }
 
+/// A box's validity, a byte of its own.
+fn is_valid(cursor: &mut Cursor<'_>) -> Result<PropertyEntry, String> {
+    scalar(cursor, "IsValid", |c| {
+        Ok(PropertyValue::Bool {
+            value: c.read_u8()? != 0,
+        })
+    })
+}
+
 fn bounds(cursor: &mut Cursor<'_>, name: &str, axes: &[&str]) -> Result<PropertyValue, String> {
-    let min = doubles(cursor, "Min", axes)?;
-    let max = doubles(cursor, "Max", axes)?;
-    let is_valid = cursor.read_u8()? != 0;
-    Ok(build(
-        name,
-        vec![
-            entry("Min", min),
-            entry("Max", max),
-            entry("IsValid", PropertyValue::Bool { value: is_valid }),
-        ],
-    ))
+    let min = scalar(cursor, "Min", |c| doubles(c, "Min", axes))?;
+    let max = scalar(cursor, "Max", |c| doubles(c, "Max", axes))?;
+    Ok(build(name, vec![min, max, is_valid(cursor)?]))
 }
 
 /// The single-precision box: `Vector2f` bounds and the validity byte.
 fn bounds_f32(cursor: &mut Cursor<'_>, name: &str, axes: &[&str]) -> Result<PropertyValue, String> {
-    let min = floats(cursor, "Min", axes)?;
-    let max = floats(cursor, "Max", axes)?;
-    let is_valid = cursor.read_u8()? != 0;
-    Ok(build(
-        name,
-        vec![
-            entry("Min", min),
-            entry("Max", max),
-            entry("IsValid", PropertyValue::Bool { value: is_valid }),
-        ],
-    ))
+    let min = scalar(cursor, "Min", |c| floats(c, "Min", axes))?;
+    let max = scalar(cursor, "Max", |c| floats(c, "Max", axes))?;
+    Ok(build(name, vec![min, max, is_valid(cursor)?]))
 }
 
 /// `FMovieSceneEventParameters::Serialize`: the payload struct's soft path, then its bytes as a
@@ -371,15 +368,13 @@ fn event_parameters(
 }
 
 fn sphere(cursor: &mut Cursor<'_>, name: &str) -> Result<PropertyValue, String> {
-    let center = doubles(cursor, "Center", &["X", "Y", "Z"])?;
-    let radius = cursor.read_f64()?;
-    Ok(build(
-        name,
-        vec![
-            entry("Center", center),
-            entry("W", PropertyValue::Float { value: radius }),
-        ],
-    ))
+    let center = scalar(cursor, "Center", |c| doubles(c, "Center", &["X", "Y", "Z"]))?;
+    let radius = scalar(cursor, "W", |c| {
+        Ok(PropertyValue::Float {
+            value: c.read_f64()?,
+        })
+    })?;
+    Ok(build(name, vec![center, radius]))
 }
 
 /// A guid a class writes after its properties, kept editable like one inside them.
@@ -416,13 +411,23 @@ fn top_level_asset_path(cursor: &mut Cursor<'_>, ctx: &Ctx<'_>) -> Result<Proper
 }
 
 /// The sixteen reflected bitfield bools share one word that is not itself a property, and
-/// `FNavAgentSelector::Serialize` writes only that word.
-fn nav_agent_selector(cursor: &mut Cursor<'_>) -> Result<PropertyValue, String> {
+/// `FNavAgentSelector::Serialize` writes only that word. Each bool spans the whole word, which an
+/// edit rewrites with its bit changed.
+fn nav_agent_selector(
+    cursor: &mut Cursor<'_>,
+    diagnostics: &mut Diagnostics,
+) -> Result<PropertyValue, String> {
+    let start = cursor.file_offset();
+    diagnostics
+        .native_leaves
+        .push((start, NativeLeaf::AgentBits));
     let packed = cursor.read_u32()?;
+    let span = Some((start, cursor.file_offset()));
     let fields = (0..16)
-        .map(|bit| {
-            entry(
-                &format!("bSupportsAgent{bit}"),
+        .map(|bit| PropertyEntry {
+            span,
+            ..entry(
+                &format!("{AGENT_BIT}{bit}"),
                 PropertyValue::Bool {
                     value: packed >> bit & 1 == 1,
                 },
@@ -430,6 +435,17 @@ fn nav_agent_selector(cursor: &mut Cursor<'_>) -> Result<PropertyValue, String> 
         })
         .collect();
     Ok(build("NavAgentSelector", fields))
+}
+
+/// What each of a `NavAgentSelector`'s bits is called, before its number.
+const AGENT_BIT: &str = "bSupportsAgent";
+
+/// Which bit of a `NavAgentSelector`'s word the field named `name` is.
+pub(crate) fn agent_bit(name: &str) -> Option<u32> {
+    name.strip_prefix(AGENT_BIT)?
+        .parse()
+        .ok()
+        .filter(|bit| *bit < 32)
 }
 
 fn marvel_soft_object_path(cursor: &mut Cursor<'_>) -> Result<PropertyValue, String> {
@@ -571,12 +587,11 @@ fn gameplay_tag_container(
 fn rich_curve_key(cursor: &mut Cursor<'_>) -> Result<PropertyValue, String> {
     let mut fields = Vec::with_capacity(9);
     for label in ["InterpMode", "TangentMode", "TangentWeightMode"] {
-        fields.push(entry(
-            label,
-            PropertyValue::Byte {
-                value: cursor.read_u8()?,
-            },
-        ));
+        fields.push(scalar(cursor, label, |c| {
+            Ok(PropertyValue::Byte {
+                value: c.read_u8()?,
+            })
+        })?);
     }
     for label in [
         "Time",
@@ -586,12 +601,11 @@ fn rich_curve_key(cursor: &mut Cursor<'_>) -> Result<PropertyValue, String> {
         "LeaveTangent",
         "LeaveTangentWeight",
     ] {
-        fields.push(entry(
-            label,
-            PropertyValue::Float {
-                value: f64::from(cursor.read_f32()?),
-            },
-        ));
+        fields.push(scalar(cursor, label, |c| {
+            Ok(PropertyValue::Float {
+                value: f64::from(c.read_f32()?),
+            })
+        })?);
     }
     Ok(build("RichCurveKey", fields))
 }
@@ -600,28 +614,19 @@ fn rich_curve_key(cursor: &mut Cursor<'_>) -> Result<PropertyValue, String> {
 fn frame_range(cursor: &mut Cursor<'_>, name: &str) -> Result<PropertyValue, String> {
     let mut fields = Vec::with_capacity(2);
     for label in ["LowerBound", "UpperBound"] {
-        let kind = cursor.read_i8()?;
-        let value = cursor.read_i32()?;
-        fields.push(entry(
-            label,
-            build(
-                "FrameNumberRangeBound",
-                vec![
-                    entry(
-                        "Type",
-                        PropertyValue::Int {
-                            value: i64::from(kind),
-                        },
-                    ),
-                    entry(
-                        "Value",
-                        PropertyValue::Int {
-                            value: i64::from(value),
-                        },
-                    ),
-                ],
-            ),
-        ));
+        fields.push(scalar(cursor, label, |c| {
+            let kind = scalar(c, "Type", |c| {
+                Ok(PropertyValue::Int {
+                    value: i64::from(c.read_i8()?),
+                })
+            })?;
+            let value = scalar(c, "Value", |c| {
+                Ok(PropertyValue::Int {
+                    value: i64::from(c.read_i32()?),
+                })
+            })?;
+            Ok(build("FrameNumberRangeBound", vec![kind, value]))
+        })?);
     }
     Ok(build(name, fields))
 }
@@ -1228,6 +1233,47 @@ mod tests {
     /// exactly its length, so a slot stored from nothing decodes as the struct it declares.
     #[test]
     fn every_native_default_reads_back_to_its_own_length() {
+        for (name, value) in every_native_default() {
+            assert!(
+                !matches!(value, PropertyValue::Unset { .. }),
+                "{name} reads back as a value"
+            );
+        }
+    }
+
+    /// Every field a native layout reads records the bytes it came from, so each one edits in
+    /// place, however deep it sits.
+    #[test]
+    fn every_native_leaf_carries_the_bytes_it_was_read_from() {
+        fn unspanned(fields: &[PropertyEntry], at: &str, out: &mut Vec<String>) {
+            for field in fields {
+                let here = format!("{at}.{}", field.name);
+                if field.span.is_none() {
+                    out.push(here.clone());
+                }
+                within(&field.value, &here, out);
+            }
+        }
+        fn within(value: &PropertyValue, at: &str, out: &mut Vec<String>) {
+            match value {
+                PropertyValue::Struct { fields, .. } => unspanned(fields, at, out),
+                PropertyValue::Array { items } | PropertyValue::Set { items } => {
+                    for (index, item) in items.iter().enumerate() {
+                        within(item, &format!("{at}[{index}]"), out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut missing = Vec::new();
+        for (name, value) in every_native_default() {
+            within(&value, name, &mut missing);
+        }
+        assert!(missing.is_empty(), "{missing:#?}");
+    }
+
+    /// Each native layout's default, read back through the layout.
+    fn every_native_default() -> Vec<(&'static str, PropertyValue)> {
         use retoc::legacy_asset::FPackageNameMap;
         use usmap::{Property, PropertyInner, Struct};
 
@@ -1265,6 +1311,7 @@ mod tests {
             "Sphere",
             "RichCurveKey",
             "MovieSceneFrameRange",
+            "NavAgentSelector",
             "FontCharacter",
             "FontData",
             "Transform3f",
@@ -1320,6 +1367,7 @@ mod tests {
             synth: None,
             local: None,
         };
+        let mut read = Vec::with_capacity(NATIVE.len());
         for name in NATIVE {
             let parts = match native_default(name) {
                 NativeDefault::Fixed(bytes) => vec![DefaultPart::Bytes(bytes)],
@@ -1347,11 +1395,9 @@ mod tests {
                 bytes.len(),
                 "{name} consumes its default"
             );
-            assert!(
-                !matches!(value, PropertyValue::Unset { .. }),
-                "{name} reads back as a value"
-            );
+            read.push((*name, value));
         }
+        read
     }
 
     /// The reflected side of the layouts that wrap a property block: the tether data declares no
@@ -1700,7 +1746,8 @@ mod tests {
     fn a_nav_agent_selector_is_one_packed_word_not_sixteen_bools() {
         let data = 0b1001u32.to_le_bytes();
         let mut cursor = Cursor::new(&data, 0);
-        let value = nav_agent_selector(&mut cursor).expect("selector");
+        let value = nav_agent_selector(&mut cursor, &mut crate::props::Diagnostics::default())
+            .expect("selector");
         assert!(cursor.remaining() == 0);
         let PropertyValue::Struct { fields, .. } = value else {
             panic!("expected a struct");

@@ -1336,6 +1336,9 @@ pub fn patch_package_with(
     let mut object_links: Vec<(u64, i32)> = Vec::new();
     // The keys added to each set or map in this save, since two edits cannot see each other.
     let mut inserted_keys: Vec<(u64, Vec<u8>)> = Vec::new();
+    // Each word of bits several edits share, by where it starts, with the pending splice that
+    // writes it, so every bit changed in this save lands in the one write.
+    let mut bit_words: BTreeMap<u64, usize> = BTreeMap::new();
     // Several edits can land in one property block, and its header may only be re-emitted once.
     let mut blocks: BTreeMap<u64, (UnversionedHeader, usize)> = BTreeMap::new();
 
@@ -1470,6 +1473,48 @@ pub fn patch_package_with(
         // it did. Container edits produce two splices because the element count is written apart
         // from the elements.
         let (splices, done) = match &edit.op {
+            EditOp::Set { text }
+                if stored && native_leaf_at(parsed, start) == Some(NativeLeaf::AgentBits) =>
+            {
+                let bit = crate::structs::agent_bit(&entry.name)
+                    .ok_or_else(|| format!("{} is not one of the word's bits", entry.label()))?;
+                let held = bit_words.get(&start).copied();
+                let word = match held {
+                    Some(at) => &pending[at].splice.bytes[..],
+                    None => bytes_at(bundle, base, start, end)?,
+                };
+                let word: [u8; 4] = word
+                    .try_into()
+                    .map_err(|_| format!("{} is not held in one word", entry.label()))?;
+                let word = u32::from_le_bytes(word);
+                let word = match bool_text(text)? {
+                    true => word | 1 << bit,
+                    false => word & !(1 << bit),
+                };
+                let bytes = word.to_le_bytes().to_vec();
+                let splices = match held {
+                    Some(at) => {
+                        pending[at].splice.bytes = bytes;
+                        Vec::new()
+                    }
+                    None => {
+                        bit_words.insert(start, pending.len());
+                        vec![Splice { start, end, bytes }]
+                    }
+                };
+                (
+                    splices,
+                    AppliedEdit {
+                        name: entry.label(),
+                        offset: start,
+                        offset_after: start,
+                        element: None,
+                        elements_after: None,
+                        before: entry.value.summary(),
+                        after: text.clone(),
+                    },
+                )
+            }
             EditOp::Set { text } => {
                 let was = bytes_at(bundle, base, start, end)?;
                 // A value with no bytes shares its offset with the one stored next, which is not
@@ -6943,6 +6988,15 @@ fn encode_declared(declared: &str, text: &str, target: Target<'_>) -> Result<Vec
     }
 }
 
+/// A bool as it can be typed.
+fn bool_text(text: &str) -> Result<bool, String> {
+    match text.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Ok(true),
+        "false" | "0" | "no" | "off" => Ok(false),
+        other => Err(format!("{other} is not true or false")),
+    }
+}
+
 /// Numbers are written at the width the asset already uses, or at the width the schema declares
 /// when the value is not stored yet, so the size is never a guess.
 fn encode_scalar(
@@ -6957,11 +7011,7 @@ fn encode_scalar(
     })?;
     let bytes = match value {
         PropertyValue::Bool { .. } => {
-            let on = match text.to_ascii_lowercase().as_str() {
-                "true" | "1" | "yes" | "on" => true,
-                "false" | "0" | "no" | "off" => false,
-                other => return Err(format!("{other} is not true or false")),
-            };
+            let on = bool_text(text)?;
             match width {
                 1 => vec![u8::from(on)],
                 4 => u32::from(on).to_le_bytes().to_vec(),
@@ -7076,6 +7126,9 @@ fn encode_native_leaf(
         }
         NativeLeaf::MarvelSoftObjectPath => Ok(encode_string(text)),
         NativeLeaf::StringTableId => Ok(encode_name(text, names)),
+        NativeLeaf::AgentBits => {
+            Err("a NavAgentSelector's bits are set one at a time, by name".to_string())
+        }
     }
 }
 
