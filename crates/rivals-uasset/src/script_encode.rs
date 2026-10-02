@@ -637,6 +637,31 @@ pub(crate) fn assemble(
     })
 }
 
+/// What is wrong with `text` as the script of `export`, line by line, and what is only worth
+/// knowing: both empty for a text that assembles cleanly.
+pub fn text_diagnostics(
+    bundle: &AssetBundle<'_>,
+    parsed: &ParsedPackage,
+    export: u32,
+    text: &str,
+) -> Result<(Vec<Diagnostic>, Vec<Diagnostic>), String> {
+    let header = crate::package::read_header(bundle)?;
+    let mut tables = Tables {
+        names: header.name_map.clone(),
+        imports: header.imports.clone(),
+    };
+    let options = AssembleOptions {
+        add_names: true,
+        add_imports: true,
+    };
+    Ok(
+        match assemble(text, parsed, export, &header, &mut tables, options) {
+            Ok(assembled) => (Vec::new(), assembled.warnings),
+            Err(errors) => (errors, Vec::new()),
+        },
+    )
+}
+
 /// Where the offsets a script had land in the code written from a text: every label named after an
 /// offset, and the script's old end at its new one.
 pub(crate) fn moved_of(

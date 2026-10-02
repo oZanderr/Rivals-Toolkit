@@ -558,3 +558,103 @@ describe("AssetInspector script edits", () => {
     ]);
   });
 });
+
+describe("AssetInspector script text", () => {
+  const PRINTED = `${BRANCH}\nReturn Nothing\n@0139:\nEndOfScript\n`;
+  const assembles = {
+    diagnostics: [],
+    warnings: [],
+    applied: [
+      { name: "IsActiveAbility script text", before: "3 statement(s)", after: "4 statement(s)" },
+    ],
+  };
+
+  function textView() {
+    return { ...scriptView(), text: PRINTED };
+  }
+
+  /** Puts the caret at the very start of the text and types there. */
+  async function typeAtStart(user: ReturnType<typeof userEvent.setup>, text: string) {
+    const content = await waitFor(() => {
+      const found = document.querySelector("[data-testid=script-text] .cm-content");
+      expect(found, "the editor should be mounted").not.toBeNull();
+      return found as HTMLElement;
+    });
+    content.focus();
+    await user.keyboard("{Control>}{Home}{/Control}");
+    await user.keyboard(text);
+  }
+
+  it("writes a function from text and saves it with the text it printed", async () => {
+    mock = tauri(functionPackage())
+      .on("export_script_view", () => textView())
+      .on("assemble_preview", () => assembles);
+    installTauri(mock);
+    mount();
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: /Edit as text/ }));
+    await typeAtStart(user, "Return Nothing{Enter}");
+    expect(await screen.findByText(/Assembles\. Save as mod to write it/)).toBeTruthy();
+    expect(screen.getByText(/3 statement\(s\) → 4 statement\(s\)/)).toBeTruthy();
+    await user.click(await screen.findByRole("button", { name: /Save as mod/ }));
+    await waitFor(() =>
+      expect(lastSave().script_texts).toEqual([
+        { export: 0, text: `Return Nothing\n${PRINTED}`, was: PRINTED },
+      ])
+    );
+  });
+
+  it("marks the lines the assembler refuses and lists why", async () => {
+    mock = tauri(functionPackage())
+      .on("export_script_view", () => textView())
+      .on("assemble_preview", () => ({
+        diagnostics: [{ line: 1, column: 6, message: "expected a label such as @0045" }],
+        warnings: [],
+        applied: [],
+      }));
+    installTauri(mock);
+    mount();
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: /Edit as text/ }));
+    await typeAtStart(user, "x");
+    expect(await screen.findByText("line 1:6: expected a label such as @0045")).toBeTruthy();
+    await waitFor(() => expect(document.querySelector(".cm-st-error-line")).not.toBeNull());
+  });
+
+  it("locks the expressions while the function is written from text, and frees them on discard", async () => {
+    mock = tauri(functionPackage())
+      .on("export_script_view", () => textView())
+      .on("assemble_preview", () => assembles);
+    installTauri(mock);
+    mount();
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: /Edit as text/ }));
+    await typeAtStart(user, "Return Nothing{Enter}");
+    await screen.findByText(/Assembles\./);
+    await user.click(screen.getByRole("button", { name: /Listing/ }));
+    expect(await screen.findByText("written from text, not saved yet")).toBeTruthy();
+    expect(
+      (screen.getByRole("button", { name: "always false" }) as HTMLButtonElement).disabled
+    ).toBe(true);
+    await user.click(screen.getByRole("button", { name: /Edit as text/ }));
+    await user.click(await screen.findByRole("button", { name: /Discard text/ }));
+    await waitFor(() =>
+      expect(
+        (screen.getByRole("button", { name: "always false" }) as HTMLButtonElement).disabled
+      ).toBe(false)
+    );
+  });
+
+  it("will not write a function from text over edits inside it", async () => {
+    mock = tauri(functionPackage()).on("export_script_view", () => textView());
+    installTauri(mock);
+    mount();
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "always false" }));
+    await waitFor(() =>
+      expect(
+        (screen.getByRole("button", { name: /Edit as text/ }) as HTMLButtonElement).disabled
+      ).toBe(true)
+    );
+  });
+});

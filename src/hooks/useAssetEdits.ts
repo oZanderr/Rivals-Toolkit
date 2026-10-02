@@ -35,6 +35,7 @@ export type Draft =
   | { op: "payload_replace"; file: string }
   | { op: "bulk_replace"; file: string }
   | { op: "script_set"; text: string }
+  | { op: "script_text"; text: string }
   | { op: "row_add"; at: number }
   | { op: "row_duplicate"; source: string; at: number }
   | { op: "row_remove" }
@@ -77,6 +78,8 @@ export interface EditTarget {
   /** An expression in an export's bytecode: by the offset it starts at when `at` is set, and
    *  otherwise as its statement's `constant`-th literal. */
   script?: { export: number; statement: number; constant: number; at?: number };
+  /** A function's whole script, written anew from assembler text. */
+  scriptText?: { export: number };
   /** The value as it read when the draft was made, so a save refuses one that has since changed. */
   was?: string;
   /** Down from the value at this target to the one the draft sets: field names through an unset
@@ -125,6 +128,7 @@ const SEP = String.fromCharCode(0);
 
 export function draftKey(target: EditTarget): string {
   if (target.payload) return ["payload", target.payload.export].join(SEP);
+  if (target.scriptText) return ["script_text", target.scriptText.export].join(SEP);
   if (target.bulk) return ["bulk", target.bulk.resource].join(SEP);
   if (target.script) {
     const { export: exportIndex, statement, constant, at } = target.script;
@@ -181,6 +185,17 @@ export function payloadTarget(exportIndex: number): EditTarget {
 /** Bulk data resource `resource` of the package. */
 export function bulkTarget(resource: number): EditTarget {
   return { offset: 0, name: "bulk", kind: "bulk", bulk: { resource } };
+}
+
+/** The whole script of export `exportIndex`, which printed as `was` when the text was taken. */
+export function scriptTextTarget(exportIndex: number, was: string): EditTarget {
+  return {
+    offset: 0,
+    name: "script text",
+    kind: "script_text",
+    scriptText: { export: exportIndex },
+    was,
+  };
 }
 
 /** Literal `constant` of the statement at `statement` in the bytecode of export `exportIndex`. */
@@ -462,6 +477,7 @@ interface EditList {
   payloads?: PayloadEdit[];
   bulk?: BulkEdit[];
   scripts?: ScriptEdit[];
+  script_texts?: ScriptTextEdit[];
   remove_exports?: number[];
   reset_exports?: number[];
   duplicate_exports?: { export: number; name: string; into_level?: number }[];
@@ -559,6 +575,18 @@ function toScriptEdit({ target, draft }: DraftRecord): ScriptEdit | null {
   const edit: ScriptEdit = { ...target.script, value: draft.text };
   if (target.script.at !== undefined && target.was !== undefined) edit.was = target.was;
   return edit;
+}
+
+/** A function's whole script written anew from text, held to the text it printed as. */
+interface ScriptTextEdit {
+  export: number;
+  text: string;
+  was?: string;
+}
+
+function toScriptTextEdit({ target, draft }: DraftRecord): ScriptTextEdit | null {
+  if (!target.scriptText || draft.op !== "script_text") return null;
+  return { export: target.scriptText.export, text: draft.text, was: target.was };
 }
 
 function toBulkEdit({ target, draft }: DraftRecord): BulkEdit | null {
@@ -965,6 +993,7 @@ export function useAssetEdits({
           !record.target.payload &&
           !record.target.bulk &&
           !record.target.script &&
+          !record.target.scriptText &&
           !record.target.path &&
           !isKeyDraft(record.draft)
       );
@@ -975,6 +1004,7 @@ export function useAssetEdits({
       const payloads = records.flatMap((record) => toPayloadEdit(record) ?? []);
       const bulk = records.flatMap((record) => toBulkEdit(record) ?? []);
       const scripts = records.flatMap((record) => toScriptEdit(record) ?? []);
+      const scriptTexts = records.flatMap((record) => toScriptTextEdit(record) ?? []);
       const imports = structural ? [] : Object.values(importDrafts);
       if (!structural && !saveAs && records.length === 0 && imports.length === 0) return;
       const dropped = structural?.removeImports ?? [];
@@ -993,6 +1023,7 @@ export function useAssetEdits({
           payloads,
           bulk,
           scripts,
+          script_texts: scriptTexts,
           remove_exports: structural?.remove ?? [],
           reset_exports: structural?.reset ?? [],
           duplicate_exports: structural?.duplicate ?? [],

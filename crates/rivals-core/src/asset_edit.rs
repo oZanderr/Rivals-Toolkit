@@ -1356,6 +1356,76 @@ fn text_calls(
     out
 }
 
+/// What writing a function anew from text would do, before anything is saved.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TextPreview {
+    /// What stops the text assembling, line by line. Nothing else is worked out until it does.
+    pub diagnostics: Vec<rivals_uasset::Diagnostic>,
+    /// What assembles but is worth knowing, such as an object imported without its class.
+    pub warnings: Vec<rivals_uasset::Diagnostic>,
+    /// Why the save would be refused once the text assembles: a label something enters at that
+    /// the text dropped, a layout the function has to keep, a call of the wrong shape.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refused: Option<String>,
+    /// The calls the save would need leave for, as the refusal it would give without it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unchecked: Option<String>,
+    /// What the save would change: the script, each entry and resume point it moves, its layout.
+    pub applied: Vec<rivals_uasset::AppliedEdit>,
+}
+
+/// What writing the function at `export` anew from `text` would do: the check a save makes, and
+/// the changes it would make, without saving.
+pub fn preview_script_text(
+    request: &AssetEditRequest<'_>,
+    mappings: Option<&Mappings>,
+    export: u32,
+    text: &str,
+) -> Result<TextPreview, String> {
+    let (loaded, parsed) = read_package(request, mappings)?;
+    let (diagnostics, warnings) =
+        rivals_uasset::text_diagnostics(&bundle_of(&loaded), &parsed, export, text)?;
+    let mut preview = TextPreview {
+        diagnostics,
+        warnings,
+        refused: None,
+        unchecked: None,
+        applied: Vec::new(),
+    };
+    if !preview.diagnostics.is_empty() {
+        return Ok(preview);
+    }
+    let attempt = |allow_unchecked: bool| {
+        preview_edits(
+            &AssetEditRequest {
+                changes: PackageEdits {
+                    script_texts: vec![rivals_uasset::ScriptTextEdit {
+                        export,
+                        text: text.to_string(),
+                        was: None,
+                    }],
+                    allow_unchecked,
+                    ..Default::default()
+                },
+                ..*request
+            },
+            mappings,
+        )
+    };
+    let outcome = match attempt(false) {
+        Err(refused) if refused.starts_with(crate::object_check::UNCHECKED) => {
+            preview.unchecked = Some(refused);
+            attempt(true)
+        }
+        other => other,
+    };
+    match outcome {
+        Ok((patched, _)) => preview.applied = patched.applied,
+        Err(refused) => preview.refused = Some(refused),
+    }
+    Ok(preview)
+}
+
 /// What a call would meet pointed at another function, before anything is saved.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CallPreview {
@@ -14423,5 +14493,46 @@ mod game_data_tests {
         let text = text_of(&before, "Initialize Anim Events");
         let (patched, _) = fixture.apply_changes(text_edit(export, text));
         assert_eq!(patched.exports, fixture.loaded.exports_file_buffer);
+    }
+
+    /// The app's preview names a text's problems by line, and once the text assembles, what the
+    /// save would change and the calls it would need leave for.
+    #[test]
+    fn a_text_preview_lists_problems_by_line_and_then_what_a_save_would_do() {
+        let Some(fixture) = Fixture::open(PLAYER_CONTROLLER) else {
+            return;
+        };
+        let before = fixture.parse();
+        let export = function(&before, "IsActiveAbility").index;
+        let request = fixture.request_changes(PackageEdits::default());
+        let broken = preview_script_text(&request, Some(&fixture.schema), export, "Jump\n")
+            .expect("previewed");
+        assert_eq!(broken.diagnostics.len(), 1, "{broken:?}");
+        assert_eq!(broken.diagnostics[0].line, 1);
+        assert!(broken.applied.is_empty());
+
+        let text = text_of(&before, "IsActiveAbility").replacen(
+            "@0139:\n",
+            "LetBool LocalVariable(CallFunc_Greater_IntInt_ReturnValue) = CallMath /Script/Engine.KismetMathLibrary:Less_IntInt(LocalVariable(CallFunc_Array_Length_ReturnValue), 3)\n@0139:\n",
+            1,
+        );
+        let preview =
+            preview_script_text(&request, Some(&fixture.schema), export, &text).expect("previewed");
+        assert!(preview.diagnostics.is_empty(), "{preview:?}");
+        assert!(preview.refused.is_none(), "{preview:?}");
+        assert!(
+            preview
+                .unchecked
+                .as_deref()
+                .is_some_and(|unchecked| unchecked.contains("Less_IntInt")),
+            "{preview:?}"
+        );
+        assert!(
+            preview
+                .applied
+                .iter()
+                .any(|applied| applied.name == "IsActiveAbility script text"),
+            "{preview:?}"
+        );
     }
 }

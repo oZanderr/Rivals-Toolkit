@@ -429,6 +429,41 @@ pub(crate) async fn export_script_view(
     .map_err(|e| e.to_string())?
 }
 
+/// What writing the function at `export` anew from `text` would do: the problems the text has,
+/// line by line, or the changes a save would make and what it would need leave for. See
+/// `rivals_core::asset_edit::preview_script_text`.
+#[tauri::command]
+pub(crate) async fn assemble_preview(
+    state: State<'_, SettingsState>,
+    game_root: String,
+    container: String,
+    entry: String,
+    export: u32,
+    text: String,
+) -> Result<asset_edit::TextPreview, String> {
+    let usmap = configured_usmap(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let schema = mappings::resolve(None, usmap.as_deref())
+            .and_then(|path| mappings::load(&path))
+            .ok();
+        asset_edit::preview_script_text(
+            &AssetEditRequest {
+                game_root: &game_root,
+                container: &container,
+                entry: &entry,
+                kind: source_of(&container),
+                mod_name: "",
+                changes: Default::default(),
+            },
+            schema.as_deref(),
+            export,
+            &text,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// How the call starting at `at` would fare pointed at `value`: both functions' shapes and the
 /// verdict a save would reach. See `rivals_core::asset_edit::preview_call`.
 #[tauri::command]

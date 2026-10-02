@@ -43,6 +43,7 @@ import {
   X,
 } from "lucide-react";
 
+import { ScriptTextEditor } from "@/components/ScriptTextEditor";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -97,6 +98,7 @@ import {
   pathCheckText,
   usePathCheck,
   withWarnings,
+  scriptTextTarget,
 } from "@/hooks/useAssetEdits";
 import { useExportClipboard, type ExportClipboard } from "@/hooks/useExportClipboard";
 import { useSaveHotkeys } from "@/hooks/useSaveHotkeys";
@@ -1838,6 +1840,22 @@ function ScriptPane({
   const [view, setView] = useState<ScriptView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(true);
+  const session = useEditSession();
+  const [asText, setAsText] = useState(false);
+  const textKey = draftKey(scriptTextTarget(exportIndex, ""));
+  const textDraft = session.drafts[textKey]?.draft;
+  const draftText = textDraft?.op === "script_text" ? textDraft.text : null;
+  // A text replaces the whole script, so nothing inside it can be drafted alongside one.
+  const listed = useMemo<EditSession>(
+    () =>
+      draftText === null
+        ? session
+        : {
+            ...session,
+            locked: "This function is being written from text: save or discard the text first.",
+          },
+    [session, draftText]
+  );
 
   // The pane is keyed by export, so it mounts fresh for each one and the effect never has to
   // reset what the last one left behind.
@@ -1883,6 +1901,45 @@ function ScriptPane({
   if (error || !view) {
     return <p className="p-6 text-center text-sm text-red-400">{error ?? "No script"}</p>;
   }
+  const printed = view.text ?? null;
+  const pending = Object.values(session.drafts).filter(
+    (record) =>
+      record.target.script?.export === exportIndex || record.target.payload?.export === exportIndex
+  ).length;
+  const textBlocked =
+    printed === null
+      ? "Only a script that decoded whole can be edited as text."
+      : session.locked
+        ? session.locked
+        : pending > 0
+          ? `Save or discard the ${pending} edit${pending === 1 ? "" : "s"} to this function first.`
+          : null;
+  if (asText && printed !== null && !textBlocked) {
+    return (
+      <ScriptTextEditor
+        gamePath={gamePath}
+        container={container}
+        entry={entry}
+        exportIndex={exportIndex}
+        initial={draftText ?? printed}
+        keepsLayout={view.resize_lock ?? null}
+        onText={(text) => {
+          if (text === printed) session.dropDraft(textKey);
+          else
+            session.setDraft(
+              scriptTextTarget(exportIndex, printed),
+              { op: "script_text", text },
+              []
+            );
+        }}
+        onDiscard={() => {
+          session.dropDraft(textKey);
+          setAsText(false);
+        }}
+        onDone={() => setAsText(false)}
+      />
+    );
+  }
   return (
     <div className="min-h-0 min-w-0 flex-1 overflow-auto">
       <div className="flex items-center gap-3 border-b border-border/60 px-3 py-1.5 text-[11px] text-muted-foreground">
@@ -1903,6 +1960,27 @@ function ScriptPane({
             </span>
           </Tip>
         )}
+        {draftText !== null && (
+          <span className="text-blue-accent-foreground">written from text, not saved yet</span>
+        )}
+        <Tip
+          content={
+            textBlocked ??
+            "Rewrite the whole function as text: add, drop, move or change statements."
+          }
+        >
+          <span className="ml-auto">
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-6 px-2 text-[11px]"
+              disabled={textBlocked !== null}
+              onClick={() => setAsText(true)}
+            >
+              <Pencil size={12} /> Edit as text
+            </Button>
+          </span>
+        </Tip>
       </div>
       {view.signature_text && view.signature && (
         <div className="border-b border-border/60 px-3 py-1.5 font-mono text-[11px]">
@@ -1939,16 +2017,18 @@ function ScriptPane({
           ))}
         </div>
       )}
-      <ScriptLines
-        exportIndex={exportIndex}
-        lines={view.lines}
-        endLabels={view.end_labels ?? []}
-        entries={view.entries}
-        exportNames={exportNames}
-        focus={focus}
-        onOpen={onOpen}
-        previewCall={previewCall}
-      />
+      <EditSessionContext.Provider value={listed}>
+        <ScriptLines
+          exportIndex={exportIndex}
+          lines={view.lines}
+          endLabels={view.end_labels ?? []}
+          entries={view.entries}
+          exportNames={exportNames}
+          focus={focus}
+          onOpen={onOpen}
+          previewCall={previewCall}
+        />
+      </EditSessionContext.Provider>
     </div>
   );
 }

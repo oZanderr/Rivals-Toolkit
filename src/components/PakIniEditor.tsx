@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 
-import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import {
   ChangeSet,
   EditorState,
@@ -64,6 +63,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Tip } from "@/components/ui/tooltip";
+import { editingKeys, editorTheme } from "@/lib/codeEditor";
 import {
   countMatches,
   matchAtOrAfter,
@@ -1097,48 +1097,6 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
       editorViewRef.current = null;
     }
 
-    const cmTheme = EditorView.theme({
-      "&": {
-        height: "100%",
-        fontSize: "13px",
-        backgroundColor: "var(--color-background)",
-      },
-      ".cm-content": {
-        fontFamily: "ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace",
-        caretColor: "var(--color-foreground)",
-        color: "var(--color-foreground)",
-        // Pinned to an integer pixel value so every row renders at the same height;
-        // a unitless multiplier (e.g. 1.625) yields 21.125px which the browser
-        // rounds inconsistently between rows.
-        lineHeight: "21px",
-        padding: "16px 0",
-      },
-      ".cm-line": {
-        padding: "0 16px",
-      },
-      "&.cm-focused .cm-cursor": {
-        borderLeftColor: "var(--color-foreground)",
-      },
-      "&.cm-focused .cm-selectionBackground, .cm-selectionBackground": {
-        backgroundColor: "hsl(215 60% 40% / 0.4)",
-      },
-      ".cm-gutters": {
-        display: "none",
-      },
-      ".cm-scroller": {
-        overflow: "auto",
-      },
-      "&.cm-focused": {
-        outline: "none",
-      },
-      ".cm-search-match": {
-        backgroundColor: "hsl(210 80% 60% / 0.35)",
-      },
-      ".cm-search-match-current": {
-        backgroundColor: "hsl(210 80% 60% / 0.7)",
-      },
-    });
-
     const cmKeymap = keymap.of([
       {
         key: "Mod-s",
@@ -1179,10 +1137,9 @@ export function PakIniEditor({ gamePath, isActive, gameRunning }: Props) {
       EditorState.create({
         doc: currentContent,
         extensions: [
-          cmTheme,
+          editorTheme(),
           cmKeymap,
-          keymap.of([...defaultKeymap, ...historyKeymap]),
-          history(),
+          editingKeys(),
           searchExtension,
           updateListener,
           EditorView.lineWrapping,

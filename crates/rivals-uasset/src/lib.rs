@@ -36,7 +36,7 @@ pub use call_shape::{
 };
 pub use script_edit::{narrowing_edits, widening_edits};
 pub use script_encode::{
-    AssembleOptions, Assembled, RoundTripFailure, RoundTrips, script_round_trips,
+    AssembleOptions, Assembled, RoundTripFailure, RoundTrips, script_round_trips, text_diagnostics,
 };
 pub use script_text::{Diagnostic, ScriptText, TextLabel, TextLine, print_expr, print_script};
 mod stringtable;
