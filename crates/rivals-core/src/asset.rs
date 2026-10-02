@@ -274,6 +274,31 @@ pub fn game_entry(game_root: &str, package_name: &str, disk_path: &Path) -> Resu
         })
 }
 
+/// A `--filter` text, matched against a package however its path is written: a piece of the
+/// container entry (`Marvel/UI/Setting`) or of the package name (`/Game/Marvel/UI/Setting`), with
+/// either slash, in any case.
+pub struct PathFilter(Option<String>);
+
+impl PathFilter {
+    pub fn new(text: Option<&str>) -> Self {
+        Self(
+            text.map(|text| text.replace('\\', "/").to_lowercase())
+                .filter(|text| !text.is_empty()),
+        )
+    }
+
+    /// Whether an entry path, or a file's path on disk, is one the filter keeps.
+    pub fn matches(&self, path: &str) -> bool {
+        let Some(needle) = &self.0 else {
+            return true;
+        };
+        let path = path.replace('\\', "/");
+        path.to_lowercase().contains(needle.as_str())
+            || package_name_of_entry(&path)
+                .is_some_and(|name| name.to_lowercase().contains(needle.as_str()))
+    }
+}
+
 /// The mount-relative path a package named `package_name` is saved under: where the game ships it
 /// when it does, else under its mount's content folder. A plugin's mount is placed by finding any
 /// package the game ships under it.
@@ -523,6 +548,34 @@ mod tests {
             "Marvel/Content/NoExtension"
         );
         assert_eq!(strip_extension("Some.Folder/File.umap"), "Some.Folder/File");
+    }
+
+    /// A filter finds a package however its path is written: a piece of the container entry or of
+    /// the package name, a plugin's mount included, with either slash and in any case, and on a
+    /// loose file's path on disk too.
+    #[test]
+    fn a_filter_matches_an_entry_path_or_a_package_name() {
+        let entry = "Marvel/Content/Marvel/Data/DataTable/GameMode/2206/Row.uasset";
+        let plugin = "Marvel/Plugins/MarvelGAS/Content/Mods/X/DA_Thing.uasset";
+        let disk = r"D:\Mods\Out\Marvel\Content\Marvel\Data\DataTable\GameMode\2206\Row.uasset";
+        for (filter, path) in [
+            ("DataTable/GameMode", entry),
+            (r"DataTable\GameMode", entry),
+            ("/Game/Marvel/Data/DataTable/GameMode", entry),
+            ("/game/marvel/data", entry),
+            ("/MarvelGAS/Mods/X", plugin),
+            ("/Game/Marvel/Data/DataTable", disk),
+            ("DataTable/GameMode", disk),
+        ] {
+            assert!(
+                PathFilter::new(Some(filter)).matches(path),
+                "{filter} on {path}"
+            );
+        }
+        assert!(!PathFilter::new(Some("/Game/Marvel/Characters")).matches(entry));
+        assert!(!PathFilter::new(Some("/Engine/Marvel/Data")).matches(entry));
+        assert!(PathFilter::new(None).matches(entry));
+        assert!(PathFilter::new(Some("")).matches(entry));
     }
 
     /// A package's sidecars and a loose INI sit beside it, and none of them is a package to open.

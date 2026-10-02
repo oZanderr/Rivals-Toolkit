@@ -501,14 +501,10 @@ fn matching(request: &SweepRequest<'_>, utoc: &std::path::Path) -> Result<Listin
                 .collect(),
         ),
     };
-    let needle = request.filter.map(str::to_lowercase);
+    let filter = crate::asset::PathFilter::new(request.filter);
     let mut paths: Vec<(Option<retoc::FPackageId>, String)> = all
         .into_iter()
-        .filter(|(_, path)| {
-            needle
-                .as_ref()
-                .is_none_or(|needle| path.to_lowercase().contains(needle.as_str()))
-        })
+        .filter(|(_, path)| filter.matches(path))
         .collect();
     paths.sort_by(|left, right| left.1.cmp(&right.1));
     if let Some(limit) = request.limit {

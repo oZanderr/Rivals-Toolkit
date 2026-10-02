@@ -1060,14 +1060,10 @@ pub fn list(game_root: &str, container: &str, filter: Option<&str>) -> Result<Ve
             .collect(),
         AssetSource::Pak | AssetSource::Loose => asset::list_package_entries(container)?,
     };
-    let needle = filter.map(str::to_lowercase);
+    let filter = asset::PathFilter::new(filter);
     let mut paths: Vec<String> = entries
         .into_iter()
-        .filter(|path| {
-            needle
-                .as_ref()
-                .is_none_or(|n| path.to_lowercase().contains(n.as_str()))
-        })
+        .filter(|path| filter.matches(path))
         .collect();
     paths.sort();
     Ok(paths)
@@ -2516,15 +2512,11 @@ pub fn synth_check(
 ) -> Result<SynthCheckReport, String> {
     let path = mappings::resolve(usmap, configured_usmap)?;
     let schema = mappings::load(&path)?;
-    let needle = filter.map(str::to_lowercase);
+    let filter = asset::PathFilter::new(filter);
     let (store, packages) = asset::list_packages(game_root, container)?;
     let packages: Vec<_> = packages
         .into_iter()
-        .filter(|(_, path)| {
-            needle
-                .as_ref()
-                .is_none_or(|n| path.to_lowercase().contains(n.as_str()))
-        })
+        .filter(|(_, path)| filter.matches(path))
         .collect();
     let total = limit.map_or(packages.len(), |l| l.min(packages.len()));
 
@@ -2723,14 +2715,10 @@ pub fn audit_dir(
 ) -> Result<AuditReport, String> {
     let path = mappings::resolve(usmap, configured_usmap)?;
     let schema = mappings::load(&path)?;
-    let needle = filter.map(str::to_lowercase);
+    let filter = asset::PathFilter::new(filter);
     let files: Vec<_> = asset::list_loose_packages(Path::new(dir))?
         .into_iter()
-        .filter(|p| {
-            needle
-                .as_ref()
-                .is_none_or(|n| p.to_string_lossy().to_lowercase().contains(n.as_str()))
-        })
+        .filter(|p| filter.matches(&p.to_string_lossy()))
         .collect();
     let total = limit.map_or(files.len(), |l| l.min(files.len()));
 
@@ -2773,15 +2761,11 @@ pub fn audit(
 ) -> Result<AuditReport, String> {
     let path = mappings::resolve(usmap, configured_usmap)?;
     let schema = mappings::load(&path)?;
-    let needle = filter.map(str::to_lowercase);
+    let filter = asset::PathFilter::new(filter);
     let (store, packages) = asset::list_packages(game_root, container)?;
     let packages: Vec<_> = packages
         .into_iter()
-        .filter(|(_, path)| {
-            needle
-                .as_ref()
-                .is_none_or(|n| path.to_lowercase().contains(n.as_str()))
-        })
+        .filter(|(_, path)| filter.matches(path))
         .collect();
     let total = limit.map_or(packages.len(), |l| l.min(packages.len()));
 
@@ -3709,12 +3693,8 @@ pub fn diagnose(
     } = request;
     let path = mappings::resolve(usmap, configured_usmap)?;
     let schema = mappings::load(&path)?;
-    let needle = filter.map(str::to_lowercase);
-    let matches = |path: &str| {
-        needle
-            .as_ref()
-            .is_none_or(|n| path.to_lowercase().contains(n.as_str()))
-    };
+    let filter = asset::PathFilter::new(filter);
+    let matches = |path: &str| filter.matches(path);
 
     let mut cached: Vec<(String, Vec<u8>, Vec<u8>)> = Vec::new();
     let source = match dir {

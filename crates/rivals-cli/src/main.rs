@@ -222,7 +222,7 @@ struct ListArgs {
     #[arg(long, value_name = "PATH")]
     container: String,
 
-    /// Keep only paths containing this text, case insensitive.
+    /// Keep only paths containing this text, case insensitive: a piece of the container path (`Marvel/UI/Setting`) or of the package name (`/Game/Marvel/UI/Setting`), with either slash.
     #[arg(long, value_name = "TEXT")]
     filter: Option<String>,
 }
@@ -315,7 +315,7 @@ struct SweepArgs {
     #[arg(long, value_name = "PATH")]
     container: String,
 
-    /// Keep only packages whose path contains this text, case insensitive.
+    /// Keep only packages whose path contains this text, case insensitive: a piece of the container path (`Marvel/UI/Setting`) or of the package name (`/Game/Marvel/UI/Setting`), with either slash.
     #[arg(long, value_name = "TEXT")]
     filter: Option<String>,
 
@@ -924,7 +924,7 @@ struct AuditArgs {
     #[arg(long, value_name = "N")]
     limit: Option<usize>,
 
-    /// Only walk packages whose path contains this text, case insensitive.
+    /// Only walk packages whose path contains this text, case insensitive: a piece of the container path (`Marvel/UI/Setting`) or of the package name (`/Game/Marvel/UI/Setting`), with either slash.
     #[arg(long, value_name = "TEXT")]
     filter: Option<String>,
 
@@ -1098,7 +1098,7 @@ struct PaksExtractArgs {
     #[arg(long, value_name = "DIR")]
     out: PathBuf,
 
-    /// Only packages whose path contains this text. Repeatable.
+    /// Only packages whose path contains this text, case insensitive: a piece of the container path (`Marvel/UI/Setting`) or of the package name (`/Game/Marvel/UI/Setting`), with either slash. Repeatable.
     #[arg(long)]
     filter: Vec<String>,
 }

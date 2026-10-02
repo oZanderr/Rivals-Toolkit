@@ -49,8 +49,12 @@ fn container_stem(utoc_path: &Path) -> Result<String, String> {
         .ok_or_else(|| format!("invalid utoc path {}", utoc_path.display()))
 }
 
+/// Whether a path passes any of the filters, each matched the way every `--filter` is.
 fn matches_filter(path: &str, filter: &[String]) -> bool {
-    filter.is_empty() || filter.iter().any(|f| path.contains(f.as_str()))
+    filter.is_empty()
+        || filter
+            .iter()
+            .any(|f| crate::asset::PathFilter::new(Some(f)).matches(path))
 }
 
 type PackageList = Vec<(FPackageId, String)>;
