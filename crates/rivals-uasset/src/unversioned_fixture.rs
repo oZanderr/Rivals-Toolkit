@@ -30,6 +30,9 @@ pub const NAMES: &[&str] = &[
     "Handler",
     "OnFired",
     "Count",
+    "ScriptStruct",
+    "Point",
+    "Wrapper",
 ];
 
 /// Where the package's imports sit, as the package indices values point at.
@@ -37,6 +40,10 @@ pub const TEST_CLASS: i32 = -2;
 pub const HELPER: i32 = -4;
 pub const HELPER_PATH: &str = "/Game/Helpers.Helper";
 pub const TEST_CLASS_PATH: &str = "/Script/Test.TestClass";
+/// Two reflected structs, `Point { X, Y }` and `Wrapper { Inner }` holding an instanced struct.
+pub const POINT: i32 = -5;
+pub const POINT_PATH: &str = "/Script/Test.Point";
+pub const WRAPPER: i32 = -6;
 
 pub fn index_of(value: &str) -> i32 {
     NAMES
@@ -174,7 +181,57 @@ pub fn slots() -> Vec<Slot> {
                     .collect(),
             ),
         ),
+        slot(
+            "Payload",
+            instanced_struct(),
+            Held::Bytes(instanced(POINT, &point(7))),
+        ),
+        slot("Holder", instanced_struct(), Held::Bytes(vec![0; 8])),
+        slot("Spot", instanced_struct(), Held::Skipped),
+        slot("ZeroSpot", instanced_struct(), Held::Zero),
+        slot(
+            "Nest",
+            instanced_struct(),
+            Held::Bytes(instanced(
+                WRAPPER,
+                &block(1, &[(0, instanced(POINT, &point(1)))]),
+            )),
+        ),
     ]
+}
+
+fn instanced_struct() -> PropertyInner {
+    PropertyInner::Struct {
+        name: "InstancedStruct".into(),
+    }
+}
+
+/// An `FInstancedStruct`: its type, its payload's length, then the payload.
+fn instanced(index: i32, payload: &[u8]) -> Vec<u8> {
+    let mut out = index.to_le_bytes().to_vec();
+    out.extend_from_slice(&(payload.len() as i32).to_le_bytes());
+    out.extend_from_slice(payload);
+    out
+}
+
+/// A `Point` storing `X` alone.
+fn point(x: i32) -> Vec<u8> {
+    block(2, &[(0, x.to_le_bytes().to_vec())])
+}
+
+/// A property block over `slots` slots, storing the values given for some of them in order.
+fn block(slots: usize, stored: &[(u32, Vec<u8>)]) -> Vec<u8> {
+    let empty = crate::unversioned::empty_header(slots);
+    let mut header =
+        crate::unversioned::read_header(&mut crate::reader::Cursor::new(&empty, 0)).unwrap();
+    for (slot, _) in stored {
+        header.insert_value(*slot, false).unwrap();
+    }
+    let mut out = header.write().unwrap();
+    for (_, bytes) in stored {
+        out.extend_from_slice(bytes);
+    }
+    out
 }
 
 fn native(name: &'static str, kind: &str, bytes: Vec<u8>) -> Slot {
@@ -265,6 +322,18 @@ pub fn unversioned_package() -> (Vec<u8>, Vec<u8>) {
                 FPackageIndex::create_import(2),
                 "Helper",
             ),
+            import(
+                "/Script/CoreUObject",
+                "ScriptStruct",
+                FPackageIndex::create_import(0),
+                "Point",
+            ),
+            import(
+                "/Script/CoreUObject",
+                "ScriptStruct",
+                FPackageIndex::create_import(0),
+                "Wrapper",
+            ),
         ],
         exports: vec![FObjectExport {
             object_name: minimal("TestObject"),
@@ -289,6 +358,12 @@ pub fn unversioned_package() -> (Vec<u8>, Vec<u8>) {
 /// The schema [`unversioned_package`] was cooked against.
 pub fn unversioned_mappings() -> Mappings {
     use usmap::{Property, Struct};
+    let property = |name: &str, index: u16, inner: PropertyInner| Property {
+        name: name.into(),
+        array_dim: 1,
+        index,
+        inner,
+    };
     let properties = slots()
         .into_iter()
         .enumerate()
@@ -310,6 +385,19 @@ pub fn unversioned_mappings() -> Mappings {
             name: "TestClass".into(),
             super_struct: Some("Object".into()),
             properties,
+        },
+        Struct {
+            name: "Point".into(),
+            super_struct: None,
+            properties: vec![
+                property("X", 0, PropertyInner::Int),
+                property("Y", 1, PropertyInner::Int),
+            ],
+        },
+        Struct {
+            name: "Wrapper".into(),
+            super_struct: None,
+            properties: vec![property("Inner", 0, instanced_struct())],
         },
     ])
 }

@@ -22,7 +22,7 @@ use crate::package::ExportStatus;
 use crate::package::{
     AssetBundle, ParsedExport, ParsedPackage, header_size, path_from, read_header,
 };
-use crate::props::{InstancedLayout, NativeLeaf};
+use crate::props::{InstancedLayout, NativeLeaf, TYPE_FIELD, UNDECODED_FIELD};
 use crate::reader::Cursor;
 use crate::remove::{plan_removal, remove_exports, reset_export};
 use crate::renumber::rebuild_runs;
@@ -1523,6 +1523,44 @@ pub fn patch_package_with(
         // it did. Container edits produce two splices because the element count is written apart
         // from the elements.
         let (splices, done) = match &edit.op {
+            // An instanced struct's type is written with the payload it governs: the type, the
+            // payload's length, and the new type's defaults, all in one splice.
+            EditOp::Set { text } if entry.name == TYPE_FIELD => {
+                if tagged {
+                    return Err(format!(
+                        "{} belongs to an instanced struct in a tagged package, whose type this \
+                         editor cannot change",
+                        entry.label()
+                    ));
+                }
+                let layout = instanced_at(parsed, start).ok_or_else(|| {
+                    format!("{} is not an instanced struct's type", entry.label())
+                })?;
+                let (index, payload) = instanced_value(text, &mut tables, &package, mappings)?;
+                let mut bytes = index.to_le_bytes().to_vec();
+                let size = i32::try_from(payload.len()).map_err(|_| "the payload is too large")?;
+                bytes.extend_from_slice(&size.to_le_bytes());
+                bytes.extend(payload);
+                if index != 0 {
+                    object_links.push((start, index));
+                }
+                (
+                    vec![Splice {
+                        start,
+                        end: layout.payload_end,
+                        bytes,
+                    }],
+                    AppliedEdit {
+                        name: entry.label(),
+                        offset: start,
+                        offset_after: start,
+                        element: None,
+                        elements_after: None,
+                        before: entry.value.summary(),
+                        after: text.clone(),
+                    },
+                )
+            }
             EditOp::Set { text }
                 if stored && native_leaf_at(parsed, start) == Some(NativeLeaf::AgentBits) =>
             {
@@ -2214,8 +2252,7 @@ pub fn patch_package_with(
     // An instanced struct guards its payload with a byte length, so every edit inside one moves
     // that length by what it added or removed. Each enclosing payload is summed on its own, which
     // is what keeps nested payloads right.
-    let splices_so_far: Vec<Splice> = pending.iter().map(|held| held.splice.clone()).collect();
-    for (size_at, delta) in prefix_deltas(&parsed.instanced, &splices_so_far) {
+    for (size_at, delta) in prefix_deltas(&parsed.instanced, &pending) {
         let was = i32::from_le_bytes(
             bytes_at(bundle, base, size_at, size_at + 4)?
                 .try_into()
@@ -2416,12 +2453,18 @@ fn check_whole_edits(parsed: &ParsedPackage, edits: &[ValueEdit]) -> Result<(), 
         let Ok(entry) = locate(parsed, edit) else {
             continue;
         };
-        let Some(span) = entry.span else { continue };
+        let Some(mut span) = entry.span else { continue };
         let why = match (&edit.op, &entry.value) {
             (EditOp::Set { .. }, PropertyValue::Text { parts, .. }) if !parts.is_empty() => {
                 "edit the whole text or one of its parts, not both"
             }
             (EditOp::Reorder { .. }, _) => "reorder it in a save of its own",
+            (EditOp::Set { .. }, _) if entry.name == TYPE_FIELD => {
+                if let Some(layout) = instanced_at(parsed, span.0) {
+                    span.1 = layout.payload_end;
+                }
+                "give it its type in a save of its own, then edit what it holds"
+            }
             _ => continue,
         };
         whole.push(Whole {
@@ -2449,6 +2492,7 @@ fn check_whole_edits(parsed: &ParsedPackage, edits: &[ValueEdit]) -> Result<(), 
             if same || inside {
                 let verb = match held.edit.op {
                     EditOp::Reorder { .. } => "reordered",
+                    _ if held.label == TYPE_FIELD => "given another type",
                     _ => "set as a whole",
                 };
                 return Err(format!(
@@ -3745,20 +3789,33 @@ fn patch_sidecar(
 /// How much each instanced struct's payload grows or shrinks under `splices`: the sum of the deltas
 /// of every splice inside it. A zero-width splice on the payload's end belongs to it, the same way
 /// `rewrite` charges an insertion on an export boundary to the export it came out of.
-fn prefix_deltas(instanced: &[InstancedLayout], splices: &[Splice]) -> Vec<(u64, i64)> {
+fn prefix_deltas(instanced: &[InstancedLayout], pending: &[Pending]) -> Vec<(u64, i64)> {
     instanced
         .iter()
         .filter_map(|layout| {
-            let delta: i64 = splices
+            let delta: i64 = pending
                 .iter()
-                .filter(|splice| {
-                    splice.start >= layout.payload_start && splice.end <= layout.payload_end
-                })
-                .map(Splice::delta)
+                .filter(|held| inside_payload(layout, held))
+                .map(|held| held.splice.delta())
                 .sum();
             (delta != 0).then_some((layout.size_at, delta))
         })
         .collect()
+}
+
+/// Whether a splice lands inside a payload. Bytes written at its very end are inside it, as an
+/// element appended to the last array in it is, unless they are a value of a block that starts
+/// outside it: a value stored in the slot after the payload goes there too.
+fn inside_payload(layout: &InstancedLayout, held: &Pending) -> bool {
+    let Splice { start, end, .. } = held.splice;
+    if start < layout.payload_start || end > layout.payload_end {
+        return false;
+    }
+    if start < layout.payload_end {
+        return true;
+    }
+    let (header_at, _) = held.order;
+    header_at == 0 || (layout.payload_start <= header_at && header_at < layout.payload_end)
 }
 
 /// The layout the reader recorded for the container starting at `at`.
@@ -4117,6 +4174,83 @@ fn removals(edits: &PackageEdits) -> Result<BTreeMap<u64, BTreeSet<u32>>, String
         }
     }
     Ok(out)
+}
+
+/// The instanced struct whose type is written at `type_at`.
+fn instanced_at(parsed: &ParsedPackage, type_at: u64) -> Option<&InstancedLayout> {
+    parsed
+        .instanced
+        .iter()
+        .find(|layout| layout.size_at == type_at + 4)
+}
+
+/// An instanced struct's type, from the path typed for it, and the payload it starts with: every
+/// field its default. `None` is no type and no payload. A type the package does not name yet is
+/// imported as the struct it is: a native one from a script package, a Blueprint one otherwise.
+fn instanced_value(
+    text: &str,
+    tables: &mut Tables,
+    package: &retoc::legacy_asset::FLegacyPackageHeader,
+    mappings: Option<&Mappings>,
+) -> Result<(i32, Vec<u8>), String> {
+    let text = text.trim();
+    if text.is_empty() || text.eq_ignore_ascii_case("none") {
+        return Ok((0, Vec::new()));
+    }
+    if text.parse::<i32>().is_ok() {
+        return Err(format!(
+            "{text} is a table index; name the struct type by its path"
+        ));
+    }
+    let name = text.rsplit(['/', '.', ':']).next().unwrap_or(text);
+    let payload = instanced_default(name, mappings, &mut tables.names)?;
+    let index = match object_index(package, tables, text) {
+        Some(index) => index,
+        None => {
+            let class = match text.starts_with("/Script/") {
+                true => ("/Script/CoreUObject", "ScriptStruct"),
+                false => ("/Script/Engine", "UserDefinedStruct"),
+            };
+            add_import(
+                tables,
+                text,
+                Some((class.0.to_string(), class.1.to_string())),
+            )?
+        }
+    };
+    Ok((index, payload))
+}
+
+/// What a struct of type `name` holds when every field is its default: a native layout's own
+/// default, or a reflected struct's header storing nothing.
+fn instanced_default(
+    name: &str,
+    mappings: Option<&Mappings>,
+    names: &mut FPackageNameMap,
+) -> Result<Vec<u8>, String> {
+    use crate::props::DefaultPart;
+    use crate::structs::NativeDefault;
+    let empty =
+        |name: &str| -> Result<Vec<u8>, String> {
+            let schema = mappings.and_then(|mappings| mappings.schema(name)).ok_or_else(|| {
+            format!("{name} is not a struct the mappings file describes, so it cannot be laid out")
+        })?;
+            Ok(crate::unversioned::empty_header(schema.len()))
+        };
+    match crate::structs::native_default(name) {
+        NativeDefault::Fixed(bytes) => Ok(bytes),
+        NativeDefault::Recipe(parts) => {
+            let mut out = Vec::new();
+            for part in parts {
+                match part {
+                    DefaultPart::Struct(inner) => out.extend(empty(inner)?),
+                    other => out.extend(realise_default(&[other], names)?),
+                }
+            }
+            Ok(out)
+        }
+        NativeDefault::NotNative => empty(name),
+    }
 }
 
 /// The pairs each map is given new keys for this save, keyed by the offset its edits address it
@@ -6640,6 +6774,9 @@ fn same_entries(
     if excuses.by_name {
         return same_entries_by_name(before, after, edits, excuses, export);
     }
+    if rewrites_whole(before, edits) {
+        return Ok(());
+    }
     if before.len() != after.len() {
         return Err(format!(
             "export {export} decoded {} values before the edit and {} after",
@@ -6673,6 +6810,18 @@ fn same_entries(
     Ok(())
 }
 
+/// Whether an edit rewrote the fields of the struct holding `entries` along with one of them: its
+/// type, which brings another type's fields, or the bytes that did not decode.
+fn rewrites_whole(entries: &[PropertyEntry], edits: &[ValueEdit]) -> bool {
+    entries.iter().any(|entry| {
+        matches!(entry.name.as_str(), TYPE_FIELD | UNDECODED_FIELD)
+            && edits.iter().any(|edit| {
+                edit.expect_name == entry.name
+                    && entry.span.is_some_and(|(start, _)| start == edit.offset)
+            })
+    })
+}
+
 /// [`same_entries`] for a tagged block, pairing entries by name and array slot. An entry an edit
 /// addressed may come and go; every other one must still be there and read the same.
 fn same_entries_by_name(
@@ -6689,6 +6838,9 @@ fn same_entries_by_name(
                 && old.span.is_some_and(|(start, _)| start == edit.offset)
         })
     };
+    if rewrites_whole(before, edits) {
+        return Ok(());
+    }
     for old in before {
         let new = after
             .iter()
@@ -6875,9 +7027,14 @@ fn first_difference(
         ) if function == still && excuses.removed_paths.contains(object) => {
             return Ok(None);
         }
-        // An instanced struct whose type export went reads as nothing at all.
-        (PropertyValue::Struct { name, .. }, PropertyValue::Default { .. })
-            if excuses.names_removed(name) =>
+        // An instanced struct whose type export went reads as one with no type.
+        (PropertyValue::Struct { name, .. }, PropertyValue::Struct { fields, .. })
+            if excuses.names_removed(name)
+                && matches!(
+                    &fields[..],
+                    [PropertyEntry { name: field, value: PropertyValue::Object { index: 0, .. }, .. }]
+                        if field == TYPE_FIELD
+                ) =>
         {
             return Ok(None);
         }
@@ -10835,16 +10992,24 @@ mod tests {
             payload_start: 0x154,
             payload_end: 0x180,
         };
+        let held = |splice: Splice, header_at: u64| Pending {
+            splice,
+            order: (header_at, 0),
+        };
         let splices = vec![
-            splice_at(0x0F0, 0x0F4, 8),  // outside both, +4
-            splice_at(0x110, 0x114, 2),  // outer only, -2
-            splice_at(0x160, 0x164, 10), // inside both, +6
-            splice_at(0x180, 0x180, 3),  // on the inner end: inner and outer, +3
+            held(splice_at(0x0F0, 0x0F4, 8), 0),  // outside both, +4
+            held(splice_at(0x110, 0x114, 2), 0),  // outer only, -2
+            held(splice_at(0x160, 0x164, 10), 0), // inside both, +6
+            held(splice_at(0x180, 0x180, 3), 0),  // on the inner end: inner and outer, +3
+            // On the inner end too, but stored in a slot of the outer block: outer only, +5.
+            held(splice_at(0x180, 0x180, 5), 0x104),
+            // At the outer end, stored in a slot of a block before both: neither.
+            held(splice_at(0x200, 0x200, 6), 0x10),
         ];
         let mut deltas = prefix_deltas(&[outer, inner], &splices);
         deltas.sort();
-        assert_eq!(deltas, vec![(0x100, 7), (0x150, 9)]);
-        assert!(prefix_deltas(&[outer], &[splice_at(0x0F0, 0x0F4, 4)]).is_empty());
+        assert_eq!(deltas, vec![(0x100, 12), (0x150, 9)]);
+        assert!(prefix_deltas(&[outer], &[held(splice_at(0x0F0, 0x0F4, 4), 0)]).is_empty());
     }
 
     #[test]

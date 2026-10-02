@@ -112,7 +112,7 @@ pub use package::{
 };
 pub use props::{
     ContainerLayout, Diagnostics, IndexRef, InstancedLayout, MapKeys, MissingSchema, OddHeader,
-    PREVIEW_DEPTH, TraceEntry, UndecodedPayload, UnsetSlot,
+    PREVIEW_DEPTH, TYPE_FIELD, TraceEntry, UNDECODED_FIELD, UndecodedPayload, UnsetSlot,
 };
 pub use remove::{ClearedReference, Importers, RemovalPlan, RemovedExport, plan_removal};
 pub use stringtable::{StringEntrySpan, StringTable, StringTableEntry, StringTableLayout};

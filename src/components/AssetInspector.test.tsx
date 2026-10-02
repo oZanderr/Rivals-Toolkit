@@ -450,6 +450,46 @@ function containersPackage() {
   };
 }
 
+describe("AssetInspector instanced structs", () => {
+  it("gives an instanced struct another type through its type field", async () => {
+    mock = tauri({
+      ...labelPackage(),
+      exports: [
+        exp(0, "Settings", "SettingsData", [
+          {
+            name: "Payload",
+            span: [40, 60],
+            value: {
+              kind: "struct",
+              name: "Point",
+              fields: [entry("(type)", object(-5, "/Script/Test.Point"), 40)],
+            },
+          },
+        ]),
+      ],
+    });
+    installTauri(mock);
+    mount();
+    const user = userEvent.setup();
+    await user.click(await screen.findByText("/Script/Test.Point"));
+    const input = await screen.findByDisplayValue("/Script/Test.Point");
+    await user.clear(input);
+    await user.type(input, "/Script/CoreUObject.Vector{Enter}");
+    await user.click(await screen.findByRole("button", { name: /Save as mod/ }));
+    await waitFor(() =>
+      expect(lastSave().values).toEqual([
+        {
+          offset: 40,
+          name: "(type)",
+          kind: "object",
+          op: "set",
+          text: "/Script/CoreUObject.Vector",
+        },
+      ])
+    );
+  });
+});
+
 describe("AssetInspector keys and moves", () => {
   it("renames a map key from its own row", async () => {
     mock = tauri(containersPackage());

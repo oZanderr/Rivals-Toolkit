@@ -7,8 +7,9 @@ use crate::edit::{
     verify_patch,
 };
 use crate::package::{AssetBundle, ExportStatus, ParseOptions, ParsedPackage, parse_package_opts};
+use crate::props::TYPE_FIELD;
 use crate::unversioned_fixture::{
-    HELPER_PATH, TEST_CLASS_PATH, unversioned_mappings, unversioned_package,
+    HELPER_PATH, POINT_PATH, TEST_CLASS_PATH, unversioned_mappings, unversioned_package,
 };
 use crate::value::{PropertyEntry, PropertyValue};
 
@@ -624,4 +625,137 @@ fn two_nav_agent_bits_change_in_one_save() {
         other => panic!("{other:?}"),
     };
     assert_eq!(on, ["bSupportsAgent1", "bSupportsAgent3"]);
+}
+
+/// The names of an instanced struct's fields, its type first, and what that type reads as.
+fn instanced_fields(value: &PropertyValue) -> (String, Vec<String>) {
+    let PropertyValue::Struct { name, fields } = value else {
+        panic!("{value:?} is not a struct");
+    };
+    assert_eq!(fields[0].name, TYPE_FIELD, "{fields:?}");
+    (
+        format!("{name} {}", fields[0].value.summary()),
+        fields[1..]
+            .iter()
+            .map(|field| format!("{}={}", field.name, field.value.summary()))
+            .collect(),
+    )
+}
+
+#[test]
+fn an_instanced_struct_shows_its_type_as_a_field() {
+    let (parsed, ..) = fixture();
+    let (typed, fields) = instanced_fields(value(&parsed, "Payload"));
+    assert_eq!(typed, format!("Point {POINT_PATH}"));
+    assert_eq!(fields, ["X=7", "Y=(not stored)"]);
+    let (typed, fields) = instanced_fields(value(&parsed, "Holder"));
+    assert_eq!(typed, "InstancedStruct None");
+    assert!(fields.is_empty());
+}
+
+/// A zero instanced struct is stored as one with no type, not as a block of zero fields.
+#[test]
+fn a_zero_instanced_struct_stores_as_an_empty_one() {
+    let after = apply(|p| vec![edit_of(find(top(p), "ZeroSpot"), EditOp::Store)]);
+    assert_eq!(
+        instanced_fields(value(&after, "ZeroSpot")).0,
+        "InstancedStruct None"
+    );
+}
+
+fn retype(parsed: &ParsedPackage, name: &str, to: &str) -> ValueEdit {
+    edit_of(field(parsed, name, &[TYPE_FIELD]), set(to))
+}
+
+#[test]
+fn an_instanced_struct_is_retyped_to_a_reflected_struct() {
+    let after = apply(|p| vec![retype(p, "Holder", POINT_PATH)]);
+    let (typed, fields) = instanced_fields(value(&after, "Holder"));
+    assert_eq!(typed, format!("Point {POINT_PATH}"));
+    assert_eq!(fields, ["X=(not stored)", "Y=(not stored)"]);
+    assert_eq!(
+        value(&after, "Count").summary(),
+        "7",
+        "what follows reads on"
+    );
+}
+
+#[test]
+fn an_instanced_struct_is_retyped_to_a_native_struct() {
+    const VECTOR: &str = "/Script/CoreUObject.Vector";
+    let after = apply(|p| vec![retype(p, "Payload", VECTOR)]);
+    let (typed, fields) = instanced_fields(value(&after, "Payload"));
+    assert_eq!(typed, format!("Vector {VECTOR}"));
+    assert_eq!(fields, ["X=0.0", "Y=0.0", "Z=0.0"]);
+    let import = after
+        .imports
+        .iter()
+        .find(|import| import.path == VECTOR)
+        .expect("imported");
+    assert_eq!(import.class_name, "ScriptStruct");
+}
+
+#[test]
+fn an_instanced_struct_is_retyped_to_none() {
+    let after = apply(|p| vec![retype(p, "Payload", "None")]);
+    assert_eq!(
+        instanced_fields(value(&after, "Payload")),
+        ("InstancedStruct None".to_string(), Vec::new())
+    );
+}
+
+/// One nothing stores yet is stored empty, then given a type in the next save.
+#[test]
+fn an_unset_instanced_struct_is_stored_empty_then_typed() {
+    let (asset, exports) = unversioned_package();
+    let (stored, asset, exports) = apply_to(&asset, &exports, |p| {
+        vec![edit_of(find(top(p), "Spot"), EditOp::Store)]
+    });
+    assert_eq!(
+        instanced_fields(value(&stored, "Spot")).0,
+        "InstancedStruct None"
+    );
+    let (typed, ..) = apply_to(&asset, &exports, |p| vec![retype(p, "Spot", POINT_PATH)]);
+    assert_eq!(
+        instanced_fields(value(&typed, "Spot")).0,
+        format!("Point {POINT_PATH}")
+    );
+}
+
+#[test]
+fn a_type_the_mappings_do_not_describe_is_refused() {
+    let error = refused(|p| vec![retype(p, "Payload", "/Script/Test.Missing")]);
+    assert!(
+        error.contains("not a struct the mappings file describes"),
+        "{error}"
+    );
+}
+
+/// A retype writes the payload anew, so a field of the old payload cannot be edited beside it.
+#[test]
+fn fields_inside_a_retyped_payload_are_refused_in_the_same_save() {
+    let error = refused(|p| {
+        vec![
+            retype(p, "Payload", "None"),
+            edit_of(field(p, "Payload", &["X"]), set("9")),
+        ]
+    });
+    assert!(error.contains("given another type"), "{error}");
+}
+
+/// A retype inside another instanced struct moves both lengths: its own, which it writes, and the
+/// one around it.
+#[test]
+fn a_nested_retype_moves_both_sizes() {
+    let after = apply(|p| {
+        vec![edit_of(
+            field(p, "Nest", &["Inner", TYPE_FIELD]),
+            set("/Script/CoreUObject.Vector"),
+        )]
+    });
+    let (outer, _) = instanced_fields(value(&after, "Nest"));
+    assert!(outer.starts_with("Wrapper "), "{outer}");
+    let (inner, fields) = instanced_fields(&field(&after, "Nest", &["Inner"]).value);
+    assert!(inner.starts_with("Vector "), "{inner}");
+    assert_eq!(fields, ["X=0.0", "Y=0.0", "Z=0.0"]);
 }

@@ -177,7 +177,7 @@ fn undecoded(tag: &Tag, reason: &str) -> PropertyValue {
     PropertyValue::Struct {
         name: tag.type_name.clone(),
         fields: vec![PropertyEntry {
-            name: "(undecoded)".into(),
+            name: crate::props::UNDECODED_FIELD.into(),
             element: None,
             span: None,
             slot: None,

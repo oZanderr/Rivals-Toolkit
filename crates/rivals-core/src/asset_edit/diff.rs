@@ -14,7 +14,7 @@ use serde_json::Value as Json;
 
 use rivals_uasset::{
     EditOp, ImportEdit, ParsedPackage, PropertyEntry, PropertyValue, RowEdit, RowOp, StringEdit,
-    StringOp, ValueEdit, kind_of,
+    StringOp, TYPE_FIELD, ValueEdit, kind_of,
 };
 
 use super::json::EditList;
@@ -414,8 +414,31 @@ fn diff_in_place(
     }
     match before {
         PropertyValue::Struct { name, fields } => {
+            let typed = fields.first().filter(|field| field.name == TYPE_FIELD);
+            let items = edited.get("fields").and_then(Json::as_array);
+            // An instanced struct given another type: the type is the edit, and it then holds its
+            // new type's defaults, which a second pass changes.
+            if let (Some(typed), Some(items)) = (typed, items)
+                && let Some(now) = items
+                    .iter()
+                    .find(|item| item.get("name").and_then(Json::as_str) == Some(TYPE_FIELD))
+                && now
+                    .get("value")
+                    .is_some_and(|value| differs(&typed.value, value))
+            {
+                let typed = std::slice::from_ref(typed);
+                diff_entries(typed, std::slice::from_ref(now), export, label, out);
+                if items.len() > 1 {
+                    out.notes.push(format!(
+                        "{label}: given another type, it holds that type's defaults; dump the \
+                         saved copy and diff again to change its fields"
+                    ));
+                }
+                return;
+            }
             if let Some(now) = edited.get("name").and_then(Json::as_str)
                 && now != name
+                && typed.is_none()
             {
                 out.notes.push(format!(
                     "{label}: a struct's type is the property's, so it stays a {name} rather than \
@@ -445,7 +468,7 @@ fn diff_in_place(
                 }
             }
             None => {
-                if content(&serde_json::to_value(before).unwrap_or_default()) != content(edited) {
+                if differs(before, edited) {
                     out.notes.push(format!(
                         "{label}: a {was} has no text form an edit can carry, so the change is not \
                          made"
@@ -995,6 +1018,15 @@ fn diff_map(
                 out,
             );
         }
+    }
+}
+
+/// Whether the edited value says something the original does not: through the text an edit
+/// would carry where it has one, and otherwise through everything the dump says of it.
+fn differs(before: &PropertyValue, edited: &Json) -> bool {
+    match edited_text(before, edited) {
+        Some(text) => text != before.summary(),
+        None => dumped(before) != content(edited),
     }
 }
 
@@ -2249,6 +2281,41 @@ mod tests {
             "{:?}",
             out.edits
         );
+    }
+
+    /// An instanced struct given another type is one object set on its type field; the fields
+    /// the dump gives the new type follow on a second pass.
+    #[test]
+    fn an_instanced_struct_s_type_is_set_and_its_fields_follow() {
+        let out = one(
+            entry(
+                "Payload",
+                PropertyValue::Struct {
+                    name: "Point".into(),
+                    fields: vec![
+                        entry(
+                            TYPE_FIELD,
+                            PropertyValue::Object {
+                                index: -5,
+                                path: Some("/Script/Test.Point".into()),
+                            },
+                            0x60,
+                        ),
+                        entry("X", PropertyValue::Int { value: 7 }, 0x6A),
+                    ],
+                },
+                0x60,
+            ),
+            json!({"kind": "struct", "name": "Vector", "fields": [
+                {"name": TYPE_FIELD, "value": {"kind": "object", "index": -7, "path": "/Script/CoreUObject.Vector"}},
+                {"name": "X", "value": {"kind": "float", "value": 1.0}},
+            ]}),
+        );
+        let edit = value(&out);
+        assert_eq!((edit.offset, edit.expect_name.as_str()), (0x60, TYPE_FIELD));
+        assert!(matches!(&edit.op, EditOp::Set { text } if text == "/Script/CoreUObject.Vector"));
+        assert_eq!(out.notes.len(), 1, "{:?}", out.notes);
+        assert!(out.notes[0].contains("diff again"), "{}", out.notes[0]);
     }
 
     /// The text form the dump renders is the one an edit carries, so a whole float keeps the

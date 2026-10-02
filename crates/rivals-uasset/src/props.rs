@@ -228,6 +228,13 @@ pub struct IndexRef {
     pub index: i32,
 }
 
+/// The field an instanced struct shows its type as, ahead of the fields the type gives it. Set to
+/// another struct's path, it gives the instanced struct that type and its defaults.
+pub const TYPE_FIELD: &str = "(type)";
+
+/// The field a payload that did not decode shows its bytes as.
+pub const UNDECODED_FIELD: &str = "(undecoded)";
+
 /// Where an `FInstancedStruct` keeps its payload and the byte length that guards it. An edit that
 /// changes the width of anything inside has to move the length too.
 #[derive(Debug, Clone, Copy)]
@@ -826,6 +833,12 @@ fn record_unset(
 ) {
     let (default_bytes, default_recipe) = split_default(unset_default(inner, ctx));
     let zero_bytes = match inner {
+        // An instanced struct lays itself out, so a zero one is stored as one with no type.
+        PropertyInner::Struct { name }
+            if matches!(name.as_str(), "InstancedStruct" | "ConstStruct") =>
+        {
+            None
+        }
         PropertyInner::Struct { name } if zero && native_parts(name, ctx).is_none() => ctx
             .schema(name)
             .and_then(|schema| unversioned::zero_header(schema.len()).ok()),
@@ -883,7 +896,8 @@ fn record_unset(
 fn unset_default(inner: &PropertyInner, ctx: &Ctx<'_>) -> Option<Vec<DefaultPart>> {
     let bytes = match inner {
         PropertyInner::Struct { name } => match name.as_str() {
-            "InstancedStruct" | "ConstStruct" => return None,
+            // No type, and no payload.
+            "InstancedStruct" | "ConstStruct" => vec![0u8; 8],
             _ => {
                 return match native_parts(name, ctx) {
                     Some(parts) => parts,
@@ -1180,7 +1194,7 @@ pub(crate) fn read_value(
         }
         PropertyInner::Struct { name } => match name.as_str() {
             "InstancedStruct" | "ConstStruct" => {
-                read_instanced_struct(cursor, ctx, diagnostics, depth + 1)?
+                read_instanced_struct(name, cursor, ctx, diagnostics, depth + 1)?
             }
             _ => read_struct(name, cursor, ctx, diagnostics, depth + 1)?,
         },
@@ -1196,13 +1210,17 @@ pub(crate) fn read_value(
 
 /// `FInstancedStruct` writes the struct type as an object reference followed by the byte length
 /// of the payload. That length is what makes this safe: whatever happens to the inner parse, the
-/// cursor is placed exactly at the end of the payload afterwards.
+/// cursor is placed exactly at the end of the payload afterwards. The type shows as a field of its
+/// own, first, so it can be read and set like any reference; one with no type is a struct holding
+/// that field alone, named as declared.
 fn read_instanced_struct(
+    declared: &str,
     cursor: &mut Cursor<'_>,
     ctx: &Ctx<'_>,
     diagnostics: &mut Diagnostics,
     depth: u32,
 ) -> Result<PropertyValue, String> {
+    let type_at = cursor.file_offset();
     let type_index = read_index(cursor, diagnostics)?;
     let size_at = cursor.file_offset();
     let serial_size = cursor.read_i32()?;
@@ -1218,17 +1236,42 @@ fn read_instanced_struct(
         payload_end: payload_finish,
     });
 
-    let type_name = ctx
-        .object_path(type_index)
-        .map_err(|e| cursor.err(e))?
-        .map(|path| last_segment(&path));
+    let type_path = ctx.object_path(type_index).map_err(|e| cursor.err(e))?;
+    let type_name = type_path.as_deref().map(last_segment);
+    let typed = PropertyEntry {
+        name: TYPE_FIELD.into(),
+        element: None,
+        value: PropertyValue::Object {
+            index: type_index,
+            path: type_path,
+        },
+        span: Some((type_at, type_at + 4)),
+        slot: None,
+    };
 
     let marks = diagnostics.marks();
     let value = match type_name {
         Some(name) if serial_size > 0 => {
             let parsed = read_struct(&name, cursor, ctx, diagnostics, depth);
             match parsed {
-                Ok(value) => value,
+                Ok(PropertyValue::Struct { name, mut fields }) => {
+                    fields.insert(0, typed);
+                    PropertyValue::Struct { name, fields }
+                }
+                // A native struct that holds one value shows it as a field beside its type.
+                Ok(value) => PropertyValue::Struct {
+                    name,
+                    fields: vec![
+                        typed,
+                        PropertyEntry {
+                            name: "Value".into(),
+                            element: None,
+                            value,
+                            span: Some((payload_start, payload_finish)),
+                            slot: None,
+                        },
+                    ],
+                },
                 Err(reason) => {
                     diagnostics.rewind(&marks);
                     diagnostics.undecoded.push(UndecodedPayload {
@@ -1239,27 +1282,30 @@ fn read_instanced_struct(
                     });
                     PropertyValue::Struct {
                         name,
-                        fields: vec![PropertyEntry {
-                            name: "(undecoded)".into(),
-                            element: None,
-                            span: None,
-                            slot: None,
-                            value: PropertyValue::Undecoded {
-                                reason,
-                                bytes: serial_size as u64,
+                        fields: vec![
+                            typed,
+                            PropertyEntry {
+                                name: UNDECODED_FIELD.into(),
+                                element: None,
+                                span: None,
+                                slot: None,
+                                value: PropertyValue::Undecoded {
+                                    reason,
+                                    bytes: serial_size as u64,
+                                },
                             },
-                        }],
+                        ],
                     }
                 }
             }
         }
         Some(name) => PropertyValue::Struct {
             name,
-            fields: Vec::new(),
+            fields: vec![typed],
         },
-        None => PropertyValue::Default {
-            declared: None,
-            fields: Vec::new(),
+        None => PropertyValue::Struct {
+            name: declared.to_string(),
+            fields: vec![typed],
         },
     };
 
@@ -1887,10 +1933,11 @@ mod tests {
             panic!("expected the placeholder struct, got {value:?}");
         };
         assert_eq!(name, "Broken");
-        assert_eq!(fields.len(), 1);
-        assert_eq!(fields[0].name, "(undecoded)");
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].name, TYPE_FIELD);
+        assert_eq!(fields[1].name, UNDECODED_FIELD);
         assert!(
-            matches!(fields[0].value, PropertyValue::Undecoded { bytes: 3, .. }),
+            matches!(fields[1].value, PropertyValue::Undecoded { bytes: 3, .. }),
             "the placeholder carries the payload length, not a stored string"
         );
 
