@@ -8756,6 +8756,28 @@ mod game_data_tests {
         assert!(settled.notes.is_empty(), "{:?}", settled.notes);
     }
 
+    /// A dump read back untouched diffs to nothing at all, across packages holding tables, maps
+    /// keyed by structs, delegates, instanced structs and texts.
+    #[test]
+    fn an_untouched_dump_diffs_to_nothing() {
+        for path in [
+            DEFAULTS,
+            INPUT_CONTEXT,
+            AUDIO_SETTINGS,
+            CONSTRAINT_EMITTER,
+            SHAKE,
+        ] {
+            let Some(fixture) = Fixture::open(path) else {
+                return;
+            };
+            let before = fixture.parse();
+            let dump = serde_json::to_value(&before).expect("dump");
+            let outcome = crate::asset_edit::diff::diff_dump(&before, &dump).expect("diff");
+            assert!(outcome.edits.is_empty(), "{path}: {:?}", outcome.edits);
+            assert!(outcome.notes.is_empty(), "{path}: {:?}", outcome.notes);
+        }
+    }
+
     /// A string table round trips the same way, through its own entry ops rather than value edits.
     #[test]
     fn an_edited_string_table_diffs_back_into_string_edits() {

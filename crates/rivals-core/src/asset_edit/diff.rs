@@ -334,6 +334,22 @@ fn diff_entries(
         };
         diff_value(entry, value, export, owner, out);
     }
+    for held in is {
+        let name = held.get("name").and_then(Json::as_str).unwrap_or_default();
+        let element = held.get("element").and_then(Json::as_u64).map(|e| e as u32);
+        if !was
+            .iter()
+            .any(|entry| entry.name == name && entry.element == element)
+        {
+            let label = match element {
+                Some(at) => format!("{name}[{at}]"),
+                None => name.to_string(),
+            };
+            out.notes.push(format!(
+                "{owner}.{label}: the package has no such property here, so it is not added"
+            ));
+        }
+    }
 }
 
 /// One value against its edited form, recursing where the value has parts of its own.
@@ -347,125 +363,73 @@ fn diff_value(
     let was = kind_of(&entry.value);
     let is = kind_in(edited).unwrap_or_default();
     let label = format!("{owner}.{}", entry.label());
-    let at = || entry.span.map(|(start, _)| start);
 
     if was != is {
         return diff_retyped(entry, edited, export, &label, &was, is, out);
     }
     match &entry.value {
-        PropertyValue::Struct { fields, .. } => {
-            if let Some(items) = edited.get("fields").and_then(Json::as_array) {
-                diff_entries(fields, items, export, &label, out);
-            }
-        }
-        PropertyValue::Text { parts, value, .. } if !parts.is_empty() => {
-            let edits_before = out.edits.values.len();
-            let edited_parts = edited.get("parts").and_then(Json::as_array);
-            if let Some(items) = edited_parts {
-                diff_entries(parts, items, export, &label, out);
-            }
-            let Some(now) = edited
-                .get("value")
-                .and_then(Json::as_str)
-                .filter(|now| Some(*now) != value.as_deref())
-            else {
-                return;
-            };
-            // A changed value is the whole text typed again; changed parts already say the same
-            // thing when the value is what they read as, and anything else is two answers.
-            if out.edits.values.len() > edits_before {
-                if edited_parts
-                    .and_then(|items| parts_read_as(items))
-                    .as_deref()
-                    != Some(now)
-                {
-                    out.notes.push(format!(
-                        "{label}: both the text and its parts changed, and they disagree; the part \
-                         edits are kept"
-                    ));
-                }
-                return;
-            }
-            push_text_edit(entry, &label, now.to_string(), out);
-        }
-        // A localized text whose namespace or key changed is a text with another identity, which
-        // only its literal can spell.
-        PropertyValue::Text {
-            namespace: Some(namespace),
-            key: Some(key),
-            value,
-            ..
-        } => {
-            let field = |name: &str| edited.get(name).and_then(Json::as_str);
-            let now_namespace = field("namespace").unwrap_or(namespace);
-            let now_key = field("key").unwrap_or(key);
-            let now_value = field("value").map(str::to_string).or_else(|| value.clone());
-            if now_namespace != namespace || now_key != key {
-                let literal = rivals_uasset::text_literal::TextLiteral::Localized {
-                    namespace: now_namespace.to_string(),
-                    key: now_key.to_string(),
-                    source: now_value.unwrap_or_default(),
-                };
-                push_text_edit(
-                    entry,
-                    &label,
-                    rivals_uasset::text_literal::format(&literal),
-                    out,
-                );
-            } else if now_value != *value
-                && let Some(now_value) = now_value
-            {
-                push_text_edit(entry, &label, now_value, out);
-            }
-        }
         PropertyValue::Array { items } | PropertyValue::Set { items } => {
             diff_items(entry, items, edited, export, &label, out);
         }
-        PropertyValue::Map { entries } => {
-            let Some(items) = edited.get("entries").and_then(Json::as_array) else {
-                return;
-            };
-            if items.len() != entries.len() {
-                out.notes.push(format!(
-                    "{label}: the map holds {} entries and the edited dump {}; adding or dropping \
-                     one is keyed, so make it in the editor rather than in the dump",
-                    entries.len(),
-                    items.len()
-                ));
-                return;
-            }
-            for (position, (before, now)) in entries.iter().zip(items).enumerate() {
-                if let Some(key) = now.get("key")
-                    && text_of(key).as_deref() != Some(&before.key.summary())
-                {
-                    out.notes.push(format!(
-                        "{label}: entry {position}'s key changed, which is a remove and an insert \
-                         rather than a value edit"
-                    ));
-                }
-                if let Some(value) = now.get("value") {
-                    diff_map_value(
-                        entry,
-                        position as u32,
-                        &before.value,
-                        value,
-                        export,
-                        &label,
-                        out,
-                    );
-                }
+        PropertyValue::Map { entries } => diff_map(entry, entries, edited, export, &label, out),
+        PropertyValue::Unset { fields, .. } | PropertyValue::Default { fields, .. } => {
+            if let Some(edited) = edited.get("fields").and_then(Json::as_array) {
+                field_sets_in(entry, fields, edited, &[], &label, out);
             }
         }
-        PropertyValue::Delegate { .. }
-        | PropertyValue::FieldPath { .. }
-        | PropertyValue::LazyObject { .. } => {
-            if bound_reference(edited).is_some_and(|now| now != entry.value.summary()) {
+        value => diff_in_place(entry, Whole::Value, value, edited, export, &label, out),
+    }
+}
+
+/// Where a value typed whole lands: the property itself, or one half of an element of the
+/// container `entry` is, addressed through the container.
+#[derive(Debug, Clone, Copy)]
+enum Whole {
+    Value,
+    Element(u32),
+    Key,
+}
+
+/// A value that keeps its place, against its edited form: a property, or either half of a
+/// container's element. A struct recurses through its fields and a text through its parts, which
+/// have offsets of their own; anything else is typed whole, and a change no text can carry is a
+/// note.
+fn diff_in_place(
+    entry: &PropertyEntry,
+    whole: Whole,
+    before: &PropertyValue,
+    edited: &Json,
+    export: u32,
+    label: &str,
+    out: &mut DiffOutcome,
+) {
+    let was = kind_of(before);
+    let is = kind_in(edited).unwrap_or_default();
+    if was != is {
+        out.notes.push(format!(
+            "{label}: it reads as a {is} in the edited dump and a {was} in the package; an \
+             element is always its container's type"
+        ));
+        return;
+    }
+    match before {
+        PropertyValue::Struct { name, fields } => {
+            if let Some(now) = edited.get("name").and_then(Json::as_str)
+                && now != name
+            {
                 out.notes.push(format!(
-                    "{label}: a {was} is written by the loader, not stored as text, so a changed \
-                     one is not an edit this tool can make"
+                    "{label}: a struct's type is the property's, so it stays a {name} rather than \
+                     a {now}"
                 ));
             }
+            match edited.get("fields").and_then(Json::as_array) {
+                Some(items) => diff_entries(fields, items, export, label, out),
+                None => out.notes.push(format!(
+                    "{label}: the edited struct lists no fields, so nothing in it is changed"
+                )),
+            }
         }
+        PropertyValue::Text { .. } => diff_text(entry, whole, before, edited, export, label, out),
         PropertyValue::Undecoded { bytes, .. } => {
             let now = edited.get("bytes").and_then(Json::as_u64);
             if now != Some(*bytes) {
@@ -474,50 +438,129 @@ fn diff_value(
                 ));
             }
         }
-        PropertyValue::Unset { fields, .. } | PropertyValue::Default { fields, .. } => {
-            if let Some(edited) = edited.get("fields").and_then(Json::as_array) {
-                field_sets_in(entry, fields, edited, &[], &label, out);
+        _ => match edited_text(before, edited) {
+            Some(text) => {
+                if text != before.summary() {
+                    push_edit(entry, whole, text, label, out);
+                }
             }
-        }
-        _ => {
-            if summary_changed(&entry.value, edited) {
-                let Some(offset) = at() else {
+            None => {
+                if content(&serde_json::to_value(before).unwrap_or_default()) != content(edited) {
                     out.notes.push(format!(
-                        "{label}: the reader recorded no offset for it, so it cannot be addressed"
+                        "{label}: a {was} has no text form an edit can carry, so the change is not \
+                         made"
                     ));
-                    return;
-                };
-                let Some(text) = text_of(edited) else {
-                    out.notes
-                        .push(format!("{label}: the edited value is not a {was}"));
-                    return;
-                };
-                out.edits.values.push(ValueEdit {
-                    offset,
-                    expect_name: entry.name.clone(),
-                    expect_element: entry.element,
-                    expect_kind: was,
-                    op: EditOp::Set { text },
-                });
+                }
             }
-        }
+        },
     }
 }
 
-/// A text typed again as a whole, at the text's own offset.
-fn push_text_edit(entry: &PropertyEntry, label: &str, text: String, out: &mut DiffOutcome) {
+/// A text against its edited form. Its parts are edited at their own offsets; a changed value is
+/// the whole text typed again, and a localized text given another namespace or key is a text with
+/// another identity, which only its literal can spell.
+fn diff_text(
+    entry: &PropertyEntry,
+    whole: Whole,
+    before: &PropertyValue,
+    edited: &Json,
+    export: u32,
+    label: &str,
+    out: &mut DiffOutcome,
+) {
+    let PropertyValue::Text {
+        value,
+        parts,
+        namespace,
+        key,
+        ..
+    } = before
+    else {
+        return;
+    };
+    let field = |name: &str| edited.get(name).and_then(Json::as_str);
+    if !parts.is_empty() {
+        let edits_before = out.edits.values.len();
+        let edited_parts = edited.get("parts").and_then(Json::as_array);
+        if let Some(items) = edited_parts {
+            diff_entries(parts, items, export, label, out);
+        }
+        let Some(now) = field("value").filter(|now| Some(*now) != value.as_deref()) else {
+            return;
+        };
+        // A changed value is the whole text typed again; changed parts already say the same thing
+        // when the value is what they read as, and anything else is two answers.
+        if out.edits.values.len() > edits_before {
+            if edited_parts
+                .and_then(|items| parts_read_as(items))
+                .as_deref()
+                != Some(now)
+            {
+                out.notes.push(format!(
+                    "{label}: both the text and its parts changed, and they disagree; the part \
+                     edits are kept"
+                ));
+            }
+            return;
+        }
+        return push_edit(entry, whole, now.to_string(), label, out);
+    }
+    if let (Some(namespace), Some(key)) = (namespace, key) {
+        let now_namespace = field("namespace").unwrap_or(namespace);
+        let now_key = field("key").unwrap_or(key);
+        let now_value = field("value").map(str::to_string).or_else(|| value.clone());
+        if now_namespace != namespace || now_key != key {
+            let literal = rivals_uasset::text_literal::TextLiteral::Localized {
+                namespace: now_namespace.to_string(),
+                key: now_key.to_string(),
+                source: now_value.unwrap_or_default(),
+            };
+            let text = rivals_uasset::text_literal::format(&literal);
+            push_edit(entry, whole, text, label, out);
+        } else if now_value != *value
+            && let Some(now_value) = now_value
+        {
+            push_edit(entry, whole, now_value, label, out);
+        }
+        return;
+    }
+    let now = field("value").unwrap_or_default();
+    if now != value.as_deref().unwrap_or_default() {
+        push_edit(entry, whole, now.to_string(), label, out);
+    }
+}
+
+/// A value typed whole, where `whole` says: at the property's own offset, or as an element of the
+/// container `entry` is.
+fn push_edit(
+    entry: &PropertyEntry,
+    whole: Whole,
+    text: String,
+    label: &str,
+    out: &mut DiffOutcome,
+) {
     let Some((offset, _)) = entry.span else {
         out.notes.push(format!(
             "{label}: the reader recorded no offset for it, so it cannot be addressed"
         ));
         return;
     };
+    let op = match whole {
+        Whole::Value => EditOp::Set { text },
+        Whole::Element(index) => EditOp::SetElement { index, text },
+        Whole::Key => {
+            out.notes.push(format!(
+                "{label}: a key that changed is a remove and an insert rather than a value edit"
+            ));
+            return;
+        }
+    };
     out.edits.values.push(ValueEdit {
         offset,
         expect_name: entry.name.clone(),
         expect_element: entry.element,
         expect_kind: kind_of(&entry.value),
-        op: EditOp::Set { text },
+        op,
     });
 }
 
@@ -710,45 +753,10 @@ fn diff_items(
     let Some(now) = edited.get("items").and_then(Json::as_array) else {
         return;
     };
-    let shared = items.len().min(now.len());
-    for position in 0..shared {
-        let before = &items[position];
-        let after = &now[position];
-        match before {
-            PropertyValue::Struct { fields, .. } => {
-                if let Some(inner) = after.get("fields").and_then(Json::as_array) {
-                    diff_entries(fields, inner, export, &format!("{label}[{position}]"), out);
-                }
-            }
-            _ => {
-                if !summary_changed(before, after) {
-                    continue;
-                }
-                let Some(offset) = entry.span.map(|(start, _)| start) else {
-                    out.notes.push(format!(
-                        "{label}[{position}]: the container has no recorded offset"
-                    ));
-                    continue;
-                };
-                let Some(text) = text_of(after) else {
-                    out.notes.push(format!(
-                        "{label}[{position}]: the edited element is not a {}",
-                        kind_of(before)
-                    ));
-                    continue;
-                };
-                out.edits.values.push(ValueEdit {
-                    offset,
-                    expect_name: entry.name.clone(),
-                    expect_element: entry.element,
-                    expect_kind: kind_of(&entry.value),
-                    op: EditOp::SetElement {
-                        index: position as u32,
-                        text,
-                    },
-                });
-            }
-        }
+    for (position, (before, after)) in items.iter().zip(now).enumerate() {
+        let at = Whole::Element(position as u32);
+        let here = format!("{label}[{position}]");
+        diff_in_place(entry, at, before, after, export, &here, out);
     }
     let Some(offset) = entry.span.map(|(start, _)| start) else {
         return;
@@ -921,69 +929,91 @@ fn element_sets(
     same
 }
 
-/// A map's value half. It is addressed as an element of the map, so only a scalar change is an
-/// edit; a struct value recurses through its own fields' offsets.
-#[allow(clippy::too_many_arguments)]
-fn diff_map_value(
+/// A map against its edited form, pair by pair: each key and each value keeps its place.
+fn diff_map(
     entry: &PropertyEntry,
-    position: u32,
-    before: &PropertyValue,
+    entries: &[rivals_uasset::MapEntry],
     edited: &Json,
     export: u32,
     label: &str,
     out: &mut DiffOutcome,
 ) {
-    if let PropertyValue::Struct { fields, .. } = before {
-        if let Some(inner) = edited.get("fields").and_then(Json::as_array) {
-            diff_entries(fields, inner, export, &format!("{label}[{position}]"), out);
-        }
-        return;
-    }
-    if !summary_changed(before, edited) {
-        return;
-    }
-    let (Some(offset), Some(text)) = (entry.span.map(|(start, _)| start), text_of(edited)) else {
-        out.notes.push(format!(
-            "{label}[{position}]: the edited value cannot be addressed as an element"
-        ));
+    let Some(items) = edited.get("entries").and_then(Json::as_array) else {
         return;
     };
-    out.edits.values.push(ValueEdit {
-        offset,
-        expect_name: entry.name.clone(),
-        expect_element: entry.element,
-        expect_kind: kind_of(&entry.value),
-        op: EditOp::SetElement {
-            index: position,
-            text,
-        },
-    });
-}
-
-/// Whether the edited JSON says something the original does not. Compared through the text form
-/// both ends already use, which is what an edit carries and what verification reads back.
-fn summary_changed(was: &PropertyValue, edited: &Json) -> bool {
-    match text_of(edited) {
-        Some(text) => text != was.summary(),
-        None => false,
+    if items.len() != entries.len() {
+        out.notes.push(format!(
+            "{label}: the map holds {} entries and the edited dump {}; adding or dropping one is \
+             keyed, so make it in the editor rather than in the dump",
+            entries.len(),
+            items.len()
+        ));
+        return;
+    }
+    for (position, (before, now)) in entries.iter().zip(items).enumerate() {
+        let at = position as u32;
+        if let Some(key) = now.get("key") {
+            let here = format!("{label}[{position}].key");
+            diff_in_place(entry, Whole::Key, &before.key, key, export, &here, out);
+        }
+        if let Some(value) = now.get("value") {
+            let here = format!("{label}[{position}]");
+            diff_in_place(
+                entry,
+                Whole::Element(at),
+                &before.value,
+                value,
+                export,
+                &here,
+                out,
+            );
+        }
     }
 }
 
-/// How the dump renders a reference the loader binds. Kept apart from `text_of` so a retype can
-/// never turn one into a `Set`: none of these three is written from text.
-fn bound_reference(edited: &Json) -> Option<String> {
-    let field = |name: &str| edited.get(name).and_then(Json::as_str);
-    match kind_in(edited)? {
-        "delegate" => {
-            let function = field("function")?;
-            Some(match field("object") {
-                Some(object) => format!("{object}::{function}"),
-                None => function.to_string(),
-            })
+/// The text an edited value is typed as. Where the dump shows a value two ways, the one that
+/// changed is the one meant: an enum's number under the name it had, or an object's index under
+/// the path it had.
+fn edited_text(before: &PropertyValue, edited: &Json) -> Option<String> {
+    let field = |name: &str| edited.get(name);
+    match before {
+        PropertyValue::Enum { value, name, .. } => {
+            let now = field("value").and_then(Json::as_i64);
+            if field("name").and_then(Json::as_str) == name.as_deref()
+                && let Some(now) = now.filter(|now| now != value)
+            {
+                return Some(now.to_string());
+            }
         }
-        "field_path" => field("path").map(str::to_string),
-        "lazy_object" => field("guid").map(str::to_string),
-        _ => None,
+        PropertyValue::Object { index, path } => {
+            let now = field("index").and_then(Json::as_i64);
+            if field("path").and_then(Json::as_str) == path.as_deref()
+                && let Some(now) = now.filter(|now| *now != i64::from(*index))
+            {
+                return Some(match now {
+                    0 => "None".to_string(),
+                    now => now.to_string(),
+                });
+            }
+        }
+        _ => {}
+    }
+    text_of(edited)
+}
+
+/// What a dump says of a value, less what it shows only for reading: where it sits and what a
+/// lookup displays.
+fn content(value: &Json) -> Json {
+    match value {
+        Json::Object(fields) => Json::Object(
+            fields
+                .iter()
+                .filter(|(name, _)| !matches!(name.as_str(), "span" | "display"))
+                .map(|(name, value)| (name.clone(), content(value)))
+                .collect(),
+        ),
+        Json::Array(items) => Json::Array(items.iter().map(content).collect()),
+        other => other.clone(),
     }
 }
 
@@ -1762,6 +1792,16 @@ mod tests {
             },
             0x700,
         ));
+        entries.push(entry(
+            "ByPoint",
+            PropertyValue::Map {
+                entries: vec![rivals_uasset::MapEntry {
+                    key: point(),
+                    value: PropertyValue::Int { value: 1 },
+                }],
+            },
+            0x800,
+        ));
         entries.push(table_text("Play"));
         entries
     }
@@ -1778,6 +1818,228 @@ mod tests {
         diff_entries(&entries, &json, 0, "/Game/Thing.Thing", &mut out);
         assert!(out.edits.is_empty(), "{:?}", out.edits);
         assert!(out.notes.is_empty(), "{:?}", out.notes);
+    }
+
+    /// An enum whose number changed under the name it had is set by the number, which is the half
+    /// of the dump that was edited.
+    #[test]
+    fn an_enum_given_only_a_new_number_is_set_by_it() {
+        let out = one(
+            entry(
+                "Role",
+                PropertyValue::Enum {
+                    value: 0,
+                    name: Some("Tank".into()),
+                    enum_type: Some("EHeroRole".into()),
+                },
+                0x8,
+            ),
+            json!({"kind": "enum", "value": 2, "name": "Tank", "enum_type": "EHeroRole"}),
+        );
+        assert!(matches!(&value(&out).op, EditOp::Set { text } if text == "2"));
+    }
+
+    /// An object whose index changed under the path it had is set by the index.
+    #[test]
+    fn an_object_given_only_a_new_index_is_set_by_it() {
+        let out = one(
+            entry(
+                "Mesh",
+                PropertyValue::Object {
+                    index: -3,
+                    path: Some("/Game/A.A".into()),
+                },
+                0x20,
+            ),
+            json!({"kind": "object", "index": -4, "path": "/Game/A.A"}),
+        );
+        assert!(matches!(&value(&out).op, EditOp::Set { text } if text == "-4"));
+    }
+
+    /// A struct element the dump lists without its fields, or as another type, says so rather
+    /// than changing nothing in silence.
+    #[test]
+    fn a_struct_element_without_fields_is_noted() {
+        let out = one(
+            array(vec![my_struct(1, PropertyValue::Int { value: 2 })]),
+            json!({"kind": "array", "items": [{"kind": "struct", "name": "Other"}]}),
+        );
+        assert!(out.edits.is_empty(), "{:?}", out.edits);
+        assert_eq!(out.notes.len(), 2, "{:?}", out.notes);
+        assert!(
+            out.notes
+                .iter()
+                .any(|note| note.contains("lists no fields"))
+        );
+        assert!(
+            out.notes
+                .iter()
+                .any(|note| note.contains("stays a MyStruct"))
+        );
+    }
+
+    /// An element is always its container's type, so one given another kind is a note.
+    #[test]
+    fn an_element_given_another_kind_is_noted() {
+        let out = one(
+            array(vec![PropertyValue::Str { value: "a".into() }]),
+            json!({"kind": "array", "items": [{"kind": "int", "value": 1}]}),
+        );
+        assert!(out.edits.is_empty(), "{:?}", out.edits);
+        assert_eq!(out.notes.len(), 1, "{:?}", out.notes);
+        assert!(out.notes[0].contains("Tags[0]"), "{}", out.notes[0]);
+    }
+
+    /// A changed element no text can carry is a note, not a change dropped in silence.
+    #[test]
+    fn a_changed_element_with_no_text_form_is_noted() {
+        let delegate = |function: &str| PropertyValue::Delegate {
+            object: Some("/Game/A.A_C".into()),
+            function: function.into(),
+        };
+        let out = one(
+            array(vec![delegate("Handler")]),
+            json!({"kind": "array", "items": [
+                {"kind": "delegate", "object": "/Game/A.A_C", "function": "Other"},
+            ]}),
+        );
+        assert!(out.edits.is_empty(), "{:?}", out.edits);
+        assert_eq!(out.notes.len(), 1, "{:?}", out.notes);
+    }
+
+    /// A property the edited dump adds is not something a save can declare, so it is a note.
+    #[test]
+    fn a_property_the_package_does_not_declare_is_noted() {
+        let mut out = DiffOutcome::default();
+        diff_entries(
+            &[entry("Count", PropertyValue::Int { value: 1 }, 0)],
+            &[
+                json!({"name": "Count", "value": {"kind": "int", "value": 1}}),
+                json!({"name": "Extra", "value": {"kind": "int", "value": 2}}),
+            ],
+            0,
+            "/Game/Thing.Thing",
+            &mut out,
+        );
+        assert!(out.edits.is_empty(), "{:?}", out.edits);
+        assert_eq!(out.notes.len(), 1, "{:?}", out.notes);
+        assert!(out.notes[0].contains("Thing.Extra"), "{}", out.notes[0]);
+    }
+
+    /// A text inside a container is diffed the way a text property is: its parts at their own
+    /// offsets, and a value typed again set whole through its index.
+    #[test]
+    fn a_text_element_s_parts_recurse_and_its_value_is_set_whole() {
+        let labels = entry(
+            "Labels",
+            PropertyValue::Array {
+                items: vec![table_text("Play").value],
+            },
+            0x30,
+        );
+        let out = one(
+            labels.clone(),
+            json!({"kind": "array", "items": [table_json(&format!("{TABLE}:Quit"), "Quit")]}),
+        );
+        let edit = value(&out);
+        assert_eq!((edit.offset, edit.expect_name.as_str()), (0x4D, "Key"));
+
+        let out = one(
+            labels,
+            json!({"kind": "array", "items": [table_json("Fixed", "Play")]}),
+        );
+        let edit = value(&out);
+        assert_eq!(edit.offset, 0x30);
+        assert!(
+            matches!(&edit.op, EditOp::SetElement { index: 0, text } if text == "Fixed"),
+            "{:?}",
+            edit.op
+        );
+    }
+
+    /// A localized text held as a map's value, given another key, is set as its literal through
+    /// the pair's index.
+    #[test]
+    fn a_text_map_value_with_a_new_key_is_set_as_its_literal() {
+        let localized = PropertyValue::Text {
+            value: Some("Play".into()),
+            parts: Vec::new(),
+            namespace: Some("Menu".into()),
+            key: Some("Play".into()),
+            display: None,
+        };
+        let out = one(
+            entry(
+                "Titles",
+                PropertyValue::Map {
+                    entries: vec![rivals_uasset::MapEntry {
+                        key: PropertyValue::Name { value: "A".into() },
+                        value: localized,
+                    }],
+                },
+                0x30,
+            ),
+            json!({"kind": "map", "entries": [{
+                "key": {"kind": "name", "value": "A"},
+                "value": {"kind": "text", "value": "Play", "namespace": "Menu", "key": "Start"},
+            }]}),
+        );
+        assert!(matches!(
+            &value(&out).op,
+            EditOp::SetElement { index: 0, text } if text == r#"NSLOCTEXT("Menu", "Start", "Play")"#
+        ));
+    }
+
+    /// A field of a map's struct key is edited at its own offset; the key as a whole keeps its
+    /// place.
+    #[test]
+    fn a_struct_key_s_field_is_set_at_its_own_offset() {
+        let out = one(
+            entry(
+                "ByPoint",
+                PropertyValue::Map {
+                    entries: vec![rivals_uasset::MapEntry {
+                        key: my_struct(1, PropertyValue::Int { value: 2 }),
+                        value: PropertyValue::Int { value: 7 },
+                    }],
+                },
+                0x40,
+            ),
+            json!({"kind": "map", "entries": [{
+                "key": {"kind": "struct", "name": "MyStruct", "fields": [
+                    {"name": "X", "value": {"kind": "int", "value": 1}},
+                    {"name": "Y", "value": {"kind": "int", "value": 3}},
+                ]},
+                "value": {"kind": "int", "value": 7},
+            }]}),
+        );
+        let edit = value(&out);
+        assert_eq!((edit.offset, edit.expect_name.as_str()), (0x54, "Y"));
+        assert!(out.notes.is_empty(), "{:?}", out.notes);
+    }
+
+    /// A scalar key that changed is a note until keys can be set.
+    #[test]
+    fn a_changed_scalar_key_is_noted() {
+        let out = one(
+            entry(
+                "Scores",
+                PropertyValue::Map {
+                    entries: vec![rivals_uasset::MapEntry {
+                        key: PropertyValue::Name { value: "A".into() },
+                        value: PropertyValue::Int { value: 7 },
+                    }],
+                },
+                0x40,
+            ),
+            json!({"kind": "map", "entries": [{
+                "key": {"kind": "name", "value": "B"},
+                "value": {"kind": "int", "value": 7},
+            }]}),
+        );
+        assert!(out.edits.is_empty(), "{:?}", out.edits);
+        assert_eq!(out.notes.len(), 1, "{:?}", out.notes);
+        assert!(out.notes[0].contains("Scores[0].key"), "{}", out.notes[0]);
     }
 
     /// The text form the dump renders is the one an edit carries, so a whole float keeps the
