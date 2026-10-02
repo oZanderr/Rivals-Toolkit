@@ -100,7 +100,7 @@ pub fn mod_search(
 fn search_package(package: &str, parsed: &ParsedPackage, needle: &str, out: &mut Vec<SearchHit>) {
     for export in &parsed.exports {
         if let Some(script) = &export.script {
-            let lines = rivals_uasset::script_lines(script);
+            let lines = rivals_uasset::script_lines(parsed, export.index);
             // One hit per statement: a call and the variable holding its result often both match,
             // and the call is the more telling of the two.
             for (statement, line) in script.statements.iter().zip(&lines) {

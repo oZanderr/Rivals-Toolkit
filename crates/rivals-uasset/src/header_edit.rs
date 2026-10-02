@@ -51,6 +51,7 @@ fn placeholder_name() -> String {
 
 /// The name map and import table as they stand while a patch is assembled. Both grow as edits add
 /// to them, and every later edit resolves against the grown tables.
+#[derive(Clone)]
 pub(crate) struct Tables {
     pub names: FPackageNameMap,
     pub imports: Vec<FObjectImport>,

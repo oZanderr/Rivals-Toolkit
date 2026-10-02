@@ -6,14 +6,14 @@ use serde::{Deserialize, Serialize};
 
 use rivals_uasset::{
     BulkEdit, DependencyEdit, DuplicateExport, ExportEdit, ImportEdit, KeyEdit, PackageEdits,
-    PayloadEdit, RowEdit, ScriptConstEdit, StringEdit, ValueEdit,
+    PayloadEdit, RowEdit, ScriptConstEdit, ScriptTextEdit, StringEdit, ValueEdit,
 };
 
 use crate::paths::{mods_dir, paks_dir};
 
 /// Every change one save makes, in the form the app sends and an edit file holds. Bulk and payload
 /// bytes are named by file rather than inlined: they are large by nature, and a path keeps an edit
-/// file readable.
+/// file readable. A function's text may be either.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EditList {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -33,6 +33,9 @@ pub struct EditList {
     /// Literal constants changed in place inside a function's bytecode.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scripts: Vec<ScriptConstEdit>,
+    /// Whole functions written anew from assembler text.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub script_texts: Vec<ScriptTextFile>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub remove_exports: Vec<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -92,6 +95,45 @@ pub struct PayloadFile {
     pub file: String,
 }
 
+/// A function's whole script as assembler text: given inline, or as a file to read it from.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ScriptTextFile {
+    pub export: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    /// The text the script printed as when the edit was made.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub was: Option<String>,
+}
+
+/// Text read from a file, whichever encoding a shell wrote it in: UTF-8, with or without a byte
+/// order mark, or UTF-16 behind one, which is what Windows PowerShell's `>` writes.
+pub fn decode_text(bytes: &[u8]) -> Result<String, String> {
+    let utf16 = |bytes: &[u8], big: bool| {
+        let units: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|pair| {
+                if big {
+                    u16::from_be_bytes([pair[0], pair[1]])
+                } else {
+                    u16::from_le_bytes([pair[0], pair[1]])
+                }
+            })
+            .collect();
+        String::from_utf16(&units).map_err(|e| format!("not UTF-16 text: {e}"))
+    };
+    match bytes {
+        [0xEF, 0xBB, 0xBF, rest @ ..] => {
+            String::from_utf8(rest.to_vec()).map_err(|e| format!("not UTF-8 text: {e}"))
+        }
+        [0xFF, 0xFE, rest @ ..] => utf16(rest, false),
+        [0xFE, 0xFF, rest @ ..] => utf16(rest, true),
+        _ => String::from_utf8(bytes.to_vec()).map_err(|e| format!("not UTF-8 text: {e}")),
+    }
+}
+
 impl EditList {
     pub fn is_empty(&self) -> bool {
         self.values.is_empty()
@@ -102,6 +144,7 @@ impl EditList {
             && self.bulk.is_empty()
             && self.payloads.is_empty()
             && self.scripts.is_empty()
+            && self.script_texts.is_empty()
             && self.remove_exports.is_empty()
             && self.reset_exports.is_empty()
             && self.duplicate_exports.is_empty()
@@ -142,6 +185,14 @@ impl EditList {
             strings: self.strings.clone(),
             keys: self.keys.clone(),
             scripts: self.scripts.clone(),
+            script_texts: self
+                .script_texts
+                .iter()
+                .map(|entry| ScriptTextEdit {
+                    export: entry.export,
+                    ..Default::default()
+                })
+                .collect(),
             remove_exports: self.remove_exports.clone(),
             reset_exports: self.reset_exports.clone(),
             duplicate_exports: self.duplicate_exports.clone(),
@@ -179,6 +230,26 @@ impl EditList {
                 bytes: read(&entry.file)?,
             });
         }
+        let mut script_texts = Vec::with_capacity(self.script_texts.len());
+        for entry in self.script_texts {
+            let text = match (entry.text, &entry.file) {
+                (Some(text), None) => text,
+                (None, Some(file)) => {
+                    decode_text(&read(file)?).map_err(|e| format!("{file}: {e}"))?
+                }
+                _ => {
+                    return Err(format!(
+                        "the script text for export {} takes `text` or `file`, one of them",
+                        entry.export
+                    ));
+                }
+            };
+            script_texts.push(ScriptTextEdit {
+                export: entry.export,
+                text,
+                was: entry.was,
+            });
+        }
         Ok(PackageEdits {
             values: self.values,
             imports: self.imports,
@@ -188,6 +259,7 @@ impl EditList {
             bulk,
             payloads,
             scripts: self.scripts,
+            script_texts,
             remove_exports: self.remove_exports,
             reset_exports: self.reset_exports,
             duplicate_exports: self.duplicate_exports,
@@ -477,5 +549,55 @@ mod tests {
         let error = resolve_container("absent.utoc", &dir, "C:/nowhere").expect_err("refused");
         assert!(error.contains("absent.utoc"), "{error}");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A function's text travels inline, as the app sends it, or as a file beside the edit file,
+    /// as a person writes one; never both.
+    #[test]
+    fn a_script_text_is_inline_or_a_file_beside_the_edit_file() {
+        let dir = scratch("text");
+        std::fs::write(dir.join("fn.txt"), "Return Nothing\nEndOfScript\n").expect("write");
+        let list: EditList = serde_json::from_str(
+            r#"{"script_texts": [
+                {"export": 4, "text": "EndOfScript\n", "was": "Return Nothing\nEndOfScript\n"},
+                {"export": 5, "file": "fn.txt"}
+            ]}"#,
+        )
+        .expect("parse");
+        assert!(!list.is_empty());
+        let edits = list.resolve(&dir).expect("resolved");
+        assert_eq!(edits.script_texts.len(), 2);
+        assert_eq!(edits.script_texts[0].text, "EndOfScript\n");
+        assert_eq!(
+            edits.script_texts[0].was.as_deref(),
+            Some("Return Nothing\nEndOfScript\n")
+        );
+        assert_eq!(edits.script_texts[1].export, 5);
+        assert_eq!(edits.script_texts[1].text, "Return Nothing\nEndOfScript\n");
+
+        let both: EditList = serde_json::from_str(
+            r#"{"script_texts": [{"export": 4, "text": "x", "file": "fn.txt"}]}"#,
+        )
+        .expect("parse");
+        let error = both.resolve(&dir).expect_err("refused");
+        assert!(error.contains("`text` or `file`"), "{error}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Windows PowerShell's `>` writes UTF-16 behind a byte order mark, which reads the same as the
+    /// UTF-8 a shell elsewhere writes.
+    #[test]
+    fn text_reads_whichever_encoding_a_shell_wrote() {
+        let text = "Jump @0045 unless LocalVariable(bOk)\n";
+        let mut utf16 = vec![0xFF, 0xFE];
+        for unit in text.encode_utf16() {
+            utf16.extend_from_slice(&unit.to_le_bytes());
+        }
+        assert_eq!(decode_text(&utf16).as_deref(), Ok(text));
+        let mut bom = vec![0xEF, 0xBB, 0xBF];
+        bom.extend_from_slice(text.as_bytes());
+        assert_eq!(decode_text(&bom).as_deref(), Ok(text));
+        assert_eq!(decode_text(text.as_bytes()).as_deref(), Ok(text));
+        assert!(decode_text(&[0xC3, 0x28]).is_err());
     }
 }

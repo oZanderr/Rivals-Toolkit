@@ -13,8 +13,8 @@ use crate::edit::{
 };
 use crate::header_edit::{Tables, add_import};
 use crate::kismet::{self, Expr, FixupKind, Script, Span};
-use crate::package::{ParsedExport, ParsedPackage, path_from};
-use crate::relocate::{Change, OffsetMap, relocate};
+use crate::package::{AssetBundle, ParsedExport, ParsedPackage, path_from};
+use crate::relocate::{Change, OffsetMap, Relocated, relocate};
 use crate::write::Splice;
 
 /// The expression an edit lands on.
@@ -122,12 +122,45 @@ pub(crate) struct ScriptSplices {
     pub notes: Vec<String>,
 }
 
+/// The line a save reports a script's change of size with, when it changed size.
+fn layout_line(
+    parsed: &ParsedPackage,
+    export: u32,
+    owner: &str,
+    relocated: &Relocated,
+) -> Option<AppliedEdit> {
+    let ((loaded, stored), (now_loaded, now_stored)) = relocated.sizes?;
+    let sizes_at = parsed
+        .exports
+        .iter()
+        .find(|e| e.index == export)
+        .and_then(|e| e.script.as_ref())
+        .map_or(0, |script| script.sizes_at);
+    Some(AppliedEdit {
+        name: format!("{owner} script layout"),
+        offset: sizes_at,
+        offset_after: sizes_at,
+        element: None,
+        elements_after: None,
+        before: format!("{loaded} bytes loaded, {stored} stored"),
+        after: format!(
+            "{now_loaded} bytes loaded, {now_stored} stored; {} offset(s), {} event entr{} and {} latent resume point(s) moved",
+            relocated.jumps,
+            relocated.entries,
+            if relocated.entries == 1 { "y" } else { "ies" },
+            relocated.linkages
+        ),
+    })
+}
+
 /// Works out every script edit in `edits`, the bytes each writes, and everything that moves.
 pub(crate) fn script_splices(
     parsed: &ParsedPackage,
     edits: &PackageEdits,
     tables: &mut Tables,
     package: &retoc::legacy_asset::FLegacyPackageHeader,
+    bundle: &AssetBundle<'_>,
+    base: u64,
 ) -> Result<ScriptSplices, String> {
     let mut out = ScriptSplices {
         splices: Vec::new(),
@@ -177,32 +210,25 @@ pub(crate) fn script_splices(
             });
         }
         let relocated = relocate(parsed, export, changes)?;
+        let owner = mine.first().map_or("", |plan| plan.name.as_str());
+        let owner = owner.split(" script").next().unwrap_or(owner);
+        out.applied
+            .extend(layout_line(parsed, export, owner, &relocated));
         labelled.extend(relocated.splices);
-        if let Some(((loaded, stored), (now_loaded, now_stored))) = relocated.sizes {
-            let owner = mine.first().map_or("", |plan| plan.name.as_str());
-            let owner = owner.split(" script").next().unwrap_or(owner);
-            let sizes_at = parsed
-                .exports
-                .iter()
-                .find(|e| e.index == export)
-                .and_then(|e| e.script.as_ref())
-                .map_or(0, |script| script.sizes_at);
-            out.applied.push(AppliedEdit {
-                name: format!("{owner} script layout"),
-                offset: sizes_at,
-                offset_after: sizes_at,
-                element: None,
-                elements_after: None,
-                before: format!("{loaded} bytes loaded, {stored} stored"),
-                after: format!(
-                    "{now_loaded} bytes loaded, {now_stored} stored; {} offset(s), {} event entr{} and {} latent resume point(s) moved",
-                    relocated.jumps,
-                    relocated.entries,
-                    if relocated.entries == 1 { "y" } else { "ies" },
-                    relocated.linkages
-                ),
-            });
-        }
+    }
+    for edit in &edits.script_texts {
+        let text =
+            crate::script_text_edit::plan_text(parsed, edits, edit, tables, package, bundle, base)?;
+        out.links.extend(text.links);
+        out.notes.extend(text.notes);
+        out.applied.extend(text.applied);
+        let owner = parsed
+            .exports
+            .get(edit.export as usize)
+            .map_or_else(|| edit.export.to_string(), |e| e.object_name.clone());
+        out.applied
+            .extend(layout_line(parsed, edit.export, &owner, &text.relocated));
+        labelled.extend(text.relocated.splices);
     }
     // An edit in one script can land on bytes another script's relocation rewrites, such as the
     // entry a stub passes an event graph this save moves, or inside a stub given a whole new payload.
@@ -335,6 +361,7 @@ fn bytes_for(
                 name: "NameConst",
                 value: name.clone(),
                 at: 0,
+                id: kismet::NameId::default(),
             },
             &mut tables.names,
         )?,
@@ -1085,6 +1112,7 @@ fn change_for(found: &Located<'_>, value: &str) -> Result<(Replacement, Expect, 
             name,
             function,
             params,
+            ..
         } => {
             let new_name = value.trim();
             if new_name.is_empty() || new_name.contains(['/', '.', ':', ' ']) {
@@ -1100,6 +1128,7 @@ fn change_for(found: &Located<'_>, value: &str) -> Result<(Replacement, Expect, 
                 name,
                 function: new_name.to_string(),
                 params: params.clone(),
+                id: kismet::NameId::default(),
             };
             let after = kismet::render(&new);
             Ok((
@@ -1477,7 +1506,7 @@ pub(crate) fn verify(
     after: &ParsedPackage,
     edits: &PackageEdits,
 ) -> Result<(), String> {
-    if edits.scripts.is_empty() {
+    if edits.scripts.is_empty() && edits.script_texts.is_empty() {
         return Ok(());
     }
     let plans = plan_all(before, edits, true)?;
@@ -1487,6 +1516,14 @@ pub(crate) fn verify(
         if !mine.is_empty() {
             maps.push((export.index, export.object_name.clone(), map_of(&mine)));
         }
+    }
+    let texts = crate::script_text_edit::lay_out_texts(before, after, edits)?;
+    for laid in &texts {
+        let name = before
+            .exports
+            .get(laid.export as usize)
+            .map_or_else(|| laid.export.to_string(), |e| e.object_name.clone());
+        maps.push((laid.export, name, laid.map.clone()));
     }
     let functions = kismet::functions_of(&before.exports);
     for was in &before.exports {
@@ -1516,6 +1553,10 @@ pub(crate) fn verify(
                 was.object_name,
                 new.resize_lock().unwrap_or_default()
             ));
+        }
+        if let Some(laid) = texts.iter().find(|laid| laid.export == was.index) {
+            crate::script_text_edit::verify_text(&was.object_name, laid, new)?;
+            continue;
         }
         let mine: Vec<&Planned> = plans.iter().filter(|p| p.export == was.index).collect();
         let own_map = maps
@@ -1828,6 +1869,12 @@ fn find_mut<'a>(expr: &'a mut Expr, index: usize, next: &mut usize) -> Option<&'
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// The bytes a save reads a script from, for one whose edits never need them.
+    const NO_BUNDLE: AssetBundle<'static> = AssetBundle {
+        asset: &[],
+        exports: &[],
+    };
     use crate::package::{ExportStatus, ImportInfo};
     use crate::props::{Ctx, Diagnostics};
     use retoc::legacy_asset::{FLegacyPackageHeader, FMinimalName, FObjectImport, FPackageNameMap};
@@ -1901,7 +1948,7 @@ mod tests {
     }
 
     /// Seven statements, at loaded offsets 0x00, 0x0F, 0x1D, 0x30, 0x3B, 0x45 and 0x47:
-    /// `Target(411)`, `Jump 0x0045 unless Flag`, `Target(Object(T_A))`, `Target(True)`,
+    /// `Target(411)`, `Jump @0045 unless Flag`, `Target(ObjectConst(T_A))`, `Target(True)`,
     /// `PopExecutionFlowIfNot(Flag)`, `Return Nothing` and the end marker.
     fn script_bytes() -> Vec<u8> {
         let mut out = Vec::new();
@@ -2013,7 +2060,11 @@ mod tests {
             names: header.name_map.clone(),
             imports: header.imports.clone(),
         };
-        let out = script_splices(&before, edits, &mut tables, &header)?;
+        let bundle = AssetBundle {
+            asset: &[],
+            exports: &bytes,
+        };
+        let out = script_splices(&before, edits, &mut tables, &header, &bundle, 0)?;
         let mut patched = bytes.clone();
         let mut ordered: Vec<&Splice> = out.splices.iter().collect();
         ordered.sort_by_key(|splice| std::cmp::Reverse(splice.start));
@@ -2058,10 +2109,10 @@ mod tests {
         assert_eq!(
             rendered(&parsed),
             [
-                "0x0000 LocalFinalFunction Target(411)",
-                "0x000F Jump 0x0045 unless LocalVariable(Flag)",
-                "0x001D LocalFinalFunction Target(Object(/Game/T_A.T_A))",
-                "0x0030 LocalFinalFunction Target(True)",
+                "0x0000 LocalFinalFunction 'Target'(411)",
+                "0x000F Jump @0045 unless LocalVariable(Flag)",
+                "0x001D LocalFinalFunction 'Target'(ObjectConst(/Game/T_A.T_A))",
+                "0x0030 LocalFinalFunction 'Target'(True)",
                 "0x003B PopExecutionFlowIfNot(LocalVariable(Flag))",
                 "0x0045 Return Nothing",
                 "0x0047 EndOfScript",
@@ -2075,14 +2126,14 @@ mod tests {
         let (_, after, applied) = save(&edits(vec![edit(0, None, "1000")])).expect("saved");
         assert_eq!(
             rendered(&after)[0],
-            "0x0000 LocalFinalFunction Target(1000)"
+            "0x0000 LocalFinalFunction 'Target'(1000)"
         );
         assert_eq!(
             (applied[0].before.as_str(), applied[0].after.as_str()),
             ("411", "1000")
         );
         let (_, after, _) = save(&edits(vec![edit(0, Some(9), "7")])).expect("saved");
-        assert_eq!(rendered(&after)[0], "0x0000 LocalFinalFunction Target(7)");
+        assert_eq!(rendered(&after)[0], "0x0000 LocalFinalFunction 'Target'(7)");
         let missing = save(&edits(vec![edit(0, Some(8), "7")])).expect_err("no expression there");
         assert!(
             missing.contains("no expression starts at 0x0008"),
@@ -2097,15 +2148,15 @@ mod tests {
         let (_, after, _) = save(&edits(vec![edit(0x0F, Some(0x0F), "true")])).expect("saved");
         assert_eq!(
             rendered(&after)[1],
-            "0x000F Jump 0x001D unless LocalVariable(Flag)"
+            "0x000F Jump @001D unless LocalVariable(Flag)"
         );
         let (_, after, _) = save(&edits(vec![edit(0x0F, Some(0x0F), "false")])).expect("saved");
         let lines = rendered(&after);
-        assert_eq!(lines[1], "0x000F Jump 0x0045");
+        assert_eq!(lines[1], "0x000F Jump @0045");
         assert_eq!(lines[2], "0x0014 LocalVariable(Flag)");
         assert_eq!(
             lines[3],
-            "0x001D LocalFinalFunction Target(Object(/Game/T_A.T_A))"
+            "0x001D LocalFinalFunction 'Target'(ObjectConst(/Game/T_A.T_A))"
         );
         let unclear =
             save(&edits(vec![edit(0x0F, Some(0x0F), "maybe")])).expect_err("not a condition");
@@ -2137,12 +2188,12 @@ mod tests {
         let (before, after, _) = save_with(script.clone(), &never).expect("saved");
         assert_eq!(
             rendered(&before)[1],
-            "0x000E PopExecutionFlowIfNot(LocalFinalFunction Target(True))"
+            "0x000E PopExecutionFlowIfNot(LocalFinalFunction 'Target'(True))"
         );
         assert_eq!(
             rendered(&after),
             [
-                "0x0000 Jump 0x0010 unless LocalVariable(Flag)",
+                "0x0000 Jump @0010 unless LocalVariable(Flag)",
                 "0x000E PopExecutionFlowIfNot(True)",
                 "0x0010 Return Nothing",
                 "0x0012 EndOfScript",
@@ -2158,11 +2209,14 @@ mod tests {
             &never,
             &mut tables,
             &header,
+            &NO_BUNDLE,
+            0,
         )
         .expect("planned");
         assert!(
-            out.notes.iter().any(|note| note
-                .ends_with("the condition LocalFinalFunction Target(True) is no longer evaluated")),
+            out.notes.iter().any(|note| note.ends_with(
+                "the condition LocalFinalFunction 'Target'(True) is no longer evaluated"
+            )),
             "{:?}",
             out.notes
         );
@@ -2173,7 +2227,7 @@ mod tests {
         let (_, after, _) = save(&edits(vec![edit(0x30, Some(0x39), "false")])).expect("saved");
         assert_eq!(
             rendered(&after)[3],
-            "0x0030 LocalFinalFunction Target(False)"
+            "0x0030 LocalFinalFunction 'Target'(False)"
         );
         let same = save(&edits(vec![edit(0x30, Some(0x39), "1")])).expect_err("already true");
         assert!(same.contains("already reads"), "{same}");
@@ -2186,13 +2240,13 @@ mod tests {
         let (_, after, _) = save(&edits(vec![edit(0x1D, Some(0x26), "None")])).expect("saved");
         assert_eq!(
             rendered(&after)[2],
-            "0x001D LocalFinalFunction Target(Object(None))"
+            "0x001D LocalFinalFunction 'Target'(ObjectConst(None))"
         );
         let (_, after, _) =
             save(&edits(vec![edit(0x1D, Some(0x26), "/Game/T_B.T_B")])).expect("saved");
         assert_eq!(
             rendered(&after)[2],
-            "0x001D LocalFinalFunction Target(Object(/Game/T_B.T_B))"
+            "0x001D LocalFinalFunction 'Target'(ObjectConst(/Game/T_B.T_B))"
         );
         assert_eq!(
             after.imports.last().map(|import| import.path.as_str()),
@@ -2302,7 +2356,7 @@ mod tests {
     }
 
     /// `ExecuteUbergraph_X`, at loaded offsets 0x00, 0x0A, 0x18, 0x26, 0x42, 0x5F, 0x8F and 0x91:
-    /// its dispatch, `Target("ab")`, `Jump 0x008F unless Flag`, `Self->Target("cd")`, a switch
+    /// its dispatch, `Target("ab")`, `Jump @008F unless Flag`, `Self->Target("cd")`, a switch
     /// on `Flag` defaulting to `IntZero`, a latent action resuming at 0x8F, `Return` and the end.
     fn graph_script() -> Vec<u8> {
         let mut out = vec![0x4E, 0x00];
@@ -2458,7 +2512,11 @@ mod tests {
             names: header.name_map.clone(),
             imports: header.imports.clone(),
         };
-        let out = script_splices(&before, edits, &mut tables, header)?;
+        let bundle = AssetBundle {
+            asset: &[],
+            exports: whole,
+        };
+        let out = script_splices(&before, edits, &mut tables, header, &bundle, 0)?;
         let mut patched = whole.to_vec();
         let mut ordered: Vec<&Splice> = out.splices.iter().collect();
         ordered.sort_by_key(|splice| std::cmp::Reverse(splice.start));
@@ -2526,11 +2584,11 @@ mod tests {
             lines_of(&parsed, 0),
             [
                 "0x0000 Jump LocalVariable(EntryPoint)",
-                "0x000A LocalFinalFunction Target(\"ab\")",
-                "0x0018 Jump 0x008F unless LocalVariable(Flag)",
-                "0x0026 Self->LocalFinalFunction Target(\"cd\") [Flag]",
-                "0x0042 Switch(LocalVariable(Flag)) {7 -> \"e\"; default -> IntZero}",
-                "0x005F LocalFinalFunction Target(LatentActionInfo{Offset 0x008F, 5, 'ExecuteUbergraph_X', Self})",
+                "0x000A LocalFinalFunction 'Target'(\"ab\")",
+                "0x0018 Jump @008F unless LocalVariable(Flag)",
+                "0x0026 Self->[Flag] LocalFinalFunction 'Target'(\"cd\")",
+                "0x0042 SwitchValue(LocalVariable(Flag), 7 => \"e\", default => IntZero)",
+                "0x005F LocalFinalFunction 'Target'(StructConst<'LatentActionInfo', 32>(SkipOffsetConst(@008F), 5, 'ExecuteUbergraph_X', Self))",
                 "0x008F Return Nothing",
                 "0x0091 EndOfScript",
             ]
@@ -2549,11 +2607,11 @@ mod tests {
             lines_of(&after, 0),
             [
                 "0x0000 Jump LocalVariable(EntryPoint)",
-                "0x000A LocalFinalFunction Target(\"abcdef\")",
-                "0x001C Jump 0x0093 unless LocalVariable(Flag)",
-                "0x002A Self->LocalFinalFunction Target(\"cd\") [Flag]",
-                "0x0046 Switch(LocalVariable(Flag)) {7 -> \"e\"; default -> IntZero}",
-                "0x0063 LocalFinalFunction Target(LatentActionInfo{Offset 0x0093, 5, 'ExecuteUbergraph_X', Self})",
+                "0x000A LocalFinalFunction 'Target'(\"abcdef\")",
+                "0x001C Jump @0093 unless LocalVariable(Flag)",
+                "0x002A Self->[Flag] LocalFinalFunction 'Target'(\"cd\")",
+                "0x0046 SwitchValue(LocalVariable(Flag), 7 => \"e\", default => IntZero)",
+                "0x0063 LocalFinalFunction 'Target'(StructConst<'LatentActionInfo', 32>(SkipOffsetConst(@0093), 5, 'ExecuteUbergraph_X', Self))",
                 "0x0093 Return Nothing",
                 "0x0095 EndOfScript",
             ]
@@ -2583,7 +2641,7 @@ mod tests {
         assert_eq!(*skip, 17);
         assert_eq!(
             lines_of(&after, 0)[2],
-            "0x0018 Jump 0x0092 unless LocalVariable(Flag)"
+            "0x0018 Jump @0092 unless LocalVariable(Flag)"
         );
     }
 
@@ -2599,11 +2657,11 @@ mod tests {
         let lines = lines_of(&after, 0);
         assert_eq!(
             lines[4],
-            "0x0043 Switch(LocalVariable(Flag)) {7 -> \"e\"; default -> 1000}"
+            "0x0043 SwitchValue(LocalVariable(Flag), 7 => \"e\", default => 1000)"
         );
         assert_eq!(
             lines[5],
-            "0x0064 LocalFinalFunction Target(LatentActionInfo{Offset 0x0094, 5, 'ExecuteUbergraph_X', Self})"
+            "0x0064 LocalFinalFunction 'Target'(StructConst<'LatentActionInfo', 32>(SkipOffsetConst(@0094), 5, 'ExecuteUbergraph_X', Self))"
         );
         assert_eq!(lines[6], "0x0094 Return Nothing");
     }
@@ -2628,12 +2686,12 @@ mod tests {
             names: header.name_map.clone(),
             imports: header.imports.clone(),
         };
-        let refused = script_splices(&parsed, &edits_long, &mut tables, &header)
+        let refused = script_splices(&parsed, &edits_long, &mut tables, &header, &NO_BUNDLE, 0)
             .err()
             .expect("locked");
         assert!(refused.contains("has to keep its size"), "{refused}");
         let same = edits(vec![graph_edit(0, 0x0A, 0x13, "xy")]);
-        assert!(script_splices(&parsed, &same, &mut tables, &header).is_ok());
+        assert!(script_splices(&parsed, &same, &mut tables, &header, &NO_BUNDLE, 0).is_ok());
     }
 
     /// A stub's entry is the event graph's to move when the graph changes size, so a save that also
@@ -2759,7 +2817,7 @@ mod tests {
         assert_eq!(
             rendered(&after),
             [
-                "0x0000 LocalFinalFunction Target(Text(\"Hello there\"))",
+                "0x0000 LocalFinalFunction 'Target'(TextConst<Invariant>(\"Hello there\"))",
                 "0x0019 Return Nothing",
                 "0x001B EndOfScript",
             ]
@@ -2771,7 +2829,7 @@ mod tests {
         .expect("saved");
         assert_eq!(
             rendered(&after)[0],
-            "0x0000 LocalFinalFunction Target(Text(\"Play\"))"
+            "0x0000 LocalFinalFunction 'Target'(TextConst<Localized>(\"Play\", \"Title\", \"Menu\"))"
         );
         assert_eq!(applied[0].after, "NSLOCTEXT(\"Menu\", \"Title\", \"Play\")");
         let transform = save_with(
@@ -2797,7 +2855,7 @@ mod tests {
         .expect("saved");
         assert_eq!(
             rendered(&after)[0],
-            "0x0000 LocalFinalFunction Target(Text(\"Play\" in /Game/UI/ST_B.ST_B))"
+            "0x0000 LocalFinalFunction 'Target'(TextConst<StringTable, /Game/UI/ST_B.ST_B>(\"/Game/UI/ST_B.ST_B\", \"Play\"))"
         );
         assert_eq!(
             after.imports.last().map(|import| import.path.as_str()),
@@ -2815,7 +2873,7 @@ mod tests {
         .expect("saved");
         assert_eq!(
             rendered(&after)[0],
-            "0x0000 LocalFinalFunction Target(Text(\"New\" in /Game/ST_A.ST_A))"
+            "0x0000 LocalFinalFunction 'Target'(TextConst<StringTable, /Game/ST_A.ST_A>(\"/Game/ST_A.ST_A\", \"New\"))"
         );
 
         let header = header();
@@ -2824,8 +2882,15 @@ mod tests {
             names: header.name_map.clone(),
             imports: header.imports.clone(),
         };
-        let out = script_splices(&before, &text_edit("Plain words"), &mut tables, &header)
-            .expect("planned");
+        let out = script_splices(
+            &before,
+            &text_edit("Plain words"),
+            &mut tables,
+            &header,
+            &NO_BUNDLE,
+            0,
+        )
+        .expect("planned");
         assert!(
             out.notes
                 .iter()
@@ -2882,6 +2947,8 @@ mod tests {
             &edits(vec![graph_edit(1, 0, 0, "Target")]),
             &mut tables,
             &header,
+            &NO_BUNDLE,
+            0,
         )
         .expect("a virtual call takes another name");
         assert_eq!(renamed.applied[0].after, "LocalVirtualFunction Target()");
@@ -2890,6 +2957,8 @@ mod tests {
             &edits(vec![graph_edit(1, 0, 0, "/Game/X.X:Y")]),
             &mut tables,
             &header,
+            &NO_BUNDLE,
+            0,
         )
         .err()
         .expect("a path for a virtual call");

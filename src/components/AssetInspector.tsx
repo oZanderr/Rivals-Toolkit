@@ -1942,6 +1942,7 @@ function ScriptPane({
       <ScriptLines
         exportIndex={exportIndex}
         lines={view.lines}
+        endLabels={view.end_labels ?? []}
         entries={view.entries}
         exportNames={exportNames}
         focus={focus}
@@ -1954,11 +1955,25 @@ function ScriptPane({
 
 const hex = (offset: number) => `0x${offset.toString(16).toUpperCase().padStart(4, "0")}`;
 
-/** Statements with their jump, pushed-flow and resume targets as links, and the events that
- *  enter an Ubergraph named where their code starts. */
+/** A label line of the script's text, with what enters there from outside the function. */
+function LabelRow({ label }: { label: TextLabel }) {
+  return (
+    <div className="flex gap-3">
+      <span className="w-12 shrink-0" />
+      <span className="text-blue-accent-foreground">
+        @{label.name}:
+        {label.note && <span className="ml-2 font-sans text-muted-foreground">{label.note}</span>}
+      </span>
+    </div>
+  );
+}
+
+/** Statements with their jump, pushed-flow and resume targets as links, and a label wherever
+ *  code is jumped or resumed to, naming the events that enter there. */
 function ScriptLines({
   exportIndex,
   lines,
+  endLabels,
   entries,
   exportNames,
   focus,
@@ -1967,6 +1982,7 @@ function ScriptLines({
 }: {
   exportIndex: number;
   lines: ScriptLine[];
+  endLabels: TextLabel[];
   entries: [number, string][];
   exportNames: Set<string>;
   focus: number | null;
@@ -1991,12 +2007,6 @@ function ScriptLines({
     }
     return from;
   }, [lines]);
-
-  const eventsAt = useMemo(() => {
-    const at = new Map<number, string[]>();
-    for (const [offset, name] of entries) at.set(offset, [...(at.get(offset) ?? []), name]);
-    return at;
-  }, [entries]);
 
   const go = (offset: number) => {
     setFocused(offset);
@@ -2074,10 +2084,8 @@ function ScriptLines({
         ];
         return (
           <React.Fragment key={line.offset}>
-            {eventsAt.get(line.offset)?.map((name) => (
-              <div key={name} className="mt-2 font-sans font-semibold text-blue-accent-foreground">
-                {name}
-              </div>
+            {(line.labels ?? []).map((label) => (
+              <LabelRow key={label.name} label={label} />
             ))}
             <div
               ref={(el) => {
@@ -2098,6 +2106,11 @@ function ScriptLines({
                   flows after the text, onto a line of its own when the text fills the width. */}
               <div className="min-w-0 flex-1">
                 <span className="whitespace-pre-wrap [overflow-wrap:anywhere]">{line.text}</span>
+                {line.note && (
+                  <span className="ml-2 whitespace-pre-wrap text-muted-foreground">
+                    ; {line.note}
+                  </span>
+                )}
                 {actions.length > 0 && (
                   <span className="ml-3 inline-flex max-w-full flex-wrap items-center gap-x-3 gap-y-0.5 align-top">
                     {actions}
@@ -2108,6 +2121,9 @@ function ScriptLines({
           </React.Fragment>
         );
       })}
+      {endLabels.map((label) => (
+        <LabelRow key={label.name} label={label} />
+      ))}
     </div>
   );
 }
@@ -2130,6 +2146,8 @@ interface ExpressionSlot {
   text: string;
   /** What it holds as an edit types it. */
   value?: string;
+  /** Where it sits in its line's text, start and end. */
+  range?: [number, number];
 }
 
 /** What a call would meet pointed at another function, as a save would judge it. A native
@@ -2434,9 +2452,20 @@ function ConditionToggle({
   );
 }
 
+/** A label of the script's text: the offset it was named after, and what enters there. */
+interface TextLabel {
+  name: string;
+  note?: string;
+}
+
 interface ScriptLine {
   offset: number;
+  /** The statement as the assembler text writes it. */
   text: string;
+  /** The labels the text defines just before the statement. */
+  labels?: TextLabel[];
+  /** What an unresolved call probably was, or what a raw object index names. */
+  note?: string;
   targets?: number[];
   calls?: string[];
   literals?: LiteralSlot[];
@@ -2451,6 +2480,10 @@ interface FunctionField {
 
 interface ScriptView {
   lines: ScriptLine[];
+  /** Labels at the very end of the script, where a jump past its last statement lands. */
+  end_labels?: TextLabel[];
+  /** The whole script as assembler text, when it decoded whole. */
+  text?: string | null;
   entries: [number, string][];
   signature: { params: FunctionField[]; locals: FunctionField[] } | null;
   signature_text: string | null;

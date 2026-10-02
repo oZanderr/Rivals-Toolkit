@@ -1196,7 +1196,7 @@ fn patch_pass(
     if !request.changes.allow_unchecked {
         check_script_objects(request, mappings, parsed, &after)?;
     }
-    check_script_calls(request, mappings, parsed)?;
+    check_script_calls(request, mappings, parsed, &after, changes)?;
     Ok((patched, after))
 }
 
@@ -1209,8 +1209,21 @@ fn check_script_calls(
     request: &AssetEditRequest<'_>,
     mappings: Option<&Mappings>,
     before: &rivals_uasset::ParsedPackage,
+    after: &rivals_uasset::ParsedPackage,
+    changes: &PackageEdits,
 ) -> Result<(), String> {
     let mut doubts = Vec::new();
+    for edit in &changes.script_texts {
+        for (call, fit) in text_calls(request, mappings, before, after, edit.export) {
+            match fit {
+                rivals_uasset::Fit::Fits => {}
+                rivals_uasset::Fit::Mismatch(reason) => {
+                    return Err(format!("{call}: {reason}"));
+                }
+                rivals_uasset::Fit::Unknown(reason) => doubts.push(format!("{call}: {reason}")),
+            }
+        }
+    }
     for edit in &request.changes.scripts {
         let Some(at) = edit.at else {
             continue;
@@ -1248,6 +1261,99 @@ fn check_script_calls(
         crate::object_check::UNCHECKED,
         doubts.join("\n  ")
     ))
+}
+
+/// Every call a function makes, as the statement and expression it starts at with how it reads.
+fn calls_in(parsed: &rivals_uasset::ParsedPackage, export: u32) -> Vec<(u32, u32, String)> {
+    let Some(script) = parsed
+        .exports
+        .get(export as usize)
+        .and_then(|found| found.script.as_ref())
+    else {
+        return Vec::new();
+    };
+    rivals_uasset::script_lines(parsed, export)
+        .into_iter()
+        .flat_map(|line| {
+            line.expressions
+                .into_iter()
+                .filter(|slot| slot.kind == rivals_uasset::SlotKind::Call)
+                .filter_map(move |slot| {
+                    let expr = rivals_uasset::expression_starting(script, line.offset, slot.at)?;
+                    Some((line.offset, slot.at, rivals_uasset::expression_shape(expr)))
+                })
+        })
+        .collect()
+}
+
+/// The calls the function at `export` makes once written from text that it did not make before,
+/// each held to what its function takes. A Blueprint function says what it takes; a native one
+/// says nothing, so a call to one fits only when the package already called it with as many
+/// arguments, and is not known otherwise.
+fn text_calls(
+    request: &AssetEditRequest<'_>,
+    mappings: Option<&Mappings>,
+    before: &rivals_uasset::ParsedPackage,
+    after: &rivals_uasset::ParsedPackage,
+    export: u32,
+) -> Vec<(String, rivals_uasset::Fit)> {
+    let unchanged: std::collections::HashSet<String> = calls_in(before, export)
+        .into_iter()
+        .map(|(_, _, shape)| shape)
+        .collect();
+    let mut known: std::collections::HashSet<(String, usize)> = std::collections::HashSet::new();
+    for found in &before.exports {
+        let Some(script) = found.script.as_ref() else {
+            continue;
+        };
+        for (statement, at, _) in calls_in(before, found.index) {
+            if let Some(call) = rivals_uasset::call_at(script, statement, at) {
+                known.insert((call.callee, call.arity));
+            }
+        }
+    }
+    let Some(found) = after.exports.get(export as usize) else {
+        return Vec::new();
+    };
+    let Some(script) = found.script.as_ref() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (statement, at, shape) in calls_in(after, export) {
+        if unchanged.contains(&shape) {
+            continue;
+        }
+        let (Some(call), Some((site, use_))) = (
+            rivals_uasset::call_at(script, statement, at),
+            rivals_uasset::site_at(after, export, statement, at, mappings),
+        ) else {
+            continue;
+        };
+        let by_name = call.opcode.contains("Virtual");
+        let what = format!(
+            "{} at 0x{statement:04X} calls {}",
+            found.object_name, call.callee
+        );
+        let fit = match blueprint_shape(request, mappings, after, &call.callee, by_name) {
+            Some(_) if call.opcode == "CallMath" => rivals_uasset::Fit::Mismatch(format!(
+                "a CallMath reaches only a native static function, and {} is a Blueprint function",
+                call.callee
+            )),
+            Some(wanted) => rivals_uasset::compare_calls(
+                &passed_shape(&site, use_, Some(&wanted)),
+                &wanted,
+                use_,
+                mappings,
+            ),
+            None if known.contains(&(call.callee.clone(), call.arity)) => rivals_uasset::Fit::Fits,
+            None => rivals_uasset::Fit::Unknown(format!(
+                "nothing in this package calls it with {} argument(s), and the game's files do not record what a native function takes",
+                call.arity
+            )),
+        };
+        out.push((what, fit));
+    }
+    out
 }
 
 /// What a call would meet pointed at another function, before anything is saved.
@@ -13774,13 +13880,22 @@ mod game_data_tests {
             .unwrap_or_else(|| panic!("no function {name}"))
     }
 
-    /// The first expression of `kind` in a script: its statement's offset and its own.
+    /// The lines of the function `name` names, as the script view shows them.
+    fn lines_of(
+        parsed: &rivals_uasset::ParsedPackage,
+        name: &str,
+    ) -> Vec<rivals_uasset::ScriptLine> {
+        rivals_uasset::script_lines(parsed, function(parsed, name).index)
+    }
+
+    /// The first expression of `kind` in a function's script: its statement's offset and its own.
     fn first_slot(
-        script: &rivals_uasset::Script,
+        parsed: &rivals_uasset::ParsedPackage,
+        export: u32,
         kind: rivals_uasset::SlotKind,
         token: &str,
     ) -> (u32, u32) {
-        rivals_uasset::script_lines(script)
+        rivals_uasset::script_lines(parsed, export)
             .into_iter()
             .find_map(|line| {
                 line.expressions
@@ -13802,7 +13917,12 @@ mod game_data_tests {
         let graph = function(&before, "ExecuteUbergraph_");
         let script = graph.script.as_ref().expect("a script");
         assert!(script.resize_lock().is_none(), "{:?}", script.resize_lock());
-        let (statement, at) = first_slot(script, rivals_uasset::SlotKind::Object, "NoObject");
+        let (statement, at) = first_slot(
+            &before,
+            graph.index,
+            rivals_uasset::SlotKind::Object,
+            "NoObject",
+        );
         let scripts = |parsed: &rivals_uasset::ParsedPackage| {
             parsed
                 .exports
@@ -13819,11 +13939,7 @@ mod game_data_tests {
             .unwrap_or_default()
         };
         let resumes = |parsed: &rivals_uasset::ParsedPackage| {
-            let script = function(parsed, "ExecuteUbergraph_")
-                .script
-                .clone()
-                .expect("a script");
-            rivals_uasset::script_lines(&script)
+            lines_of(parsed, "ExecuteUbergraph_")
                 .into_iter()
                 .filter(|line| line.text.contains("LatentActionInfo"))
                 .flat_map(|line| line.targets)
@@ -13886,8 +14002,12 @@ mod game_data_tests {
         };
         let before = fixture.parse();
         let export = function(&before, "IsActiveAbility");
-        let script = export.script.as_ref().expect("a script");
-        let (statement, at) = first_slot(script, rivals_uasset::SlotKind::Condition, "JumpIfNot");
+        let (statement, at) = first_slot(
+            &before,
+            export.index,
+            rivals_uasset::SlotKind::Condition,
+            "JumpIfNot",
+        );
         let fix = |value: &str| {
             fixture.apply_changes(PackageEdits {
                 scripts: vec![ScriptConstEdit {
@@ -13901,30 +14021,26 @@ mod game_data_tests {
             })
         };
         let line = |parsed: &rivals_uasset::ParsedPackage, offset: u32| {
-            let script = function(parsed, "IsActiveAbility")
-                .script
-                .clone()
-                .expect("a script");
-            rivals_uasset::script_lines(&script)
+            lines_of(parsed, "IsActiveAbility")
                 .into_iter()
                 .find(|line| line.offset == offset)
                 .map(|line| line.text)
                 .unwrap_or_default()
         };
         let (_, never) = fix("true");
-        let next = rivals_uasset::script_lines(script)
+        let next = rivals_uasset::script_lines(&before, export.index)
             .into_iter()
             .map(|line| line.offset)
             .find(|offset| *offset > statement)
             .expect("a statement after the branch");
         assert!(
-            line(&never, statement).starts_with(&format!("Jump 0x{next:04X} unless")),
+            line(&never, statement).starts_with(&format!("Jump @{next:04X} unless")),
             "{}",
             line(&never, statement)
         );
         let (_, always) = fix("false");
         assert!(
-            line(&always, statement).starts_with("Jump 0x")
+            line(&always, statement).starts_with("Jump @")
                 && !line(&always, statement).contains("unless"),
             "{}",
             line(&always, statement)
@@ -13944,8 +14060,12 @@ mod game_data_tests {
         };
         let before = fixture.parse();
         let export = function(&before, "IsActiveAbility");
-        let script = export.script.as_ref().expect("a script");
-        let (statement, at) = first_slot(script, rivals_uasset::SlotKind::Object, "ObjectConst");
+        let (statement, at) = first_slot(
+            &before,
+            export.index,
+            rivals_uasset::SlotKind::Object,
+            "ObjectConst",
+        );
         let edit = |value: &str, allow_unchecked| PackageEdits {
             scripts: vec![ScriptConstEdit {
                 export: export.index,
@@ -13971,13 +14091,9 @@ mod game_data_tests {
         );
         assert!(refused.contains("is a KismetSystemLibrary"), "{refused}");
         let (_, after) = fixture.apply_changes(edit(other, true));
-        let script = function(&after, "IsActiveAbility")
-            .script
-            .clone()
-            .expect("a script");
-        assert!(rivals_uasset::script_lines(&script).iter().any(|line| {
+        assert!(lines_of(&after, "IsActiveAbility").iter().any(|line| {
             line.text
-                .contains("Object(/Script/Engine.Default__KismetSystemLibrary)")
+                .contains("ObjectConst(/Script/Engine.Default__KismetSystemLibrary)")
         }),);
     }
 
@@ -13991,8 +14107,12 @@ mod game_data_tests {
         };
         let before = fixture.parse();
         let export = function(&before, "Initialize Anim Events");
-        let script = export.script.as_ref().expect("a script");
-        let (statement, at) = first_slot(script, rivals_uasset::SlotKind::Text, "TextConst");
+        let (statement, at) = first_slot(
+            &before,
+            export.index,
+            rivals_uasset::SlotKind::Text,
+            "TextConst",
+        );
         let edit = |value: &str| PackageEdits {
             scripts: vec![ScriptConstEdit {
                 export: export.index,
@@ -14019,14 +14139,10 @@ mod game_data_tests {
             "{missing}"
         );
         let (_, after) = fixture.apply_changes(edit("INVTEXT(\"TOOLKIT\")"));
-        let script = function(&after, "Initialize Anim Events")
-            .script
-            .clone()
-            .expect("a script");
         assert!(
-            rivals_uasset::script_lines(&script)
+            lines_of(&after, "Initialize Anim Events")
                 .iter()
-                .any(|line| line.text.contains("Text(\"TOOLKIT\")"))
+                .any(|line| line.text.contains("TextConst<Invariant>(\"TOOLKIT\")"))
         );
     }
 
@@ -14062,8 +14178,12 @@ mod game_data_tests {
         };
         let before = fixture.parse();
         let export = function(&before, "IsActiveAbility");
-        let script = export.script.as_ref().expect("a script");
-        let (statement, at) = first_slot(script, rivals_uasset::SlotKind::Call, "CallMath");
+        let (statement, at) = first_slot(
+            &before,
+            export.index,
+            rivals_uasset::SlotKind::Call,
+            "CallMath",
+        );
         let edit = |value: &str, allow_unchecked: bool| PackageEdits {
             scripts: vec![ScriptConstEdit {
                 export: export.index,
@@ -14089,12 +14209,8 @@ mod game_data_tests {
             "{refused}"
         );
         let (_, after) = fixture.apply_changes(edit(less, true));
-        let script = function(&after, "IsActiveAbility")
-            .script
-            .clone()
-            .expect("a script");
         assert!(
-            rivals_uasset::script_lines(&script)
+            lines_of(&after, "IsActiveAbility")
                 .iter()
                 .any(|line| line.text.contains("KismetMathLibrary:Less_IntInt(")),
         );
@@ -14122,8 +14238,12 @@ mod game_data_tests {
         };
         let before = fixture.parse();
         let export = function(&before, "ExecuteUbergraph_MarvelPlayerControllerBP");
-        let script = export.script.as_ref().expect("a script");
-        let (statement, at) = first_slot(script, rivals_uasset::SlotKind::Call, "VirtualFunction");
+        let (statement, at) = first_slot(
+            &before,
+            export.index,
+            rivals_uasset::SlotKind::Call,
+            "VirtualFunction",
+        );
         let request = fixture.request_changes(PackageEdits::default());
         let preview = |value: &str| {
             preview_call(
@@ -14143,5 +14263,165 @@ mod game_data_tests {
         assert_eq!(other.now.as_deref(), Some("(Str)"));
         let elsewhere = preview("NoSuchFunction");
         assert_eq!(elsewhere.verdict, "unknown", "{elsewhere:?}");
+    }
+
+    fn text_of(parsed: &rivals_uasset::ParsedPackage, name: &str) -> String {
+        rivals_uasset::print_script(parsed, function(parsed, name).index)
+            .expect("a script")
+            .text()
+    }
+
+    fn text_edit(export: u32, text: String) -> PackageEdits {
+        PackageEdits {
+            script_texts: vec![rivals_uasset::ScriptTextEdit {
+                export,
+                text,
+                was: None,
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// Every whole script in the pinned packages prints as text that assembles back to its bytes.
+    #[test]
+    fn every_whole_script_in_the_pinned_packages_round_trips() {
+        for entry in [
+            LEVEL,
+            CONSTRAINT_EMITTER,
+            PLAYER_CONTROLLER,
+            DEBUG_AUDIO_ABILITY,
+        ] {
+            let Some(fixture) = Fixture::open(entry) else {
+                return;
+            };
+            let parsed = fixture.parse();
+            let results =
+                rivals_uasset::script_round_trips(&fixture.bundle(), &parsed).expect("read");
+            assert!(!results.is_empty(), "{entry} has scripts");
+            for (export, result) in results {
+                assert!(result.is_ok(), "{entry} #{export}: {result:?}");
+            }
+        }
+    }
+
+    /// A statement put at the head of the event graph moves every event that enters it and every
+    /// latent action resuming in it, and the stubs read the new entries back.
+    #[test]
+    fn an_event_graph_written_as_text_moves_its_entries_and_resume_points() {
+        let Some(fixture) = Fixture::open(CONSTRAINT_EMITTER) else {
+            return;
+        };
+        let before = fixture.parse();
+        let graph = function(&before, "ExecuteUbergraph_");
+        let text = text_of(&before, "ExecuteUbergraph_").replacen(
+            "Jump LocalVariable(EntryPoint)\n",
+            "Jump LocalVariable(EntryPoint)\nLetBool InstanceVariable(isSetLimit) = True\n",
+            1,
+        );
+        assert!(text.contains("SkipOffsetConst(@00DC)"));
+        assert!(
+            text_of(&before, "SetLimit").contains("ExecuteUbergraph_BP_ConstraintEmitter(1790)")
+        );
+        let (patched, after) = fixture.apply_changes(text_edit(graph.index, text));
+        // `LetBool`, a variable and `True`: 1 + 9 + 1 loaded bytes.
+        assert!(
+            text_of(&after, "SetLimit").contains("ExecuteUbergraph_BP_ConstraintEmitter(1801)"),
+            "{}",
+            text_of(&after, "SetLimit")
+        );
+        let graph_after = text_of(&after, "ExecuteUbergraph_");
+        assert!(
+            graph_after.contains("SkipOffsetConst(@00E7)"),
+            "{graph_after}"
+        );
+        assert!(
+            graph_after.contains("@0709:  ; SetLimit enters here"),
+            "{graph_after}"
+        );
+        let entries = patched
+            .applied
+            .iter()
+            .filter(|applied| applied.name.starts_with("the offset "))
+            .count();
+        assert_eq!(entries, 10, "{:?}", patched.applied);
+    }
+
+    /// A call a text adds to a native function is unknown unless the package already makes it with
+    /// as many arguments, which is the only record of what a native function takes.
+    #[test]
+    fn a_new_native_call_needs_leave_unless_the_package_already_makes_it() {
+        let Some(fixture) = Fixture::open(PLAYER_CONTROLLER) else {
+            return;
+        };
+        let before = fixture.parse();
+        let export = function(&before, "IsActiveAbility").index;
+        let with = |call: &str| {
+            text_of(&before, "IsActiveAbility").replacen(
+                "@0139:\n",
+                &format!("{call}\n@0139:\n"),
+                1,
+            )
+        };
+        let known = with(
+            "LetBool LocalVariable(CallFunc_Greater_IntInt_ReturnValue) = CallMath /Script/Engine.KismetMathLibrary:Greater_IntInt(LocalVariable(CallFunc_Array_Length_ReturnValue), 3)",
+        );
+        let (_, after) = fixture.apply_changes(text_edit(export, known));
+        assert!(
+            text_of(&after, "IsActiveAbility")
+                .contains("Greater_IntInt(LocalVariable(CallFunc_Array_Length_ReturnValue), 3)")
+        );
+
+        let new = with(
+            "LetBool LocalVariable(CallFunc_Greater_IntInt_ReturnValue) = CallMath /Script/Engine.KismetMathLibrary:Less_IntInt(LocalVariable(CallFunc_Array_Length_ReturnValue), 3)",
+        );
+        let request = fixture.request_changes(text_edit(export, new.clone()));
+        let refused = match preview_edits(&request, Some(&fixture.schema)) {
+            Ok(_) => panic!("a native call nothing vouches for should wait for leave"),
+            Err(refused) => refused,
+        };
+        assert!(
+            refused.starts_with(crate::object_check::UNCHECKED) && refused.contains("Less_IntInt"),
+            "{refused}"
+        );
+        let mut allowed = text_edit(export, new);
+        allowed.allow_unchecked = true;
+        fixture.apply_changes(allowed);
+    }
+
+    /// A call a text adds to a Blueprint function is held to the function's own parameters.
+    #[test]
+    fn a_text_calling_a_blueprint_function_wrongly_is_refused() {
+        let Some(fixture) = Fixture::open(PLAYER_CONTROLLER) else {
+            return;
+        };
+        let before = fixture.parse();
+        let export = function(&before, "IsActiveAbility").index;
+        let text = text_of(&before, "IsActiveAbility").replacen(
+            "@0139:\n",
+            "LocalFinalFunction /Game/Marvel/Blueprints/LevelGameplay/Base/MarvelPlayerControllerBP.MarvelPlayerControllerBP_C:IsActiveAbility(1, 2)\n@0139:\n",
+            1,
+        );
+        let request = fixture.request_changes(text_edit(export, text));
+        let refused = match preview_edits(&request, Some(&fixture.schema)) {
+            Ok(_) => panic!("a call of the wrong shape should be refused"),
+            Err(refused) => refused,
+        };
+        assert!(
+            refused.contains("IsActiveAbility at 0x0139 calls /Game/Marvel/Blueprints/LevelGameplay/Base/MarvelPlayerControllerBP.MarvelPlayerControllerBP_C:IsActiveAbility"),
+            "{refused}"
+        );
+    }
+
+    /// A function named with spaces prints quoted and assembles back to itself.
+    #[test]
+    fn a_function_named_with_spaces_prints_and_assembles() {
+        let Some(fixture) = Fixture::open(DEBUG_AUDIO_ABILITY) else {
+            return;
+        };
+        let before = fixture.parse();
+        let export = function(&before, "Initialize Anim Events").index;
+        let text = text_of(&before, "Initialize Anim Events");
+        let (patched, _) = fixture.apply_changes(text_edit(export, text));
+        assert_eq!(patched.exports, fixture.loaded.exports_file_buffer);
     }
 }

@@ -7,6 +7,11 @@
 //! latent resume points are rewritten through it, then its size words, then whatever other
 //! functions hold into it: the entry each event stub passes an event graph, and a latent resume
 //! point another function's code holds.
+//!
+//! A script written anew from text maps by its labels instead: each label the text kept, named
+//! after an offset the script had, says where that code starts now, and nothing else survives.
+
+use std::collections::BTreeMap;
 
 use crate::kismet::{self, Fixup, FixupKind};
 use crate::package::ParsedPackage;
@@ -41,6 +46,9 @@ impl Change {
 pub(crate) struct OffsetMap {
     /// `(offset, end_offset, loaded delta)` for each change, in order.
     moves: Vec<(u32, u32, i64)>,
+    /// For a script written anew from text: each old offset the text kept a label for, to where
+    /// that label is now. An offset without one is gone.
+    labels: Option<BTreeMap<u32, u32>>,
 }
 
 impl OffsetMap {
@@ -55,17 +63,42 @@ impl OffsetMap {
 
     pub fn from_moves(mut moves: Vec<(u32, u32, i64)>) -> Self {
         moves.sort_by_key(|(offset, _, _)| *offset);
-        Self { moves }
+        Self {
+            moves,
+            labels: None,
+        }
+    }
+
+    /// The map a script written anew from text makes: old offset to new, by the labels it kept.
+    pub fn from_labels(labels: BTreeMap<u32, u32>) -> Self {
+        Self {
+            moves: Vec::new(),
+            labels: Some(labels),
+        }
+    }
+
+    /// Whether this maps by a text's labels, which can drop an offset without moving anything.
+    pub fn labelled(&self) -> bool {
+        self.labels.is_some()
     }
 
     /// Whether nothing moves at all.
     pub fn is_identity(&self) -> bool {
-        self.moves.iter().all(|(_, _, delta)| *delta == 0)
+        match &self.labels {
+            Some(labels) => labels.iter().all(|(old, new)| old == new),
+            None => self.moves.iter().all(|(_, _, delta)| *delta == 0),
+        }
     }
 
     /// Where code that started at `target` starts now. A target inside a replaced run names code
     /// that is gone, so it has nowhere to land; the start of a run lands on its replacement.
     pub fn map(&self, target: u32) -> Result<u32, String> {
+        if let Some(labels) = &self.labels {
+            return labels
+                .get(&target)
+                .copied()
+                .ok_or_else(|| format!("the text keeps no label @{target:04X} for it"));
+        }
         let mut shift = 0i64;
         for (offset, end_offset, delta) in &self.moves {
             if *offset < target && target < *end_offset {
@@ -90,6 +123,9 @@ pub(crate) struct Relocated {
     pub jumps: usize,
     pub entries: usize,
     pub linkages: usize,
+    /// Each entry and resume point another function holds that moved: what it is, and the offset
+    /// it held before and holds now.
+    pub moved: Vec<(String, u32, u32)>,
     /// `((loaded, stored) before, after)`, when the size changed.
     pub sizes: Option<((u32, u32), (u32, u32))>,
 }
@@ -98,7 +134,19 @@ pub(crate) struct Relocated {
 pub(crate) fn relocate(
     parsed: &ParsedPackage,
     export: u32,
+    changes: Vec<Change>,
+) -> Result<Relocated, String> {
+    let map = OffsetMap::new(&changes);
+    relocate_through(parsed, export, changes, map)
+}
+
+/// [`relocate`], with where each old offset lands given rather than worked out from the changes:
+/// what a script written anew from text needs, whose labels say it.
+pub(crate) fn relocate_through(
+    parsed: &ParsedPackage,
+    export: u32,
     mut changes: Vec<Change>,
+    map: OffsetMap,
 ) -> Result<Relocated, String> {
     let found = parsed
         .exports
@@ -118,7 +166,6 @@ pub(crate) fn relocate(
             ));
         }
     }
-    let map = OffsetMap::new(&changes);
     let file_delta: i64 = changes.iter().map(Change::file_delta).sum();
     let loaded_delta: i64 = changes.iter().map(Change::loaded_delta).sum();
     let resized = !map.is_identity() || file_delta != 0;
@@ -144,7 +191,9 @@ pub(crate) fn relocate(
             change.label.clone(),
         ));
     }
-    if !resized {
+    // A text can drop a label something enters at without moving anything, so its labels are
+    // checked whether or not the script changes size.
+    if !resized && !map.labelled() {
         return Ok(out);
     }
     for fixup in script.fixups.iter().filter(|fixup| !replaced(fixup.at)) {
@@ -158,28 +207,31 @@ pub(crate) fn relocate(
             out.jumps += 1;
         }
     }
-    let loaded = shifted(script.buffer_size, loaded_delta, &found.object_name)?;
-    let stored = shifted(script.storage_size, file_delta, &found.object_name)?;
-    let mut words = loaded.to_le_bytes().to_vec();
-    words.extend_from_slice(&stored.to_le_bytes());
-    out.splices.push((
-        Splice {
-            start: script.sizes_at,
-            end: script.sizes_at + 8,
-            bytes: words,
-        },
-        format!("{}'s size words", found.object_name),
-    ));
-    out.sizes = Some(((script.buffer_size, script.storage_size), (loaded, stored)));
+    if resized {
+        let loaded = shifted(script.buffer_size, loaded_delta, &found.object_name)?;
+        let stored = shifted(script.storage_size, file_delta, &found.object_name)?;
+        let mut words = loaded.to_le_bytes().to_vec();
+        words.extend_from_slice(&stored.to_le_bytes());
+        out.splices.push((
+            Splice {
+                start: script.sizes_at,
+                end: script.sizes_at + 8,
+                bytes: words,
+            },
+            format!("{}'s size words", found.object_name),
+        ));
+        out.sizes = Some(((script.buffer_size, script.storage_size), (loaded, stored)));
+    }
 
     let functions = kismet::functions_of(&parsed.exports);
     if let Some(target) = functions.iter().find(|f| f.export == export) {
         let inbound = kismet::inbound(&functions, target);
         for entry in &inbound.entries {
+            let holder = name_of(parsed, entry.export);
             let new = map.map(entry.offset).map_err(|reason| {
                 format!(
-                    "an event enters {} at a place this edit replaces: {reason}",
-                    found.object_name
+                    "{holder} enters {} at 0x{:04X}, and this edit leaves it nowhere to land: {reason}",
+                    found.object_name, entry.offset
                 )
             })?;
             if new == entry.offset {
@@ -192,35 +244,27 @@ pub(crate) fn relocate(
                     kismet::token_name(entry.span.token).unwrap_or("literal")
                 ));
             }
-            out.splices.push((
-                word(entry.span.at + 1, new),
-                format!(
-                    "the offset {} enters {} at",
-                    name_of(parsed, entry.export),
-                    found.object_name
-                ),
-            ));
+            let what = format!("the offset {holder} enters {} at", found.object_name);
+            out.splices
+                .push((word(entry.span.at + 1, new), what.clone()));
+            out.moved.push((what, entry.offset, new));
             out.entries += 1;
         }
         for (holder, fixup) in &inbound.linkages {
             let FixupKind::Absolute { target, .. } = &fixup.kind else {
                 continue;
             };
+            let holder = name_of(parsed, *holder);
             let new = map.map(*target).map_err(|reason| {
                 format!(
-                    "a latent action in export {holder} resumes {} at a place this edit replaces: {reason}",
+                    "a latent action in {holder} resumes {} at 0x{target:04X}, and this edit leaves it nowhere to land: {reason}",
                     found.object_name
                 )
             })?;
             if new != *target {
-                out.splices.push((
-                    word(fixup.at, new),
-                    format!(
-                        "a latent action in {} resuming {}",
-                        name_of(parsed, *holder),
-                        found.object_name
-                    ),
-                ));
+                let what = format!("a latent action in {holder} resuming {}", found.object_name);
+                out.splices.push((word(fixup.at, new), what.clone()));
+                out.moved.push((what, *target, new));
                 out.linkages += 1;
             }
         }
@@ -274,6 +318,7 @@ fn shifted(size: u32, delta: i64, owner: &str) -> Result<u32, String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -304,5 +349,19 @@ mod tests {
         assert!(map.map(35).is_err());
         assert!(!map.is_identity());
         assert!(OffsetMap::new(&[change(10, 14, 4)]).is_identity());
+    }
+
+    /// A text's labels say where each offset they kept lands, and an offset they did not keep has
+    /// nowhere to land, even where nothing moved.
+    #[test]
+    fn a_label_map_moves_only_the_offsets_its_text_kept() {
+        let map = OffsetMap::from_labels(BTreeMap::from([(0x0A, 0x0A), (0x92, 0xA9)]));
+        assert!(map.labelled());
+        assert_eq!(map.map(0x0A), Ok(0x0A));
+        assert_eq!(map.map(0x92), Ok(0xA9));
+        let missing = map.map(0x18).expect_err("dropped");
+        assert!(missing.contains("no label @0018"), "{missing}");
+        assert!(!map.is_identity());
+        assert!(OffsetMap::from_labels(BTreeMap::from([(4, 4)])).is_identity());
     }
 }

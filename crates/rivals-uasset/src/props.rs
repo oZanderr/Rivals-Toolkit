@@ -1357,7 +1357,7 @@ fn read_removed(
 
 /// Container counts come straight off disk, so a desynced stream shows up here as an absurd
 /// length rather than a multi-gigabyte allocation.
-fn read_count(cursor: &mut Cursor<'_>, what: &str) -> Result<usize, String> {
+pub(crate) fn read_count(cursor: &mut Cursor<'_>, what: &str) -> Result<usize, String> {
     let count = cursor.read_i32()?;
     if count < 0 {
         return Err(cursor.err(format!("negative {what} count {count}")));

@@ -337,7 +337,7 @@ describe("AssetInspector text edits", () => {
   });
 });
 
-const BRANCH = "Jump 0x0139 unless LocalVariable(bOk)";
+const BRANCH = "Jump @0139 unless LocalVariable(bOk)";
 const CALL = "CallMath /Script/Engine.KismetMathLibrary:Greater_IntInt(LocalVariable(Count), 0)";
 
 /** One function with a branch and a call, which opens straight into its script. */
@@ -441,6 +441,28 @@ describe("AssetInspector without a mappings file", () => {
 });
 
 describe("AssetInspector script edits", () => {
+  it("shows the labels code is jumped to, and what an unresolved call probably was", async () => {
+    const view = scriptView();
+    mock = tauri(functionPackage()).on("export_script_view", () => ({
+      ...view,
+      lines: [
+        view.lines[0],
+        {
+          ...view.lines[1],
+          labels: [{ name: "0104", note: "ReceiveBeginPlay enters here" }],
+          note: "probably Greater_IntInt",
+        },
+      ],
+      end_labels: [{ name: "0139" }],
+    }));
+    installTauri(mock);
+    mount();
+    expect(await screen.findByText("ReceiveBeginPlay enters here")).toBeTruthy();
+    expect(screen.getByText("@0104:")).toBeTruthy();
+    expect(screen.getByText("@0139:")).toBeTruthy();
+    expect(screen.getByText("; probably Greater_IntInt")).toBeTruthy();
+  });
+
   it("fixes a branch's condition by where it starts, holding it to what it read", async () => {
     mock = tauri(functionPackage()).on("export_script_view", () => scriptView());
     installTauri(mock);

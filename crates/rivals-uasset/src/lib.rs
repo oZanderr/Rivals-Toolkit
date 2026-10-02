@@ -25,11 +25,20 @@ mod relocate;
 mod remove;
 mod renumber;
 mod script_edit;
+mod script_encode;
+#[cfg(test)]
+mod script_fixture;
+mod script_text;
+mod script_text_edit;
 pub use call_shape::{
     CallShape, CallSite, Fit, compare as compare_calls, render as render_call_shape,
     shape_of_signature, site_at,
 };
 pub use script_edit::{narrowing_edits, widening_edits};
+pub use script_encode::{
+    AssembleOptions, Assembled, RoundTripFailure, RoundTrips, script_round_trips,
+};
+pub use script_text::{Diagnostic, ScriptText, TextLabel, TextLine, print_expr, print_script};
 mod stringtable;
 mod structs;
 mod tagged;
@@ -62,9 +71,10 @@ pub use duplicate::{
 pub use edit::{
     AppliedEdit, BulkEdit, DRIFT, DuplicateExport, EditOp, Expected, FieldSet, KeyEdit, KeyOp,
     NOT_STORED, PackageEdits, PatchedBundle, PayloadEdit, RowEdit, RowOp, ScriptConstEdit,
-    Sidecars, StringEdit, StringOp, ValueEdit, check_expectations, entry_named_at, expectations,
-    kind_of, patch_identity, patch_package, patch_package_copy, patch_package_with, patch_values,
-    payload_lock, same_enumerator, verify_copy, verify_identity, verify_patch, verify_references,
+    ScriptTextEdit, Sidecars, StringEdit, StringOp, ValueEdit, check_expectations, entry_named_at,
+    expectations, kind_of, patch_identity, patch_package, patch_package_copy, patch_package_with,
+    patch_values, payload_lock, same_enumerator, verify_copy, verify_identity, verify_patch,
+    verify_references,
 };
 pub use export_edit::{
     EDITABLE_FLAGS, ExportEdit, ExportEditPlan, flag_names, plan_export_edits,
@@ -85,7 +95,7 @@ pub use kismet::{
     Script, ScriptCensus, ScriptLine, ScriptStop, SlotKind, Statement, SwitchCase, Term, TermKind,
     TextLiteral, call_at, call_expr_at, call_sites, callee_name, census as script_census,
     children as expression_children, expression_at, expression_starting, literals, render_script,
-    script_lines, statement_terms, token_name, ubergraph_entries,
+    script_lines, shape as expression_shape, statement_terms, token_name, ubergraph_entries,
 };
 pub use mappings::{Mappings, Schema, SchemaFixups, SchemaSlot, kind_name};
 pub use names::unused_names;

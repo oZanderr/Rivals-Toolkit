@@ -824,6 +824,7 @@ mod tests {
         let local = |name: &str| Expr::Variable {
             name: "LocalVariable",
             property: PropertyRef {
+                names: Vec::new(),
                 path: name.into(),
                 owner: kismet::ObjectRef {
                     index: 0,
@@ -865,6 +866,7 @@ mod tests {
         let local = |name: &str| Expr::Variable {
             name: "LocalVariable",
             property: PropertyRef {
+                names: Vec::new(),
                 path: name.into(),
                 owner: kismet::ObjectRef {
                     index: 0,
@@ -925,6 +927,7 @@ mod tests {
         let member = |name: &'static str, owner: &str, field: &str| Expr::Variable {
             name,
             property: PropertyRef {
+                names: Vec::new(),
                 path: field.into(),
                 owner: ObjectRef {
                     index: 0,
@@ -939,6 +942,7 @@ mod tests {
             object: Box::new(Expr::SelfRef),
             skip: 0,
             property: PropertyRef {
+                names: Vec::new(),
                 path: String::new(),
                 owner: ObjectRef {
                     index: 0,

@@ -12,7 +12,7 @@ use serde::Serialize;
 
 use retoc::legacy_asset::FPackageNameMap;
 
-use crate::props::{Ctx, Diagnostics, read_field_path, read_index};
+use crate::props::{Ctx, Diagnostics, read_count, read_index};
 use crate::reader::Cursor;
 
 /// A statement is one top-level expression, so a script nested deeper than this is not one this
@@ -161,11 +161,32 @@ pub struct ObjectRef {
     pub path: Option<String>,
 }
 
+/// A name exactly as the bytes hold it: an entry of the package's name table and the number UE
+/// appends to it, stored one higher than it prints.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct NameId {
+    pub index: i32,
+    pub number: i32,
+}
+
+impl From<retoc::legacy_asset::FMinimalName> for NameId {
+    fn from(name: retoc::legacy_asset::FMinimalName) -> Self {
+        NameId {
+            index: name.index,
+            number: name.number,
+        }
+    }
+}
+
 /// A property the script reads or writes, as the dotted name chain and the object that owns it.
 #[derive(Debug, Clone, Serialize)]
 pub struct PropertyRef {
     pub path: String,
     pub owner: ObjectRef,
+    /// Each segment of the chain as the bytes name it, which the path's text cannot always say:
+    /// a segment may hold a dot, and the table may hold a name twice.
+    #[serde(skip)]
+    pub names: Vec<NameId>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -224,7 +245,8 @@ pub enum Expr {
     },
     Assert {
         line: u16,
-        debug: bool,
+        /// Whether the assert only fires in a debug build. A byte, kept whole so it writes back.
+        debug: u8,
         condition: Box<Expr>,
     },
     NothingInt32 {
@@ -262,6 +284,8 @@ pub enum Expr {
         name: &'static str,
         function: String,
         params: Vec<Expr>,
+        #[serde(skip)]
+        id: NameId,
     },
     FinalCall {
         name: &'static str,
@@ -310,6 +334,8 @@ pub enum Expr {
         name: &'static str,
         value: String,
         at: u64,
+        #[serde(skip)]
+        id: NameId,
     },
     /// Rotations, vectors and transforms: a fixed run of floating point numbers.
     Numbers {
@@ -384,6 +410,8 @@ pub enum Expr {
         function: String,
         delegate: Box<Expr>,
         object: Box<Expr>,
+        #[serde(skip)]
+        id: NameId,
     },
     CallMulticastDelegate {
         signature: ObjectRef,
@@ -400,6 +428,8 @@ pub enum Expr {
         event: u8,
         #[serde(skip_serializing_if = "Option::is_none")]
         name: Option<String>,
+        #[serde(skip)]
+        id: NameId,
     },
     ArrayGetByRef {
         array: Box<Expr>,
@@ -515,16 +545,35 @@ pub fn token_name(token: u8) -> Option<&'static str> {
     })
 }
 
-/// The conversions `EX_Cast` performs, for the disassembly.
-fn conversion_name(kind: u8) -> &'static str {
-    match kind {
-        0x46 => "ObjectToInterface",
-        0x47 => "ObjectToBool",
-        0x49 => "InterfaceToBool",
-        0x4A => "DoubleToFloat",
-        0x4B => "FloatToDouble",
-        _ => "Cast",
-    }
+/// The token a name from [`token_name`] stands for.
+pub fn token_named(name: &str) -> Option<u8> {
+    static TOKENS: std::sync::OnceLock<std::collections::HashMap<&'static str, u8>> =
+        std::sync::OnceLock::new();
+    TOKENS
+        .get_or_init(|| {
+            (0..=u8::MAX)
+                .filter_map(|token| Some((token_name(token)?, token)))
+                .collect()
+        })
+        .get(name)
+        .copied()
+}
+
+/// The conversions `EX_Cast` performs, by UE5's numbering, which is the one the game's scripts use.
+pub(crate) fn conversion_name(kind: u8) -> Option<&'static str> {
+    Some(match kind {
+        0x00 => "ObjectToInterface",
+        0x01 => "ObjectToBool",
+        0x02 => "InterfaceToBool",
+        0x03 => "DoubleToFloat",
+        0x04 => "FloatToDouble",
+        _ => return None,
+    })
+}
+
+/// The conversion a name from [`conversion_name`] stands for.
+pub(crate) fn conversion_kind(name: &str) -> Option<u8> {
+    (0..=u8::MAX).find(|kind| conversion_name(*kind) == Some(name))
 }
 
 struct Reader<'a, 'b> {
@@ -620,10 +669,10 @@ impl<'a, 'b> Reader<'a, 'b> {
     }
 
     /// A name is eight bytes on disk and twelve once loaded, which is where the two sizes part.
-    fn name(&mut self) -> Result<String, String> {
-        let value = self.cursor.read_name(self.ctx.names())?;
+    fn name(&mut self) -> Result<(String, NameId), String> {
+        let (value, id) = self.cursor.read_name_id(self.ctx.names())?;
         self.offset += LOADED_NAME;
-        Ok(value)
+        Ok((value, id.into()))
     }
 
     /// An object is a four byte package index on disk and a pointer once loaded.
@@ -639,20 +688,27 @@ impl<'a, 'b> Reader<'a, 'b> {
 
     /// A property is an `FFieldPath` on disk and a pointer once loaded.
     fn property(&mut self) -> Result<PropertyRef, String> {
-        let start = self.cursor.file_offset();
-        let (path, owner) = read_field_path(&mut self.cursor, self.ctx, self.diagnostics)?;
-        let _ = start;
+        let count = read_count(&mut self.cursor, "field path")?;
+        let mut segments = Vec::with_capacity(count);
+        let mut names = Vec::with_capacity(count);
+        for _ in 0..count {
+            let (segment, id) = self.cursor.read_name_id(self.ctx.names())?;
+            segments.push(segment);
+            names.push(id.into());
+        }
+        let owner = read_index(&mut self.cursor, self.diagnostics)?;
         self.offset += LOADED_POINTER;
         let resolved = self
             .ctx
             .object_path(owner)
             .map_err(|e| self.cursor.err(e))?;
         Ok(PropertyRef {
-            path,
+            path: segments.join("."),
             owner: ObjectRef {
                 index: owner,
                 path: resolved,
             },
+            names,
         })
     }
 
@@ -758,7 +814,7 @@ impl<'a, 'b> Reader<'a, 'b> {
             },
             0x09 => Expr::Assert {
                 line: self.u16v()?,
-                debug: self.u8v()? != 0,
+                debug: self.u8v()?,
                 condition: self.boxed()?,
             },
             0x0B | 0x15 | 0x16 | 0x25 | 0x26 | 0x27 | 0x28 | 0x2A | 0x2D | 0x30 | 0x32 | 0x3A
@@ -834,11 +890,15 @@ impl<'a, 'b> Reader<'a, 'b> {
                     value: self.boxed()?,
                 }
             }
-            0x1B | 0x45 => Expr::VirtualCall {
-                name: named(token),
-                function: self.name()?,
-                params: self.until(0x16)?,
-            },
+            0x1B | 0x45 => {
+                let (function, id) = self.name()?;
+                Expr::VirtualCall {
+                    name: named(token),
+                    function,
+                    params: self.until(0x16)?,
+                    id,
+                }
+            }
             0x1C | 0x46 | 0x68 => Expr::FinalCall {
                 name: named(token),
                 function: self.object()?,
@@ -859,11 +919,15 @@ impl<'a, 'b> Reader<'a, 'b> {
             0x20 => Expr::ObjectConst {
                 object: self.object()?,
             },
-            0x21 | 0x4B => Expr::NameConst {
-                name: named(token),
-                value: self.name()?,
-                at,
-            },
+            0x21 | 0x4B => {
+                let (value, id) = self.name()?;
+                Expr::NameConst {
+                    name: named(token),
+                    value,
+                    at,
+                    id,
+                }
+            }
             0x22 | 0x23 => Expr::Numbers {
                 name: named(token),
                 values: self.doubles(3)?,
@@ -998,11 +1062,15 @@ impl<'a, 'b> Reader<'a, 'b> {
                 delegate: self.boxed()?,
                 value: self.boxed()?,
             },
-            0x61 => Expr::BindDelegate {
-                function: self.name()?,
-                delegate: self.boxed()?,
-                object: self.boxed()?,
-            },
+            0x61 => {
+                let (function, id) = self.name()?;
+                Expr::BindDelegate {
+                    function,
+                    delegate: self.boxed()?,
+                    object: self.boxed()?,
+                    id,
+                }
+            }
             0x63 => Expr::CallMulticastDelegate {
                 signature: self.object()?,
                 delegate: self.boxed()?,
@@ -1012,8 +1080,13 @@ impl<'a, 'b> Reader<'a, 'b> {
             0x6A => {
                 let event = self.u8v()?;
                 // Only an inline event carries a name of its own.
-                let name = (event == 4).then(|| self.name()).transpose()?;
-                Expr::InstrumentationEvent { event, name }
+                let named = (event == 4).then(|| self.name()).transpose()?;
+                let id = named.as_ref().map(|(_, id)| *id).unwrap_or_default();
+                Expr::InstrumentationEvent {
+                    event,
+                    name: named.map(|(name, _)| name),
+                    id,
+                }
             }
             0x6B => Expr::ArrayGetByRef {
                 array: self.boxed()?,
@@ -1697,6 +1770,13 @@ pub fn functions_of(exports: &[crate::package::ParsedExport]) -> Vec<Function<'_
 pub struct ScriptLine {
     pub offset: u32,
     pub text: String,
+    /// The labels the text defines just before the statement, each with what enters there.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<crate::script_text::TextLabel>,
+    /// What the text notes beside the statement: what an unresolved call probably was, or what a
+    /// raw object index names.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
     /// Where a jump, a pushed flow, or a latent action's resume point leads, in statement offsets.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub targets: Vec<u32>,
@@ -1750,6 +1830,9 @@ pub struct ExpressionSlot {
     /// UE's literal syntax, the function a call names. Nothing for a condition.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
+    /// Where it sits in its line's text, in UTF-16 units, start and end.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub range: Option<(u32, u32)>,
 }
 
 /// The string a text part holds.
@@ -1848,19 +1931,30 @@ pub(crate) fn nodes_by_statement(script: &Script) -> Vec<Vec<(&Expr, Span)>> {
         .collect()
 }
 
-/// The expressions an edit can address in each statement.
-fn slots_of(nodes: &[(&Expr, Span)]) -> Vec<ExpressionSlot> {
+/// The expressions an edit can address in each statement, with where each sits in the statement's
+/// line when the line is given.
+fn slots_of(
+    nodes: &[(&Expr, Span)],
+    line: Option<&crate::script_text::TextLine>,
+) -> Vec<ExpressionSlot> {
+    let units =
+        |text: &str, at: usize| text.get(..at).map_or(0, |head| head.encode_utf16().count()) as u32;
     nodes
         .iter()
         .enumerate()
         .filter_map(|(position, (expr, span))| {
             let kind = slot_kind(expr, position == 0)?;
+            let range = line.and_then(|line| {
+                let (_, (from, to)) = line.ranges.iter().find(|(at, _)| *at == span.offset)?;
+                Some((units(&line.text, *from), units(&line.text, *to)))
+            });
             Some(ExpressionSlot {
                 at: span.offset,
                 kind,
                 token: token_name(span.token).unwrap_or("unknown"),
                 text: render(expr),
                 value: slot_value(expr, kind),
+                range,
             })
         })
         .collect()
@@ -1880,7 +1974,7 @@ pub fn expression_at(
         .position(|s| s.offset == statement)
         .ok_or_else(|| format!("no statement starts at 0x{statement:04X}"))?;
     let nodes = nodes_by_statement(script);
-    let slots = slots_of(&nodes[position]);
+    let slots = slots_of(&nodes[position], None);
     let of_kind: Vec<&ExpressionSlot> = slots.iter().filter(|slot| slot.kind == kind).collect();
     of_kind.get(nth as usize).map(|slot| slot.at).ok_or_else(|| {
         let listing: Vec<String> = slots
@@ -2000,6 +2094,7 @@ pub fn call_at(script: &Script, statement: u32, at: u32) -> Option<CallInfo> {
             name,
             function,
             params,
+            ..
         } => Some(CallInfo {
             opcode: name,
             callee: function.clone(),
@@ -2069,14 +2164,27 @@ pub fn literal_slots(expr: &Expr) -> Vec<LiteralSlot> {
         .collect()
 }
 
-/// Every statement rendered on its own, alongside the offsets it links to.
-pub fn script_lines(script: &Script) -> Vec<ScriptLine> {
+/// Every statement of the script `export` holds, as the assembler text writes it, alongside the
+/// offsets it links to and what an edit can address in it.
+pub fn script_lines(parsed: &crate::package::ParsedPackage, export: u32) -> Vec<ScriptLine> {
+    let Some(script) = parsed
+        .exports
+        .get(export as usize)
+        .and_then(|export| export.script.as_ref())
+    else {
+        return Vec::new();
+    };
+    let mut lines = crate::script_text::print_script(parsed, export)
+        .map(|text| text.lines)
+        .unwrap_or_default()
+        .into_iter();
     let nodes = nodes_by_statement(script);
     script
         .statements
         .iter()
         .enumerate()
         .map(|(position, statement)| {
+            let line = lines.next();
             let mut targets = Vec::new();
             flow_targets(&statement.expr, &mut targets);
             targets.dedup();
@@ -2086,13 +2194,23 @@ pub fn script_lines(script: &Script) -> Vec<ScriptLine> {
                 .map(|t| callee_name(&t.text).to_string())
                 .collect();
             calls.dedup();
+            let expressions = nodes
+                .get(position)
+                .map(|n| slots_of(n, line.as_ref()))
+                .unwrap_or_default();
+            let (text, labels, note) = match line {
+                Some(line) => (line.text, line.labels, line.note),
+                None => (render(&statement.expr), Vec::new(), None),
+            };
             ScriptLine {
                 offset: statement.offset,
-                text: render(&statement.expr),
+                text,
+                labels,
+                note,
                 targets,
                 calls,
                 literals: literal_slots(&statement.expr),
-                expressions: nodes.get(position).map(|n| slots_of(n)).unwrap_or_default(),
+                expressions,
             }
         })
         .collect()
@@ -2261,18 +2379,6 @@ pub fn render_script(script: &Script) -> String {
         ));
     }
     out
-}
-
-fn object_text(object: &ObjectRef) -> String {
-    match &object.path {
-        Some(path) => path.clone(),
-        None if object.index == 0 => "None".to_string(),
-        None => object.index.to_string(),
-    }
-}
-
-fn list(items: &[Expr]) -> String {
-    items.iter().map(render).collect::<Vec<_>>().join(", ")
 }
 
 /// Every literal in `expr` in bytecode order: the constants a value can be written into, plus
@@ -2505,8 +2611,9 @@ pub(crate) fn visit_mut(expr: &mut Expr, visit: &mut impl FnMut(&mut Expr)) {
 /// A statement as a comparison should see it: where its bytes sit in the file, and the path an
 /// object resolves to, are left out, so a script that moved compares equal to itself. So are the
 /// lengths a context and a switch hold, which the decoder measures against the code they cover
-/// and locks the script over when they disagree. The debug form keeps every other operand, a float
-/// as its exact value and a NaN as one.
+/// and locks the script over when they disagree, and the table entries names were stored as, which
+/// an edit naming something new does not know until it is written. The debug form keeps every
+/// other operand, a float as its exact value and a NaN as one.
 pub fn shape(expr: &Expr) -> String {
     let mut copy = expr.clone();
     visit_mut(&mut copy, &mut |node| {
@@ -2533,11 +2640,39 @@ pub fn shape(expr: &Expr) -> String {
             | Expr::Numbers { at, .. } => *at = 0,
             _ => {}
         }
+        match node {
+            Expr::VirtualCall { id, .. }
+            | Expr::NameConst { id, .. }
+            | Expr::BindDelegate { id, .. }
+            | Expr::InstrumentationEvent { id, .. } => *id = NameId::default(),
+            _ => {}
+        }
         for object in objects_mut(node) {
             object.path = None;
         }
+        for property in properties_mut(node) {
+            property.names.clear();
+        }
     });
     format!("{copy:?}")
+}
+
+/// The field paths an expression holds itself, not those of its children.
+pub(crate) fn properties_mut(expr: &mut Expr) -> Vec<&mut PropertyRef> {
+    match expr {
+        Expr::Variable { property, .. }
+        | Expr::BitFieldConst { property, .. }
+        | Expr::PropertyConst { property }
+        | Expr::Member { property, .. }
+        | Expr::ContainerConst { property, .. }
+        | Expr::Context { property, .. }
+        | Expr::Let {
+            property: Some(property),
+            ..
+        } => vec![property],
+        Expr::MapConst { key, value, .. } => vec![key, value],
+        _ => Vec::new(),
+    }
 }
 
 /// The object operands an expression holds itself, not those of its children.
@@ -2720,6 +2855,7 @@ pub(crate) fn with_value(literal: &Expr, text: &str) -> Result<Expr, String> {
                 name,
                 value: text.to_string(),
                 at: *at,
+                id: NameId::default(),
             }
         }
         Expr::Numbers { name, values, at } => {
@@ -2860,198 +2996,22 @@ fn is_unresolved_target(function: &ObjectRef) -> bool {
         .is_some_and(crate::package::is_unresolved_import_name)
 }
 
-fn render_call(
-    name: &str,
+/// The function an unresolved call probably was, read off the locals around it. `None` for a call
+/// the package resolves.
+pub(crate) fn probable_call(
     function: &ObjectRef,
     params: &[Expr],
     variable: Option<&Expr>,
-) -> String {
-    let hint = is_unresolved_target(function)
+) -> Option<String> {
+    is_unresolved_target(function)
         .then(|| probable_function(variable, params))
         .flatten()
-        .map(|function| format!(" /* probably {function} */"))
-        .unwrap_or_default();
-    format!("{name} {}({}){hint}", object_text(function), list(params))
 }
 
+/// An expression in the assembler text's syntax, without the package around it: what a message
+/// or an edit's `was` quotes.
 pub(crate) fn render(expr: &Expr) -> String {
-    match expr {
-        Expr::Simple { name } => (*name).to_string(),
-        Expr::Variable { name, property } => format!("{name}({})", property.path),
-        Expr::Return { value } => format!("Return {}", render(value)),
-        Expr::Jump { target } => format!("Jump 0x{target:04X}"),
-        Expr::JumpIfNot { target, condition } => {
-            format!("Jump 0x{target:04X} unless {}", render(condition))
-        }
-        Expr::Assert {
-            line,
-            debug,
-            condition,
-        } => format!("Assert line {line} debug {debug} {}", render(condition)),
-        Expr::NothingInt32 { value } => format!("Nothing({value})"),
-        Expr::Let {
-            name,
-            property,
-            variable,
-            value,
-        } => {
-            let value = match value.as_ref() {
-                Expr::FinalCall {
-                    name,
-                    function,
-                    params,
-                } => render_call(name, function, params, Some(variable)),
-                other => render(other),
-            };
-            match property {
-                Some(property) => {
-                    format!("{name} {}<{}> = {value}", render(variable), property.path)
-                }
-                None => format!("{name} {} = {value}", render(variable)),
-            }
-        }
-        Expr::BitFieldConst { property, value } => format!("BitField({}) {value}", property.path),
-        Expr::Context {
-            name,
-            object,
-            property,
-            member,
-            ..
-        } => {
-            let arrow = if *name == "ClassContext" { "::" } else { "->" };
-            format!(
-                "{}{arrow}{} [{}]",
-                render(object),
-                render(member),
-                property.path
-            )
-        }
-        Expr::Cast { name, class, value } => {
-            format!("{name}<{}>({})", object_text(class), render(value))
-        }
-        Expr::SelfRef => "Self".to_string(),
-        Expr::Skip { skip, value } => format!("Skip 0x{skip:04X} {}", render(value)),
-        Expr::VirtualCall {
-            name,
-            function,
-            params,
-        } => format!("{name} {function}({})", list(params)),
-        Expr::FinalCall {
-            name,
-            function,
-            params,
-        } => render_call(name, function, params, None),
-        Expr::IntConst { value, .. } => value.to_string(),
-        Expr::Int64Const { value, .. } => value.to_string(),
-        Expr::UInt64Const { value, .. } => value.to_string(),
-        Expr::FloatConst { value, .. } => format!("{value}f"),
-        Expr::DoubleConst { value, .. } => value.to_string(),
-        Expr::ByteConst { value, .. } => value.to_string(),
-        Expr::StringConst { value, .. } | Expr::UnicodeStringConst { value, .. } => {
-            format!("{value:?}")
-        }
-        Expr::ObjectConst { object } => format!("Object({})", object_text(object)),
-        Expr::NameConst { value, .. } => format!("'{value}'"),
-        Expr::Numbers { name, values, .. } => format!(
-            "{name}({})",
-            values
-                .iter()
-                .map(|v| v.to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        Expr::TextConst { text } => match text {
-            TextLiteral::Empty => "Text(\"\")".to_string(),
-            TextLiteral::Localized { source, .. } => format!("Text({})", render(source)),
-            TextLiteral::Invariant { source } | TextLiteral::Literal { source } => {
-                format!("Text({})", render(source))
-            }
-            TextLiteral::StringTable { table, key, .. } => {
-                format!("Text({} in {})", render(key), object_text(table))
-            }
-        },
-        Expr::StructConst {
-            struct_type,
-            fields,
-            ..
-        } => format!("{}{{{}}}", object_text(struct_type), list(fields)),
-        Expr::SetArray { array, items } => format!("{} = [{}]", render(array), list(items)),
-        Expr::PropertyConst { property } => format!("Property({})", property.path),
-        Expr::Conversion { conversion, value } => {
-            format!("{}({})", conversion_name(*conversion), render(value))
-        }
-        Expr::SetContainer {
-            name,
-            target,
-            items,
-            ..
-        } => format!("{name} {} = {{{}}}", render(target), list(items)),
-        Expr::ContainerConst {
-            name,
-            property,
-            items,
-            ..
-        } => format!("{name}<{}>[{}]", property.path, list(items)),
-        Expr::MapConst {
-            key, value, items, ..
-        } => format!("Map<{}, {}>{{{}}}", key.path, value.path, list(items)),
-        Expr::Member {
-            name,
-            property,
-            value,
-        } => format!("{name} {}.{}", render(value), property.path),
-        Expr::PushExecutionFlow { target } => format!("PushFlow 0x{target:04X}"),
-        Expr::ComputedJump { target } => format!("Jump {}", render(target)),
-        Expr::Unary { name, value } => format!("{name}({})", render(value)),
-        Expr::SkipOffsetConst { value } => format!("Offset 0x{value:04X}"),
-        Expr::DelegateOp {
-            name,
-            delegate,
-            value,
-        } => format!("{name} {} {}", render(delegate), render(value)),
-        Expr::BindDelegate {
-            function,
-            delegate,
-            object,
-        } => format!(
-            "BindDelegate '{function}' {} {}",
-            render(delegate),
-            render(object)
-        ),
-        Expr::CallMulticastDelegate {
-            signature,
-            delegate,
-            params,
-        } => format!(
-            "{}.Broadcast<{}>({})",
-            render(delegate),
-            object_text(signature),
-            list(params)
-        ),
-        Expr::SwitchValue {
-            index,
-            cases,
-            default,
-            ..
-        } => {
-            let arms = cases
-                .iter()
-                .map(|case| format!("{} -> {}", render(&case.value), render(&case.result)))
-                .collect::<Vec<_>>()
-                .join("; ");
-            format!(
-                "Switch({}) {{{arms}; default -> {}}}",
-                render(index),
-                render(default)
-            )
-        }
-        Expr::InstrumentationEvent { event, name } => match name {
-            Some(name) => format!("Instrumentation {event} '{name}'"),
-            None => format!("Instrumentation {event}"),
-        },
-        Expr::ArrayGetByRef { array, index } => format!("{}[{}]", render(array), render(index)),
-        Expr::Unknown { token } => format!("?? {token:#04X}"),
-    }
+    crate::script_text::print_expr(expr)
 }
 
 #[cfg(test)]
@@ -3128,6 +3088,16 @@ mod tests {
         out.extend_from_slice(&1i32.to_le_bytes());
         name_bytes(out, value);
         out.extend_from_slice(&owner.to_le_bytes());
+    }
+
+    /// The lines of a script that belongs to no package of its own.
+    fn lines_of(script: &Script) -> Vec<ScriptLine> {
+        let parsed =
+            crate::package::ParsedPackage::of_exports(vec![crate::package::ParsedExport {
+                script: Some(script.clone()),
+                ..crate::package::ParsedExport::blank(0)
+            }]);
+        script_lines(&parsed, 0)
     }
 
     fn decode(bytes: &[u8], buffer_size: Option<u32>) -> (Script, Diagnostics) {
@@ -3377,6 +3347,7 @@ mod tests {
         let local = |path: &str| Expr::Variable {
             name: "LocalVariable",
             property: PropertyRef {
+                names: Vec::new(),
                 path: path.to_string(),
                 owner: ObjectRef {
                     index: 6,
@@ -3399,28 +3370,25 @@ mod tests {
                 local("CallFunc_Add_IntInt_ReturnValue_1"),
             ])),
         };
-        assert!(
-            render(&filled).ends_with("/* probably MountPak */"),
-            "{}",
-            render(&filled)
-        );
+        // The note sits beside the statement, out of the text the assembler reads.
+        let note = |expr: &Expr| {
+            lines_of(&script_of(vec![(0, expr.clone())]))[0]
+                .note
+                .clone()
+        };
+        assert_eq!(note(&filled).as_deref(), Some("probably MountPak"));
 
         let out_param = call(vec![local("CallFunc_GetMountedPakNames_PakFilenames_1")]);
-        assert!(
-            render(&out_param).ends_with("/* probably GetMountedPakNames */"),
-            "{}",
-            render(&out_param)
+        assert_eq!(
+            note(&out_param).as_deref(),
+            Some("probably GetMountedPakNames")
         );
 
         let ambiguous = call(vec![
             local("CallFunc_Array_Get_Item_1"),
             local("CallFunc_Add_IntInt_ReturnValue_1"),
         ]);
-        assert!(
-            !render(&ambiguous).contains("probably"),
-            "{}",
-            render(&ambiguous)
-        );
+        assert_eq!(note(&ambiguous), None);
 
         let resolved = Expr::FinalCall {
             name: "CallMath",
@@ -3430,11 +3398,7 @@ mod tests {
             },
             params: vec![local("CallFunc_Subtract_IntInt_ReturnValue_1")],
         };
-        assert!(
-            !render(&resolved).contains("probably"),
-            "{}",
-            render(&resolved)
-        );
+        assert_eq!(note(&resolved), None);
     }
 
     /// A literal knows where its token sits, and the walk hands literals back in bytecode order
@@ -3522,6 +3486,7 @@ mod tests {
         assert!(err.contains("one-byte form"), "{err}");
 
         let name = Expr::NameConst {
+            id: NameId::default(),
             name: "NameConst",
             value: "Old".to_string(),
             at: 0,
@@ -3618,7 +3583,7 @@ mod tests {
                 },
             ),
         ]);
-        let lines = script_lines(&script);
+        let lines = lines_of(&script);
         let targets: Vec<&[u32]> = lines.iter().map(|l| l.targets.as_slice()).collect();
         assert_eq!(targets, [&[0x30][..], &[0x20], &[0x40], &[]]);
         assert_eq!(lines[1].offset, 0x05);
@@ -3680,6 +3645,7 @@ mod tests {
             variable: Box::new(Expr::Variable {
                 name: "LocalVariable",
                 property: PropertyRef {
+                    names: Vec::new(),
                     path: "Loaded".into(),
                     owner: object("/Game/X.X_C:F"),
                 },
@@ -3738,7 +3704,7 @@ mod tests {
             sites.get("Helper").map(Vec::as_slice),
             Some(&[("First".to_string(), 0x10), ("Second".to_string(), 0x20)][..])
         );
-        let lines = script_lines(&first);
+        let lines = lines_of(&first);
         assert_eq!(lines[0].calls, ["Helper"]);
     }
 
@@ -3922,7 +3888,7 @@ mod tests {
         assert_eq!(
             seen,
             [
-                ("LocalFinalFunction Target(411)".to_string(), 0, 15),
+                ("LocalFinalFunction 'Target'(411)".to_string(), 0, 15),
                 ("411".to_string(), 9, 14),
                 ("Return Nothing".to_string(), 15, 17),
                 ("Nothing".to_string(), 16, 17),
@@ -4001,6 +3967,7 @@ mod tests {
     #[test]
     fn a_call_kept_through_its_object_is_kept() {
         let reference = |path: &str| PropertyRef {
+            names: Vec::new(),
             path: path.into(),
             owner: ObjectRef {
                 index: 0,
@@ -4056,5 +4023,103 @@ mod tests {
             unreachable!()
         };
         assert_eq!(call_use(&outer, &params[0]).0, CallUse::Consumed);
+    }
+
+    /// A name keeps the table entry and number the bytes hold, a field path one per segment, so a
+    /// text printed from the script can say exactly which entry each name was.
+    #[test]
+    fn every_name_keeps_the_entry_and_number_it_was_stored_as() {
+        let damage = NAMES.iter().position(|n| *n == "Damage").expect("named") as i32;
+        let fired = NAMES.iter().position(|n| *n == "OnFired").expect("named") as i32;
+        let mut data = vec![0x21];
+        data.extend_from_slice(&damage.to_le_bytes());
+        data.extend_from_slice(&3i32.to_le_bytes());
+        data.push(0x00);
+        data.extend_from_slice(&2i32.to_le_bytes());
+        data.extend_from_slice(&damage.to_le_bytes());
+        data.extend_from_slice(&0i32.to_le_bytes());
+        data.extend_from_slice(&fired.to_le_bytes());
+        data.extend_from_slice(&2i32.to_le_bytes());
+        data.extend_from_slice(&0i32.to_le_bytes());
+        data.push(0x53);
+
+        let (script, _) = decode(&data, None);
+        assert!(script.complete(), "{:?}", script.stopped);
+        let Expr::NameConst { value, id, .. } = &script.statements[0].expr else {
+            panic!("{:?}", script.statements[0].expr);
+        };
+        assert_eq!(value, "Damage_2");
+        assert_eq!(
+            *id,
+            NameId {
+                index: damage,
+                number: 3
+            }
+        );
+        let Expr::Variable { property, .. } = &script.statements[1].expr else {
+            panic!("{:?}", script.statements[1].expr);
+        };
+        assert_eq!(property.path, "Damage.OnFired_1");
+        assert_eq!(
+            property.names,
+            [
+                NameId {
+                    index: damage,
+                    number: 0
+                },
+                NameId {
+                    index: fired,
+                    number: 2
+                }
+            ]
+        );
+        assert_eq!(
+            shape(&script.statements[0].expr),
+            shape(&Expr::NameConst {
+                name: "NameConst",
+                value: "Damage_2".into(),
+                at: 0,
+                id: NameId::default(),
+            }),
+            "a comparison leaves the stored entry out"
+        );
+    }
+
+    /// The flag byte an assert carries is kept whole, so a value other than 0 or 1 writes back.
+    #[test]
+    fn an_assert_keeps_its_debug_byte() {
+        let data = [0x09, 0x0C, 0x00, 0x07, 0x27, 0x53];
+        let (script, _) = decode(&data, None);
+        assert!(script.complete(), "{:?}", script.stopped);
+        assert!(matches!(
+            script.statements[0].expr,
+            Expr::Assert {
+                line: 12,
+                debug: 7,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn every_token_name_maps_back_to_its_token() {
+        for token in 0..=u8::MAX {
+            if let Some(name) = token_name(token) {
+                assert_eq!(token_named(name), Some(token), "{name}");
+            }
+        }
+        assert_eq!(token_named("NotAToken"), None);
+    }
+
+    /// UE5 numbers the conversions from zero, which is what the game's scripts hold.
+    #[test]
+    fn conversions_are_named_by_the_engines_numbering() {
+        assert_eq!(conversion_name(0x00), Some("ObjectToInterface"));
+        assert_eq!(conversion_name(0x03), Some("DoubleToFloat"));
+        assert_eq!(conversion_name(0x46), None);
+        for kind in 0..=0x04 {
+            let name = conversion_name(kind).expect("named");
+            assert_eq!(conversion_kind(name), Some(kind));
+        }
     }
 }

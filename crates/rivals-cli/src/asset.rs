@@ -538,6 +538,52 @@ pub fn preview_script_widen(
     Ok(patched.applied)
 }
 
+/// Writes a function's whole script anew from assembler text into a mod.
+pub fn script_assemble(
+    request: &Request<'_>,
+    edit: rivals_uasset::ScriptTextEdit,
+    mod_name: &str,
+    replace: bool,
+) -> Result<String, String> {
+    write_edits(
+        request,
+        mod_name,
+        replace,
+        PackageEdits {
+            script_texts: vec![edit],
+            ..Default::default()
+        },
+    )
+}
+
+/// What a save would do, without writing anything: each change it makes, and what it would say.
+#[derive(Serialize)]
+pub struct SavePreview {
+    pub applied: Vec<rivals_uasset::AppliedEdit>,
+    pub notes: Vec<String>,
+}
+
+/// What `script_assemble` would change, assembled, patched and verified in memory without
+/// writing anything.
+pub fn preview_script_assemble(
+    request: &Request<'_>,
+    edit: rivals_uasset::ScriptTextEdit,
+) -> Result<SavePreview, String> {
+    let schema = mappings::resolve(request.usmap, request.configured_usmap)
+        .and_then(|path| mappings::load(&path))
+        .ok();
+    let changes = PackageEdits {
+        script_texts: vec![edit],
+        ..Default::default()
+    };
+    let (patched, _) =
+        asset_edit::preview_edits(&edit_request(request, "", changes), schema.as_deref())?;
+    Ok(SavePreview {
+        applied: patched.applied,
+        notes: patched.notes,
+    })
+}
+
 /// What `script_set` would change, patched and verified in memory without writing anything.
 pub fn preview_script_set(
     request: &Request<'_>,
@@ -1918,10 +1964,15 @@ pub struct ScriptReport {
     pub signature: Option<rivals_uasset::FunctionSignature>,
     /// The functions in this package that call this one, with the offset of each call.
     pub callers: Vec<(String, u32)>,
-    /// Each statement as the disassembly prints it, with the offsets of what an edit can address
-    /// in it: its literals, object constants, texts, calls and conditions, as `script-set --at`
-    /// takes them, and where its jumps lead.
+    /// Each statement as the assembler text writes it, with the offsets of what an edit can
+    /// address in it: its literals, object constants, texts, calls and conditions, as
+    /// `script-set --at` takes them, and where its jumps lead.
     pub lines: Vec<rivals_uasset::ScriptLine>,
+    /// Labels at the very end of the script, where a jump past its last statement lands.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub end_labels: Vec<rivals_uasset::TextLabel>,
+    /// The whole script as assembler text, which `asset script-assemble` reads back.
+    pub text: String,
 }
 
 pub fn script(request: &Request<'_>, export: u32) -> Result<ScriptReport, String> {
@@ -1949,6 +2000,8 @@ pub fn script(request: &Request<'_>, export: u32) -> Result<ScriptReport, String
     let callers = rivals_uasset::call_sites(scripts())
         .remove(&found.object_name)
         .unwrap_or_default();
+    let text = rivals_uasset::print_script(&parsed, export)
+        .ok_or_else(|| format!("export {export} carries no bytecode"))?;
     Ok(ScriptReport {
         export,
         object_name: found.object_name.clone(),
@@ -1957,7 +2010,9 @@ pub fn script(request: &Request<'_>, export: u32) -> Result<ScriptReport, String
         entries,
         signature: found.signature.clone(),
         callers,
-        lines: rivals_uasset::script_lines(script),
+        lines: rivals_uasset::script_lines(&parsed, export),
+        end_labels: text.end_labels.clone(),
+        text: text.text(),
     })
 }
 
@@ -2001,11 +2056,18 @@ pub fn print_script(report: &ScriptReport, expressions: bool, out: &mut impl FnM
         out(format!("keeps its size: {lock}"));
     }
     out(String::new());
-    for line in rivals_uasset::script_lines(script) {
-        for (_, event) in report.entries.iter().filter(|(at, _)| *at == line.offset) {
-            out(format!("        -- {event} --"));
+    let label = |label: &rivals_uasset::TextLabel| match &label.note {
+        Some(note) => format!("        @{}:  ; {note}", label.name),
+        None => format!("        @{}:", label.name),
+    };
+    for line in &report.lines {
+        for each in &line.labels {
+            out(label(each));
         }
-        out(format!("0x{:04X}  {}", line.offset, line.text));
+        match &line.note {
+            Some(note) => out(format!("0x{:04X}  {}  ; {note}", line.offset, line.text)),
+            None => out(format!("0x{:04X}  {}", line.offset, line.text)),
+        }
         if expressions {
             for slot in &line.expressions {
                 out(format!(
@@ -2017,6 +2079,9 @@ pub fn print_script(report: &ScriptReport, expressions: bool, out: &mut impl FnM
                 ));
             }
         }
+    }
+    for each in &report.end_labels {
+        out(label(each));
     }
     // The walk's own account of where it stopped closes the listing.
     for stop in rivals_uasset::render_script(script)
@@ -3132,6 +3197,7 @@ pub fn audit(
     configured_usmap: Option<&str>,
     skip_blueprint: bool,
     relocation_check: bool,
+    text_check: bool,
     mut progress: impl FnMut(usize, usize),
 ) -> Result<AuditReport, String> {
     let path = mappings::resolve(usmap, configured_usmap)?;
@@ -3146,6 +3212,7 @@ pub fn audit(
 
     let mut acc = Accumulator::new(container.to_string(), skip_blueprint);
     acc.relocation_check = relocation_check;
+    acc.text_check = text_check;
     acc.report.mappings_warning = mappings::drift_warning(game_root, &path);
     let converter = asset::PackageConverter::new(&*store);
     for (index, (package_id, path)) in packages.iter().take(total).enumerate() {
@@ -3189,6 +3256,8 @@ struct Accumulator {
     /// Widen every script in memory, verify the result and narrow it back, as `--relocation-check`
     /// asks.
     relocation_check: bool,
+    /// Print every script as text and assemble it again, as `--text-check` asks.
+    text_check: bool,
     report: AuditReport,
     kinds: BTreeMap<String, usize>,
     failures: BTreeMap<String, usize>,
@@ -3219,6 +3288,7 @@ impl Accumulator {
         Self {
             skip_blueprint,
             relocation_check: false,
+            text_check: false,
             report: AuditReport {
                 container: source,
                 mappings_warning: None,
@@ -3472,6 +3542,9 @@ impl Accumulator {
         if self.relocation_check {
             self.check_relocation(asset, exports, schema, source, &parsed);
         }
+        if self.text_check {
+            self.check_text(asset, exports, schema, source, &parsed);
+        }
         let census = rivals_uasset::script_census(&parsed);
         for (line, count) in census.counts {
             *self.relocation.entry(line).or_default() += count;
@@ -3573,6 +3646,101 @@ impl Accumulator {
                     seen.push(format!("{}: {reason}", source.entry));
                 }
             }
+        }
+    }
+
+    /// Prints every whole script in the package as text and assembles it again, counting the
+    /// functions that come back byte for byte and why the others do not. Then saves the package
+    /// with every one that did written from its own text, the way a text edit is saved, which has
+    /// to verify and give back the package's own bytes.
+    fn check_text(
+        &mut self,
+        asset: &[u8],
+        exports: &[u8],
+        schema: &Mappings,
+        source: &PackageSource<'_>,
+        parsed: &rivals_uasset::ParsedPackage,
+    ) {
+        let mut count = |line: String, example: Option<String>| {
+            *self.relocation.entry(line.clone()).or_default() += 1;
+            if let Some(example) = example {
+                let seen = self.relocation_examples.entry(line).or_default();
+                if seen.len() < PARTIAL_EXAMPLES {
+                    seen.push(example);
+                }
+            }
+        };
+        let results =
+            match rivals_uasset::script_round_trips(&AssetBundle { asset, exports }, parsed) {
+                Ok(results) => results,
+                Err(reason) => {
+                    count(
+                        format!("text check failed: {}", short_reason(&reason)),
+                        Some(format!("{}: {reason}", source.entry)),
+                    );
+                    return;
+                }
+            };
+        let mut texts = Vec::new();
+        for (export, result) in results {
+            match result {
+                Ok(()) => {
+                    count(
+                        "text check: functions back byte for byte from their own text".to_string(),
+                        None,
+                    );
+                    if let Some(text) = rivals_uasset::print_script(parsed, export) {
+                        texts.push(rivals_uasset::ScriptTextEdit {
+                            export,
+                            text: text.text(),
+                            was: None,
+                        });
+                    }
+                }
+                Err(failure) if failure.cause == "did not decode" => {}
+                Err(failure) => count(
+                    format!("text check failed: {}", failure.cause),
+                    Some(format!("{}#{export}: {}", source.entry, failure.detail)),
+                ),
+            }
+        }
+        if texts.is_empty() {
+            return;
+        }
+        let changes = PackageEdits {
+            script_texts: texts,
+            ..Default::default()
+        };
+        let saved = rivals_uasset::patch_package_with(
+            &AssetBundle { asset, exports },
+            rivals_uasset::Sidecars::default(),
+            parsed,
+            &changes,
+            Some(schema),
+        )
+        .and_then(|patched| {
+            let after = schema_synth::parse_package_checked(
+                &AssetBundle {
+                    asset: &patched.asset,
+                    exports: &patched.exports,
+                },
+                Some(schema),
+                source,
+            )?;
+            rivals_uasset::verify_patch(parsed, &after, &changes, &patched.applied)?;
+            same_bytes("header", asset, &patched.asset)?;
+            same_bytes("exports", exports, &patched.exports)
+        });
+        match saved {
+            Ok(()) => count(
+                "text check: packages saved from their own text, verified and unchanged"
+                    .to_string(),
+                None,
+            ),
+            Err(reason) => count(
+                format!("text check save failed: {}", short_reason(&reason)),
+                Some(format!("{}: {reason}", source.entry)),
+            ),
         }
     }
 

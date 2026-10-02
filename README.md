@@ -116,7 +116,7 @@ cargo build --release -p rivals-cli
 cargo test --workspace
 ```
 
-There is no JavaScript test framework. `pnpm lint` and `pnpm exec tsc --noEmit` cover the frontend.
+`pnpm test` runs the frontend's tests with Vitest; `pnpm lint` and `pnpm exec tsc --noEmit` check it.
 
 ## Command Line
 
@@ -198,13 +198,20 @@ with the components hanging from it. The class keeps the component's variable, w
 the save names the functions that read it. Blueprint variables and functions
 cannot be added: a
 class's own properties come first in every object's layout, so a new one would shift every
-inherited value in every instance, and a function needs a bytecode compiler.
+inherited value in every instance, and a new function needs an export of its own and a place in
+its class's function map. An existing function can be rewritten whole, as text: see below.
 
-`asset script-set` changes one literal constant inside a function's bytecode, addressed by the
-statement offset `asset script` prints and which literal in that statement, and only at the width
-the old value took: an `IntConst` can become another integer, a string another string of the same
-length, but a one-byte `IntZero` cannot grow into a four-byte constant without moving every jump
-after it, so that is refused. `--dry-run` shows the change without writing.
+`asset script-set` changes one thing inside a function's bytecode, addressed by the statement
+offset `asset script` prints: a literal by its place in the statement (`--const`) or by where it
+starts (`--at`, as `asset script --expressions` lists), an object constant (`--object`), a text
+(`--text`), a call's function (`--call`) or a branch's condition (`--condition`). A value may take
+another width: the code after it moves, and so does everything pointing into the function, the
+event stubs entering an event graph and the latent actions resuming in it. A function something
+points into in a way that cannot be followed keeps its size and takes only a change of the same
+width. A call pointed at a Blueprint function is held to its parameters; a native function's are
+recorded nowhere the toolkit reads, so one is refused until `--allow-unchecked`. `asset
+script-widen` writes every literal in its widest form, which moves code without changing what it
+does. `--dry-run` shows the change without writing.
 
 
 ```bash
@@ -231,11 +238,14 @@ rivals-cli asset save-as --container ... --entry ... --to /Game/Mods/MyThing/DA_
 rivals-cli asset rename-package --container ~mods/MyMod_9999999_P.utoc --entry ... --to /Game/Mods/MyThing/DA_New
 rivals-cli asset deps    --container ... --entry ... --export 3                         # load order
 rivals-cli asset script  --container ... --entry ... --export 26                        # disassembly
+rivals-cli asset script  --container ... --entry ... --export 26 --text > fn.txt        # assembler text
 rivals-cli asset script-set --container ... --entry ... --export 26 --statement 0x0664 --const 0 --value 1000 --mod-name MyMod
+rivals-cli asset script-assemble --container ... --entry ... --export 26 --text-file fn.txt --mod-name MyMod
 rivals-cli asset copy-export --container ... --entry ... --from-container ... --from-entry ... --export 274 --name MyLight
 
 rivals-cli asset audit --container pakchunk0-Windows.utoc --filter Data/DataTable
 rivals-cli asset audit --container pakchunk0-Windows.utoc --skip-blueprint   # native classes only
+rivals-cli asset audit --all --text-check      # every script back byte for byte from its own text
 ```
 
 `asset sweep` sets the same properties across every package a filter matches, by name at any depth,
@@ -300,6 +310,39 @@ beside a note still apply. The limits worth knowing:
   container, changing a map key, and editing a delegate or a field path are reported, not written.
 - **Bytes are not in the JSON.** Payload and bulk data are named by file in an edit list, never
   dumped inline.
+
+### Editing a function as text
+
+`asset script --text` prints a function's bytecode as assembler text, one statement a line, and
+`asset script-assemble` writes the function anew from such a text, so statements can be added,
+dropped, reordered or changed:
+
+```bash
+rivals-cli asset script --container ... --entry ... --export 10 --text > graph.txt
+#   edit graph.txt
+rivals-cli asset script-assemble --container ... --entry ... --export 10 --text-file graph.txt --dry-run
+rivals-cli asset script-assemble --container ... --entry ... --export 10 --text-file graph.txt --mod-name MyMod
+```
+
+Labels stand where offsets did, each named after the offset its statement started at (`@0045:`),
+with a comment saying what enters there from outside the function. Whatever outside the function
+points into it, an event's entry or a latent action's resume point, follows its label; a text that
+drops a label something enters at is refused, naming what holds it. A label of your own is a word
+(`@retry:`). A function something points into in a way that cannot be followed keeps its layout:
+its statements can change but not move.
+
+The text says everything the bytes do. Variables are named, with the object that owns one written
+after `in` where it is not the function or class it plainly belongs to; objects are named by path;
+numbers, strings and names take forms that say which instruction holds them (`5`, `Int64Const(5)`,
+`1.5f`, `"one byte a character"`, `u"wide"`, `'Name'`); and `#` marks anything written exactly as
+the bytes hold it. A text is assembled only for a function whose own text assembles back to its
+exact bytes, which `asset audit --text-check` counts across the game.
+
+Only a function's own parameters and locals can be named; none can be added. A name or object the
+package does not have yet is added to it. A changed or new call to a Blueprint function is held to
+its parameters; one to a native function the package never calls with as many arguments is refused
+until `--allow-unchecked`. An edit file carries a function's text as `script_texts`, inline
+(`text`) or from a file beside it (`file`).
 
 `--pak` takes a pak path or a bare mod name to look up in `~mods`. `--json` makes every command
 emit machine-readable output, and failures exit non-zero. `--dry-run` reports what a write command

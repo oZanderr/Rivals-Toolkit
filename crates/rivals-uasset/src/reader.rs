@@ -179,13 +179,22 @@ impl<'a> Cursor<'a> {
     }
 
     pub(crate) fn read_name(&mut self, names: &FPackageNameMap) -> Result<String, String> {
+        self.read_name_id(names).map(|(name, _)| name)
+    }
+
+    /// A name and the table entry and number it was stored as.
+    pub(crate) fn read_name_id(
+        &mut self,
+        names: &FPackageNameMap,
+    ) -> Result<(String, FMinimalName), String> {
         let at = self.file_offset();
         let index = self.read_i32()?;
         let number = self.read_i32()?;
         self.names.push(at);
+        let id = FMinimalName { index, number };
         names
-            .get(FMinimalName { index, number })
-            .map(|name| name.into_owned())
+            .get(id)
+            .map(|name| (name.into_owned(), id))
             .map_err(|e| self.err(format!("resolve FName: {e}")))
     }
 }

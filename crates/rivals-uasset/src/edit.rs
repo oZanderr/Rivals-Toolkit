@@ -177,6 +177,19 @@ pub struct ScriptConstEdit {
     pub narrow: bool,
 }
 
+/// A function's whole script written anew from assembler text, as `asset script --text` prints it.
+/// Statements can be added, dropped, moved or changed; whatever outside the function points into
+/// it follows the labels the text keeps.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ScriptTextEdit {
+    pub export: u32,
+    pub text: String,
+    /// The text the script printed as when the edit was made. A script that prints otherwise has
+    /// changed since, and the edit is refused rather than undoing what changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub was: Option<String>,
+}
+
 /// Everything one save changes: values inside exports, the import table they point into, or the
 /// export table itself. Removing or resetting exports is a save of its own: the value edits
 /// address bytes those operations move or delete.
@@ -198,6 +211,8 @@ pub struct PackageEdits {
     pub payloads: Vec<PayloadEdit>,
     /// Literal constants changed in place inside bytecode. See [`ScriptConstEdit`].
     pub scripts: Vec<ScriptConstEdit>,
+    /// Whole scripts written anew from text. See [`ScriptTextEdit`].
+    pub script_texts: Vec<ScriptTextEdit>,
     /// Exports to remove, with their subobjects. See [`crate::plan_removal`].
     pub remove_exports: Vec<u32>,
     /// Exports whose stored values are dropped so they inherit everything.
@@ -394,6 +409,26 @@ pub fn check_expectations(parsed: &ParsedPackage, edits: &PackageEdits) -> Resul
         }
     }
     let mut sized: Vec<u32> = Vec::new();
+    for export in edits.script_texts.iter().map(|edit| edit.export) {
+        let Some(script) = parsed
+            .exports
+            .get(export as usize)
+            .and_then(|export| export.script.as_ref())
+        else {
+            continue;
+        };
+        if !sized.contains(&export) {
+            sized.push(export);
+            if let Some(was) = expect.scripts.get(&Expected::script_size_key(export))
+                && *was != script_sizes(script)
+            {
+                drift.push(format!(
+                    "the script of export {export} was {was} bytes loaded/stored, and is now {}",
+                    script_sizes(script)
+                ));
+            }
+        }
+    }
     for edit in &edits.scripts {
         let Some(script) = parsed
             .exports
@@ -467,6 +502,7 @@ pub fn expectations(parsed: &ParsedPackage, edits: &PackageEdits) -> Expected {
     exports.extend(edits.rows.iter().map(|edit| edit.export));
     exports.extend(edits.strings.iter().map(|edit| edit.export));
     exports.extend(edits.scripts.iter().map(|edit| edit.export));
+    exports.extend(edits.script_texts.iter().map(|edit| edit.export));
     exports.extend(edits.payloads.iter().map(|edit| edit.export));
     exports.extend(edits.remove_exports.iter().copied());
     exports.extend(edits.reset_exports.iter().copied());
@@ -563,6 +599,17 @@ pub fn expectations(parsed: &ParsedPackage, edits: &PackageEdits) -> Expected {
             _ => {}
         }
     }
+    for edit in &edits.script_texts {
+        if let Some(script) = parsed
+            .exports
+            .get(edit.export as usize)
+            .and_then(|export| export.script.as_ref())
+        {
+            expect
+                .scripts
+                .insert(Expected::script_size_key(edit.export), script_sizes(script));
+        }
+    }
     for edit in &edits.scripts {
         let script = parsed
             .exports
@@ -647,6 +694,7 @@ impl PackageEdits {
         self.bulk.extend(other.bulk);
         self.payloads.extend(other.payloads);
         self.scripts.extend(other.scripts);
+        self.script_texts.extend(other.script_texts);
         self.remove_exports.extend(other.remove_exports);
         self.reset_exports.extend(other.reset_exports);
         self.duplicate_exports.extend(other.duplicate_exports);
@@ -675,6 +723,7 @@ impl PackageEdits {
             && self.bulk.is_empty()
             && self.payloads.is_empty()
             && self.scripts.is_empty()
+            && self.script_texts.is_empty()
             && self.remove_exports.is_empty()
             && self.reset_exports.is_empty()
             && self.duplicate_exports.is_empty()
@@ -1140,6 +1189,7 @@ pub fn patch_package_with(
             || !edits.bulk.is_empty()
             || !edits.payloads.is_empty()
             || !edits.scripts.is_empty()
+            || !edits.script_texts.is_empty()
             || !edits.remove_exports.is_empty()
             || !edits.reset_exports.is_empty()
             || !edits.duplicate_exports.is_empty()
@@ -1164,6 +1214,7 @@ pub fn patch_package_with(
             || !edits.bulk.is_empty()
             || !edits.payloads.is_empty()
             || !edits.scripts.is_empty()
+            || !edits.script_texts.is_empty()
             || !edits.remove_exports.is_empty()
             || !edits.duplicate_exports.is_empty()
         {
@@ -1204,6 +1255,7 @@ pub fn patch_package_with(
             || !edits.bulk.is_empty()
             || !edits.payloads.is_empty()
             || !edits.scripts.is_empty()
+            || !edits.script_texts.is_empty()
             || !edits.remove_exports.is_empty()
             || !edits.reset_exports.is_empty()
             || !edits.duplicate_exports.is_empty()
@@ -1227,6 +1279,7 @@ pub fn patch_package_with(
             || !edits.bulk.is_empty()
             || !edits.payloads.is_empty()
             || !edits.scripts.is_empty()
+            || !edits.script_texts.is_empty()
         {
             return Err(
                 "removing, resetting or duplicating an export is a save of its own; save or discard the other edits first"
@@ -1856,7 +1909,8 @@ pub fn patch_package_with(
         });
         applied_imports.push(done);
     }
-    let scripts = crate::script_edit::script_splices(parsed, edits, &mut tables, &package)?;
+    let scripts =
+        crate::script_edit::script_splices(parsed, edits, &mut tables, &package, bundle, base)?;
     object_links.extend(scripts.links);
     notes.extend(scripts.notes);
     for splice in scripts.splices {
@@ -5032,7 +5086,7 @@ fn with_block(
 
 /// The bytes between two offsets, which is what an encoder rebuilds an FText's namespace and key
 /// from and what an insertion copies.
-fn bytes_at<'a>(
+pub(crate) fn bytes_at<'a>(
     bundle: &AssetBundle<'a>,
     base: u64,
     from: u64,

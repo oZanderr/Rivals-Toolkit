@@ -156,6 +156,10 @@ enum AssetCmd {
     /// differently, but every offset after each literal moves, which checks in game that a
     /// script can change size safely.
     ScriptWiden(ScriptWidenArgs),
+    /// Write a function's whole script anew from assembler text, as `asset script --text` prints
+    /// it, and write the result into a mod pak. Whatever outside the function points into it
+    /// follows the labels the text keeps.
+    ScriptAssemble(ScriptAssembleArgs),
     /// Change a stored value and write the result into a mod pak.
     Set(AssetSetArgs),
     /// Set the same properties by name across every package a filter matches, in one mod.
@@ -319,6 +323,34 @@ struct ScriptWidenArgs {
 }
 
 #[derive(Args)]
+struct ScriptAssembleArgs {
+    #[command(flatten)]
+    asset: AssetArgs,
+
+    /// Export index of the function, as `asset info` prints it.
+    #[arg(long, value_name = "N")]
+    export: u32,
+
+    /// The text to assemble, as `asset script --text` prints it: UTF-8, or UTF-16 behind a byte
+    /// order mark.
+    #[arg(long, value_name = "FILE")]
+    text_file: std::path::PathBuf,
+
+    /// Mod pak to write into, created in `~mods` if it does not exist. Defaults to the name the
+    /// desktop app last saved into, then to `AssetEdits`.
+    #[arg(long, value_name = "NAME")]
+    mod_name: Option<String>,
+
+    /// Overwrite an edited copy of this asset that the mod pak already holds.
+    #[arg(long)]
+    replace: bool,
+
+    /// Assemble, patch and verify, report what would change, and write nothing.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Args)]
 struct ScriptArgs {
     #[command(flatten)]
     asset: AssetArgs,
@@ -329,8 +361,13 @@ struct ScriptArgs {
 
     /// Under each statement, list everything in it an edit can address, by the offset it starts
     /// at: literals, object constants, texts, calls and conditions.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "text")]
     expressions: bool,
+
+    /// Print only the assembler text, which `asset script-assemble` takes back: no offsets, no
+    /// header, labels where code is jumped to.
+    #[arg(long)]
+    text: bool,
 }
 
 #[derive(Args)]
@@ -1043,6 +1080,11 @@ struct AuditArgs {
     /// Each literal is then narrowed back, which has to give the package's own bytes again.
     #[arg(long)]
     relocation_check: bool,
+
+    /// Print every whole script as assembler text and assemble the text again, which has to give
+    /// back the package's own bytes: the check that a script's text says all its bytes do.
+    #[arg(long)]
+    text_check: bool,
 }
 
 #[derive(Args)]
@@ -1279,6 +1321,7 @@ fn run(cli: &Cli) -> Result<(), String> {
         Command::Asset(AssetCmd::Script(a)) => asset_script(cli, &app, a),
         Command::Asset(AssetCmd::ScriptSet(a)) => asset_script_set(cli, &app, a),
         Command::Asset(AssetCmd::ScriptWiden(a)) => asset_script_widen(cli, &app, a),
+        Command::Asset(AssetCmd::ScriptAssemble(a)) => asset_script_assemble(cli, &app, a),
         Command::Asset(AssetCmd::Set(a)) => asset_set(cli, &app, a),
         Command::Asset(AssetCmd::Sweep(a)) => asset_sweep(cli, &app, a),
         Command::Asset(AssetCmd::Import(a)) => asset_import(cli, &app, a),
@@ -2336,9 +2379,52 @@ fn asset_script_widen(
     emit(cli, &message, || outln!("{message}"))
 }
 
+fn asset_script_assemble(
+    cli: &Cli,
+    app: &settings::AppSettings,
+    args: &ScriptAssembleArgs,
+) -> Result<(), String> {
+    let root = resolve::game_root(cli.game_root.as_deref(), app)?;
+    let request = asset_request(cli, app, &args.asset, &root);
+    let bytes = std::fs::read(&args.text_file)
+        .map_err(|e| format!("read {}: {e}", args.text_file.display()))?;
+    let text = rivals_core::asset_edit::json::decode_text(&bytes)
+        .map_err(|e| format!("{}: {e}", args.text_file.display()))?;
+    let edit = rivals_uasset::ScriptTextEdit {
+        export: args.export,
+        text,
+        was: None,
+    };
+    if args.dry_run {
+        let preview = asset::preview_script_assemble(&request, edit)?;
+        return emit(cli, &preview, || {
+            for done in &preview.applied {
+                outln!("would set {}: {} -> {}", done.name, done.before, done.after);
+            }
+            for note in &preview.notes {
+                outln!("note: {note}");
+            }
+        });
+    }
+    if !cli.force && rivals_core::game_status::should_block_for_game() {
+        return Err(rivals_core::game_status::game_running_error());
+    }
+    let message = asset::script_assemble(
+        &request,
+        edit,
+        mod_name_of(app, args.mod_name.as_deref()),
+        args.replace,
+    )?;
+    emit(cli, &message, || outln!("{message}"))
+}
+
 fn asset_script(cli: &Cli, app: &settings::AppSettings, args: &ScriptArgs) -> Result<(), String> {
     let root = resolve::game_root(cli.game_root.as_deref(), app)?;
     let report = asset::script(&asset_request(cli, app, &args.asset, &root), args.export)?;
+    if args.text {
+        // Exactly the text, so `> fn.txt` saves what `script-assemble` reads.
+        return emit(cli, &report, || out!("{}", report.text));
+    }
     emit(cli, &report, || {
         asset::print_script(&report, args.expressions, &mut |line| outln!("{line}"))
     })
@@ -3536,6 +3622,7 @@ fn asset_audit(cli: &Cli, app: &settings::AppSettings, args: &AuditArgs) -> Resu
             app.usmap_path.as_deref(),
             args.skip_blueprint,
             args.relocation_check,
+            args.text_check,
             tick,
         )?,
         (None, None) => return Err("pass either --container or --dir".into()),

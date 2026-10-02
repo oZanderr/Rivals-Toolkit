@@ -342,6 +342,10 @@ pub(crate) async fn export_bytes_view(
 #[derive(Serialize)]
 pub(crate) struct ScriptView {
     lines: Vec<rivals_uasset::ScriptLine>,
+    /// Labels at the very end of the script, where a jump past its last statement lands.
+    end_labels: Vec<rivals_uasset::TextLabel>,
+    /// The whole script as assembler text, when it decoded whole.
+    text: Option<String>,
     /// The events that enter this function, when it is a Blueprint's Ubergraph, by the offset
     /// each one starts at.
     entries: Vec<(u32, String)>,
@@ -394,8 +398,14 @@ pub(crate) async fn export_script_view(
         let callers = rivals_uasset::call_sites(scripts())
             .remove(&found.object_name)
             .unwrap_or_default();
+        let text = rivals_uasset::print_script(&parsed, export);
         Ok(ScriptView {
-            lines: rivals_uasset::script_lines(script),
+            lines: rivals_uasset::script_lines(&parsed, export),
+            end_labels: text
+                .as_ref()
+                .map(|text| text.end_labels.clone())
+                .unwrap_or_default(),
+            text: text.filter(|_| script.complete()).map(|text| text.text()),
             entries,
             signature_text: found
                 .signature
