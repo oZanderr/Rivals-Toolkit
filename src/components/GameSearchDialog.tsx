@@ -35,6 +35,18 @@ interface SearchProgress {
   total: number;
 }
 
+/** The kinds of term a search can be narrowed to, as the backend names them. */
+const KINDS = [
+  { kind: "call", label: "Calls" },
+  { kind: "delegate", label: "Delegates" },
+  { kind: "string", label: "Strings" },
+  { kind: "name", label: "Names" },
+  { kind: "object", label: "Objects" },
+  { kind: "variable", label: "Variables" },
+] as const;
+
+type Kind = (typeof KINDS)[number]["kind"];
+
 const PHASES: Record<SearchProgress["phase"], string> = {
   listing: "Listing packages",
   headers: "Reading headers",
@@ -62,6 +74,10 @@ export function GameSearch({
   const [query, setQuery] = useState("");
   const [values, setValues] = useState(false);
   const [filter, setFilter] = useState("");
+  // No kind picked is every kind.
+  const [kinds, setKinds] = useState<Kind[]>([]);
+  const [wholeWord, setWholeWord] = useState(false);
+  const [mods, setMods] = useState(true);
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState<SearchProgress | null>(null);
   const [search, setSearch] = useState<{
@@ -97,6 +113,9 @@ export function GameSearch({
       query: text,
       values,
       filter: filter.trim() || null,
+      kinds,
+      wholeWord,
+      mods,
     })
       .then((result) => setSearch({ query: text, values, result }))
       .catch((e: unknown) => setError(String(e)))
@@ -157,6 +176,37 @@ export function GameSearch({
               placeholder="Only paths containing… (optional)"
               className="h-7 font-mono text-[11px]"
             />
+          </div>
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-[12px]">
+            <div className="flex items-center gap-1" role="group" aria-label="Kinds">
+              {KINDS.map(({ kind, label }) => {
+                const on = kinds.includes(kind);
+                return (
+                  <Button
+                    key={kind}
+                    size="sm"
+                    variant={on ? "blue" : "outline"}
+                    aria-pressed={on}
+                    className="h-6 px-2 text-[11px]"
+                    onClick={() =>
+                      setKinds((held) =>
+                        on ? held.filter((other) => other !== kind) : [...held, kind]
+                      )
+                    }
+                  >
+                    {label}
+                  </Button>
+                );
+              })}
+            </div>
+            <label className="flex items-center gap-2">
+              <Switch checked={wholeWord} onCheckedChange={setWholeWord} aria-label="Whole word" />
+              Whole word
+            </label>
+            <label className="flex items-center gap-2">
+              <Switch checked={mods} onCheckedChange={setMods} aria-label="Enabled mods" />
+              Include enabled mods
+            </label>
           </div>
           {running && (
             <div className="flex items-center gap-2 text-[11px] text-muted-foreground">

@@ -80,7 +80,15 @@ describe("GameSearch", () => {
       screen.getByText("Searched 5497 of 554734 packages, the ones holding functions.")
     ).toBeTruthy();
     expect(mock.callsTo("search_game")).toEqual([
-      { gameRoot: GAME, query: "SetScalarParameterValue", values: false, filter: null },
+      {
+        gameRoot: GAME,
+        query: "SetScalarParameterValue",
+        values: false,
+        filter: null,
+        kinds: [],
+        wholeWord: false,
+        mods: true,
+      },
     ]);
   });
 
@@ -93,7 +101,40 @@ describe("GameSearch", () => {
     await user.type(screen.getByLabelText("Search for"), "Hulk{Enter}");
     await waitFor(() =>
       expect(mock.callsTo("search_game")).toEqual([
-        { gameRoot: GAME, query: "Hulk", values: true, filter: "Data/DataTable" },
+        {
+          gameRoot: GAME,
+          query: "Hulk",
+          values: true,
+          filter: "Data/DataTable",
+          kinds: [],
+          wholeWord: false,
+          mods: true,
+        },
+      ])
+    );
+  });
+
+  it("narrows a search to kinds of term, to whole words and to the base game", async () => {
+    mount();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /Search Game/ }));
+    await user.click(await screen.findByRole("button", { name: "Calls" }));
+    await user.click(screen.getByRole("button", { name: "Delegates" }));
+    await user.click(screen.getByRole("button", { name: "Calls" }));
+    await user.click(screen.getByRole("switch", { name: "Whole word" }));
+    await user.click(screen.getByRole("switch", { name: "Enabled mods" }));
+    await user.type(screen.getByLabelText("Search for"), "Delay{Enter}");
+    await waitFor(() =>
+      expect(mock.callsTo("search_game")).toEqual([
+        {
+          gameRoot: GAME,
+          query: "Delay",
+          values: false,
+          filter: null,
+          kinds: ["delegate"],
+          wholeWord: true,
+          mods: false,
+        },
       ])
     );
   });

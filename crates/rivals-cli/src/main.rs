@@ -633,6 +633,11 @@ struct AssetSearchArgs {
     #[arg(long, value_name = "KIND")]
     kind: Vec<SearchKindArg>,
 
+    /// Match the text only as a whole word, not inside a longer name: `Delay` then finds
+    /// `KismetSystemLibrary:Delay` but not `DelayUntilNextTick`.
+    #[arg(long)]
+    word: bool,
+
     /// Leave the enabled mods out and read the base game alone.
     #[arg(long)]
     no_mods: bool,
@@ -3614,7 +3619,8 @@ fn asset_search(
         &args.query,
         args.kind.iter().map(|kind| (*kind).into()).collect(),
         args.values,
-    )?;
+    )?
+    .whole_word(args.word);
     // Ctrl+C ends the process, so nothing ever cancels a CLI search.
     static NEVER: AtomicBool = AtomicBool::new(false);
     let shown = std::io::stderr().is_terminal();

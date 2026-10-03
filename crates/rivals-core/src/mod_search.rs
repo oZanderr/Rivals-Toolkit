@@ -7,12 +7,12 @@ use rivals_uasset::{
     AssetBundle, DataTable, Expr, Mappings, ParseOptions, ParsedPackage, PropertyEntry,
     PropertyValue, ScriptPrinter, StringTable, Term, TermKind,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::asset::{AssetSource, PackageConverter, list_packages};
 use crate::schema_synth::{self, PackageSource};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HitKind {
     String,
@@ -63,6 +63,9 @@ pub struct Query {
     needle: String,
     kinds: Vec<HitKind>,
     pub values: bool,
+    /// Match the text only where it stands as a word of its own: not inside a longer name, so
+    /// `Delay` finds `KismetSystemLibrary:Delay` but not `DelayUntilNextTick` or `bDelayed`.
+    whole_word: bool,
 }
 
 impl Query {
@@ -75,11 +78,26 @@ impl Query {
             needle,
             kinds,
             values,
+            whole_word: false,
         })
     }
 
+    /// The same query, matching only whole words when `whole_word` is set.
+    pub fn whole_word(self, whole_word: bool) -> Self {
+        Self { whole_word, ..self }
+    }
+
     fn matches(&self, text: &str) -> bool {
-        text.to_lowercase().contains(&self.needle)
+        let text = text.to_lowercase();
+        if !self.whole_word {
+            return text.contains(&self.needle);
+        }
+        // A word is a run of letters, digits and underscores, as an identifier is.
+        let word = |c: char| c.is_alphanumeric() || c == '_';
+        text.match_indices(&self.needle).any(|(at, found)| {
+            !text[..at].chars().next_back().is_some_and(word)
+                && !text[at + found.len()..].chars().next().is_some_and(word)
+        })
     }
 
     /// The term a statement is found by: of the ones of a kind asked for that match, the one
@@ -353,6 +371,23 @@ fn walk_value(
 mod tests {
     use super::*;
     use rivals_uasset::{ObjectRef, PropertyRef};
+
+    /// A whole word is bounded by anything but letters, digits and underscores, so a path's
+    /// separators bound it and a longer name does not.
+    #[test]
+    fn a_whole_word_stands_apart_from_longer_names() {
+        let query = Query::new("Delay", Vec::new(), false)
+            .unwrap()
+            .whole_word(true);
+        assert!(query.matches("/Script/Engine.KismetSystemLibrary:Delay"));
+        assert!(query.matches("delay"));
+        assert!(query.matches("Delay or DelayUntilNextTick"));
+        assert!(!query.matches("DelayUntilNextTick"));
+        assert!(!query.matches("bDelayed"));
+        assert!(!query.matches("CallFunc_Delay_ReturnValue"));
+        let anywhere = Query::new("Delay", Vec::new(), false).unwrap();
+        assert!(anywhere.matches("bDelayed"));
+    }
 
     #[test]
     fn an_empty_query_is_refused() {

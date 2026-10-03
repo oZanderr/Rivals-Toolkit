@@ -257,7 +257,9 @@ rivals-cli asset audit --all --text-check      # every script back byte for byte
 delegate, a string, a name constant, an object or a variable. It reads each package from the copy
 the game loads, enabled mods included and labelled. A script search parses only the packages
 holding functions, which takes about half a minute for the whole game; `--values` searches stored
-values too, at any depth, which means reading every package, so narrow it with `--filter`.
+values too, at any depth, which means reading every package, so narrow it with `--filter`. `--kind`
+keeps one kind of term, `--word` matches whole words only, and `--no-mods` reads the base game
+alone.
 
 `asset sweep` sets the same properties across every package a filter matches, by name at any depth,
 and puts the whole batch in with one container rewrite. It changes only values a package actually
