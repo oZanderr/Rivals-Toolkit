@@ -642,7 +642,8 @@ struct AssetSearchArgs {
     #[arg(long)]
     no_mods: bool,
 
-    /// Stop after this many places are found; 0 for no limit.
+    /// List at most this many places, the first by path; every place is still counted. 0 lists
+    /// them all.
     #[arg(long, value_name = "N", default_value_t = 5000)]
     limit: usize,
 }
@@ -3681,13 +3682,14 @@ fn asset_search(
         };
         outln!(
             "\n{} hit(s) in {packages} package(s); searched {} of {} packages ({what})",
-            result.hits.len(),
+            result.found,
             result.searched,
             result.listed
         );
         if result.truncated {
             outln!(
-                "stopped at {} hits: raise --limit, or narrow the search with --filter or --kind",
+                "showing the first {} by path: raise --limit, or narrow the search with --filter \
+                 or --kind",
                 result.hits.len()
             );
         }

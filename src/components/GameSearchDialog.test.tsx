@@ -39,6 +39,7 @@ const MOD_HIT = {
 function result(extra: Record<string, unknown> = {}) {
   return {
     hits: [BASE_HIT, MOD_HIT],
+    found: 2,
     unreadable: [],
     listed: 554734,
     searched: 5497,
@@ -153,6 +154,17 @@ describe("GameSearch", () => {
     await act(async () => pending.resolve(result({ hits: [BASE_HIT], cancelled: true })));
     expect(
       await screen.findByText("Cancelled: these are the places found before it stopped.")
+    ).toBeTruthy();
+  });
+
+  it("says how many places a capped search found beyond the ones it lists", async () => {
+    mock.on("search_game", () => result({ found: 8312, truncated: true }));
+    mount();
+    const user = userEvent.setup();
+    await searchFor(user, "Set");
+    expect(await screen.findByText("8312 places name “Set”")).toBeTruthy();
+    expect(
+      screen.getByText("Showing the first 2 by path; narrow the search to see the rest.")
     ).toBeTruthy();
   });
 

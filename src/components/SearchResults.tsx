@@ -26,10 +26,13 @@ export function SearchResults({
   result,
   onOpen,
   note,
+  found = result.hits.length,
 }: {
   query: string;
   result: SearchResult;
   onOpen: (hit: SearchHit) => void;
+  /** How many places were found in all, when that is more than are listed. */
+  found?: number;
   /** Says how the result is short of the whole answer, when it is. */
   note?: string;
 }) {
@@ -39,7 +42,7 @@ export function SearchResults({
   return (
     <section className="flex flex-col gap-3">
       <p className="text-muted-foreground">
-        {result.hits.length} place{result.hits.length === 1 ? "" : "s"} name “{query}”
+        {found} place{found === 1 ? "" : "s"} name “{query}”
       </p>
       {note && <p className="text-warn">{note}</p>}
       {[...byPackage].map(([pkg, hits]) => (

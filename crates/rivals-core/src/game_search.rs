@@ -8,8 +8,8 @@
 
 use std::collections::HashSet;
 use std::io::Cursor;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use rayon::prelude::*;
 use retoc::container_header::EIoContainerHeaderVersion;
@@ -48,20 +48,24 @@ pub struct GameSearch<'a> {
     pub filter: Option<&'a str>,
     /// Read the enabled mods' copies where they win, as the game does.
     pub mods: bool,
-    /// Stop once this many places are found.
+    /// List at most this many places: the first by path. Every place is still counted.
     pub max_hits: Option<usize>,
 }
 
 #[derive(Debug, Default, Serialize)]
 pub struct GameSearchResult {
+    /// The places found, in walk order: the mods the game prefers first, then the base game, each
+    /// by path. At most the cap, the first ones when there are more.
     pub hits: Vec<SearchHit>,
+    /// How many places were found in all, listed or not.
+    pub found: usize,
     /// Packages that could not be read, with why, so an empty result is not taken as proof.
     pub unreadable: Vec<(String, String)>,
     /// How many packages the walk listed, after the path filter.
     pub listed: usize,
     /// How many of them were parsed: the ones holding functions, or every one for a value search.
     pub searched: usize,
-    /// The search stopped at its cap. The hits are then the first found, not the first by path.
+    /// More places were found than the cap lists.
     pub truncated: bool,
     /// The search was cancelled, and the hits are the ones found before it stopped.
     pub cancelled: bool,
@@ -86,9 +90,59 @@ struct Candidate {
 }
 
 enum Outcome {
-    Hits(Vec<SearchHit>),
+    /// A package read: the places it holds, and how many, which is more than it lists when they
+    /// fall past the cap.
+    Hits {
+        hits: Vec<SearchHit>,
+        found: usize,
+    },
     Unreadable(String, String),
+    /// Not read, because the search was cancelled first.
     Skipped,
+}
+
+/// Which chunks of the walk still keep the places they find. Chunks finish in any order, but once
+/// every chunk up to one has finished and together they hold the cap's worth of places, nothing
+/// later in the walk can be among the first by path, so later chunks only count theirs. That keeps
+/// the listing the same from run to run without holding every place a broad search finds.
+struct Frontier {
+    cap: usize,
+    /// Places each finished chunk found, by chunk.
+    found: Mutex<Vec<Option<usize>>>,
+    /// Chunks from this one on keep nothing.
+    keep_below: AtomicUsize,
+}
+
+impl Frontier {
+    fn new(chunks: usize, cap: usize) -> Self {
+        Self {
+            cap,
+            found: Mutex::new(vec![None; chunks]),
+            keep_below: AtomicUsize::new(usize::MAX),
+        }
+    }
+
+    fn keeps(&self, chunk: usize) -> bool {
+        chunk < self.keep_below.load(Ordering::Relaxed)
+    }
+
+    fn finished(&self, chunk: usize, found: usize) {
+        let Ok(mut held) = self.found.lock() else {
+            return;
+        };
+        if let Some(slot) = held.get_mut(chunk) {
+            *slot = Some(found);
+        }
+        let mut sum = 0usize;
+        for (at, count) in held.iter().enumerate() {
+            let Some(count) = count else { break };
+            sum += count;
+            if sum >= self.cap {
+                self.keep_below.fetch_min(at + 1, Ordering::Relaxed);
+                break;
+            }
+        }
+    }
 }
 
 /// Every place the game's scripts, or with `query.values` its stored values, name what `query`
@@ -121,8 +175,8 @@ pub fn game_search(
     };
     let total = candidates.len();
     let done = AtomicUsize::new(0);
-    let found = AtomicUsize::new(0);
     let cap = search.max_hits.unwrap_or(usize::MAX);
+    let frontier = Frontier::new(total.div_ceil(PACKAGES_PER_CONVERTER), cap);
     // A value search reads values the way the inspector shows them, which can take layouts
     // recovered from the Blueprints that define them, looked up through the newest patch.
     let patch = values
@@ -130,15 +184,17 @@ pub fn game_search(
         .transpose()?;
     let outcomes: Vec<Outcome> = candidates
         .par_chunks(PACKAGES_PER_CONVERTER)
-        .flat_map_iter(|chunk| {
+        .enumerate()
+        .flat_map_iter(|(index, chunk)| {
             let converter = PackageConverter::new(&order);
+            let mut found = 0;
             let outcomes: Vec<Outcome> = chunk
                 .iter()
                 .map(|candidate| {
-                    if cancel.load(Ordering::Relaxed) || found.load(Ordering::Relaxed) >= cap {
+                    if cancel.load(Ordering::Relaxed) {
                         return Outcome::Skipped;
                     }
-                    let outcome = search_one(
+                    let mut outcome = search_one(
                         &converter,
                         candidate,
                         &order,
@@ -147,8 +203,11 @@ pub fn game_search(
                         game_root,
                         patch.as_deref(),
                     );
-                    if let Outcome::Hits(hits) = &outcome {
-                        found.fetch_add(hits.len(), Ordering::Relaxed);
+                    if let Outcome::Hits { hits, found: here } = &mut outcome {
+                        found += *here;
+                        if !frontier.keeps(index) {
+                            hits.clear();
+                        }
                     }
                     let now = done.fetch_add(1, Ordering::Relaxed) + 1;
                     if now.is_multiple_of(64) || now == total {
@@ -157,6 +216,7 @@ pub fn game_search(
                     outcome
                 })
                 .collect();
+            frontier.finished(index, found);
             if values {
                 schema_synth::forget_package_layouts();
             }
@@ -319,28 +379,31 @@ fn search_one(
         hit.container = Some(candidate.container.to_string());
         hit.in_mod.clone_from(mod_name);
     }
-    Outcome::Hits(hits)
+    Outcome::Hits {
+        found: hits.len(),
+        hits,
+    }
 }
 
-/// The hits in walk order up to `cap`, and the packages that would not read. The result is
-/// truncated when the cap cut hits off, or left packages unread.
+/// The first `cap` places in walk order, how many there were in all, and the packages that
+/// would not read.
 fn gather(outcomes: Vec<Outcome>, cap: usize) -> GameSearchResult {
     let mut result = GameSearchResult::default();
-    let mut skipped = false;
     for outcome in outcomes {
         match outcome {
-            Outcome::Hits(hits) => {
+            Outcome::Hits { hits, found } => {
                 result.searched += 1;
+                result.found += found;
                 result.hits.extend(hits);
             }
             Outcome::Unreadable(path, reason) => {
                 result.searched += 1;
                 result.unreadable.push((path, reason));
             }
-            Outcome::Skipped => skipped = true,
+            Outcome::Skipped => {}
         }
     }
-    result.truncated = result.hits.len() > cap || (skipped && result.hits.len() >= cap);
+    result.truncated = result.found > cap;
     result.hits.truncate(cap);
     result
 }
@@ -365,34 +428,61 @@ mod tests {
         }
     }
 
-    /// The hits come back in walk order, and a cap cuts them there and says so.
+    fn listed(hits: Vec<SearchHit>) -> Outcome {
+        Outcome::Hits {
+            found: hits.len(),
+            hits,
+        }
+    }
+
+    /// The hits come back in walk order, a cap lists the first of them, and every place found is
+    /// counted, listed or not.
     #[test]
-    fn a_hit_cap_keeps_walk_order_and_marks_the_result_truncated() {
+    fn a_hit_cap_lists_the_first_by_path_and_counts_the_rest() {
         let outcomes = || {
             vec![
-                Outcome::Hits(vec![hit("A"), hit("A")]),
+                listed(vec![hit("A"), hit("A")]),
                 Outcome::Unreadable("B".into(), "broken".into()),
                 Outcome::Skipped,
-                Outcome::Hits(vec![hit("C")]),
+                listed(vec![hit("C")]),
+                // A chunk past the frontier counts its places without keeping them.
+                Outcome::Hits {
+                    hits: Vec::new(),
+                    found: 4,
+                },
             ]
         };
         let all = gather(outcomes(), usize::MAX);
         let packages: Vec<&str> = all.hits.iter().map(|h| h.package.as_str()).collect();
         assert_eq!(packages, ["A", "A", "C"]);
-        assert_eq!(all.searched, 3);
-        assert!(!all.truncated);
+        assert_eq!((all.searched, all.found), (4, 7));
         assert_eq!(all.unreadable, [("B".to_string(), "broken".to_string())]);
 
         let capped = gather(outcomes(), 2);
         let packages: Vec<&str> = capped.hits.iter().map(|h| h.package.as_str()).collect();
         assert_eq!(packages, ["A", "A"]);
+        assert_eq!(capped.found, 7);
         assert!(capped.truncated);
-        // As many as the cap with nothing left unread is the whole answer.
-        let whole = vec![
-            Outcome::Hits(vec![hit("A"), hit("A")]),
-            Outcome::Hits(vec![hit("C")]),
-        ];
-        assert!(!gather(whole, 3).truncated);
+        assert!(!gather(vec![listed(vec![hit("A")])], 1).truncated);
+    }
+
+    /// Chunks finish in any order. Only once the chunks from the first one on hold the cap's worth
+    /// do later chunks stop keeping their places, so what is listed is the same however the
+    /// threads ran.
+    #[test]
+    fn the_frontier_moves_only_past_a_finished_run_from_the_start() {
+        let frontier = Frontier::new(4, 3);
+        frontier.finished(2, 10);
+        assert!(
+            frontier.keeps(3),
+            "chunk 0 and 1 may still hold the first places"
+        );
+        frontier.finished(0, 2);
+        assert!(frontier.keeps(3));
+        frontier.finished(1, 1);
+        assert!(frontier.keeps(1));
+        assert!(!frontier.keeps(2), "chunks 0 and 1 already hold three");
+        assert!(!frontier.keeps(3));
     }
 }
 

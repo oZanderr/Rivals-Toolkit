@@ -21,6 +21,8 @@ import { Switch } from "@/components/ui/switch";
 import { Tip } from "@/components/ui/tooltip";
 
 interface GameSearchResult extends SearchResult {
+  /** How many places were found in all; `hits` lists the first of them by path. */
+  found: number;
   /** Packages the walk listed, after the path filter. */
   listed: number;
   /** How many of them were parsed: the ones holding functions, or all of them for values. */
@@ -128,7 +130,7 @@ export function GameSearch({
   const note = search?.result.cancelled
     ? "Cancelled: these are the places found before it stopped."
     : search?.result.truncated
-      ? `Stopped at ${search.result.hits.length} places; narrow the search to see the rest.`
+      ? `Showing the first ${search.result.hits.length} by path; narrow the search to see the rest.`
       : undefined;
 
   return (
@@ -245,6 +247,7 @@ export function GameSearch({
                 <SearchResults
                   query={search.query}
                   result={search.result}
+                  found={search.result.found}
                   note={note}
                   onOpen={(hit) => {
                     setOpen(false);
