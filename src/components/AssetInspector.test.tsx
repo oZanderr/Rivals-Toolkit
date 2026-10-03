@@ -518,6 +518,8 @@ describe("AssetInspector raw bytes", () => {
         { offset: 40, name: "Count", kind: "int", op: "set_raw", hex: "05 00 00 00 00" },
       ])
     );
+    // Held to the bytes it replaces, not to what they read as.
+    expect(lastSave().expect).toMatchObject({ values: { "40": "03000000" } });
   });
 });
 
@@ -557,6 +559,8 @@ describe("AssetInspector keys and moves", () => {
         { offset: 80, name: "Tags", kind: "array", op: "reorder", order: [2, 0, 1] },
       ])
     );
+    // Held to the elements it moved, each as it is typed.
+    expect(lastSave().expect).toMatchObject({ values: { "80": '[["a"],["b"],["c"]]' } });
   });
 });
 

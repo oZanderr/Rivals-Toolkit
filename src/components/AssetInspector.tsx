@@ -83,6 +83,7 @@ import {
   scriptTarget,
   EditSessionContext,
   elementTarget,
+  heldElements,
   keyTarget,
   entryTarget,
   isKeyDraft,
@@ -675,6 +676,8 @@ interface TreeRow {
   siblings?: number;
   /** For an element a pending reorder moved, the position it was read at. */
   movedFrom?: number;
+  /** For an element, what its container held when read, which a reorder is held to. */
+  held?: string;
 }
 
 /** A field's segment in a path: its name, and its slot for a static array. */
@@ -785,6 +788,7 @@ function childrenOf(row: TreeRow, draft?: Draft): TreeRow[] {
       );
     case "array":
     case "set": {
+      const held = heldElements(value);
       const rows: TreeRow[] = value.items.map((item, i) => {
         const element = target ? elementTarget(entry, i) : null;
         return {
@@ -793,6 +797,7 @@ function childrenOf(row: TreeRow, draft?: Draft): TreeRow[] {
           reason: element ? null : NO_POSITION,
           within: inner,
           siblings: value.items.length,
+          held,
         };
       });
       if (draft?.op === "reorder") return reordered(rows, draft.order);
@@ -812,6 +817,7 @@ function childrenOf(row: TreeRow, draft?: Draft): TreeRow[] {
       return rows;
     }
     case "map": {
+      const held = heldElements(value);
       const rows: TreeRow[] = value.entries.map((pair, i) => {
         const element = target ? elementTarget(entry, i) : null;
         return {
@@ -821,6 +827,7 @@ function childrenOf(row: TreeRow, draft?: Draft): TreeRow[] {
           within: inner,
           key: { value: pair.key, target: target ? keyTarget(entry, i) : null },
           siblings: value.entries.length,
+          held,
         };
       });
       return draft?.op === "reorder" ? reordered(rows, draft.order) : rows;
@@ -957,7 +964,14 @@ function parseHex(text: string): number[] | null {
 }
 
 /** Typing a value's bytes by hand, starting from the ones it holds. */
-function BytesForm({ ask, onConfirm }: { ask: BytesAsk; onConfirm: (hex: string) => void }) {
+function BytesForm({
+  ask,
+  onConfirm,
+}: {
+  ask: BytesAsk;
+  /** The bytes typed, and the ones they replace, which the save is held to. */
+  onConfirm: (hex: string, was: string) => void;
+}) {
   const place = useContext(PackageContext);
   const [held, setHeld] = useState<number[] | null>(null);
   const [text, setText] = useState("");
@@ -1018,7 +1032,12 @@ function BytesForm({ ask, onConfirm }: { ask: BytesAsk; onConfirm: (hex: string)
       </p>
       <AlertDialogFooter>
         <AlertDialogCancel>Cancel</AlertDialogCancel>
-        <AlertDialogAction disabled={!changed} onClick={() => onConfirm(text)}>
+        <AlertDialogAction
+          disabled={!changed}
+          onClick={() =>
+            held && onConfirm(text, held.map((byte) => byte.toString(16).padStart(2, "0")).join(""))
+          }
+        >
           Replace
         </AlertDialogAction>
       </AlertDialogFooter>
@@ -1043,8 +1062,8 @@ function BytesAskDialog({
           <BytesForm
             key={draftKey(ask.target)}
             ask={ask}
-            onConfirm={(hex) => {
-              session.setDraft(ask.target, { op: "set_raw", hex }, ask.within);
+            onConfirm={(hex, was) => {
+              session.setDraft({ ...ask.target, was }, { op: "set_raw", hex }, ask.within);
               onClose();
             }}
           />
@@ -1641,7 +1660,11 @@ function RowMenu({
       if (next.every((old, position) => old === position)) {
         session.dropDraft(containerKey);
       } else {
-        session.setDraft(container, { op: "reorder", order: next }, containerWithin);
+        session.setDraft(
+          { ...container, was: row.held },
+          { op: "reorder", order: next },
+          containerWithin
+        );
       }
     };
     // Adding or dropping an element moves every byte after it, so it waits for the edits inside

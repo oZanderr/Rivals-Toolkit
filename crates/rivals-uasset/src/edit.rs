@@ -291,7 +291,9 @@ pub struct Expected {
     /// Import table position to the path it had.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub imports: BTreeMap<u32, String>,
-    /// The value a value edit replaces, keyed by its offset, or `offset[index]` for one element.
+    /// The value a value edit replaces, keyed by its offset, or `offset[index]` for one element:
+    /// as it is typed, or for a reorder, the elements it moves as [`held_elements`] lists them,
+    /// and for bytes typed by hand, the bytes they replace as hex.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub values: BTreeMap<String, String>,
     /// The constant a script edit replaces, keyed `export:statement:constant`.
@@ -377,25 +379,17 @@ pub fn check_expectations(parsed: &ParsedPackage, edits: &PackageEdits) -> Resul
         else {
             continue;
         };
-        // Bytes typed by hand replace whatever the value read as.
+        // Bytes typed by hand are held to the bytes they replace, which the patch reads.
         if let EditOp::SetRaw { .. } = edit.op {
-            if entry.value.summary() != *was {
-                drift.push(format!(
-                    "{} was {was}, and is now {}",
-                    entry.label(),
-                    entry.value.summary()
-                ));
-            }
             continue;
         }
         // A reorder is held to every element it moves, in the order they read.
         if let EditOp::Reorder { .. } = edit.op {
-            let now = fingerprint(&entry.value);
-            if now.as_deref() != Some(was.as_str()) {
+            if !same_elements(&entry.value, was) {
                 drift.push(format!(
-                    "{} held {was}, and now holds {}",
+                    "{} no longer holds the elements the reorder was made against; it holds {}",
                     entry.label(),
-                    now.as_deref().unwrap_or("no elements")
+                    element_summaries(&entry.value).unwrap_or_else(|| "no elements".into())
                 ));
             }
             continue;
@@ -602,15 +596,9 @@ pub fn expectations(parsed: &ParsedPackage, edits: &PackageEdits) -> Expected {
             continue;
         };
         if let EditOp::Reorder { .. } = edit.op {
-            if let Some(held) = fingerprint(&entry.value) {
+            if let Some(held) = held_elements(&entry.value) {
                 expect.values.insert(Expected::value_key(edit), held);
             }
-            continue;
-        }
-        if let EditOp::SetRaw { .. } = edit.op {
-            expect
-                .values
-                .insert(Expected::value_key(edit), entry.value.summary());
             continue;
         }
         let now = match &edit.op {
@@ -688,8 +676,53 @@ pub fn expectations(parsed: &ParsedPackage, edits: &PackageEdits) -> Expected {
     expect
 }
 
-/// A container's elements in the order they read, which is what a reorder is held to.
-fn fingerprint(value: &PropertyValue) -> Option<String> {
+/// The halves of a container's elements, in the order they read: a map pair's key and value, or
+/// the element alone.
+fn element_halves(value: &PropertyValue) -> Option<Vec<Vec<&PropertyValue>>> {
+    Some(match value {
+        PropertyValue::Array { items } | PropertyValue::Set { items } => {
+            items.iter().map(|item| vec![item]).collect()
+        }
+        PropertyValue::Map { entries } => entries
+            .iter()
+            .map(|pair| vec![&pair.key, &pair.value])
+            .collect(),
+        _ => return None,
+    })
+}
+
+/// A container's elements as JSON, in the order they read: for each, a list of its halves as each
+/// is typed, `null` for one with no text form. This is what a reorder is held to, element by
+/// element, so the app can spell it from what it shows.
+fn held_elements(value: &PropertyValue) -> Option<String> {
+    let texts: Vec<Vec<Option<String>>> = element_halves(value)?
+        .into_iter()
+        .map(|halves| halves.into_iter().map(value_text).collect())
+        .collect();
+    serde_json::to_string(&texts).ok()
+}
+
+/// Whether a container still holds what [`held_elements`] listed: as many elements, each half
+/// reading as its text, where it had one.
+fn same_elements(value: &PropertyValue, was: &str) -> bool {
+    let (Some(now), Ok(was)) = (
+        element_halves(value),
+        serde_json::from_str::<Vec<Vec<Option<String>>>>(was),
+    ) else {
+        return false;
+    };
+    now.len() == was.len()
+        && now.iter().zip(&was).all(|(now, was)| {
+            now.len() == was.len()
+                && now.iter().zip(was).all(|(value, text)| {
+                    text.as_deref()
+                        .is_none_or(|text| reads_back_as(value, text))
+                })
+        })
+}
+
+/// A container's elements as they read, for saying what it holds.
+fn element_summaries(value: &PropertyValue) -> Option<String> {
     let shown: Vec<String> = match value {
         PropertyValue::Array { items } | PropertyValue::Set { items } => {
             items.iter().map(PropertyValue::summary).collect()
@@ -1113,6 +1146,7 @@ pub fn patch_package_with(
     header_round_trips(bundle)?;
     check_inline_bulk(bundle)?;
     let base = header_size(bundle)?;
+    check_raw_expectations(bundle, base, parsed, edits)?;
     let package = read_header(bundle)?;
     let dropping_imports: Vec<u32> = edits
         .imports
@@ -2083,7 +2117,7 @@ pub fn patch_package_with(
                         offset_after: start,
                         element: None,
                         elements_after: None,
-                        before: fingerprint(&entry.value).unwrap_or_default(),
+                        before: element_summaries(&entry.value).unwrap_or_default(),
                         after: format!("{order:?}"),
                     },
                 )
@@ -2432,6 +2466,48 @@ pub fn patch_package_with(
         optional_bulk: bulk_out.optional_bulk,
         notes,
     })
+}
+
+/// Bytes typed by hand are held to the bytes they were typed over, which nothing but the bytes
+/// themselves can say: whatever the value reads as, they replace all of it.
+fn check_raw_expectations(
+    bundle: &AssetBundle<'_>,
+    base: u64,
+    parsed: &ParsedPackage,
+    edits: &PackageEdits,
+) -> Result<(), String> {
+    if edits.allow_drift {
+        return Ok(());
+    }
+    let mut drift = Vec::new();
+    for edit in &edits.values {
+        let EditOp::SetRaw { .. } = edit.op else {
+            continue;
+        };
+        let Some(was) = edits.expect.values.get(&Expected::value_key(edit)) else {
+            continue;
+        };
+        let Some((start, end)) =
+            find_at(parsed, edit.offset, &edit.expect_name, edit.expect_element)
+                .and_then(|entry| entry.span)
+        else {
+            continue;
+        };
+        let now = bytes_at(bundle, base, start, end)?;
+        if crate::hex::parse(was).ok().as_deref() != Some(now) {
+            drift.push(format!(
+                "{} no longer holds the bytes its new ones were typed over",
+                edit.expect_name
+            ));
+        }
+    }
+    if drift.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "{DRIFT}: {}. Re-read the asset and make the edits again, or apply them anyway",
+        drift.join("; ")
+    ))
 }
 
 /// Bytes typed by hand sit where the edit says they went, exactly as typed. Verification reads the

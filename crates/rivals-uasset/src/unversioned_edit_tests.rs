@@ -499,7 +499,7 @@ fn an_array_is_reordered_in_one_splice() {
             .values
             .values()
             .collect::<Vec<_>>(),
-        ["[10, 20, 30]"]
+        [r#"[["10"],["20"],["30"]]"#]
     );
     let (after, _, patched) = apply_to(&asset, &exports, |_| changes.values.clone());
     assert_eq!(summaries(value(&after, "Numbers")), ["30", "10", "20"]);
@@ -1058,4 +1058,69 @@ fn raw_bytes_ride_alone_in_their_value() {
         ]
     });
     assert!(error.contains("replaced byte for byte"), "{error}");
+}
+
+/// A reorder is held to the elements it was made against, each by its text: one that changed since
+/// is drift, and one it had no text for is not checked.
+#[test]
+fn a_reorder_is_held_to_the_elements_it_read() {
+    let (before, asset, exports) = fixture();
+    let numbers = find(top(&before), "Numbers");
+    let at = numbers.span.unwrap().0.to_string();
+    let reordered = |was: &str| PackageEdits {
+        values: vec![edit_of(numbers, reorder(&[2, 0, 1]))],
+        expect: crate::edit::Expected {
+            values: [(at.clone(), was.to_string())].into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let held = r#"[["10"],["20"],["30"]]"#;
+    check_expectations(&before, &reordered(held)).expect("as read");
+    let (changed, ..) = apply_to(&asset, &exports, |p| {
+        vec![edit_of(
+            find(top(p), "Numbers"),
+            EditOp::SetElement {
+                index: 0,
+                text: "11".into(),
+            },
+        )]
+    });
+    let error = check_expectations(&changed, &reordered(held)).expect_err("drift");
+    assert!(error.starts_with(crate::edit::DRIFT), "{error}");
+    assert!(error.contains("[11, 20, 30]"), "{error}");
+    check_expectations(&changed, &reordered(r#"[[null],["20"],["30"]]"#)).expect("unchecked");
+    assert!(check_expectations(&changed, &reordered(r#"[["20"],["30"]]"#)).is_err());
+}
+
+/// Bytes typed by hand are held to the bytes they replace, unless drift is allowed.
+#[test]
+fn raw_bytes_are_held_to_the_bytes_they_were_typed_over() {
+    let (before, asset, exports) = fixture();
+    let count = find(top(&before), "Count");
+    let typed = |was: &str, allow_drift: bool| PackageEdits {
+        values: vec![edit_of(count, raw(&9i32.to_le_bytes()))],
+        expect: crate::edit::Expected {
+            values: [(count.span.unwrap().0.to_string(), was.to_string())].into(),
+            ..Default::default()
+        },
+        allow_drift,
+        ..Default::default()
+    };
+    let mappings = unversioned_mappings();
+    let patch = |changes: &PackageEdits| {
+        patch_package(
+            &AssetBundle {
+                asset: &asset,
+                exports: &exports,
+            },
+            &before,
+            changes,
+            Some(&mappings),
+        )
+    };
+    patch(&typed("07 00 00 00", false)).expect("the bytes it held");
+    let error = patch(&typed("08000000", false)).err().expect("drift");
+    assert!(error.starts_with(crate::edit::DRIFT), "{error}");
+    patch(&typed("08000000", true)).expect("drift allowed");
 }

@@ -136,6 +136,25 @@ function valueText(value: PropertyValue | undefined): string | undefined {
   }
 }
 
+/**
+ * A container's elements as JSON, in the order they read: for each, its key and value for a map
+ * pair or the element alone, as each is typed, null for one with no text form. Mirrors
+ * `held_elements` in rivals-uasset, which holds a reorder to them element by element.
+ */
+export function heldElements(value: PropertyValue): string | undefined {
+  switch (value.kind) {
+    case "array":
+    case "set":
+      return JSON.stringify(value.items.map((item) => [valueText(item) ?? null]));
+    case "map":
+      return JSON.stringify(
+        value.entries.map((pair) => [valueText(pair.key) ?? null, valueText(pair.value) ?? null])
+      );
+    default:
+      return undefined;
+  }
+}
+
 export interface DraftRecord {
   target: EditTarget;
   draft: Draft;
@@ -578,6 +597,9 @@ function expectOf(records: DraftRecord[], exportPath: string | undefined, export
     if (draft.op === "set_element" || draft.op === "remove")
       values[`${target.offset}[${draft.index}]`] = target.was;
     if (draft.op === "set_key") values[`${target.offset}[${draft.index}].key`] = target.was;
+    // A reorder is held to the elements it moves, and typed bytes to the bytes they replace.
+    if (draft.op === "reorder" || draft.op === "set_raw")
+      values[String(target.offset)] = target.was;
   }
   return {
     exports: exportPath !== undefined ? { [exportIndex]: exportPath } : undefined,
