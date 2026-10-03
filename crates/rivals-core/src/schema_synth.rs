@@ -13,6 +13,14 @@ use crate::asset::{self, AssetSource};
 type Cache = Mutex<HashMap<String, Arc<Mappings>>>;
 static CACHE: LazyLock<Cache> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Drops the layouts recovered for one package's own classes, which no other package reuses, so a
+/// walk over the whole game does not keep one for every Blueprint it read.
+pub fn forget_package_layouts() {
+    if let Ok(mut cache) = CACHE.lock() {
+        cache.retain(|key, _| key.split('\u{1}').nth(1) == Some(""));
+    }
+}
+
 /// Where the package being read came from, so the packages it references can be found too.
 pub struct PackageSource<'a> {
     pub game_root: &'a str,

@@ -28,6 +28,19 @@ pub enum HitKind {
 }
 
 impl HitKind {
+    /// The kind as the JSON and the command line spell it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::String => "string",
+            Self::Call => "call",
+            Self::Variable => "variable",
+            Self::Object => "object",
+            Self::Name => "name",
+            Self::Delegate => "delegate",
+            Self::Value => "value",
+        }
+    }
+
     /// Which of a statement's matching terms names it: a call says the most about a line, a
     /// variable the least.
     fn rank(self) -> u8 {
@@ -111,6 +124,12 @@ pub struct SearchHit {
     pub term: String,
     /// The statement rendered, or `Property = value` for a stored value.
     pub line: String,
+    /// The container a game-wide search read the package from, which is where it opens.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub container: Option<String>,
+    /// The enabled mod whose copy of the package the game loads, for a game-wide search.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub in_mod: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -198,6 +217,8 @@ pub(crate) fn search_package(
                             || rivals_uasset::print_expr(&statement.expr),
                             |line| line.text.clone(),
                         ),
+                        container: None,
+                        in_mod: None,
                     });
                 }
             }
@@ -216,6 +237,8 @@ pub(crate) fn search_package(
                 kind: HitKind::Value,
                 term: text.to_string(),
                 line: format!("{at} = {text}"),
+                container: None,
+                in_mod: None,
             });
         });
     }

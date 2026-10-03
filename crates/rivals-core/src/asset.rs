@@ -277,6 +277,24 @@ pub fn game_entry(game_root: &str, package_name: &str, disk_path: &Path) -> Resu
 /// A `--filter` text, matched against a package however its path is written: a piece of the
 /// container entry (`Marvel/UI/Setting`) or of the package name (`/Game/Marvel/UI/Setting`), with
 /// either slash, in any case.
+/// The newest patch container's file name, such as `Patch_-Windows_1.1.3892207_P.utoc`. Its
+/// header declares every package the game loads, each read from whichever container wins it.
+pub fn newest_patch(game_root: &str) -> Result<String, String> {
+    let paks = crate::paths::paks_dir(game_root);
+    std::fs::read_dir(&paks)
+        .map_err(|e| format!("read {}: {e}", paks.display()))?
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let version = name.strip_prefix("Patch_")?.strip_suffix("_P.utoc")?;
+            let build: u64 = version.rsplit('.').next()?.parse().ok()?;
+            Some((build, name))
+        })
+        .max()
+        .map(|(_, name)| name)
+        .ok_or_else(|| format!("{} holds no patch container", paks.display()))
+}
+
 pub struct PathFilter(Option<String>);
 
 impl PathFilter {

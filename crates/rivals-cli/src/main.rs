@@ -204,6 +204,9 @@ enum AssetCmd {
     Bulk(BulkArgs),
     /// List the packages that import an object or a package, from the import index.
     Importers(ImportersArgs),
+    /// Find where the game's scripts name something: a call, a delegate, a string, a name, an
+    /// object or a variable. Reads every package the game loads, the enabled mods' included.
+    Search(AssetSearchArgs),
     /// Rename an export, move it, or change the flags the loader reads it by.
     ExportEdit(ExportEditArgs),
     /// List the import table with what names each entry, and which are named by nothing.
@@ -607,6 +610,60 @@ struct RemoveExportArgs {
     /// Overwrite an edited copy of this asset that the mod pak already holds.
     #[arg(long)]
     replace: bool,
+}
+
+#[derive(Args)]
+struct AssetSearchArgs {
+    /// Text to find, anywhere in a term, case aside.
+    query: String,
+
+    /// Search stored values too: strings, names, texts, object and asset paths, enumerators and
+    /// delegates, at any depth, DataTable rows and StringTable entries included. Reads every
+    /// package rather than only the ones holding functions, which takes minutes; pair it with
+    /// `--filter`.
+    #[arg(long)]
+    values: bool,
+
+    /// Keep only packages whose path contains this text, case insensitive: a piece of the
+    /// container path (`Marvel/UI/Setting`) or of the package name (`/Game/Marvel/UI/Setting`).
+    #[arg(long, value_name = "TEXT")]
+    filter: Option<String>,
+
+    /// Only terms of this kind. Repeatable.
+    #[arg(long, value_name = "KIND")]
+    kind: Vec<SearchKindArg>,
+
+    /// Leave the enabled mods out and read the base game alone.
+    #[arg(long)]
+    no_mods: bool,
+
+    /// Stop after this many places are found; 0 for no limit.
+    #[arg(long, value_name = "N", default_value_t = 5000)]
+    limit: usize,
+}
+
+/// The kinds of term a search can be narrowed to.
+#[derive(Clone, Copy, ValueEnum)]
+enum SearchKindArg {
+    Call,
+    Delegate,
+    String,
+    Name,
+    Object,
+    Variable,
+}
+
+impl From<SearchKindArg> for rivals_core::mod_search::HitKind {
+    fn from(kind: SearchKindArg) -> Self {
+        match kind {
+            SearchKindArg::Call => Self::Call,
+            SearchKindArg::Delegate => Self::Delegate,
+            SearchKindArg::String => Self::String,
+            SearchKindArg::Name => Self::Name,
+            SearchKindArg::Object => Self::Object,
+            SearchKindArg::Variable => Self::Variable,
+        }
+    }
 }
 
 #[derive(Args)]
@@ -1356,6 +1413,7 @@ fn run(cli: &Cli) -> Result<(), String> {
         Command::Asset(AssetCmd::DuplicateExport(a)) => asset_duplicate_export(cli, &app, a),
         Command::Asset(AssetCmd::Bulk(a)) => asset_bulk(cli, &app, a),
         Command::Asset(AssetCmd::Importers(a)) => asset_importers(cli, &app, a),
+        Command::Asset(AssetCmd::Search(a)) => asset_search(cli, &app, a),
         Command::Asset(AssetCmd::ExportEdit(a)) => asset_export_edit(cli, &app, a),
         Command::Asset(AssetCmd::Imports(a)) => asset_imports_table(cli, &app, a),
         Command::Asset(AssetCmd::Names(a)) => asset_names(cli, &app, a),
@@ -3535,6 +3593,103 @@ fn asset_importers(
         }
         for package in &found.packages {
             outln!("{package}");
+        }
+    })
+}
+
+fn asset_search(
+    cli: &Cli,
+    app: &settings::AppSettings,
+    args: &AssetSearchArgs,
+) -> Result<(), String> {
+    use rivals_core::game_search::{GameSearch, SearchPhase, game_search};
+    use std::io::IsTerminal;
+    use std::sync::atomic::AtomicBool;
+
+    let root = resolve::game_root(cli.game_root.as_deref(), app)?;
+    let mappings = rivals_core::mappings::resolve(cli.usmap.as_deref(), app.usmap_path.as_deref())
+        .and_then(|path| rivals_core::mappings::load(&path))
+        .map_err(|e| format!("reading the game's packages needs a .usmap mappings file: {e}"))?;
+    let query = rivals_core::mod_search::Query::new(
+        &args.query,
+        args.kind.iter().map(|kind| (*kind).into()).collect(),
+        args.values,
+    )?;
+    // Ctrl+C ends the process, so nothing ever cancels a CLI search.
+    static NEVER: AtomicBool = AtomicBool::new(false);
+    let shown = std::io::stderr().is_terminal();
+    let last = std::sync::Mutex::new(None);
+    let progress = |phase: SearchPhase, current: usize, total: usize| {
+        if !shown {
+            return;
+        }
+        let Ok(mut last) = last.lock() else { return };
+        if last.is_some_and(|held| held != phase) {
+            eprintln!();
+        }
+        *last = Some(phase);
+        let name = match phase {
+            SearchPhase::Listing => "listing",
+            SearchPhase::Headers => "headers",
+            SearchPhase::Scripts => "scripts",
+            SearchPhase::Packages => "packages",
+        };
+        eprint!("\r  {name} {current}/{total}");
+    };
+    let result = game_search(
+        &root,
+        &mappings,
+        &GameSearch {
+            query: &query,
+            filter: args.filter.as_deref(),
+            mods: !args.no_mods,
+            max_hits: (args.limit > 0).then_some(args.limit),
+        },
+        &NEVER,
+        &progress,
+    )?;
+    if shown {
+        eprintln!();
+    }
+    emit(cli, &result, || {
+        let mut package = "";
+        let mut packages = 0;
+        for hit in &result.hits {
+            if hit.package != package {
+                package = &hit.package;
+                packages += 1;
+                match &hit.in_mod {
+                    Some(name) => outln!("{package}  (in {name})"),
+                    None => outln!("{package}"),
+                }
+            }
+            let at = hit
+                .offset
+                .map_or_else(String::new, |o| format!(" 0x{o:04X}"));
+            outln!("  {:<8} {}{at}  {}", hit.kind.name(), hit.export, hit.line);
+        }
+        let what = if args.values {
+            "every package"
+        } else {
+            "only those holding functions"
+        };
+        outln!(
+            "\n{} hit(s) in {packages} package(s); searched {} of {} packages ({what})",
+            result.hits.len(),
+            result.searched,
+            result.listed
+        );
+        if result.truncated {
+            outln!(
+                "stopped at {} hits: raise --limit, or narrow the search with --filter or --kind",
+                result.hits.len()
+            );
+        }
+        if !result.unreadable.is_empty() {
+            eprintln!("{} package(s) could not be read:", result.unreadable.len());
+            for (path, reason) in result.unreadable.iter().take(20) {
+                eprintln!("  {path}: {reason}");
+            }
         }
     })
 }

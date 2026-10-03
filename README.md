@@ -221,6 +221,8 @@ rivals-cli asset dump  --container ... --entry ... --declared      # the decoded
 rivals-cli asset table --container ... --entry ...                 # a DataTable as rows
 rivals-cli asset table --container ... --entry ... --row NAME      # one row in full, nested values and all
 rivals-cli asset trace --container ... --entry ... --export 0      # the bytes each property took
+rivals-cli asset search SetScalarParameterValue                    # every script in the game naming it
+rivals-cli asset search Hulk --values --filter Data/DataTable      # stored values too, narrowed by path
 
 rivals-cli asset set --container ... --entry ...   --offset 0xBE6 --kind float --name Damage --value 42.5 --mod-name MyMod
 rivals-cli asset set --container ... --entry ...   --offset 0x3A0 --kind map --name Scores --op set-key --index 1 --key Hulk --mod-name MyMod
@@ -250,6 +252,12 @@ rivals-cli asset audit --container pakchunk0-Windows.utoc --filter Data/DataTabl
 rivals-cli asset audit --container pakchunk0-Windows.utoc --skip-blueprint   # native classes only
 rivals-cli asset audit --all --text-check      # every script back byte for byte from its own text
 ```
+
+`asset search` finds where the game's scripts name something: a call, a bound or broadcast
+delegate, a string, a name constant, an object or a variable. It reads each package from the copy
+the game loads, enabled mods included and labelled. A script search parses only the packages
+holding functions, which takes about half a minute for the whole game; `--values` searches stored
+values too, at any depth, which means reading every package, so narrow it with `--filter`.
 
 `asset sweep` sets the same properties across every package a filter matches, by name at any depth,
 and puts the whole batch in with one container rewrite. It changes only values a package actually

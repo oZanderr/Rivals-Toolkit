@@ -3972,19 +3972,7 @@ fn short_reason(reason: &str) -> String {
 /// The game's newest patch container, which declares every package the game loads. A read through
 /// it resolves each package from the container that wins, so walking it walks the game as it loads.
 pub fn newest_patch(game_root: &str) -> Result<String, String> {
-    let paks = rivals_core::paths::paks_dir(game_root);
-    std::fs::read_dir(&paks)
-        .map_err(|e| format!("read {}: {e}", paks.display()))?
-        .flatten()
-        .filter_map(|entry| {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let version = name.strip_prefix("Patch_")?.strip_suffix("_P.utoc")?;
-            let build: u64 = version.rsplit('.').next()?.parse().ok()?;
-            Some((build, name))
-        })
-        .max()
-        .map(|(_, name)| name)
-        .ok_or_else(|| format!("{} holds no patch container", paks.display()))
+    rivals_core::asset::newest_patch(game_root)
 }
 
 pub fn print_audit(report: &AuditReport, out: &mut impl FnMut(String)) {

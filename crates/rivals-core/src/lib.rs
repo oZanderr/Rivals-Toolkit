@@ -7,6 +7,7 @@
 
 pub mod asset;
 pub mod asset_edit;
+pub mod game_search;
 pub mod game_status;
 pub mod import_index;
 pub mod inherit;
