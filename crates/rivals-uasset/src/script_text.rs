@@ -1273,10 +1273,37 @@ fn targets(
 /// A function's script as assembler text: every statement, and a label wherever code is jumped
 /// or resumed to. `None` when the export holds no script.
 pub fn print_script(parsed: &ParsedPackage, export: u32) -> Option<ScriptText> {
-    let script = parsed.exports.get(export as usize)?.script.as_ref()?;
-    let symbols = Symbols::of(parsed);
-    let cx = FunctionCx::of(parsed, export);
-    Some(print_with(parsed, export, script, &symbols, cx.as_ref()))
+    ScriptPrinter::new(parsed).print(export)
+}
+
+/// Prints any of a package's scripts against one table of its names and objects, built once,
+/// which is what a caller printing several functions of a package uses rather than
+/// [`print_script`] for each.
+pub struct ScriptPrinter<'a> {
+    parsed: &'a ParsedPackage,
+    symbols: Symbols,
+}
+
+impl<'a> ScriptPrinter<'a> {
+    pub fn new(parsed: &'a ParsedPackage) -> Self {
+        Self {
+            parsed,
+            symbols: Symbols::of(parsed),
+        }
+    }
+
+    /// The script of export `export` as text, or `None` when it has none.
+    pub fn print(&self, export: u32) -> Option<ScriptText> {
+        let script = self.parsed.exports.get(export as usize)?.script.as_ref()?;
+        let cx = FunctionCx::of(self.parsed, export);
+        Some(print_with(
+            self.parsed,
+            export,
+            script,
+            &self.symbols,
+            cx.as_ref(),
+        ))
+    }
 }
 
 pub(crate) fn print_with(

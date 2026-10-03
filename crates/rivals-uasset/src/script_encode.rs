@@ -981,6 +981,28 @@ mod tests {
         }
     }
 
+    /// One printer prints every function of a package exactly as printing each alone does.
+    #[test]
+    fn one_printer_prints_every_function_as_print_script_does() {
+        for built in [event_graph().build(), catalogue().build()] {
+            let parsed = built.parsed();
+            let printer = script_text::ScriptPrinter::new(&parsed);
+            let scripted: Vec<u32> = parsed
+                .exports
+                .iter()
+                .filter(|export| export.script.is_some())
+                .map(|export| export.index)
+                .collect();
+            assert!(!scripted.is_empty());
+            for export in scripted {
+                assert_eq!(
+                    printer.print(export).expect("printed").text(),
+                    text_of(&parsed, export)
+                );
+            }
+        }
+    }
+
     /// A function using every instruction the reader models, in the forms the text has to keep
     /// apart: the literal tokens, numbered names, every text kind, containers, delegates, casts,
     /// contexts with their values, and a NaN.
