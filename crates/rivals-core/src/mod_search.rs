@@ -4,8 +4,8 @@
 use std::path::Path;
 
 use rivals_uasset::{
-    AssetBundle, Expr, Mappings, ParseOptions, ParsedPackage, PropertyValue, ScriptPrinter, Term,
-    TermKind,
+    AssetBundle, DataTable, Expr, Mappings, ParseOptions, ParsedPackage, PropertyEntry,
+    PropertyValue, ScriptPrinter, StringTable, Term, TermKind,
 };
 use serde::Serialize;
 
@@ -21,7 +21,9 @@ pub enum HitKind {
     Object,
     Name,
     Delegate,
-    /// A string or name an export stores as a property value, such as a save slot's default.
+    /// Text an export stores as a value: a string, a name, a text, an object or asset path, an
+    /// enumerator, a delegate's function or a property path, at any depth, a DataTable's rows and
+    /// a StringTable's entries included.
     Value,
 }
 
@@ -203,26 +205,123 @@ pub(crate) fn search_package(
         if !query.values {
             continue;
         }
-        for property in &export.properties {
-            let text = match &property.value {
-                PropertyValue::Str { value } | PropertyValue::Name { value } => value,
-                PropertyValue::Text {
-                    value: Some(value), ..
-                } => value,
-                _ => continue,
-            };
+        let tables = (export.data_table.as_ref(), export.string_table.as_ref());
+        let lists = [&export.properties[..], &export.defaults[..]];
+        values_in(&lists, tables, query, &mut |at, text| {
+            out.push(SearchHit {
+                package: package.to_string(),
+                export: export.object_name.clone(),
+                export_index: export.index,
+                offset: None,
+                kind: HitKind::Value,
+                term: text.to_string(),
+                line: format!("{at} = {text}"),
+            });
+        });
+    }
+}
+
+/// Every stored value `query` matches, with where it sits: a property by its path through
+/// structs (`A.B`), elements (`A[2]`) and map pairs (`A[Key]`), a DataTable row's value under the
+/// row's name, and a StringTable entry under its key.
+fn values_in(
+    lists: &[&[PropertyEntry]],
+    (table, strings): (Option<&DataTable>, Option<&StringTable>),
+    query: &Query,
+    hit: &mut dyn FnMut(&str, &str),
+) {
+    let mut at = String::new();
+    for list in lists {
+        walk_entries(list, &mut at, query, hit);
+    }
+    for row in table.map_or(&[][..], |table| &table.rows) {
+        at.clear();
+        at.push_str(&row.name);
+        walk_entries(&row.fields, &mut at, query, hit);
+    }
+    for entry in strings.map_or(&[][..], |strings| &strings.entries) {
+        for text in [&entry.key, &entry.source] {
             if query.matches(text) {
-                out.push(SearchHit {
-                    package: package.to_string(),
-                    export: export.object_name.clone(),
-                    export_index: export.index,
-                    offset: None,
-                    kind: HitKind::Value,
-                    term: text.clone(),
-                    line: format!("{} = {text}", property.label()),
-                });
+                hit(&entry.key, text);
             }
         }
+    }
+}
+
+fn walk_entries(
+    entries: &[PropertyEntry],
+    at: &mut String,
+    query: &Query,
+    hit: &mut dyn FnMut(&str, &str),
+) {
+    for entry in entries {
+        let held = at.len();
+        if !at.is_empty() {
+            at.push('.');
+        }
+        at.push_str(&entry.label());
+        walk_value(&entry.value, at, query, hit);
+        at.truncate(held);
+    }
+}
+
+/// One value: its own text, when it has text, then whatever it holds. Numbers are never searched,
+/// and neither is a value that is not stored.
+fn walk_value(
+    value: &PropertyValue,
+    at: &mut String,
+    query: &Query,
+    hit: &mut dyn FnMut(&str, &str),
+) {
+    let text = match value {
+        PropertyValue::Str { value } | PropertyValue::Name { value } => Some(value.as_str()),
+        // A text built from parts shows what they make; one that matches is found once, as
+        // itself, rather than once more through each part.
+        PropertyValue::Text { value, parts, .. } => match value.as_deref() {
+            Some(shown) if query.matches(shown) => Some(shown),
+            _ => {
+                walk_entries(parts, at, query, hit);
+                None
+            }
+        },
+        PropertyValue::Object {
+            path: Some(path), ..
+        }
+        | PropertyValue::SoftObject { path }
+        | PropertyValue::FieldPath { path, .. } => Some(path.as_str()),
+        PropertyValue::Enum {
+            name: Some(name), ..
+        } => Some(name.as_str()),
+        PropertyValue::Delegate { function, .. } => Some(function.as_str()),
+        PropertyValue::Struct { fields, .. } => {
+            walk_entries(fields, at, query, hit);
+            None
+        }
+        PropertyValue::Array { items } | PropertyValue::Set { items } => {
+            for (index, item) in items.iter().enumerate() {
+                let held = at.len();
+                at.push_str(&format!("[{index}]"));
+                walk_value(item, at, query, hit);
+                at.truncate(held);
+            }
+            None
+        }
+        PropertyValue::Map { entries } => {
+            for pair in entries {
+                let held = at.len();
+                at.push_str(&format!("[{}]", pair.key.summary()));
+                walk_value(&pair.key, at, query, hit);
+                walk_value(&pair.value, at, query, hit);
+                at.truncate(held);
+            }
+            None
+        }
+        _ => None,
+    };
+    if let Some(text) = text
+        && query.matches(text)
+    {
+        hit(at, text);
     }
 }
 
@@ -271,5 +370,156 @@ mod tests {
         assert_eq!(best.kind, TermKind::Variable);
         let names = Query::new("helper", vec![HitKind::Name], false).unwrap();
         assert!(names.best_term(&expr).is_none());
+    }
+
+    fn field(name: &str, value: PropertyValue) -> PropertyEntry {
+        PropertyEntry {
+            name: name.into(),
+            element: None,
+            value,
+            span: None,
+            slot: None,
+        }
+    }
+
+    fn text(value: &str) -> PropertyValue {
+        PropertyValue::Str {
+            value: value.into(),
+        }
+    }
+
+    /// Every value `query` finds in `lists` and the tables, as `where = text`.
+    fn found(
+        lists: &[&[PropertyEntry]],
+        tables: (Option<&DataTable>, Option<&StringTable>),
+        query: &str,
+    ) -> Vec<String> {
+        let query = Query::new(query, Vec::new(), true).unwrap();
+        let mut out = Vec::new();
+        values_in(lists, tables, &query, &mut |at, text| {
+            out.push(format!("{at} = {text}"));
+        });
+        out
+    }
+
+    #[test]
+    fn a_value_nested_in_structs_arrays_and_maps_is_found_by_its_path() {
+        let settings = field(
+            "Settings",
+            PropertyValue::Struct {
+                name: "SaveSettings".into(),
+                fields: vec![
+                    field(
+                        "Files",
+                        PropertyValue::Array {
+                            items: vec![PropertyValue::Struct {
+                                name: "SaveFile".into(),
+                                fields: vec![field("Name", text("Keys.txt"))],
+                            }],
+                        },
+                    ),
+                    field(
+                        "Slots",
+                        PropertyValue::Map {
+                            entries: vec![rivals_uasset::MapEntry {
+                                key: PropertyValue::Name {
+                                    value: "Main".into(),
+                                },
+                                value: text("keys_backup.txt"),
+                            }],
+                        },
+                    ),
+                ],
+            },
+        );
+        assert_eq!(
+            found(&[&[settings]], (None, None), "KEYS"),
+            [
+                "Settings.Files[0].Name = Keys.txt",
+                "Settings.Slots[Main] = keys_backup.txt"
+            ]
+        );
+    }
+
+    #[test]
+    fn object_soft_enum_delegate_and_field_path_values_are_searched() {
+        let values = [
+            field(
+                "Mesh",
+                PropertyValue::Object {
+                    index: -1,
+                    path: Some("/Game/Hulk/Mesh.Mesh".into()),
+                },
+            ),
+            field(
+                "Icon",
+                PropertyValue::SoftObject {
+                    path: "/Game/Hulk/Icon.Icon".into(),
+                },
+            ),
+            field(
+                "Role",
+                PropertyValue::Enum {
+                    value: 1,
+                    name: Some("ERole::Hulk".into()),
+                    enum_type: None,
+                },
+            ),
+            field(
+                "OnSmash",
+                PropertyValue::Delegate {
+                    object: None,
+                    function: "HulkSmash".into(),
+                },
+            ),
+            field(
+                "Watched",
+                PropertyValue::FieldPath {
+                    path: "HulkRage".into(),
+                    owner: None,
+                },
+            ),
+        ];
+        assert_eq!(found(&[&values], (None, None), "hulk").len(), 5);
+    }
+
+    #[test]
+    fn a_data_table_row_and_a_string_table_entry_are_searched() {
+        let table = DataTable {
+            row_struct: "HeroRow".into(),
+            columns: vec!["Title".into()],
+            rows: vec![rivals_uasset::DataTableRow {
+                name: "Hero_1011".into(),
+                fields: vec![field("Title", text("Bruce Banner"))],
+            }],
+            declared_rows: 1,
+            truncated: None,
+        };
+        let strings = StringTable {
+            namespace: "Heroes".into(),
+            entries: vec![rivals_uasset::StringTableEntry {
+                key: "Hero_Banner".into(),
+                source: "The Hulk".into(),
+                tag: String::new(),
+                metadata: Vec::new(),
+            }],
+            loose_metadata: Vec::new(),
+        };
+        assert_eq!(
+            found(&[], (Some(&table), Some(&strings)), "banner"),
+            [
+                "Hero_1011.Title = Bruce Banner",
+                "Hero_Banner = Hero_Banner"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_number_is_never_a_hit() {
+        let values = [
+            field("Count", PropertyValue::Int { value: 1011 }),
+            field("Rate", PropertyValue::Float { value: 1011.0 }),
+        ];
+        assert!(found(&[&values], (None, None), "1011").is_empty());
     }
 }
