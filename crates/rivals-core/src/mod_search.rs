@@ -16,6 +16,8 @@ pub enum HitKind {
     Call,
     Variable,
     Object,
+    Name,
+    Delegate,
     /// A string or name an export stores as a property value, such as a save slot's default.
     Value,
 }
@@ -27,6 +29,8 @@ impl From<TermKind> for HitKind {
             TermKind::Call => Self::Call,
             TermKind::Variable => Self::Variable,
             TermKind::Object => Self::Object,
+            TermKind::Name => Self::Name,
+            TermKind::Delegate => Self::Delegate,
         }
     }
 }
@@ -109,9 +113,11 @@ fn search_package(package: &str, parsed: &ParsedPackage, needle: &str, out: &mut
                     .filter(|t| t.text.to_lowercase().contains(needle))
                     .min_by_key(|t| match t.kind {
                         TermKind::Call => 0,
-                        TermKind::String => 1,
-                        TermKind::Object => 2,
-                        TermKind::Variable => 3,
+                        TermKind::Delegate => 1,
+                        TermKind::String => 2,
+                        TermKind::Name => 3,
+                        TermKind::Object => 4,
+                        TermKind::Variable => 5,
                     })
                 else {
                     continue;

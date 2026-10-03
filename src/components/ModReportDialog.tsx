@@ -20,7 +20,7 @@ export interface SearchHit {
   export: string;
   export_index: number;
   offset?: number;
-  kind: "string" | "call" | "variable" | "object" | "value";
+  kind: "string" | "call" | "variable" | "object" | "name" | "delegate" | "value";
   term: string;
   line: string;
 }

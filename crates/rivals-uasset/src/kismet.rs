@@ -2224,10 +2224,14 @@ pub enum TermKind {
     String,
     /// A function called: a full object path for a final call, a bare name for a virtual one.
     Call,
-    /// A property read or written, by its dotted path.
+    /// A property read or written, by its dotted path, a struct's member included.
     Variable,
     /// An object named outright, such as a class a cast or spawn takes.
     Object,
+    /// A name constant, such as a row, a socket or a material parameter.
+    Name,
+    /// A function bound to a delegate, or the signature a multicast delegate broadcasts.
+    Delegate,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -2236,7 +2240,7 @@ pub struct Term {
     pub text: String,
 }
 
-/// Every string, call, variable and object `expr` names, in bytecode order.
+/// Everything `expr` names that can be searched for, in bytecode order.
 pub fn statement_terms(expr: &Expr) -> Vec<Term> {
     let mut out = Vec::new();
     collect_terms(expr, &mut out);
@@ -2259,9 +2263,23 @@ fn collect_terms(expr: &Expr, out: &mut Vec<Term>) {
         }
         Expr::VirtualCall { function, .. } => out.push(term(TermKind::Call, function)),
         Expr::Variable { property, .. } => out.push(term(TermKind::Variable, &property.path)),
-        Expr::ObjectConst { object } => {
+        Expr::ObjectConst { object } | Expr::Cast { class: object, .. } => {
             if let Some(path) = &object.path {
                 out.push(term(TermKind::Object, path));
+            }
+        }
+        Expr::Member { property, .. } => out.push(term(TermKind::Variable, &property.path)),
+        // An instance delegate reads as the function it names.
+        Expr::NameConst {
+            name: "InstanceDelegate",
+            value,
+            ..
+        } => out.push(term(TermKind::Delegate, value)),
+        Expr::NameConst { value, .. } => out.push(term(TermKind::Name, value)),
+        Expr::BindDelegate { function, .. } => out.push(term(TermKind::Delegate, function)),
+        Expr::CallMulticastDelegate { signature, .. } => {
+            if let Some(path) = &signature.path {
+                out.push(term(TermKind::Delegate, path));
             }
         }
         _ => {}
@@ -3669,6 +3687,81 @@ mod tests {
                 (TermKind::String, "Keys.txt"),
             ]
         );
+    }
+
+    /// Name constants, the functions delegates bind and broadcast, cast classes and struct
+    /// members are named too, each before what it holds.
+    #[test]
+    fn a_statement_names_its_names_delegates_casts_and_members_in_byte_order() {
+        let name = |value: &str| Expr::NameConst {
+            name: "NameConst",
+            value: value.into(),
+            at: 0,
+            id: NameId::default(),
+        };
+        let delegate = Expr::BindDelegate {
+            function: "OnPicked".into(),
+            delegate: Box::new(Expr::SelfRef),
+            object: Box::new(Expr::SelfRef),
+            id: NameId::default(),
+        };
+        let broadcast = Expr::CallMulticastDelegate {
+            signature: object("/Game/X.X_C:OnDone__DelegateSignature"),
+            delegate: Box::new(Expr::NameConst {
+                name: "InstanceDelegate",
+                value: "OnTimer".into(),
+                at: 0,
+                id: NameId::default(),
+            }),
+            params: vec![Expr::Cast {
+                name: "DynamicCast",
+                class: object("/Script/Engine.Actor"),
+                value: Box::new(Expr::Member {
+                    name: "StructMemberContext",
+                    property: PropertyRef {
+                        names: Vec::new(),
+                        path: "Location".into(),
+                        owner: object("/Script/CoreUObject.Transform"),
+                    },
+                    value: Box::new(name("Selected")),
+                }),
+            }],
+        };
+        let expr = call("/Game/X.X_C:Helper", vec![delegate, broadcast]);
+        let terms: Vec<(TermKind, String)> = statement_terms(&expr)
+            .into_iter()
+            .map(|t| (t.kind, t.text))
+            .collect();
+        let expect = |kind, text: &str| (kind, text.to_string());
+        assert_eq!(
+            terms,
+            [
+                expect(TermKind::Call, "/Game/X.X_C:Helper"),
+                expect(TermKind::Delegate, "OnPicked"),
+                expect(TermKind::Delegate, "/Game/X.X_C:OnDone__DelegateSignature"),
+                expect(TermKind::Delegate, "OnTimer"),
+                expect(TermKind::Object, "/Script/Engine.Actor"),
+                expect(TermKind::Variable, "Location"),
+                expect(TermKind::Name, "Selected"),
+            ]
+        );
+    }
+
+    /// A function a delegate binds or broadcasts is not called there, so no call site lists it.
+    #[test]
+    fn call_sites_leave_out_bound_and_broadcast_delegates() {
+        let expr = call(
+            "/Game/X.X_C:Helper",
+            vec![Expr::BindDelegate {
+                function: "OnPicked".into(),
+                delegate: Box::new(Expr::SelfRef),
+                object: Box::new(Expr::SelfRef),
+                id: NameId::default(),
+            }],
+        );
+        let script = script_of(vec![(0x10, expr)]);
+        let sites = call_sites([("First", &script)]);
+        assert_eq!(sites.keys().collect::<Vec<_>>(), ["Helper"]);
     }
 
     /// Only constants with value bytes of their own are offered, but each keeps its index among
