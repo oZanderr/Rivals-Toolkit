@@ -44,7 +44,8 @@ const KINDS = [
   { kind: "string", label: "Strings" },
   { kind: "name", label: "Names" },
   { kind: "object", label: "Objects" },
-  { kind: "variable", label: "Variables" },
+  { kind: "read", label: "Reads" },
+  { kind: "write", label: "Writes" },
 ] as const;
 
 type Kind = (typeof KINDS)[number]["kind"];
@@ -147,7 +148,7 @@ export function GameSearch({
             <AlertDialogTitle>Search the game</AlertDialogTitle>
             <AlertDialogDescription>
               Every script in the game and your enabled mods: calls, delegates, strings, names,
-              objects and variables.
+              objects, and variables read or written.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <div className="flex items-center gap-2">

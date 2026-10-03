@@ -6,7 +6,7 @@ export interface SearchHit {
   export: string;
   export_index: number;
   offset?: number;
-  kind: "string" | "call" | "variable" | "object" | "name" | "delegate" | "value";
+  kind: "string" | "call" | "read" | "write" | "object" | "name" | "delegate" | "value";
   term: string;
   line: string;
   /** The container a game-wide search read the package from, which is where it opens. */

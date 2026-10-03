@@ -122,6 +122,7 @@ describe("GameSearch", () => {
     await user.click(await screen.findByRole("button", { name: "Calls" }));
     await user.click(screen.getByRole("button", { name: "Delegates" }));
     await user.click(screen.getByRole("button", { name: "Calls" }));
+    await user.click(screen.getByRole("button", { name: "Writes" }));
     await user.click(screen.getByRole("switch", { name: "Whole word" }));
     await user.click(screen.getByRole("switch", { name: "Enabled mods" }));
     await user.type(screen.getByLabelText("Search for"), "Delay{Enter}");
@@ -132,7 +133,7 @@ describe("GameSearch", () => {
           query: "Delay",
           values: false,
           filter: null,
-          kinds: ["delegate"],
+          kinds: ["delegate", "write"],
           wholeWord: true,
           mods: false,
         },

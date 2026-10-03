@@ -205,7 +205,8 @@ enum AssetCmd {
     /// List the packages that import an object or a package, from the import index.
     Importers(ImportersArgs),
     /// Find where the game's scripts name something: a call, a delegate, a string, a name, an
-    /// object or a variable. Reads every package the game loads, the enabled mods' included.
+    /// object or a variable read or written. Reads every package the game loads, the enabled
+    /// mods' included.
     Search(AssetSearchArgs),
     /// Rename an export, move it, or change the flags the loader reads it by.
     ExportEdit(ExportEditArgs),
@@ -629,7 +630,9 @@ struct AssetSearchArgs {
     #[arg(long, value_name = "TEXT")]
     filter: Option<String>,
 
-    /// Only terms of this kind. Repeatable.
+    /// Only terms of this kind. Repeatable. `write` is where a variable is assigned, or a
+    /// container changed by the engine's array, map and set functions; `read` is everywhere else
+    /// it is named.
     #[arg(long, value_name = "KIND")]
     kind: Vec<SearchKindArg>,
 
@@ -656,7 +659,8 @@ enum SearchKindArg {
     String,
     Name,
     Object,
-    Variable,
+    Read,
+    Write,
 }
 
 impl From<SearchKindArg> for rivals_core::mod_search::HitKind {
@@ -667,7 +671,8 @@ impl From<SearchKindArg> for rivals_core::mod_search::HitKind {
             SearchKindArg::String => Self::String,
             SearchKindArg::Name => Self::Name,
             SearchKindArg::Object => Self::Object,
-            SearchKindArg::Variable => Self::Variable,
+            SearchKindArg::Read => Self::Read,
+            SearchKindArg::Write => Self::Write,
         }
     }
 }

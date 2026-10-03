@@ -17,7 +17,10 @@ use crate::schema_synth::{self, PackageSource};
 pub enum HitKind {
     String,
     Call,
-    Variable,
+    /// A variable read.
+    Read,
+    /// A variable assigned or changed in place.
+    Write,
     Object,
     Name,
     Delegate,
@@ -33,7 +36,8 @@ impl HitKind {
         match self {
             Self::String => "string",
             Self::Call => "call",
-            Self::Variable => "variable",
+            Self::Read => "read",
+            Self::Write => "write",
             Self::Object => "object",
             Self::Name => "name",
             Self::Delegate => "delegate",
@@ -42,7 +46,7 @@ impl HitKind {
     }
 
     /// Which of a statement's matching terms names it: a call says the most about a line, a
-    /// variable the least.
+    /// variable the least, and a variable stored into more than one read.
     fn rank(self) -> u8 {
         match self {
             Self::Call => 0,
@@ -50,8 +54,9 @@ impl HitKind {
             Self::String => 2,
             Self::Name => 3,
             Self::Object => 4,
-            Self::Variable => 5,
-            Self::Value => 6,
+            Self::Write => 5,
+            Self::Read => 6,
+            Self::Value => 7,
         }
     }
 }
@@ -119,7 +124,8 @@ impl From<TermKind> for HitKind {
         match kind {
             TermKind::String => Self::String,
             TermKind::Call => Self::Call,
-            TermKind::Variable => Self::Variable,
+            TermKind::Read => Self::Read,
+            TermKind::Write => Self::Write,
             TermKind::Object => Self::Object,
             TermKind::Name => Self::Name,
             TermKind::Delegate => Self::Delegate,
@@ -395,7 +401,7 @@ mod tests {
     }
 
     /// `Let Count = Helper(Count)`: a call says more about the line than the variable, unless
-    /// only variables are asked for.
+    /// only variables are asked for, and the line both writes the variable and reads it.
     #[test]
     fn the_best_term_wins_and_a_kind_filter_can_pass_it_over() {
         let count = || Expr::Variable {
@@ -423,9 +429,18 @@ mod tests {
         let any = Query::new("helper", Vec::new(), false).unwrap();
         let best = any.best_term(&expr).expect("a hit");
         assert_eq!((best.kind, best.text.as_str()), (TermKind::Call, "Helper"));
-        let variables = Query::new("HELPER", vec![HitKind::Variable], false).unwrap();
-        let best = variables.best_term(&expr).expect("a hit");
-        assert_eq!(best.kind, TermKind::Variable);
+        let writes = Query::new("HELPER", vec![HitKind::Write], false).unwrap();
+        let best = writes.best_term(&expr).expect("a hit");
+        assert_eq!(
+            (best.kind, best.text.as_str()),
+            (TermKind::Write, "CountHelper")
+        );
+        let reads = Query::new("HELPER", vec![HitKind::Read], false).unwrap();
+        let best = reads.best_term(&expr).expect("a hit");
+        assert_eq!(
+            (best.kind, best.text.as_str()),
+            (TermKind::Read, "CountHelper")
+        );
         let names = Query::new("helper", vec![HitKind::Name], false).unwrap();
         assert!(names.best_term(&expr).is_none());
     }

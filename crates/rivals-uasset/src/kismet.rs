@@ -2224,8 +2224,12 @@ pub enum TermKind {
     String,
     /// A function called: a full object path for a final call, a bare name for a virtual one.
     Call,
-    /// A property read or written, by its dotted path, a struct's member included.
-    Variable,
+    /// A property read, by its dotted path, a struct's member included.
+    Read,
+    /// A property assigned or changed in place: a `Let`'s target, a struct member set, an array
+    /// or map built or changed, a delegate bound or changed, an event's parameter stored on the
+    /// event graph's frame.
+    Write,
     /// An object named outright, such as a class a cast or spawn takes.
     Object,
     /// A name constant, such as a row, a socket or a material parameter.
@@ -2243,14 +2247,20 @@ pub struct Term {
 /// Everything `expr` names that can be searched for, in bytecode order.
 pub fn statement_terms(expr: &Expr) -> Vec<Term> {
     let mut out = Vec::new();
-    collect_terms(expr, &mut out);
+    collect_terms(expr, false, &mut out);
     out
 }
 
-fn collect_terms(expr: &Expr, out: &mut Vec<Term>) {
+/// `writing` says `expr` is where a value is stored, so the variables it names are written.
+fn collect_terms(expr: &Expr, writing: bool, out: &mut Vec<Term>) {
     let term = |kind, text: &str| Term {
         kind,
         text: text.to_string(),
+    };
+    let variable = if writing {
+        TermKind::Write
+    } else {
+        TermKind::Read
     };
     match expr {
         Expr::StringConst { value, .. } | Expr::UnicodeStringConst { value, .. } => {
@@ -2262,13 +2272,20 @@ fn collect_terms(expr: &Expr, out: &mut Vec<Term>) {
             }
         }
         Expr::VirtualCall { function, .. } => out.push(term(TermKind::Call, function)),
-        Expr::Variable { property, .. } => out.push(term(TermKind::Variable, &property.path)),
+        Expr::Variable { property, .. } => out.push(term(variable, &property.path)),
         Expr::ObjectConst { object } | Expr::Cast { class: object, .. } => {
             if let Some(path) = &object.path {
                 out.push(term(TermKind::Object, path));
             }
         }
-        Expr::Member { property, .. } => out.push(term(TermKind::Variable, &property.path)),
+        // An event's parameter copied onto the event graph's frame: the property is where the
+        // value goes, and what it holds is the value.
+        Expr::Member {
+            name: "LetValueOnPersistentFrame",
+            property,
+            ..
+        } => out.push(term(TermKind::Write, &property.path)),
+        Expr::Member { property, .. } => out.push(term(variable, &property.path)),
         // An instance delegate reads as the function it names.
         Expr::NameConst {
             name: "InstanceDelegate",
@@ -2284,8 +2301,73 @@ fn collect_terms(expr: &Expr, out: &mut Vec<Term>) {
         }
         _ => {}
     }
+    let written = written_child(expr, writing);
     for child in children(expr) {
-        collect_terms(child, out);
+        let writes = written.is_some_and(|w| std::ptr::eq(w, child));
+        collect_terms(child, writes, out);
+    }
+}
+
+/// The child `expr` stores a value in or changes, if any. `writing` says `expr` is itself where a
+/// value is stored: the store then lands in the member a context reaches, the struct a member
+/// belongs to and the array an element sits in, while the object reached through and the index
+/// are only read.
+fn written_child(expr: &Expr, writing: bool) -> Option<&Expr> {
+    match expr {
+        Expr::Let { variable, .. } => Some(&**variable),
+        Expr::SetArray { array: target, .. } | Expr::SetContainer { target, .. } => Some(&**target),
+        Expr::DelegateOp { delegate, .. } | Expr::BindDelegate { delegate, .. } => {
+            Some(&**delegate)
+        }
+        Expr::Unary {
+            name: "ClearMulticastDelegate",
+            value,
+        } => Some(&**value),
+        Expr::FinalCall {
+            function, params, ..
+        } if changes_first_argument(function) => params.first(),
+        Expr::Context { member, .. } if writing => Some(&**member),
+        Expr::Member {
+            name: "StructMemberContext",
+            value,
+            ..
+        } if writing => Some(&**value),
+        Expr::ArrayGetByRef { array, .. } if writing => Some(&**array),
+        _ => None,
+    }
+}
+
+/// Whether `function` is one of the engine's container functions that change the array, map or
+/// set they are handed first. Nothing in bytecode says a call changes an argument it is handed;
+/// these are the common ones, and engine functions do not change with the game.
+fn changes_first_argument(function: &ObjectRef) -> bool {
+    let Some((class, name)) = function.path.as_deref().and_then(|p| p.split_once(':')) else {
+        return false;
+    };
+    match class {
+        "/Script/Engine.KismetArrayLibrary" => matches!(
+            name,
+            "Array_Add"
+                | "Array_AddUnique"
+                | "Array_Append"
+                | "Array_Clear"
+                | "Array_Insert"
+                | "Array_Remove"
+                | "Array_RemoveItem"
+                | "Array_Resize"
+                | "Array_Reverse"
+                | "Array_Set"
+                | "Array_Shuffle"
+                | "Array_Swap"
+        ),
+        "/Script/Engine.BlueprintMapLibrary" => {
+            matches!(name, "Map_Add" | "Map_Remove" | "Map_Clear")
+        }
+        "/Script/Engine.BlueprintSetLibrary" => matches!(
+            name,
+            "Set_Add" | "Set_AddItems" | "Set_Remove" | "Set_RemoveItems" | "Set_Clear"
+        ),
+        _ => false,
     }
 }
 
@@ -3682,7 +3764,7 @@ mod tests {
         assert_eq!(
             terms,
             [
-                (TermKind::Variable, "Loaded"),
+                (TermKind::Write, "Loaded"),
                 (TermKind::Call, "/Script/Marvel.MarvelFileUtil:LoadFromFile"),
                 (TermKind::String, "Keys.txt"),
             ]
@@ -3741,7 +3823,7 @@ mod tests {
                 expect(TermKind::Delegate, "/Game/X.X_C:OnDone__DelegateSignature"),
                 expect(TermKind::Delegate, "OnTimer"),
                 expect(TermKind::Object, "/Script/Engine.Actor"),
-                expect(TermKind::Variable, "Location"),
+                expect(TermKind::Read, "Location"),
                 expect(TermKind::Name, "Selected"),
             ]
         );
@@ -3762,6 +3844,237 @@ mod tests {
         let script = script_of(vec![(0x10, expr)]);
         let sites = call_sites([("First", &script)]);
         assert_eq!(sites.keys().collect::<Vec<_>>(), ["Helper"]);
+    }
+
+    fn prop(path: &str) -> PropertyRef {
+        PropertyRef {
+            names: Vec::new(),
+            path: path.into(),
+            owner: object("/Game/X.X_C:F"),
+        }
+    }
+
+    /// A variable of `name`'s kind: `LocalVariable`, `InstanceVariable` and the like.
+    fn var(name: &'static str, path: &str) -> Expr {
+        Expr::Variable {
+            name,
+            property: prop(path),
+        }
+    }
+
+    fn member(name: &'static str, path: &str, value: Expr) -> Expr {
+        Expr::Member {
+            name,
+            property: prop(path),
+            value: Box::new(value),
+        }
+    }
+
+    fn assign(variable: Expr, value: Expr) -> Expr {
+        Expr::Let {
+            name: "Let",
+            property: None,
+            variable: Box::new(variable),
+            value: Box::new(value),
+        }
+    }
+
+    fn context(object: Expr, member: Expr) -> Expr {
+        Expr::Context {
+            name: "Context",
+            object: Box::new(object),
+            skip: 0,
+            property: prop("ReturnValue"),
+            member: Box::new(member),
+        }
+    }
+
+    /// Each term as its kind and text, for comparing at a glance.
+    fn terms_of(expr: &Expr) -> Vec<String> {
+        statement_terms(expr)
+            .into_iter()
+            .map(|t| format!("{:?} {}", t.kind, t.text))
+            .collect()
+    }
+
+    /// What a statement stores into is written, along the members and elements that lead to it;
+    /// everything else it names is read, the object a member is reached through included.
+    #[test]
+    fn an_assignment_writes_its_target_and_reads_the_rest() {
+        let subtract = "/Script/Engine.KismetMathLibrary:Subtract_DoubleDouble";
+        let health = assign(
+            var("InstanceVariable", "Health"),
+            call(
+                subtract,
+                vec![
+                    var("InstanceVariable", "Health"),
+                    var("LocalVariable", "Damage"),
+                ],
+            ),
+        );
+        assert_eq!(
+            terms_of(&health),
+            [
+                "Write Health".to_string(),
+                format!("Call {subtract}"),
+                "Read Health".into(),
+                "Read Damage".into(),
+            ]
+        );
+        let zero = || Expr::IntConst { value: 0, at: 0 };
+        let through = assign(
+            context(
+                var("InstanceVariable", "Target"),
+                var("InstanceVariable", "Health"),
+            ),
+            zero(),
+        );
+        assert_eq!(terms_of(&through), ["Read Target", "Write Health"]);
+        let location = || {
+            member(
+                "StructMemberContext",
+                "Location",
+                var("LocalVariable", "Transform"),
+            )
+        };
+        let set_member = assign(member("StructMemberContext", "X", location()), zero());
+        assert_eq!(
+            terms_of(&set_member),
+            ["Write X", "Write Location", "Write Transform"]
+        );
+        let get_member = assign(var("LocalVariable", "Copy"), location());
+        assert_eq!(
+            terms_of(&get_member),
+            ["Write Copy", "Read Location", "Read Transform"]
+        );
+        let element = assign(
+            Expr::ArrayGetByRef {
+                array: Box::new(var("InstanceVariable", "Items")),
+                index: Box::new(var("LocalVariable", "Index")),
+            },
+            var("LocalVariable", "Item"),
+        );
+        assert_eq!(
+            terms_of(&element),
+            ["Write Items", "Read Index", "Read Item"]
+        );
+        let stored = member(
+            "LetValueOnPersistentFrame",
+            "K2Node_Event_Damage",
+            var("LocalVariable", "Damage"),
+        );
+        assert_eq!(
+            terms_of(&stored),
+            ["Write K2Node_Event_Damage", "Read Damage"]
+        );
+        let built = Expr::SetArray {
+            array: Box::new(var("InstanceVariable", "Names")),
+            items: vec![var("LocalVariable", "First")],
+        };
+        assert_eq!(terms_of(&built), ["Write Names", "Read First"]);
+    }
+
+    /// Binding a delegate, adding to one, removing from one and clearing one all change it;
+    /// broadcasting only reads it.
+    #[test]
+    fn binding_or_clearing_a_delegate_writes_it() {
+        let added = Expr::DelegateOp {
+            name: "AddMulticastDelegate",
+            delegate: Box::new(context(
+                var("InstanceVariable", "Button"),
+                var("InstanceVariable", "OnClicked"),
+            )),
+            value: Box::new(Expr::NameConst {
+                name: "InstanceDelegate",
+                value: "OnPressed".into(),
+                at: 0,
+                id: NameId::default(),
+            }),
+        };
+        assert_eq!(
+            terms_of(&added),
+            ["Read Button", "Write OnClicked", "Delegate OnPressed"]
+        );
+        let cleared = Expr::Unary {
+            name: "ClearMulticastDelegate",
+            value: Box::new(var("InstanceVariable", "OnDone")),
+        };
+        assert_eq!(terms_of(&cleared), ["Write OnDone"]);
+        let bound = Expr::BindDelegate {
+            function: "OnPicked".into(),
+            delegate: Box::new(var("LocalVariable", "K2Node_CreateDelegate_OutputDelegate")),
+            object: Box::new(var("InstanceVariable", "Picker")),
+            id: NameId::default(),
+        };
+        assert_eq!(
+            terms_of(&bound),
+            [
+                "Delegate OnPicked",
+                "Write K2Node_CreateDelegate_OutputDelegate",
+                "Read Picker",
+            ]
+        );
+        let broadcast = Expr::CallMulticastDelegate {
+            signature: object("/Game/X.X_C:OnDone__DelegateSignature"),
+            delegate: Box::new(var("InstanceVariable", "OnDone")),
+            params: Vec::new(),
+        };
+        assert_eq!(
+            terms_of(&broadcast),
+            [
+                "Delegate /Game/X.X_C:OnDone__DelegateSignature",
+                "Read OnDone",
+            ]
+        );
+    }
+
+    /// The engine's container functions that change what they are handed write it; any other
+    /// call only reads what it is handed.
+    #[test]
+    fn a_container_call_writes_the_container_it_changes() {
+        let library = |function: &str, params| {
+            context(
+                Expr::ObjectConst {
+                    object: object("/Script/Engine.Default__KismetArrayLibrary"),
+                },
+                call(
+                    &format!("/Script/Engine.KismetArrayLibrary:{function}"),
+                    params,
+                ),
+            )
+        };
+        let paths = || var("InstanceVariable", "MountedPaths");
+        let cleared = library("Array_Clear", vec![paths()]);
+        assert_eq!(
+            terms_of(&cleared),
+            [
+                "Object /Script/Engine.Default__KismetArrayLibrary",
+                "Call /Script/Engine.KismetArrayLibrary:Array_Clear",
+                "Write MountedPaths",
+            ]
+        );
+        let added = assign(
+            var("LocalVariable", "CallFunc_Array_Add_ReturnValue"),
+            library("Array_Add", vec![paths(), var("LocalVariable", "Path")]),
+        );
+        assert_eq!(
+            terms_of(&added)
+                .into_iter()
+                .filter(|t| !t.starts_with("Object") && !t.starts_with("Call"))
+                .collect::<Vec<_>>(),
+            [
+                "Write CallFunc_Array_Add_ReturnValue",
+                "Write MountedPaths",
+                "Read Path",
+            ]
+        );
+        let counted = library("Array_Length", vec![paths()]);
+        assert!(terms_of(&counted).contains(&"Read MountedPaths".to_string()));
+        let handed = call("/Game/X.X_C:Fill", vec![paths()]);
+        assert_eq!(
+            terms_of(&handed),
+            ["Call /Game/X.X_C:Fill", "Read MountedPaths"]
+        );
     }
 
     /// Only constants with value bytes of their own are offered, but each keeps its index among
