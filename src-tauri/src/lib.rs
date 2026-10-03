@@ -6,6 +6,7 @@ mod asset_view;
 mod audio;
 mod concurrency;
 mod detect;
+mod game_search;
 mod game_status;
 mod game_user_settings;
 mod import_index;
@@ -200,6 +201,8 @@ pub fn run() {
             asset_view::plan_dependency_edits,
             asset_view::plan_export_copy,
             asset_view::save_export_copy,
+            game_search::search_game,
+            game_search::cancel_game_search,
             import_index::import_index_status,
             import_index::build_import_index,
             import_index::importers_of,

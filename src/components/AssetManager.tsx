@@ -36,6 +36,7 @@ import {
 } from "lucide-react";
 
 import AssetInspector from "@/components/AssetInspector";
+import { GameSearch } from "@/components/GameSearchDialog";
 import { HeroIcon } from "@/components/HeroIcon";
 import { ModReportDialog, type SearchHit } from "@/components/ModReportDialog";
 import {
@@ -224,8 +225,8 @@ export function AssetManager({
   /// A package the user asked to take back out of the selected mod, awaiting confirmation.
   const [revertPrompt, setRevertPrompt] = useState<string | null>(null);
   const [renamePrompt, setRenamePrompt] = useState<{ path: string; to: string } | null>(null);
-  /// A mod pak to read the inspected entry from instead of the selected container: the copy a
-  /// save just wrote.
+  /// A container to read the inspected entry from instead of the selected one: the copy a save
+  /// just wrote, or the container a game-wide search found it in.
   const [inspectFrom, setInspectFrom] = useState<string | null>(null);
   // A loose asset is addressed by path alone, so it carries no container.
   const [looseAsset, setLooseAsset] = useState<string | null>(null);
@@ -1599,6 +1600,15 @@ export function AssetManager({
           </div>
         )}
         <div className="ml-auto flex shrink-0 items-center gap-2">
+          <GameSearch
+            gamePath={gamePath}
+            disabled={!gamePath}
+            onOpenHit={(hit: SearchHit) => {
+              setInspectFrom(hit.container ?? null);
+              setInspectTarget({ exportIndex: hit.export_index, offset: hit.offset });
+              setInspecting({ path: hit.package, source: "utoc" });
+            }}
+          />
           <Tip content="Repack every installed mod in place, with one set of options">
             <Button variant="outline" size="sm" onClick={promptRepackAll} disabled={busy}>
               <Layers size={15} />

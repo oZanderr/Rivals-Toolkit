@@ -1,0 +1,214 @@
+import { useEffect, useState } from "react";
+
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { Loader2, TextSearch } from "lucide-react";
+
+import { SearchResults, type SearchHit, type SearchResult } from "@/components/SearchResults";
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Progress } from "@/components/ui/progress";
+import { Switch } from "@/components/ui/switch";
+import { Tip } from "@/components/ui/tooltip";
+
+interface GameSearchResult extends SearchResult {
+  /** Packages the walk listed, after the path filter. */
+  listed: number;
+  /** How many of them were parsed: the ones holding functions, or all of them for values. */
+  searched: number;
+  truncated: boolean;
+  cancelled: boolean;
+}
+
+interface SearchProgress {
+  phase: "listing" | "headers" | "scripts" | "packages";
+  current: number;
+  total: number;
+}
+
+const PHASES: Record<SearchProgress["phase"], string> = {
+  listing: "Listing packages",
+  headers: "Reading headers",
+  scripts: "Searching scripts",
+  packages: "Searching packages",
+};
+
+/**
+ * The Asset Manager's "Search Game" button and the dialog it opens. The search runs in the
+ * backend over every package the game loads, enabled mods included. Its state lives here rather
+ * than in the dialog, so a hit opened in the inspector leaves the results, and a search still
+ * running, as they were.
+ */
+export function GameSearch({
+  gamePath,
+  disabled,
+  onOpenHit,
+}: {
+  gamePath: string;
+  disabled?: boolean;
+  /** Opens a hit in the inspector, from the container it was found in. */
+  onOpenHit: (hit: SearchHit) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [values, setValues] = useState(false);
+  const [filter, setFilter] = useState("");
+  const [running, setRunning] = useState(false);
+  const [progress, setProgress] = useState<SearchProgress | null>(null);
+  const [search, setSearch] = useState<{
+    query: string;
+    values: boolean;
+    result: GameSearchResult;
+  } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+    void listen<SearchProgress>("game-search-progress", (event) => setProgress(event.payload)).then(
+      (stop) => {
+        if (cancelled) stop();
+        else unlisten = stop;
+      }
+    );
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  const run = () => {
+    const text = query.trim();
+    if (!text || running) return;
+    setRunning(true);
+    setError(null);
+    setProgress(null);
+    invoke<GameSearchResult>("search_game", {
+      gameRoot: gamePath,
+      query: text,
+      values,
+      filter: filter.trim() || null,
+    })
+      .then((result) => setSearch({ query: text, values, result }))
+      .catch((e: unknown) => setError(String(e)))
+      .finally(() => {
+        setRunning(false);
+        setProgress(null);
+      });
+  };
+
+  const note = search?.result.cancelled
+    ? "Cancelled: these are the places found before it stopped."
+    : search?.result.truncated
+      ? `Stopped at ${search.result.hits.length} places; narrow the search to see the rest.`
+      : undefined;
+
+  return (
+    <>
+      <Tip content="Search every script in the game and your enabled mods">
+        <Button variant="outline" size="sm" onClick={() => setOpen(true)} disabled={disabled}>
+          {running ? <Loader2 size={15} className="animate-spin" /> : <TextSearch size={15} />}
+          Search Game
+        </Button>
+      </Tip>
+      <AlertDialog open={open} onOpenChange={setOpen}>
+        <AlertDialogContent className="flex max-h-[85vh] max-w-3xl flex-col">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Search the game</AlertDialogTitle>
+            <AlertDialogDescription>
+              Every script in the game and your enabled mods: calls, delegates, strings, names,
+              objects and variables.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="flex items-center gap-2">
+            <Input
+              autoFocus
+              aria-label="Search for"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") run();
+              }}
+              placeholder="A function, a variable, a string, an asset path…"
+              className="h-8 font-mono text-[12px]"
+            />
+            <Button size="sm" variant="outline" disabled={!query.trim() || running} onClick={run}>
+              {running ? "Searching…" : "Search"}
+            </Button>
+          </div>
+          <div className="flex items-center gap-3 text-[12px]">
+            <label className="flex shrink-0 items-center gap-2">
+              <Switch checked={values} onCheckedChange={setValues} aria-label="Stored values" />
+              Also search stored values (reads every package: minutes)
+            </label>
+            <Input
+              aria-label="Only paths containing"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              placeholder="Only paths containing… (optional)"
+              className="h-7 font-mono text-[11px]"
+            />
+          </div>
+          {running && (
+            <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+              <span className="shrink-0">{progress ? PHASES[progress.phase] : "Starting"}</span>
+              {progress && progress.total > 0 ? (
+                <>
+                  <Progress
+                    value={(progress.current / progress.total) * 100}
+                    className="h-2 w-40 shrink-0"
+                  />
+                  <span className="shrink-0">
+                    {progress.current}/{progress.total}
+                  </span>
+                </>
+              ) : (
+                <Loader2 size={12} className="shrink-0 animate-spin" />
+              )}
+              <Button
+                variant="outline"
+                size="sm"
+                className="ml-auto h-6 px-2 text-[11px]"
+                onClick={() => void invoke("cancel_game_search").catch(() => undefined)}
+              >
+                Cancel
+              </Button>
+            </div>
+          )}
+          <div className="-mx-6 flex-1 overflow-y-auto px-6 text-[12px]">
+            {error && <p className="text-err">{error}</p>}
+            {search && (
+              <>
+                <p className="mb-2 text-[11px] text-muted-foreground">
+                  Searched {search.result.searched} of {search.result.listed} packages
+                  {search.values ? "." : ", the ones holding functions."}
+                </p>
+                <SearchResults
+                  query={search.query}
+                  result={search.result}
+                  note={note}
+                  onOpen={(hit) => {
+                    setOpen(false);
+                    onOpenHit(hit);
+                  }}
+                />
+              </>
+            )}
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Close</AlertDialogCancel>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
+  );
+}

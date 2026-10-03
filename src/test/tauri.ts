@@ -52,6 +52,7 @@ let current: TauriMock | null = null;
 
 export function installTauri(mock: TauriMock): void {
   current = mock;
+  listeners.clear();
 }
 
 /// What the module mock forwards to, so `vi.mock` can be hoisted while the mock it talks to is
@@ -70,3 +71,24 @@ export const windowStub = {
 export const dialogStub = {
   open: vi.fn(async () => null),
 };
+
+type Listener = (event: { payload: unknown }) => void;
+const listeners = new Map<string, Set<Listener>>();
+
+/// Stands in for `@tauri-apps/api/event`: a listener is held until the unlisten it was given runs,
+/// and `emitEvent` reaches every one held for that event.
+export const eventStub = {
+  listen: vi.fn(async (event: string, handler: Listener) => {
+    const held = listeners.get(event) ?? new Set<Listener>();
+    held.add(handler);
+    listeners.set(event, held);
+    return () => {
+      held.delete(handler);
+    };
+  }),
+};
+
+/// What the Rust side emits, delivered to the listeners a component holds.
+export function emitEvent(event: string, payload: unknown): void {
+  for (const handler of listeners.get(event) ?? []) handler({ payload });
+}

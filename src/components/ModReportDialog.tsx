@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import { invoke } from "@tauri-apps/api/core";
 
+import { SearchResults, type SearchHit, type SearchResult } from "@/components/SearchResults";
 import {
   AlertDialog,
   AlertDialogCancel,
@@ -13,22 +14,10 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { shortPath } from "@/lib/contentPath";
 import { cn } from "@/lib/utils";
 
-export interface SearchHit {
-  package: string;
-  export: string;
-  export_index: number;
-  offset?: number;
-  kind: "string" | "call" | "variable" | "object" | "name" | "delegate" | "value";
-  term: string;
-  line: string;
-}
-
-interface SearchResult {
-  hits: SearchHit[];
-  unreadable: [string, string][];
-}
+export type { SearchHit } from "@/components/SearchResults";
 
 interface PackageReport {
   path: string;
@@ -211,57 +200,6 @@ export function ModReportDialog({ gamePath, container, onClose, onRevert, onOpen
   );
 }
 
-function SearchResults({
-  query,
-  result,
-  onOpen,
-}: {
-  query: string;
-  result: SearchResult;
-  onOpen: (hit: SearchHit) => void;
-}) {
-  const byPackage = new Map<string, SearchHit[]>();
-  for (const hit of result.hits)
-    byPackage.set(hit.package, [...(byPackage.get(hit.package) ?? []), hit]);
-  return (
-    <section className="flex flex-col gap-3">
-      <p className="text-muted-foreground">
-        {result.hits.length} place{result.hits.length === 1 ? "" : "s"} name “{query}”
-      </p>
-      {[...byPackage].map(([pkg, hits]) => (
-        <div key={pkg}>
-          <p className="truncate font-mono text-[11px] text-muted-foreground">{shortPath(pkg)}</p>
-          {hits.map((hit, i) => (
-            <button
-              key={i}
-              className="flex w-full items-baseline gap-2 rounded-sm pl-3 text-left font-mono text-[11px] hover:bg-muted/50"
-              onClick={() => onOpen(hit)}
-            >
-              <span className="w-14 shrink-0 font-sans text-[10px] uppercase text-muted-foreground">
-                {hit.kind}
-              </span>
-              <span className="shrink-0 text-blue-accent-foreground">
-                {hit.export}
-                {hit.offset !== undefined &&
-                  ` 0x${hit.offset.toString(16).toUpperCase().padStart(4, "0")}`}
-              </span>
-              <span className="truncate" title={hit.line}>
-                {hit.line}
-              </span>
-            </button>
-          ))}
-        </div>
-      ))}
-      {result.unreadable.length > 0 && (
-        <p className="text-warn">
-          {result.unreadable.length} package{result.unreadable.length === 1 ? "" : "s"} could not be
-          read, so they were not searched: {result.unreadable.map(([p]) => shortPath(p)).join(", ")}
-        </p>
-      )}
-    </section>
-  );
-}
-
 function PackageList({
   title,
   packages,
@@ -303,10 +241,4 @@ function PackageList({
       ))}
     </section>
   );
-}
-
-/** Drops the `<Project>/Content/` prefix every cooked path starts with. */
-function shortPath(path: string): string {
-  const at = path.indexOf("/Content/");
-  return at >= 0 ? path.slice(at + "/Content/".length) : path;
 }
