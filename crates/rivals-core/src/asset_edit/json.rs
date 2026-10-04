@@ -95,10 +95,21 @@ pub struct PayloadFile {
     pub file: String,
 }
 
-/// A function's whole script as assembler text: given inline, or as a file to read it from.
+/// A function's whole script as assembler text: given inline, or as a file to read it from. With
+/// `new_function`, the text is the script of a function added to the class under that name.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ScriptTextFile {
+    #[serde(default)]
     pub export: u32,
+    /// A function to add to the class, by the name it takes, written from this text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_function: Option<String>,
+    /// The new function's parameters, as a signature prints: `(A: Int, ref B: Array<Int>) -> Hit: Bool`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    /// The class the new function goes to, when the package holds more than one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -188,6 +199,7 @@ impl EditList {
             script_texts: self
                 .script_texts
                 .iter()
+                .filter(|entry| entry.new_function.is_none())
                 .map(|entry| ScriptTextEdit {
                     export: entry.export,
                     ..Default::default()
@@ -231,7 +243,12 @@ impl EditList {
             });
         }
         let mut script_texts = Vec::with_capacity(self.script_texts.len());
+        let mut new_functions = Vec::new();
         for entry in self.script_texts {
+            let named = entry
+                .new_function
+                .clone()
+                .unwrap_or_else(|| format!("export {}", entry.export));
             let text = match (entry.text, &entry.file) {
                 (Some(text), None) => text,
                 (None, Some(file)) => {
@@ -239,16 +256,25 @@ impl EditList {
                 }
                 _ => {
                     return Err(format!(
-                        "the script text for export {} takes `text` or `file`, one of them",
-                        entry.export
+                        "the script text for {named} takes `text` or `file`, one of them"
                     ));
                 }
             };
-            script_texts.push(ScriptTextEdit {
-                export: entry.export,
-                text,
-                was: entry.was,
-            });
+            match entry.new_function {
+                Some(name) => new_functions.push(rivals_uasset::NewFunctionEdit {
+                    class: entry.class,
+                    name,
+                    signature: entry.signature.ok_or_else(|| {
+                        format!("the new function {named} needs a `signature`, as \"()\" for one taking nothing")
+                    })?,
+                    text,
+                }),
+                None => script_texts.push(ScriptTextEdit {
+                    export: entry.export,
+                    text,
+                    was: entry.was,
+                }),
+            }
         }
         Ok(PackageEdits {
             values: self.values,
@@ -268,6 +294,7 @@ impl EditList {
             field_sets: self.field_sets,
             compact_names: self.compact_names,
             add_exports: self.add_exports,
+            new_functions,
             add_components: self.add_components,
             remove_components: self.remove_components,
             save_as: self.save_as,

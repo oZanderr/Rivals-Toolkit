@@ -647,9 +647,22 @@ function toScriptEdit({ target, draft }: DraftRecord): ScriptEdit | null {
 
 /** A function's whole script written anew from text, held to the text it printed as. */
 interface ScriptTextEdit {
-  export: number;
+  export?: number;
   text: string;
   was?: string;
+  /** A function to add to the class under this name, written from `text`. */
+  new_function?: string;
+  signature?: string;
+  class?: number;
+}
+
+/** A function to add to a Blueprint class: its name, what it takes and gives back as a signature
+ *  prints, and the text its script is written from. */
+export interface NewFunction {
+  class?: number;
+  name: string;
+  signature: string;
+  text: string;
 }
 
 function toScriptTextEdit({ target, draft }: DraftRecord): ScriptTextEdit | null {
@@ -683,6 +696,8 @@ export interface Structural {
   compactNames?: boolean;
   /** Empty objects of a class to add. */
   addExports?: { class: string; outer?: number; name: string }[];
+  /** Functions to add to a Blueprint class, each written from its text. */
+  newFunctions?: NewFunction[];
   /** Blueprint components to add by duplicating the one a construction script node builds. */
   addComponents?: AddComponentEdit[];
   /** Blueprint components to take out, by the construction script node that builds each. */
@@ -1091,7 +1106,17 @@ export function useAssetEdits({
           payloads,
           bulk,
           scripts,
-          script_texts: scriptTexts,
+          script_texts: [
+            ...scriptTexts,
+            ...(structural?.newFunctions ?? []).map(
+              (add): ScriptTextEdit => ({
+                new_function: add.name,
+                signature: add.signature,
+                class: add.class,
+                text: add.text,
+              })
+            ),
+          ],
           remove_exports: structural?.remove ?? [],
           reset_exports: structural?.reset ?? [],
           duplicate_exports: structural?.duplicate ?? [],

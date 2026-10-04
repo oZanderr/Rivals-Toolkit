@@ -195,11 +195,10 @@ overrides keeps the list in its override record in step the same way.
 `asset remove-component --node N` takes a component out of a Blueprint with its template. The
 components under it take its place, or go with it with `--with-children`; the scene root goes only
 with the components hanging from it. The class keeps the component's variable, which reads None, so
-the save names the functions that read it. Blueprint variables and functions
-cannot be added: a
-class's own properties come first in every object's layout, so a new one would shift every
-inherited value in every instance, and a new function needs an export of its own and a place in
-its class's function map. An existing function can be rewritten whole, as text: see below.
+the save names the functions that read it. A Blueprint variable cannot be added: a class's own
+properties come first in every object's layout, so a new one would shift every inherited value in
+every instance. A function can be added to a Blueprint class, and an existing one rewritten whole,
+as text: see below.
 
 `asset script-set` changes one thing inside a function's bytecode, addressed by the statement offset
 `asset script` prints: a literal by its place in the statement (`--const`) or by where it starts
@@ -341,6 +340,7 @@ rivals-cli asset script --container ... --entry ... --export 10 --text > graph.t
 #   edit graph.txt
 rivals-cli asset script-assemble --container ... --entry ... --export 10 --text-file graph.txt --dry-run
 rivals-cli asset script-assemble --container ... --entry ... --export 10 --text-file graph.txt --mod-name MyMod
+rivals-cli asset script-assemble --container ... --entry ... --new-function Glow --signature "(Strength: Float)" --text-file glow.txt --mod-name MyMod
 ```
 
 Labels stand where offsets did, each named after the offset its statement started at (`@0045:`),
@@ -365,10 +365,23 @@ A type is `Bool`, `Byte`, `Int`, `Int64`, `Float`, `Double`, `Name`, `Str`, `Tex
 full path, as `Object</Script/Engine.Actor>`. A struct's size comes from another field of it in the
 package, or follows its path, `Struct</Script/CoreUObject.Vector, 24>`. A local of the event graph
 keeps its value between events, one for each object, which is state a class variable would otherwise
-hold. Parameters cannot be added. A name or object the package does not have yet is added to it. A
-changed or new call to a Blueprint function is held to its parameters; one to a native function the
-package never calls with as many arguments is refused until `--allow-unchecked`. An edit file
-carries a function's text as `script_texts`, inline (`text`) or from a file beside it (`file`).
+hold. A function's parameters stay as they are, since callers anywhere in the game pass its
+arguments by position; a new function takes whatever signature is wanted. A name or object the
+package does not have yet is added to it. A changed or new call to a Blueprint function is held to
+its parameters; one to a native function the package never calls with as many arguments is refused
+until `--allow-unchecked`. An edit file carries a function's text as `script_texts`, inline (`text`)
+or from a file beside it (`file`).
+
+`--new-function NAME --signature SIG` adds a function to the Blueprint class instead of rewriting
+one, its script written from the text. A signature takes the inputs in parentheses, `ref` before one
+passed by reference, and the outputs after `->`, several in parentheses: `(Strength: Float, ref
+Seen: Array<Name>) -> (Hit: Bool, Count: Int)`, types as a `local` line takes them. The function
+goes into the class's function map, which is where a call by name, `LocalVirtualFunction
+Glow(1.5f)`, finds it, and a call to it is held to its signature; `--class N` picks the class when
+the package holds more than one. A name the class or a Blueprint parent already uses is refused; a
+native parent's functions are listed nowhere the toolkit reads, so the save notes that it did not
+look. In an edit file a `script_texts` entry with `new_function` and `signature` in place of
+`export` does the same, and the app's script view has New function.
 
 `--pak` takes a pak path or a bare mod name to look up in `~mods`. `--json` makes every command
 emit machine-readable output, and failures exit non-zero. `--dry-run` reports what a write command

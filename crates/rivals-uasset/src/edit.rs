@@ -230,6 +230,10 @@ pub struct PackageEdits {
     pub duplicate_exports: Vec<DuplicateExport>,
     /// Empty objects of a class added to the end of the table. A save of its own.
     pub add_exports: Vec<crate::duplicate::AddExport>,
+    /// Functions added to a Blueprint class. Making them is a save of its own; writing their
+    /// scripts from text takes the package reading again, so the caller does that next: see
+    /// `rivals_core::asset_edit::preview_edits`.
+    pub new_functions: Vec<crate::new_function::NewFunctionEdit>,
     /// Components added to a Blueprint by copying one its construction script builds. The copy
     /// is this save; wiring it in takes value edits on the result, which the caller makes: see
     /// `rivals_core::asset_edit::preview_edits`.
@@ -796,6 +800,7 @@ impl PackageEdits {
         self.reset_exports.extend(other.reset_exports);
         self.duplicate_exports.extend(other.duplicate_exports);
         self.add_exports.extend(other.add_exports);
+        self.new_functions.extend(other.new_functions);
         self.add_components.extend(other.add_components);
         self.remove_components.extend(other.remove_components);
         self.dependencies.extend(other.dependencies);
@@ -825,6 +830,7 @@ impl PackageEdits {
             && self.reset_exports.is_empty()
             && self.duplicate_exports.is_empty()
             && self.add_exports.is_empty()
+            && self.new_functions.is_empty()
             && self.add_components.is_empty()
             && self.remove_components.is_empty()
             && self.exports.is_empty()
@@ -1228,6 +1234,44 @@ pub fn patch_package_with(
             asset: rewritten.asset,
             exports: rewritten.exports,
             applied: copies.applied,
+            bulk: None,
+            optional_bulk: None,
+            notes: Vec::new(),
+        });
+    }
+    if !edits.new_functions.is_empty() {
+        let alone = PackageEdits {
+            new_functions: Vec::new(),
+            save_as: None,
+            expect: Expected::default(),
+            allow_drift: false,
+            allow_missing: false,
+            allow_unchecked: false,
+            ..edits.clone()
+        };
+        if !alone.is_empty() {
+            return Err(
+                "adding a function is a save of its own; its script and anything else are written in the next"
+                    .into(),
+            );
+        }
+        let addition = crate::new_function::add_functions(parsed, &package, &edits.new_functions)?;
+        let rewritten = rewrite(
+            bundle,
+            &addition.splices,
+            HeaderDraft {
+                names: Some(addition.tables.names),
+                imports: Some(addition.tables.imports),
+                exports: Some(addition.exports),
+                preload_dependencies: Some(addition.preload_dependencies),
+                appended: addition.appended,
+                ..Default::default()
+            },
+        )?;
+        return Ok(PatchedBundle {
+            asset: rewritten.asset,
+            exports: rewritten.exports,
+            applied: addition.applied,
             bulk: None,
             optional_bulk: None,
             notes: Vec::new(),
@@ -5771,6 +5815,9 @@ pub fn verify_patch(
     applied: &[AppliedEdit],
 ) -> Result<(), String> {
     check_header_shapes(before, after)?;
+    if !edits.new_functions.is_empty() {
+        return crate::new_function::verify(before, after, &edits.new_functions);
+    }
     let removed = if edits.remove_exports.is_empty() {
         Vec::new()
     } else {

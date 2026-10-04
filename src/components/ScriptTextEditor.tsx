@@ -11,7 +11,7 @@ import {
   type ViewUpdate,
 } from "@codemirror/view";
 import { invoke } from "@tauri-apps/api/core";
-import { AlertTriangle, CheckCircle2, CornerUpLeft, Trash2 } from "lucide-react";
+import { AlertTriangle, CheckCircle2, CornerUpLeft, Plus, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { editingKeys, editorTheme } from "@/lib/codeEditor";
@@ -135,11 +135,15 @@ export function ScriptTextEditor({
   onText,
   onDiscard,
   onDone,
+  newFunction,
 }: {
   gamePath: string;
   container: string;
   entry: string;
   exportIndex: number;
+  /** A function being added rather than one rewritten: the text is read against the function the
+   *  save makes first, and done adds it. */
+  newFunction?: { name: string; signature: string; class?: number; blocked: string | null };
   /** The text to start from: the draft's, or the script's own. */
   initial: string;
   /** Why the function has to keep its layout, when it has to. */
@@ -150,6 +154,11 @@ export function ScriptTextEditor({
   onDone: () => void;
 }) {
   const parent = useRef<HTMLDivElement | null>(null);
+  // Held as plain values, so a parent drawing the same function again does not ask again.
+  const adding = newFunction !== undefined;
+  const addingName = newFunction?.name;
+  const addingSignature = newFunction?.signature;
+  const addingClass = newFunction?.class;
   const view = useRef<EditorView | null>(null);
   const [text, setText] = useState(initial);
   const [answer, setAnswer] = useState<{
@@ -196,13 +205,24 @@ export function ScriptTextEditor({
   useEffect(() => {
     let cancelled = false;
     const timer = setTimeout(() => {
-      invoke<TextPreview>("assemble_preview", {
-        gameRoot: gamePath,
-        container,
-        entry,
-        export: exportIndex,
-        text,
-      })
+      const asked = adding
+        ? invoke<TextPreview>("new_function_preview", {
+            gameRoot: gamePath,
+            container,
+            entry,
+            class: addingClass ?? null,
+            name: addingName,
+            signature: addingSignature,
+            text,
+          })
+        : invoke<TextPreview>("assemble_preview", {
+            gameRoot: gamePath,
+            container,
+            entry,
+            export: exportIndex,
+            text,
+          });
+      asked
         .then((result) => {
           if (!cancelled) setAnswer({ asked: text, result });
         })
@@ -214,7 +234,17 @@ export function ScriptTextEditor({
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [gamePath, container, entry, exportIndex, text]);
+  }, [
+    gamePath,
+    container,
+    entry,
+    exportIndex,
+    text,
+    adding,
+    addingName,
+    addingSignature,
+    addingClass,
+  ]);
 
   const result = answer?.asked === text ? answer.result : null;
   const preview = typeof result === "object" ? result : null;
@@ -239,20 +269,50 @@ export function ScriptTextEditor({
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex items-center gap-2 border-b border-border/60 px-3 py-1.5 text-[11px] text-muted-foreground">
-        <span>Editing as text</span>
+        {newFunction ? (
+          <span className="font-mono">
+            New function {newFunction.name}
+            {newFunction.signature}
+          </span>
+        ) : (
+          <span>Editing as text</span>
+        )}
         {keepsLayout && (
           <span className="flex items-center gap-1 text-amber-400">
             <AlertTriangle size={10} /> keeps its layout: its statements can change, not move
           </span>
         )}
-        <span className="ml-auto flex gap-1.5">
-          <Button size="sm" variant="ghost" className="h-6 px-2 text-[11px]" onClick={onDone}>
-            <CornerUpLeft size={12} /> Listing
-          </Button>
-          <Button size="sm" variant="ghost" className="h-6 px-2 text-[11px]" onClick={onDiscard}>
-            <Trash2 size={12} /> Discard text
-          </Button>
-        </span>
+        {newFunction ? (
+          <span className="ml-auto flex gap-1.5">
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-6 px-2 text-[11px]"
+              disabled={
+                newFunction.blocked !== null ||
+                !preview ||
+                preview.diagnostics.length > 0 ||
+                preview.refused !== undefined
+              }
+              title={newFunction.blocked ?? undefined}
+              onClick={onDone}
+            >
+              <Plus size={12} /> Add function
+            </Button>
+            <Button size="sm" variant="ghost" className="h-6 px-2 text-[11px]" onClick={onDiscard}>
+              <Trash2 size={12} /> Cancel
+            </Button>
+          </span>
+        ) : (
+          <span className="ml-auto flex gap-1.5">
+            <Button size="sm" variant="ghost" className="h-6 px-2 text-[11px]" onClick={onDone}>
+              <CornerUpLeft size={12} /> Listing
+            </Button>
+            <Button size="sm" variant="ghost" className="h-6 px-2 text-[11px]" onClick={onDiscard}>
+              <Trash2 size={12} /> Discard text
+            </Button>
+          </span>
+        )}
       </div>
       <div ref={parent} className="min-h-0 flex-1 overflow-hidden" data-testid="script-text" />
       <div className="max-h-48 shrink-0 overflow-auto border-t border-border/60 px-3 py-1.5 text-[11px]">
@@ -281,7 +341,10 @@ export function ScriptTextEditor({
               </p>
             ) : (
               <p className="flex items-center gap-1 text-green-400">
-                <CheckCircle2 size={11} /> Assembles. Save as mod to write it.
+                <CheckCircle2 size={11} />{" "}
+                {newFunction
+                  ? "Assembles. Add function to write it to the mod."
+                  : "Assembles. Save as mod to write it."}
               </p>
             )}
             {result.unchecked && (

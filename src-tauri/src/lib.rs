@@ -185,6 +185,7 @@ pub fn run() {
             asset_view::export_script_view,
             asset_view::script_call_preview,
             asset_view::assemble_preview,
+            asset_view::new_function_preview,
             asset_view::export_payload,
             asset_view::export_bulk,
             asset_view::enum_options,

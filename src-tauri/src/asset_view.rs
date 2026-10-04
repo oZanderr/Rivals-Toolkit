@@ -519,6 +519,48 @@ pub(crate) async fn assemble_preview(
     .map_err(|e| e.to_string())?
 }
 
+/// What adding a function to the class would do, its script written from `text`: the text's
+/// problems line by line, or the changes a save would make. See
+/// `rivals_core::asset_edit::preview_new_function`.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn new_function_preview(
+    state: State<'_, SettingsState>,
+    game_root: String,
+    container: String,
+    entry: String,
+    class: Option<u32>,
+    name: String,
+    signature: String,
+    text: String,
+) -> Result<asset_edit::TextPreview, String> {
+    let usmap = configured_usmap(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let schema = mappings::resolve(None, usmap.as_deref())
+            .and_then(|path| mappings::load(&path))
+            .ok();
+        asset_edit::preview_new_function(
+            &AssetEditRequest {
+                game_root: &game_root,
+                container: &container,
+                entry: &entry,
+                kind: source_of(&container),
+                mod_name: "",
+                changes: Default::default(),
+            },
+            schema.as_deref(),
+            &rivals_uasset::NewFunctionEdit {
+                class,
+                name,
+                signature,
+                text,
+            },
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// How the call starting at `at` would fare pointed at `value`: both functions' shapes and the
 /// verdict a save would reach. See `rivals_core::asset_edit::preview_call`.
 #[tauri::command]

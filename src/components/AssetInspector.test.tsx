@@ -867,6 +867,46 @@ describe("AssetInspector script text", () => {
     );
   });
 
+  it("adds a function from a name, a signature and its text, as a save of its own", async () => {
+    mock = tauri(functionPackage())
+      .on("export_script_view", () => textView())
+      .on("new_function_preview", () => ({
+        diagnostics: [],
+        warnings: [],
+        applied: [
+          {
+            name: "BP_Test_C function Glow",
+            before: "(none)",
+            after: "Glow(Strength: Float) as export 9",
+          },
+        ],
+      }));
+    installTauri(mock);
+    mount();
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: /New function/ }));
+    await user.type(screen.getByLabelText("New function name"), "Glow");
+    const signature = screen.getByLabelText("New function signature");
+    await user.clear(signature);
+    await user.type(signature, "(Strength: Float)");
+    await user.click(screen.getByRole("button", { name: /Write its script/ }));
+    expect(await screen.findByText(/Assembles\. Add function to write it/)).toBeTruthy();
+    expect(mock.callsTo("new_function_preview")[0]).toMatchObject({
+      name: "Glow",
+      signature: "(Strength: Float)",
+    });
+    await user.click(screen.getByRole("button", { name: /Add function/ }));
+    await waitFor(() =>
+      expect(lastSave().script_texts).toEqual([
+        {
+          new_function: "Glow",
+          signature: "(Strength: Float)",
+          text: "Return Nothing\nEndOfScript\n",
+        },
+      ])
+    );
+  });
+
   it("marks the lines the assembler refuses and lists why", async () => {
     mock = tauri(functionPackage())
       .on("export_script_view", () => textView())

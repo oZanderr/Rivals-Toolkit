@@ -99,6 +99,7 @@ import {
   type DraftRecord,
   type EditSession,
   type EditTarget,
+  type NewFunction,
   type Structural,
   pathCheckText,
   referenceText,
@@ -2096,6 +2097,9 @@ interface BytesView {
 
 // Raw bytes at the offsets traces and failure messages quote, with the run each property consumed
 // shaded so a desync can be read against the data that caused it.
+/** What a new function's script starts as: returning at once. */
+const NEW_FUNCTION_TEXT = "Return Nothing\nEndOfScript\n";
+
 /** The disassembly of one export's bytecode. Read only: an instruction cannot be edited yet, but
  *  the bytes behind it can be swapped whole through the export's Replace action. */
 function ScriptPane({
@@ -2106,6 +2110,8 @@ function ScriptPane({
   exportNames,
   focus,
   onOpen,
+  onAddFunction,
+  addBlocked,
 }: {
   gamePath: string;
   container: string;
@@ -2116,12 +2122,19 @@ function ScriptPane({
   /** A statement to scroll to on opening, when the pane was opened from a call or a caller. */
   focus: number | null;
   onOpen: (name: string, offset?: number) => void;
+  /** Adds a function to the class and saves it, a save of its own. */
+  onAddFunction?: (add: NewFunction) => void;
+  /** Why a function cannot be added now, when it cannot. */
+  addBlocked?: string | null;
 }) {
   const [view, setView] = useState<ScriptView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(true);
   const session = useEditSession();
   const [asText, setAsText] = useState(false);
+  const [adding, setAdding] = useState<{ name: string; signature: string } | null>(null);
+  const [writing, setWriting] = useState(false);
+  const newText = useRef(NEW_FUNCTION_TEXT);
   const textKey = draftKey(scriptTextTarget(exportIndex, ""));
   const textDraft = session.drafts[textKey]?.draft;
   const draftText = textDraft?.op === "script_text" ? textDraft.text : null;
@@ -2194,6 +2207,31 @@ function ScriptPane({
         : pending > 0
           ? `Save or discard the ${pending} edit${pending === 1 ? "" : "s"} to this function first.`
           : null;
+  if (adding && writing) {
+    return (
+      <ScriptTextEditor
+        gamePath={gamePath}
+        container={container}
+        entry={entry}
+        exportIndex={exportIndex}
+        initial={NEW_FUNCTION_TEXT}
+        keepsLayout={null}
+        newFunction={{ ...adding, blocked: addBlocked ?? null }}
+        onText={(text) => {
+          newText.current = text;
+        }}
+        onDiscard={() => {
+          setWriting(false);
+          setAdding(null);
+        }}
+        onDone={() => {
+          onAddFunction?.({ ...adding, text: newText.current });
+          setWriting(false);
+          setAdding(null);
+        }}
+      />
+    );
+  }
   if (asText && printed !== null && !textBlocked) {
     return (
       <ScriptTextEditor
@@ -2261,7 +2299,49 @@ function ScriptPane({
             </Button>
           </span>
         </Tip>
+        {onAddFunction && (
+          <Tip content="Add a function to this function's class, its script written as text">
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-6 px-2 text-[11px]"
+              onClick={() => setAdding(adding ? null : { name: "", signature: "()" })}
+            >
+              <Plus size={12} /> New function
+            </Button>
+          </Tip>
+        )}
       </div>
+      {adding && (
+        <div className="flex flex-wrap items-center gap-2 border-b border-border/60 px-3 py-1.5 text-[11px]">
+          <Input
+            aria-label="New function name"
+            value={adding.name}
+            onChange={(e) => setAdding({ ...adding, name: e.target.value })}
+            placeholder="Name"
+            className="h-7 w-40 font-mono text-[11px]"
+          />
+          <Input
+            aria-label="New function signature"
+            value={adding.signature}
+            onChange={(e) => setAdding({ ...adding, signature: e.target.value })}
+            placeholder="(Strength: Float) -> Hit: Bool"
+            className="h-7 min-w-0 flex-1 font-mono text-[11px]"
+          />
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7 px-2 text-[11px]"
+            disabled={!/^[A-Za-z_][A-Za-z0-9_]*$/.test(adding.name.trim())}
+            onClick={() => {
+              setAdding({ name: adding.name.trim(), signature: adding.signature.trim() });
+              setWriting(true);
+            }}
+          >
+            Write its script
+          </Button>
+        </div>
+      )}
       {view.signature_text && view.signature && (
         <div className="border-b border-border/60 px-3 py-1.5 font-mono text-[11px]">
           <p className="text-blue-accent-foreground">{view.signature_text}</p>
@@ -8688,6 +8768,16 @@ export default function AssetInspector({
                       exportNames={exportNames}
                       focus={scriptFocus?.index === selected ? scriptFocus.offset : null}
                       onOpen={openScript}
+                      onAddFunction={(add) =>
+                        void edits.save({ structural: { newFunctions: [add] } })
+                      }
+                      addBlocked={
+                        edits.saving
+                          ? "A save is under way."
+                          : previewContainerFilename(edits.modName, edits.saveTarget)
+                            ? null
+                            : "Name the mod to save into first."
+                      }
                     />
                   ) : active && treeRows.length > 0 ? (
                     <InheritedContext.Provider value={inheritedValues}>

@@ -88,6 +88,9 @@ pub fn preview_read_edits(
             parsed,
         );
     }
+    if !changes.new_functions.is_empty() {
+        return new_function_pass(request, mappings, loaded, parsed);
+    }
     if let Some(add) = changes.add_components.first() {
         if add.from_parent.is_some() {
             return inherited_component_pass(request, mappings, loaded, parsed, add);
@@ -1101,6 +1104,165 @@ fn component_pass(
     Ok((wired, loaded))
 }
 
+/// Adds functions to a Blueprint class in two stages: the functions themselves, each an export
+/// listed in its class with its parameters and a script that returns at once, then each one's
+/// script from its text along with the rest of the save, which can call them by name.
+fn new_function_pass(
+    request: &AssetEditRequest<'_>,
+    mappings: Option<&Mappings>,
+    loaded: FSerializedAssetBundle,
+    parsed: &rivals_uasset::ParsedPackage,
+) -> Result<(PatchedBundle, FSerializedAssetBundle), String> {
+    let changes = &request.changes;
+    let mut notes = Vec::new();
+    for add in &changes.new_functions {
+        notes.extend(inherited_name_clash(request, mappings, parsed, add)?);
+    }
+    let shell = PackageEdits {
+        new_functions: changes.new_functions.clone(),
+        ..Default::default()
+    };
+    let sidecars = rivals_uasset::Sidecars {
+        bulk: loaded.bulk_data_buffer.as_deref(),
+        optional_bulk: loaded.optional_bulk_data_buffer.as_deref(),
+    };
+    let (created, after) = patch_pass(
+        request,
+        mappings,
+        &bundle_of(&loaded),
+        sidecars,
+        parsed,
+        &shell,
+    )?;
+    let mut texts = changes.script_texts.clone();
+    for add in &changes.new_functions {
+        texts.push(rivals_uasset::ScriptTextEdit {
+            export: rivals_uasset::new_function_export(&after, add)?,
+            text: add.text.clone(),
+            was: None,
+        });
+    }
+    let staged = FSerializedAssetBundle {
+        asset_file_buffer: created.asset.clone(),
+        exports_file_buffer: created.exports.clone(),
+        bulk_data_buffer: loaded.bulk_data_buffer.clone(),
+        optional_bulk_data_buffer: loaded.optional_bulk_data_buffer.clone(),
+        memory_mapped_bulk_data_buffer: loaded.memory_mapped_bulk_data_buffer.clone(),
+    };
+    let (mut written, _) = preview_read_edits(
+        &AssetEditRequest {
+            changes: PackageEdits {
+                new_functions: Vec::new(),
+                script_texts: texts,
+                ..changes.clone()
+            },
+            ..*request
+        },
+        mappings,
+        staged,
+        &after,
+    )?;
+    let mut applied = created.applied;
+    applied.append(&mut written.applied);
+    written.applied = applied;
+    notes.append(&mut written.notes);
+    written.notes = notes;
+    Ok((written, loaded))
+}
+
+/// How many Blueprint parents deep a new function's name is looked for.
+const MAX_PARENTS: usize = 8;
+
+/// Refuses a new function a Blueprint parent of its class already has by that name, which it
+/// would override without being made an override. A native parent's functions are listed nowhere
+/// the toolkit reads, so meeting one is only noted.
+fn inherited_name_clash(
+    request: &AssetEditRequest<'_>,
+    mappings: Option<&Mappings>,
+    parsed: &rivals_uasset::ParsedPackage,
+    add: &rivals_uasset::NewFunctionEdit,
+) -> Result<Option<String>, String> {
+    let name = add.name.trim();
+    let class = match add.class {
+        Some(index) => parsed.exports.get(index as usize),
+        None => parsed.exports.iter().find(|export| {
+            export
+                .layout
+                .as_ref()
+                .is_some_and(|layout| layout.function_map_at.is_some())
+        }),
+    };
+    let Some(class) = class else {
+        return Ok(None);
+    };
+    let mut package = parsed.clone();
+    let mut parent = class.super_index;
+    for _ in 0..MAX_PARENTS {
+        let path = match parent {
+            index if index < 0 => package
+                .imports
+                .get((-index - 1) as usize)
+                .map(|i| i.path.clone()),
+            index if index > 0 => package
+                .exports
+                .get((index - 1) as usize)
+                .map(|e| e.path.clone()),
+            _ => None,
+        };
+        let Some(path) = path else {
+            return Ok(None);
+        };
+        if path.starts_with("/Script/") {
+            return Ok(Some(format!(
+                "{name} is not checked against the functions of {path}, which cooked data does not list"
+            )));
+        }
+        if request.kind != AssetSource::Utoc {
+            return Ok(Some(format!(
+                "{name} is not checked against the functions of {path}, which is read only from a container"
+            )));
+        }
+        let package_name = path.split('.').next().unwrap_or(&path);
+        let Ok(loaded) = asset::load_bundle(
+            request.game_root,
+            request.container,
+            package_name,
+            AssetSource::Utoc,
+        ) else {
+            return Ok(Some(format!(
+                "{name} is not checked against the functions of {path}, which did not load"
+            )));
+        };
+        let Ok(read) = rivals_uasset::parse_package_opts(
+            &bundle_of(&loaded),
+            mappings,
+            None,
+            ParseOptions {
+                skip_twins: true,
+                ..Default::default()
+            },
+        ) else {
+            return Ok(None);
+        };
+        let Some(found) = read.exports.iter().find(|export| export.path == path) else {
+            return Ok(None);
+        };
+        if found.layout.as_ref().is_some_and(|layout| {
+            layout
+                .function_map
+                .iter()
+                .any(|(listed, _)| listed.eq_ignore_ascii_case(name))
+        }) {
+            return Err(format!(
+                "{path} already has a function {name}; a new one by that name would stand in for it without being made its override"
+            ));
+        }
+        parent = found.super_index;
+        package = read;
+    }
+    Ok(None)
+}
+
 /// Takes a component out of a Blueprint in two stages: its nodes are unhooked from the construction
 /// script with value edits, the nodes under it taking its place, then the nodes and their templates
 /// are removed. Each stage is checked on its own, and the removal as a whole at the end.
@@ -1404,6 +1566,88 @@ pub fn preview_script_text(
                         text: text.to_string(),
                         was: None,
                     }],
+                    allow_unchecked,
+                    ..Default::default()
+                },
+                ..*request
+            },
+            mappings,
+        )
+    };
+    let outcome = match attempt(false) {
+        Err(refused) if refused.starts_with(crate::object_check::UNCHECKED) => {
+            preview.unchecked = Some(refused);
+            attempt(true)
+        }
+        other => other,
+    };
+    match outcome {
+        Ok((patched, _)) => preview.applied = patched.applied,
+        Err(refused) => preview.refused = Some(refused),
+    }
+    Ok(preview)
+}
+
+/// What adding `add` would do: its text's problems line by line, read against the function the
+/// save makes first, or the changes the save would make, why it would refuse, and what it would
+/// need leave for.
+pub fn preview_new_function(
+    request: &AssetEditRequest<'_>,
+    mappings: Option<&Mappings>,
+    add: &rivals_uasset::NewFunctionEdit,
+) -> Result<TextPreview, String> {
+    let (loaded, parsed) = read_package(request, mappings)?;
+    let shell = rivals_uasset::NewFunctionEdit {
+        text: "Return Nothing\nEndOfScript".into(),
+        ..add.clone()
+    };
+    let made = preview_read_edits(
+        &AssetEditRequest {
+            changes: PackageEdits {
+                new_functions: vec![shell.clone()],
+                ..Default::default()
+            },
+            ..*request
+        },
+        mappings,
+        loaded,
+        &parsed,
+    );
+    let (made, _) = match made {
+        Ok(made) => made,
+        Err(refused) => {
+            return Ok(TextPreview {
+                diagnostics: Vec::new(),
+                warnings: Vec::new(),
+                refused: Some(refused),
+                unchecked: None,
+                applied: Vec::new(),
+            });
+        }
+    };
+    let bundle = AssetBundle {
+        asset: &made.asset,
+        exports: &made.exports,
+    };
+    let after = reparse(request, mappings, &made.asset, &made.exports)?;
+    let export = rivals_uasset::new_function_export(&after, &shell)?;
+    let (diagnostics, warnings) =
+        rivals_uasset::text_diagnostics(&bundle, &after, export, &add.text)?;
+    let mut preview = TextPreview {
+        diagnostics,
+        warnings,
+        refused: None,
+        unchecked: None,
+        applied: Vec::new(),
+    };
+    if !preview.diagnostics.is_empty() {
+        return Ok(preview);
+    }
+    let attempt = |allow_unchecked: bool| {
+        preview_edits(
+            &AssetEditRequest {
+                changes: PackageEdits {
+                    new_functions: vec![add.clone()],
                     allow_unchecked,
                     ..Default::default()
                 },
@@ -14442,6 +14686,93 @@ mod game_data_tests {
                 assert!(result.is_ok(), "{entry} #{export}: {result:?}");
             }
         }
+    }
+
+    /// A function added to a Blueprint class is listed in it and written from its text, and the
+    /// event graph calls it by name in the same save, held to the new function's parameters.
+    #[test]
+    fn a_new_function_is_added_and_called_from_the_event_graph() {
+        let Some(fixture) = Fixture::open(CONSTRAINT_EMITTER) else {
+            return;
+        };
+        let before = fixture.parse();
+        let graph = function(&before, "ExecuteUbergraph_");
+        let add = rivals_uasset::NewFunctionEdit {
+            class: None,
+            name: "ToolkitGlow".into(),
+            signature: "(Strength: Float)".into(),
+            text: "local Seen: Int
+Let LocalVariable(Seen) = 1
+Return Nothing
+EndOfScript"
+                .into(),
+        };
+        let call = text_of(&before, "ExecuteUbergraph_").replacen(
+            "Jump LocalVariable(EntryPoint)
+",
+            "Jump LocalVariable(EntryPoint)
+LocalVirtualFunction ToolkitGlow(1.5f)
+",
+            1,
+        );
+        let (_, after) = fixture.apply_changes(PackageEdits {
+            new_functions: vec![add.clone()],
+            script_texts: vec![rivals_uasset::ScriptTextEdit {
+                export: graph.index,
+                text: call,
+                was: None,
+            }],
+            ..Default::default()
+        });
+        let index = rivals_uasset::new_function_export(&after, &add).expect("the function");
+        let signature = after.exports[index as usize]
+            .signature
+            .as_ref()
+            .expect("its fields");
+        assert_eq!(signature.params.len(), 1);
+        assert_eq!(
+            (
+                signature.params[0].name.as_str(),
+                signature.params[0].kind.as_str()
+            ),
+            ("Strength", "Float")
+        );
+        assert_eq!(signature.locals.len(), 1);
+        assert!(
+            text_of(&after, "ToolkitGlow").contains("Let LocalVariable(Seen) = 1"),
+            "{}",
+            text_of(&after, "ToolkitGlow")
+        );
+        assert!(
+            text_of(&after, "ExecuteUbergraph_").contains("LocalVirtualFunction ToolkitGlow(1.5f)")
+        );
+        let request = fixture.request_changes(PackageEdits {
+            new_functions: vec![rivals_uasset::NewFunctionEdit {
+                name: "ToolkitGlow".into(),
+                signature: "()".into(),
+                text: "Return Nothing
+EndOfScript"
+                    .into(),
+                ..Default::default()
+            }],
+            script_texts: vec![rivals_uasset::ScriptTextEdit {
+                export: graph.index,
+                text: text_of(&before, "ExecuteUbergraph_").replacen(
+                    "Jump LocalVariable(EntryPoint)
+",
+                    "Jump LocalVariable(EntryPoint)
+LocalVirtualFunction ToolkitGlow(1.5f)
+",
+                    1,
+                ),
+                was: None,
+            }],
+            ..Default::default()
+        });
+        let refused = preview_edits(&request, Some(&fixture.schema))
+            .err()
+            .expect("a call passing what the new function does not take is refused");
+        assert!(refused.contains("ToolkitGlow"), "{refused}");
     }
 
     /// Locals declared in an event graph's text are given to the graph, each with the import its

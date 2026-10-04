@@ -18,6 +18,7 @@ mod kismet;
 mod mappings;
 mod moviescene;
 mod names;
+mod new_function;
 mod niagara;
 mod package;
 mod props;
@@ -107,6 +108,7 @@ pub use kismet::{
 };
 pub use mappings::{Mappings, Schema, SchemaFixups, SchemaSlot, kind_name};
 pub use names::unused_names;
+pub use new_function::{NewFunctionEdit, new_function_export};
 pub use package::{
     AppliedFixup, AssetBundle, ExportStatus, ImportInfo, PackageInfo, ParseOptions, ParsedExport,
     ParsedPackage, TwinChoice, dotted_path, export_bytes, header_size, is_unresolved_import_name,

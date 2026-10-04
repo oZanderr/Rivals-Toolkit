@@ -538,22 +538,15 @@ pub fn preview_script_widen(
     Ok(patched.applied)
 }
 
-/// Writes a function's whole script anew from assembler text into a mod.
+/// Writes a function's whole script anew from assembler text into a mod, or adds a function
+/// written from one.
 pub fn script_assemble(
     request: &Request<'_>,
-    edit: rivals_uasset::ScriptTextEdit,
+    changes: PackageEdits,
     mod_name: &str,
     replace: bool,
 ) -> Result<String, String> {
-    write_edits(
-        request,
-        mod_name,
-        replace,
-        PackageEdits {
-            script_texts: vec![edit],
-            ..Default::default()
-        },
-    )
+    write_edits(request, mod_name, replace, changes)
 }
 
 /// What a save would do, without writing anything: each change it makes, and what it would say.
@@ -567,15 +560,11 @@ pub struct SavePreview {
 /// writing anything.
 pub fn preview_script_assemble(
     request: &Request<'_>,
-    edit: rivals_uasset::ScriptTextEdit,
+    changes: PackageEdits,
 ) -> Result<SavePreview, String> {
     let schema = mappings::resolve(request.usmap, request.configured_usmap)
         .and_then(|path| mappings::load(&path))
         .ok();
-    let changes = PackageEdits {
-        script_texts: vec![edit],
-        ..Default::default()
-    };
     let (patched, _) =
         asset_edit::preview_edits(&edit_request(request, "", changes), schema.as_deref())?;
     Ok(SavePreview {

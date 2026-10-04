@@ -337,8 +337,28 @@ struct ScriptAssembleArgs {
     asset: AssetArgs,
 
     /// Export index of the function, as `asset info` prints it.
-    #[arg(long, value_name = "N")]
-    export: u32,
+    #[arg(long, value_name = "N", required_unless_present = "new_function")]
+    export: Option<u32>,
+
+    /// Add a function to the Blueprint class under this name, its script written from the text,
+    /// rather than rewrite one the class has.
+    #[arg(
+        long,
+        value_name = "NAME",
+        conflicts_with = "export",
+        requires = "signature"
+    )]
+    new_function: Option<String>,
+
+    /// The new function's parameters, as a signature prints: `(A: Int, ref B: Array<Int>) -> Hit:
+    /// Bool`, or `-> (Hit: Bool, Count: Int)` for several outputs. Types as a `local` line takes
+    /// them, classes, structs and enums by full path.
+    #[arg(long, value_name = "SIGNATURE", requires = "new_function")]
+    signature: Option<String>,
+
+    /// The class export the new function goes to, when the package holds more than one.
+    #[arg(long, value_name = "N", requires = "new_function")]
+    class: Option<u32>,
 
     /// The text to assemble, as `asset script --text` prints it: UTF-8, or UTF-16 behind a byte
     /// order mark.
@@ -2481,10 +2501,25 @@ fn asset_script_assemble(
         .map_err(|e| format!("read {}: {e}", args.text_file.display()))?;
     let text = rivals_core::asset_edit::json::decode_text(&bytes)
         .map_err(|e| format!("{}: {e}", args.text_file.display()))?;
-    let edit = rivals_uasset::ScriptTextEdit {
-        export: args.export,
-        text,
-        was: None,
+    let edit = match (&args.new_function, args.export) {
+        (Some(name), _) => rivals_uasset::PackageEdits {
+            new_functions: vec![rivals_uasset::NewFunctionEdit {
+                class: args.class,
+                name: name.clone(),
+                signature: args.signature.clone().unwrap_or_default(),
+                text,
+            }],
+            ..Default::default()
+        },
+        (None, Some(export)) => rivals_uasset::PackageEdits {
+            script_texts: vec![rivals_uasset::ScriptTextEdit {
+                export,
+                text,
+                was: None,
+            }],
+            ..Default::default()
+        },
+        (None, None) => return Err("give --export, or --new-function to add one".into()),
     };
     if args.dry_run {
         let preview = asset::preview_script_assemble(&request, edit)?;
