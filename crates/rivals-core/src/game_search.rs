@@ -179,6 +179,9 @@ pub fn game_search(
     let frontier = Frontier::new(total.div_ceil(PACKAGES_PER_CONVERTER), cap);
     let outcomes: Vec<Outcome> = candidates
         .par_chunks(PACKAGES_PER_CONVERTER)
+        // Each run of packages is a job of its own: neighbours by path cost alike, so a thread
+        // handed several at once can be left with all of a folder of maps while the rest wait.
+        .with_max_len(1)
         .enumerate()
         .flat_map_iter(|(index, chunk)| {
             let converter = PackageConverter::new(&order);

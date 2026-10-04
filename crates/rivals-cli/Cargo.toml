@@ -15,5 +15,6 @@ rivals-core = { path = "../rivals-core" }
 rivals-uasset = { path = "../rivals-uasset" }
 clap.workspace = true
 dirs.workspace = true
+mimalloc.workspace = true
 serde.workspace = true
 serde_json.workspace = true

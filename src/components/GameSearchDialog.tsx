@@ -170,7 +170,7 @@ export function GameSearch({
           <div className="flex items-center gap-3 text-[12px]">
             <label className="flex shrink-0 items-center gap-2">
               <Switch checked={values} onCheckedChange={setValues} aria-label="Stored values" />
-              Also search stored values (reads every package: minutes)
+              Also search stored values (reads every package: about a minute)
             </label>
             <Input
               aria-label="Only paths containing"

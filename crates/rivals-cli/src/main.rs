@@ -2,6 +2,11 @@
 
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 
+/// The default Windows heap makes threads queue for the large allocations a walk over the game
+/// makes on every thread at once; mimalloc gives each thread its own.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 mod asset;
 mod resolve;
 mod settings;
@@ -620,8 +625,8 @@ struct AssetSearchArgs {
 
     /// Search stored values too: strings, names, texts, object and asset paths, enumerators and
     /// delegates, at any depth, DataTable rows and StringTable entries included. Reads every
-    /// package rather than only the ones holding functions, which takes minutes; pair it with
-    /// `--filter`.
+    /// package rather than only the ones holding functions, which takes about a minute for the
+    /// whole game; `--filter` narrows it.
     #[arg(long)]
     values: bool,
 

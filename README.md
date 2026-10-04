@@ -256,13 +256,13 @@ rivals-cli asset audit --all --text-check      # every script back byte for byte
 `asset search` finds where the game's scripts name something: a call, a bound or broadcast delegate,
 a string, a name constant, an object, or a variable read or written. It reads each package from the
 copy the game loads, enabled mods included and labelled. A script search parses only the packages
-holding functions, which takes about half a minute for the whole game; `--values` searches stored
-values too, at any depth, which means reading every package, so narrow it with `--filter`. `--kind`
-keeps one kind of term, `--word` matches whole words only, and `--no-mods` reads the base game
-alone. `--kind write` lists only where a variable is assigned or changed in place: a call
-changing a variable it is handed counts only for the engine functions known to, the array, map and
-set functions, timer handles, random streams and gameplay tag containers, since nothing in the
-bytecode says which arguments other calls change.
+holding functions, which takes under half a minute for the whole game; `--values` searches stored
+values too, at any depth, which means reading every package and takes about a minute, or less with
+`--filter`. `--kind` keeps one kind of term, `--word` matches whole words only, and `--no-mods`
+reads the base game alone. `--kind write` lists only where a variable is assigned or changed in
+place: a call changing a variable it is handed counts only for the engine functions known to, the
+array, map and set functions, timer handles, random streams and gameplay tag containers, since
+nothing in the bytecode says which arguments other calls change.
 
 `asset sweep` sets the same properties across every package a filter matches, by name at any depth,
 and puts the whole batch in with one container rewrite. It changes only values a package actually

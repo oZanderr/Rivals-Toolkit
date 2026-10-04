@@ -44,3 +44,4 @@ rayon.workspace = true
 ureq = { version = "3", features = ["json"] }
 lewton = "0.10"
 sysinfo.workspace = true
+mimalloc.workspace = true
