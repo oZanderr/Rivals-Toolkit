@@ -1195,7 +1195,7 @@ fn check_variable_class_is_alone(
         }),
     }
     .ok_or("this package holds no Blueprint class to add a variable to")?;
-    let class_path = class.path.clone();
+    let class_path = class.path.as_str();
     let (package, name) = class_path
         .split_once('.')
         .ok_or_else(|| format!("{class_path} is not a class's path"))?;
@@ -1204,13 +1204,36 @@ fn check_variable_class_is_alone(
         Some(index) if !index.is_stale(request.game_root) => index,
         _ => crate::import_index::build(request.game_root, &mut |_, _| {})?,
     };
-    let mut importers = index.importers_of(&class_path).packages;
+    let mut importers = index.importers_of(class_path).packages;
     importers.extend(index.importers_of(&defaults).packages);
     importers.sort();
     importers.dedup();
-    let own = request.entry.replace('\\', "/").to_ascii_lowercase();
-    let mods =
-        crate::import_index::enabled_mod_containers(&crate::paths::paks_dir(request.game_root));
+    let holders = packages_holding(request.game_root, request.entry, class_path, &importers);
+    if holders.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{class_path} is made into objects or derived from in other packages, whose values a new variable would move: {}",
+            holders.join(", ")
+        ))
+    }
+}
+
+/// Which of `importers`, as the import index lists them, make an object of `class_path` or
+/// derive a class from it, by their own headers. One that does not read counts as holding it.
+/// `own` is the class's package, which is left out.
+fn packages_holding(
+    game_root: &str,
+    own: &str,
+    class_path: &str,
+    importers: &[String],
+) -> Vec<String> {
+    let defaults = match class_path.split_once('.') {
+        Some((package, name)) => format!("{package}.Default__{name}"),
+        None => class_path.to_string(),
+    };
+    let own = own.replace('\\', "/").to_ascii_lowercase();
+    let mods = crate::import_index::enabled_mod_containers(&crate::paths::paks_dir(game_root));
     let mut holders = Vec::new();
     for listed in importers {
         let (path, in_mod) = match listed.split_once(" (in ") {
@@ -1218,7 +1241,7 @@ fn check_variable_class_is_alone(
                 path.to_string(),
                 Some(name.trim_end_matches(')').to_string()),
             ),
-            None => (listed.clone(), None),
+            None => (listed.to_string(), None),
         };
         if path.to_ascii_lowercase() == own {
             continue;
@@ -1233,7 +1256,7 @@ fn check_variable_class_is_alone(
             None => Some("pakchunk0-Windows.utoc".to_string()),
         };
         let read = container.and_then(|container| {
-            asset::load_bundle(request.game_root, &container, &path, AssetSource::Utoc).ok()
+            asset::load_bundle(game_root, &container, &path, AssetSource::Utoc).ok()
         });
         let Some(header) =
             read.and_then(|loaded| rivals_uasset::read_header(&bundle_of(&loaded)).ok())
@@ -1251,17 +1274,10 @@ fn check_variable_class_is_alone(
                 || names_it(export.super_index)
                 || names_it(export.template_index)
         }) {
-            holders.push(listed);
+            holders.push(listed.clone());
         }
     }
-    if holders.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
-            "{class_path} is made into objects or derived from in other packages, whose values a new variable would move: {}",
-            holders.join(", ")
-        ))
-    }
+    holders
 }
 
 /// How many Blueprint parents deep a new function's name is looked for.
@@ -7616,10 +7632,7 @@ mod game_data_tests {
             .expect("the left mesh's package")
             .path
             .clone();
-        let scratch = ScratchMod {
-            root: fixture.root.clone(),
-            name: "RivalsToolkitOrphanProbe",
-        };
+        let scratch = ScratchMod::new(fixture.root.clone(), "RivalsToolkitOrphanProbe");
         let request = AssetEditRequest {
             mod_name: scratch.name,
             ..fixture.request_changes(PackageEdits {
@@ -7696,10 +7709,7 @@ mod game_data_tests {
         );
         let field = entry_name(&before, "Volume_Master");
         let text = format!("LOCTABLE(\"{MODE_TABLE}\", \"Text_QuickMode\")");
-        let scratch = ScratchMod {
-            root: fixture.root.clone(),
-            name: "RivalsToolkitTextProbe",
-        };
+        let scratch = ScratchMod::new(fixture.root.clone(), "RivalsToolkitTextProbe");
         let request = AssetEditRequest {
             mod_name: scratch.name,
             ..fixture.request(vec![edit_of(&field, EditOp::Set { text: text.clone() })])
@@ -7874,10 +7884,7 @@ mod game_data_tests {
             .expect("its package")
             .path
             .clone();
-        let scratch = ScratchMod {
-            root: fixture.root.clone(),
-            name: "RivalsToolkitOuterProbe",
-        };
+        let scratch = ScratchMod::new(fixture.root.clone(), "RivalsToolkitOuterProbe");
         let request = AssetEditRequest {
             mod_name: scratch.name,
             ..fixture.request_changes(PackageEdits {
@@ -8038,9 +8045,19 @@ mod game_data_tests {
     struct ScratchMod {
         root: String,
         name: &'static str,
+        /// Released after the mod's files are gone, since fields drop after `drop` runs.
+        _turn: crate::paths::ModsTurn,
     }
 
     impl ScratchMod {
+        fn new(root: String, name: &'static str) -> Self {
+            Self {
+                root,
+                name,
+                _turn: crate::paths::ModsTurn::take(),
+            }
+        }
+
         fn container(&self) -> std::path::PathBuf {
             mod_pak_path(&self.root, self.name)
                 .expect("pak path")
@@ -8067,14 +8084,8 @@ mod game_data_tests {
         let (Some(titles), Some(strings)) = (Fixture::open(TITLES), Fixture::open(STRINGS)) else {
             return;
         };
-        let scratch = ScratchMod {
-            root: titles.root.clone(),
-            name: "RivalsToolkitRetargetProbe",
-        };
-        drop(ScratchMod {
-            root: titles.root.clone(),
-            name: scratch.name,
-        });
+        let scratch = ScratchMod::new(titles.root.clone(), "RivalsToolkitRetargetProbe");
+        drop(ScratchMod::new(titles.root.clone(), scratch.name));
         const CLONE: &str = "/Game/Mods/ToolkitTest/RetargetClone";
         const RENAMED: &str = "/Game/Mods/ToolkitTest/RetargetRenamed";
         let save = |request: AssetEditRequest<'_>, options: SaveOptions| match save_edits(
@@ -8227,14 +8238,11 @@ mod game_data_tests {
         let Some(fixture) = Fixture::open(NANITE_MATERIAL) else {
             return;
         };
-        let scratch = ScratchMod {
-            root: fixture.root.clone(),
-            name: "RivalsToolkitShaderMapProbe",
-        };
-        drop(ScratchMod {
-            root: fixture.root.clone(),
-            name: "RivalsToolkitShaderMapProbe",
-        });
+        let scratch = ScratchMod::new(fixture.root.clone(), "RivalsToolkitShaderMapProbe");
+        drop(ScratchMod::new(
+            fixture.root.clone(),
+            "RivalsToolkitShaderMapProbe",
+        ));
         let header = rivals_uasset::read_header(&fixture.bundle()).expect("header");
         let package = header.summary.package_name.clone();
         let base = asset::shader_map_hashes(&fixture.root, Some(&fixture.container), &package);
@@ -8335,14 +8343,11 @@ mod game_data_tests {
         let Some(fixture) = Fixture::open(DEFAULTS) else {
             return;
         };
-        let scratch = ScratchMod {
-            root: fixture.root.clone(),
-            name: "RivalsToolkitPreviewProbe",
-        };
-        drop(ScratchMod {
-            root: fixture.root.clone(),
-            name: "RivalsToolkitPreviewProbe",
-        });
+        let scratch = ScratchMod::new(fixture.root.clone(), "RivalsToolkitPreviewProbe");
+        drop(ScratchMod::new(
+            fixture.root.clone(),
+            "RivalsToolkitPreviewProbe",
+        ));
         let cell = row_ints(&fixture.parse(), 1).remove(0);
         let PropertyValue::Int { value: was } = cell.value else {
             unreachable!()
@@ -8414,14 +8419,8 @@ mod game_data_tests {
         let Some(fixture) = Fixture::open(DEFAULTS) else {
             return;
         };
-        let scratch = ScratchMod {
-            root: fixture.root.clone(),
-            name: "RivalsToolkitLayerReplaceProbe",
-        };
-        drop(ScratchMod {
-            root: fixture.root.clone(),
-            name: scratch.name,
-        });
+        let scratch = ScratchMod::new(fixture.root.clone(), "RivalsToolkitLayerReplaceProbe");
+        drop(ScratchMod::new(fixture.root.clone(), scratch.name));
         let cell = row_ints(&fixture.parse(), 1).remove(0);
         fn request<'a>(
             fixture: &'a Fixture,
@@ -8470,14 +8469,11 @@ mod game_data_tests {
         let Some(fixture) = Fixture::open(DEFAULTS) else {
             return;
         };
-        let scratch = ScratchMod {
-            root: fixture.root.clone(),
-            name: "RivalsToolkitLayerProbe",
-        };
-        drop(ScratchMod {
-            root: fixture.root.clone(),
-            name: "RivalsToolkitLayerProbe",
-        });
+        let scratch = ScratchMod::new(fixture.root.clone(), "RivalsToolkitLayerProbe");
+        drop(ScratchMod::new(
+            fixture.root.clone(),
+            "RivalsToolkitLayerProbe",
+        ));
         let before = fixture.parse();
         let cells = row_ints(&before, 2);
         let request = |edit: ValueEdit| AssetEditRequest {
@@ -8533,14 +8529,11 @@ mod game_data_tests {
         let Some(fixture) = Fixture::open(STRINGS) else {
             return;
         };
-        let scratch = ScratchMod {
-            root: fixture.root.clone(),
-            name: "RivalsToolkitLayerDiffProbe",
-        };
-        drop(ScratchMod {
-            root: fixture.root.clone(),
-            name: "RivalsToolkitLayerDiffProbe",
-        });
+        let scratch = ScratchMod::new(fixture.root.clone(), "RivalsToolkitLayerDiffProbe");
+        drop(ScratchMod::new(
+            fixture.root.clone(),
+            "RivalsToolkitLayerDiffProbe",
+        ));
         let row_strings = |parsed: &rivals_uasset::ParsedPackage| -> Vec<PropertyEntry> {
             parsed.exports[0].data_table.as_ref().expect("table").rows[..2]
                 .iter()
@@ -8644,22 +8637,16 @@ mod game_data_tests {
         let Some(strings) = Fixture::open(STRINGS) else {
             return;
         };
-        let first = ScratchMod {
-            root: fixture.root.clone(),
-            name: "RivalsToolkitBatchProbeA",
-        };
-        let second = ScratchMod {
-            root: fixture.root.clone(),
-            name: "RivalsToolkitBatchProbeB",
-        };
-        drop(ScratchMod {
-            root: fixture.root.clone(),
-            name: "RivalsToolkitBatchProbeA",
-        });
-        drop(ScratchMod {
-            root: fixture.root.clone(),
-            name: "RivalsToolkitBatchProbeB",
-        });
+        let first = ScratchMod::new(fixture.root.clone(), "RivalsToolkitBatchProbeA");
+        let second = ScratchMod::new(fixture.root.clone(), "RivalsToolkitBatchProbeB");
+        drop(ScratchMod::new(
+            fixture.root.clone(),
+            "RivalsToolkitBatchProbeA",
+        ));
+        drop(ScratchMod::new(
+            fixture.root.clone(),
+            "RivalsToolkitBatchProbeB",
+        ));
         let cell = row_ints(&fixture.parse(), 1).remove(0);
         let text = field_where(&strings.parse(), "is a stored string", |f| {
             stored(f) && matches!(f.value, PropertyValue::Str { .. })
@@ -8739,14 +8726,11 @@ mod game_data_tests {
         let Some(strings) = Fixture::open(STRINGS) else {
             return;
         };
-        let scratch = ScratchMod {
-            root: fixture.root.clone(),
-            name: "RivalsToolkitRevertProbe",
-        };
-        drop(ScratchMod {
-            root: fixture.root.clone(),
-            name: "RivalsToolkitRevertProbe",
-        });
+        let scratch = ScratchMod::new(fixture.root.clone(), "RivalsToolkitRevertProbe");
+        drop(ScratchMod::new(
+            fixture.root.clone(),
+            "RivalsToolkitRevertProbe",
+        ));
         let cell = row_ints(&fixture.parse(), 1).remove(0);
         let text = field_where(&strings.parse(), "is a stored string", |f| {
             stored(f) && matches!(f.value, PropertyValue::Str { .. })
@@ -8826,14 +8810,11 @@ mod game_data_tests {
         let Some(fixture) = Fixture::open(DEFAULTS) else {
             return;
         };
-        let scratch = ScratchMod {
-            root: fixture.root.clone(),
-            name: "RivalsToolkitLooseProbe",
-        };
-        drop(ScratchMod {
-            root: fixture.root.clone(),
-            name: "RivalsToolkitLooseProbe",
-        });
+        let scratch = ScratchMod::new(fixture.root.clone(), "RivalsToolkitLooseProbe");
+        drop(ScratchMod::new(
+            fixture.root.clone(),
+            "RivalsToolkitLooseProbe",
+        ));
         let dir = std::env::temp_dir().join(format!("rivals-loose-{}", std::process::id()));
         let disk = dir.join("Extracted/MarvelHeroTable.uasset");
         fs::create_dir_all(disk.parent().expect("parent")).expect("dirs");
@@ -8925,15 +8906,12 @@ mod game_data_tests {
         let Some(fixture) = Fixture::open(DEFAULTS) else {
             return;
         };
-        let scratch = ScratchMod {
-            root: fixture.root.clone(),
-            name: "RivalsToolkitIoStoreProbe",
-        };
+        let scratch = ScratchMod::new(fixture.root.clone(), "RivalsToolkitIoStoreProbe");
         // A stale container from an interrupted run would be reported rather than replaced.
-        drop(ScratchMod {
-            root: fixture.root.clone(),
-            name: "RivalsToolkitIoStoreProbe",
-        });
+        drop(ScratchMod::new(
+            fixture.root.clone(),
+            "RivalsToolkitIoStoreProbe",
+        ));
 
         let before = fixture.parse();
         let cell = before.exports[0].data_table.as_ref().expect("table").rows[0]
@@ -14836,6 +14814,60 @@ mod game_data_tests {
             declared.properties.last().map(|p| p.name.as_str()),
             Some("ToolkitCount")
         );
+    }
+
+    /// Only a package that makes an object of a class, or derives one from it, holds the class
+    /// against a new variable; one that only names it, to create or cast to it, does not.
+    #[test]
+    fn a_class_placed_in_another_package_is_held_by_it() {
+        let Ok(root) = std::env::var("RIVALS_GAME_ROOT") else {
+            return;
+        };
+        let ui = "Marvel/Content/Marvel/UI/Blueprints";
+        let packages = |names: &[&str]| -> Vec<String> {
+            names
+                .iter()
+                .map(|name| format!("{ui}/{name}.uasset"))
+                .collect()
+        };
+        // Every widget the wheel's importers are places one, the package's own copy left out.
+        let placing = packages(&[
+            "League/Team/WBP_League_PlayerOperate_InfoItem",
+            "Setting/WBP_Setting_Control_KeyCorona",
+            "Setting/WBP_Setting_Item",
+            "Setting/WBP_Setting_OptionEntryBackup",
+            "Setting/WBP_Setting_OptionEntryContent",
+            "Setting/WBP_Setting_OptionEntry_Clan",
+        ]);
+        let mut importers = placing.clone();
+        importers.extend(packages(&["Setting/WBP_Shortcut_Corona"]));
+        let holders = packages_holding(
+            &root,
+            &format!("{ui}/Setting/WBP_Shortcut_Corona.uasset"),
+            "/Game/Marvel/UI/Blueprints/Setting/WBP_Shortcut_Corona.WBP_Shortcut_Corona_C",
+            &importers,
+        );
+        assert_eq!(holders, placing);
+        // The ability HUD only calls functions on the skin helper's default object.
+        let holders = packages_holding(
+            &root,
+            &format!(
+                "{ui}/Ability/AbilityUIC/1057/UIFunction_AbilityHUD_105711AbilitySkin_BP.uasset"
+            ),
+            "/Game/Marvel/UI/Blueprints/Ability/AbilityUIC/1057/UIFunction_AbilityHUD_105711AbilitySkin_BP.UIFunction_AbilityHUD_105711AbilitySkin_BP_C",
+            &packages(&["Ability/AbilityUIC/1057/WBP_AbilityHUD_105711_105721"]),
+        );
+        assert!(holders.is_empty(), "{holders:?}");
+        // A Blueprint deriving from the class holds it too.
+        let blueprints = "Marvel/Content/Marvel/Environment/Common/Reusable/Blueprint";
+        let grass = vec![format!("{blueprints}/BP_InteriorGrass.uasset")];
+        let holders = packages_holding(
+            &root,
+            &format!("{blueprints}/BP_P_Scatterer.uasset"),
+            "/Game/Marvel/Environment/Common/Reusable/Blueprint/BP_P_Scatterer.BP_P_Scatterer_C",
+            &grass,
+        );
+        assert_eq!(holders, grass);
     }
 
     /// A function added to a Blueprint class is listed in it and written from its text, and the

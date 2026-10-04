@@ -592,6 +592,7 @@ mod game_data_tests {
         let Some((root, mappings)) = install() else {
             return;
         };
+        let _turn = crate::paths::ModsTurn::take();
         let order = load_order::open(&root, true, false).expect("containers");
         let Some(layer) = order.layers.iter().find(|layer| layer.mod_name.is_some()) else {
             return;
@@ -640,6 +641,7 @@ mod game_data_tests {
         let Some((root, _)) = install() else {
             return;
         };
+        let _turn = crate::paths::ModsTurn::take();
         let order = load_order::open(&root, true, false).expect("containers");
         let converter = PackageConverter::new(&order);
         for candidate in winning_copies(&order, &PathFilter::new(None))
