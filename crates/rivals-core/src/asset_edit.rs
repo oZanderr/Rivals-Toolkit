@@ -14444,6 +14444,52 @@ mod game_data_tests {
         }
     }
 
+    /// Locals declared in an event graph's text are given to the graph, each with the import its
+    /// type needs, and the text naming them saves and reads back.
+    #[test]
+    fn an_event_graph_text_declares_locals_of_its_own() {
+        let Some(fixture) = Fixture::open(CONSTRAINT_EMITTER) else {
+            return;
+        };
+        let before = fixture.parse();
+        let graph = function(&before, "ExecuteUbergraph_");
+        let text = format!(
+            "local ToolkitCount: Int
+local ToolkitTarget: Object</Script/Engine.Actor>
+local ToolkitAt: Struct</Script/CoreUObject.Vector, 24>
+{}",
+            text_of(&before, "ExecuteUbergraph_").replacen(
+                "Jump LocalVariable(EntryPoint)
+",
+                "Jump LocalVariable(EntryPoint)
+Let LocalVariable(ToolkitCount) = 3
+",
+                1,
+            )
+        );
+        let (_, after) = fixture.apply_changes(text_edit(graph.index, text));
+        let locals: Vec<(String, String)> = after.exports[graph.index as usize]
+            .signature
+            .as_ref()
+            .expect("its fields are read")
+            .locals
+            .iter()
+            .map(|local| (local.name.clone(), local.kind.clone()))
+            .collect();
+        let pair = |name: &str, kind: &str| (name.to_string(), kind.to_string());
+        assert!(
+            locals.ends_with(&[
+                pair("ToolkitCount", "Int"),
+                pair("ToolkitTarget", "Object<Actor>"),
+                pair("ToolkitAt", "Vector"),
+            ]),
+            "{locals:?}"
+        );
+        assert!(
+            text_of(&after, "ExecuteUbergraph_").contains("Let LocalVariable(ToolkitCount) = 3")
+        );
+    }
+
     /// A statement put at the head of the event graph moves every event that enters it and every
     /// latent action resuming in it, and the stubs read the new entries back.
     #[test]

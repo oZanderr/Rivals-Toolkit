@@ -709,4 +709,62 @@ mod game_data_tests {
         }
         assert!(recovered > 0, "nothing under {SETTINGS} needed a layout");
     }
+
+    /// Every field record of every class and function in the Settings widgets writes back to
+    /// exactly the bytes the cook wrote, which is what a new one is written in the likeness of.
+    #[test]
+    fn every_field_record_writes_back_as_the_cook_wrote_it() {
+        let Some((root, mappings)) = install() else {
+            return;
+        };
+        let order = load_order::open(&root, false, false).expect("containers");
+        let converter = PackageConverter::new(&order);
+        let mut records = 0;
+        for candidate in winning_copies(&order, &PathFilter::new(Some(SETTINGS))) {
+            let bundle = converter
+                .convert(candidate.id, &candidate.path)
+                .expect("converts");
+            let assets = AssetBundle {
+                asset: &bundle.asset_file_buffer,
+                exports: &bundle.exports_file_buffer,
+            };
+            let parsed = rivals_uasset::parse_package_opts(
+                &assets,
+                Some(&mappings),
+                None,
+                ParseOptions {
+                    skip_twins: true,
+                    ..Default::default()
+                },
+            )
+            .expect("parses");
+            let header = rivals_uasset::read_header(&assets).expect("header");
+            let bytes = [
+                bundle.asset_file_buffer.as_slice(),
+                bundle.exports_file_buffer.as_slice(),
+            ]
+            .concat();
+            let mut names = header.name_map.clone();
+            for export in &parsed.exports {
+                for (record, (start, end)) in export.layout.iter().flat_map(|l| &l.records) {
+                    assert!(
+                        rivals_uasset::encode_field_record(record, &mut names)
+                            == bytes[*start as usize..*end as usize],
+                        "{} {}: {}",
+                        candidate.path,
+                        export.object_name,
+                        record.name
+                    );
+                    records += 1;
+                }
+            }
+            assert_eq!(
+                names.num_names(),
+                header.name_map.num_names(),
+                "{}",
+                candidate.path
+            );
+        }
+        assert!(records > 1000, "only {records} records");
+    }
 }

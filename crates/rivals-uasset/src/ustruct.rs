@@ -14,14 +14,10 @@ use crate::reader::Cursor;
 /// `FUNC_Net`: the function carries a replication offset after its flags.
 const FUNC_NET: u32 = 0x0000_0040;
 
-/// `FField::FlagsPrivate`, which sits between the field's type and its name.
-const FIELD_FLAGS_BYTES: usize = 4;
-
 /// `ElementSize`, `PropertyFlags` and `RepIndex`, which follow `ArrayDim`. The size and the flags
 /// are kept, for what they say about a function's parameters.
 #[cfg(test)]
 const FIELD_TAIL_BYTES: usize = 4 + 8 + 2;
-const REP_INDEX_BYTES: usize = 2;
 
 /// `CPF_Parm`, `CPF_OutParm`, `CPF_ReturnParm` and `CPF_ReferenceParm`.
 const CPF_PARM: u64 = 0x80;
@@ -274,6 +270,65 @@ fn collect_definitions(
         .collect()
 }
 
+/// A field record as `FProperty::Serialize` writes it, every part kept, so it can be written back
+/// byte for byte and a new one written in its likeness.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldRecord {
+    /// The field's class, `IntProperty`, `StructProperty` and the rest.
+    pub kind: String,
+    pub name: String,
+    /// `FField::FlagsPrivate`, object flags.
+    pub field_flags: u32,
+    pub array_dim: i32,
+    pub element_size: i32,
+    pub property_flags: u64,
+    pub rep_index: u16,
+    pub rep_notify: String,
+    pub condition: u8,
+    pub tail: RecordTail,
+}
+
+/// What a field record's type adds after the common part.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordTail {
+    None,
+    /// `FBoolProperty`'s packing.
+    Bool([u8; BOOL_PACKING_BYTES]),
+    /// One index: a byte property's enum (zero for a plain byte), an object type's class, a
+    /// struct, a delegate's signature function.
+    Index(i32),
+    /// A class reference: the property class, then the metaclass.
+    Indices(i32, i32),
+    /// A field path: the class of field it points at, by name.
+    Name(String),
+    /// An enum property: the enum, then the underlying numeric record.
+    Enum(i32, Box<FieldRecord>),
+    /// An array's or a set's element record.
+    One(Box<FieldRecord>),
+    /// A map's key and value records.
+    Two(Box<FieldRecord>, Box<FieldRecord>),
+}
+
+/// Where a class or function export keeps what makes up its layout, and its field records as
+/// written, so a save can add a record, a function or a function map entry beside the ones it has.
+#[derive(Debug, Clone, Default)]
+pub struct StructLayout {
+    /// Where the `Children` count sits: one index follows it per function the struct holds.
+    pub children_at: u64,
+    pub children: Vec<i32>,
+    /// Where the `ChildProperties` count sits; the records follow it.
+    pub child_properties_at: u64,
+    /// Each record as written, with the file range it spans.
+    pub records: Vec<(FieldRecord, (u64, u64))>,
+    /// Where the records end, which is where the script's size words start.
+    pub records_end: u64,
+    /// A class's function map: where its count sits, then each name with its function.
+    pub function_map_at: Option<u64>,
+    pub function_map: Vec<(String, i32)>,
+    /// Where a function's `FunctionFlags` sit.
+    pub function_flags_at: Option<u64>,
+}
+
 /// What a `UStruct`-derived export stores after its properties, as far as the scanner follows it:
 /// where every object reference sits, and where bytecode the scanner cannot read into lies.
 #[derive(Debug)]
@@ -295,6 +350,7 @@ pub(crate) struct StructTail {
     pub super_struct: i32,
     /// Where that index sits, so a reparent can splice over it.
     pub super_struct_at: u64,
+    pub layout: StructLayout,
 }
 
 /// Walks a `UStruct`, `UClass` or `UFunction` export from after its object guid to its end, in
@@ -307,23 +363,31 @@ pub(crate) fn scan_struct_tail(
     chain: &[&str],
 ) -> Result<StructTail, String> {
     let mut references = Vec::new();
+    let mut layout = StructLayout::default();
     let super_struct_at = cursor.file_offset();
     let super_struct = take_index(cursor, &mut references)?;
+    layout.children_at = cursor.file_offset();
     for _ in 0..read_count(cursor, "UStruct children")? {
-        take_index(cursor, &mut references)?;
+        let child = take_index(cursor, &mut references)?;
+        layout.children.push(child);
     }
     let mut properties = Vec::new();
     let mut flags = Vec::new();
     let mut details = Vec::new();
     let mut function_tail = None;
+    layout.child_properties_at = cursor.file_offset();
     for ordinal in 0..read_count(cursor, "UStruct child properties")? {
-        let (field, flag, detail) = read_flagged_field(cursor, header, ordinal, &mut references)?;
+        let start = cursor.file_offset();
+        let (field, flag, detail, record) =
+            read_flagged_field(cursor, header, ordinal, &mut references)?;
+        layout.records.push((record, (start, cursor.file_offset())));
         properties.push(field);
         flags.push(flag);
         details.push(detail);
     }
     // Bytecode is stored behind its size, so it can be stepped over without being understood.
     let sizes_at = cursor.file_offset();
+    layout.records_end = sizes_at;
     let buffer_size = cursor.read_i32()?.max(0) as u32;
     let storage = read_count(cursor, "bytecode storage")?;
     let bytecode = (storage > 0).then(|| {
@@ -333,9 +397,11 @@ pub(crate) fn scan_struct_tail(
     cursor.skip(storage)?;
 
     if chain.contains(&"Class") {
+        layout.function_map_at = Some(cursor.file_offset());
         for _ in 0..read_count(cursor, "function map")? {
-            cursor.read_name(&header.name_map)?;
-            take_index(cursor, &mut references)?;
+            let name = cursor.read_name(&header.name_map)?;
+            let function = take_index(cursor, &mut references)?;
+            layout.function_map.push((name, function));
         }
         // ClassFlags, ClassWithin, ClassConfigName, ClassGeneratedBy. The generated-by reference
         // precedes the interfaces: the two are indistinguishable for a class without interfaces
@@ -374,9 +440,11 @@ pub(crate) fn scan_struct_tail(
                 signature: None,
                 super_struct,
                 super_struct_at,
+                layout,
             });
         }
     } else if chain.contains(&"Function") {
+        layout.function_flags_at = Some(cursor.file_offset());
         let flags = cursor.read_u32()?;
         if flags & FUNC_NET != 0 {
             cursor.skip(2)?;
@@ -398,6 +466,7 @@ pub(crate) fn scan_struct_tail(
             signature: None,
             super_struct,
             super_struct_at,
+            layout,
         });
     }
     if cursor.remaining() != 0 {
@@ -426,6 +495,7 @@ pub(crate) fn scan_struct_tail(
         signature,
         super_struct,
         super_struct_at,
+        layout,
     })
 }
 
@@ -520,17 +590,17 @@ fn read_flagged_field(
     header: &FLegacyPackageHeader,
     ordinal: usize,
     references: &mut Vec<IndexRef>,
-) -> Result<(Property, u64, FieldDetail), String> {
+) -> Result<(Property, u64, FieldDetail, FieldRecord), String> {
     let mut classes = Vec::new();
-    let (property, flags, element_size) =
-        read_field_into(cursor, header, ordinal, references, &mut classes)?;
+    let (property, record) = read_field_into(cursor, header, ordinal, references, &mut classes)?;
     Ok((
         property,
-        flags,
+        record.property_flags,
         FieldDetail {
-            element_size,
+            element_size: record.element_size,
             classes,
         },
+        record,
     ))
 }
 
@@ -541,25 +611,37 @@ fn read_field_into(
     ordinal: usize,
     references: &mut Vec<IndexRef>,
     classes: &mut Vec<NamedClass>,
-) -> Result<(Property, u64, i32), String> {
+) -> Result<(Property, FieldRecord), String> {
     let kind = cursor.read_name(&header.name_map)?;
     let name = cursor.read_name(&header.name_map)?;
-    cursor.skip(FIELD_FLAGS_BYTES)?;
+    let field_flags = cursor.read_u32()?;
     let array_dim = cursor.read_i32()?;
     let element_size = cursor.read_i32()?;
-    let flags = cursor.read_u64()?;
-    cursor.skip(REP_INDEX_BYTES)?;
-    let _rep_notify = cursor.read_name(&header.name_map)?;
-    let _replication_condition = cursor.read_u8()?;
-    let inner = read_kind(&kind, cursor, header, references, classes)?;
+    let property_flags = cursor.read_u64()?;
+    let rep_index = cursor.read_u16()?;
+    let rep_notify = cursor.read_name(&header.name_map)?;
+    let condition = cursor.read_u8()?;
+    let (inner, tail) = read_kind(&kind, cursor, header, references, classes)?;
     let property = Property {
-        name,
+        name: name.clone(),
         array_dim: u8::try_from(array_dim.clamp(1, i32::from(u8::MAX)))
             .map_err(|_| cursor.err("implausible ArrayDim"))?,
         index: u16::try_from(ordinal).map_err(|_| cursor.err("too many fields"))?,
         inner,
     };
-    Ok((property, flags, element_size))
+    let record = FieldRecord {
+        kind,
+        name,
+        field_flags,
+        array_dim,
+        element_size,
+        property_flags,
+        rep_index,
+        rep_notify,
+        condition,
+        tail,
+    };
+    Ok((property, record))
 }
 
 /// The per-type tail. An unknown type name is fatal rather than guessed: reading the wrong width
@@ -570,7 +652,7 @@ fn read_kind(
     header: &FLegacyPackageHeader,
     references: &mut Vec<IndexRef>,
     classes: &mut Vec<NamedClass>,
-) -> Result<PropertyInner, String> {
+) -> Result<(PropertyInner, RecordTail), String> {
     // Every object type takes its place in the list, named or not, so an unresolved class never
     // hands its slot to the next one.
     let mut class = |index: i32, of_class: bool| {
@@ -579,113 +661,125 @@ fn read_kind(
             of_class,
         });
     };
-    let inner = match kind {
+    let numeric = |inner: PropertyInner| (inner, RecordTail::None);
+    let read = match kind {
         // A `TEnumAsByte` is a byte property carrying an enum, and the mappings represent it as an
         // enum too. The distinction is not cosmetic: inside a container an enum is written as its
         // enumerator's `FName`, eight bytes, where a bare byte is one.
-        "ByteProperty" => match object_name(header, take_index(cursor, references)?) {
-            Some(name) => PropertyInner::Enum {
-                inner: Box::new(PropertyInner::Byte),
-                name,
-            },
-            None => PropertyInner::Byte,
-        },
+        "ByteProperty" => {
+            let index = take_index(cursor, references)?;
+            let inner = match object_name(header, index) {
+                Some(name) => PropertyInner::Enum {
+                    inner: Box::new(PropertyInner::Byte),
+                    name,
+                },
+                None => PropertyInner::Byte,
+            };
+            (inner, RecordTail::Index(index))
+        }
         "BoolProperty" => {
-            cursor.skip(BOOL_PACKING_BYTES)?;
-            PropertyInner::Bool
+            let mut packing = [0; BOOL_PACKING_BYTES];
+            packing.copy_from_slice(cursor.take(BOOL_PACKING_BYTES)?);
+            (PropertyInner::Bool, RecordTail::Bool(packing))
         }
-        "IntProperty" => PropertyInner::Int,
-        "Int8Property" => PropertyInner::Int8,
-        "Int16Property" => PropertyInner::Int16,
-        "Int64Property" => PropertyInner::Int64,
-        "UInt16Property" => PropertyInner::UInt16,
-        "UInt32Property" => PropertyInner::UInt32,
-        "UInt64Property" => PropertyInner::UInt64,
-        "FloatProperty" => PropertyInner::Float,
-        "DoubleProperty" => PropertyInner::Double,
-        "StrProperty" => PropertyInner::Str,
-        "NameProperty" => PropertyInner::Name,
-        "TextProperty" => PropertyInner::Text,
-        "ObjectProperty" => {
-            class(take_index(cursor, references)?, false);
-            PropertyInner::Object
-        }
-        "WeakObjectProperty" => {
-            class(take_index(cursor, references)?, false);
-            PropertyInner::WeakObject
-        }
-        "LazyObjectProperty" => {
-            class(take_index(cursor, references)?, false);
-            PropertyInner::LazyObject
-        }
-        "InterfaceProperty" => {
-            class(take_index(cursor, references)?, false);
-            PropertyInner::Interface
-        }
-        "SoftObjectProperty" => {
-            class(take_index(cursor, references)?, false);
-            PropertyInner::SoftObject
+        "IntProperty" => numeric(PropertyInner::Int),
+        "Int8Property" => numeric(PropertyInner::Int8),
+        "Int16Property" => numeric(PropertyInner::Int16),
+        "Int64Property" => numeric(PropertyInner::Int64),
+        "UInt16Property" => numeric(PropertyInner::UInt16),
+        "UInt32Property" => numeric(PropertyInner::UInt32),
+        "UInt64Property" => numeric(PropertyInner::UInt64),
+        "FloatProperty" => numeric(PropertyInner::Float),
+        "DoubleProperty" => numeric(PropertyInner::Double),
+        "StrProperty" => numeric(PropertyInner::Str),
+        "NameProperty" => numeric(PropertyInner::Name),
+        "TextProperty" => numeric(PropertyInner::Text),
+        "ObjectProperty" | "WeakObjectProperty" | "LazyObjectProperty" | "InterfaceProperty"
+        | "SoftObjectProperty" => {
+            let index = take_index(cursor, references)?;
+            class(index, false);
+            let inner = match kind {
+                "ObjectProperty" => PropertyInner::Object,
+                "WeakObjectProperty" => PropertyInner::WeakObject,
+                "LazyObjectProperty" => PropertyInner::LazyObject,
+                "InterfaceProperty" => PropertyInner::Interface,
+                _ => PropertyInner::SoftObject,
+            };
+            (inner, RecordTail::Index(index))
         }
         // A class reference names a second type, the metaclass, after the property class. Measured
         // on `SoftClassProperty`; `ClassProperty` is the same shape one level up the hierarchy.
         // What a class reference may hold is its metaclass, which is the one worth naming.
-        "ClassProperty" => {
-            take_index(cursor, references)?;
-            class(take_index(cursor, references)?, true);
-            PropertyInner::Object
-        }
-        "SoftClassProperty" => {
-            take_index(cursor, references)?;
-            class(take_index(cursor, references)?, true);
-            PropertyInner::SoftObject
+        "ClassProperty" | "SoftClassProperty" => {
+            let property_class = take_index(cursor, references)?;
+            let metaclass = take_index(cursor, references)?;
+            class(metaclass, true);
+            let inner = if kind == "ClassProperty" {
+                PropertyInner::Object
+            } else {
+                PropertyInner::SoftObject
+            };
+            (inner, RecordTail::Indices(property_class, metaclass))
         }
         // Delegates name the function whose signature they carry.
         "DelegateProperty" => {
-            take_index(cursor, references)?;
-            PropertyInner::Delegate
+            let signature = take_index(cursor, references)?;
+            (PropertyInner::Delegate, RecordTail::Index(signature))
         }
         "MulticastInlineDelegateProperty" | "MulticastSparseDelegateProperty" => {
-            take_index(cursor, references)?;
-            PropertyInner::MulticastDelegate
+            let signature = take_index(cursor, references)?;
+            (
+                PropertyInner::MulticastDelegate,
+                RecordTail::Index(signature),
+            )
         }
         // The property class is an `FFieldClass`, written as its name.
         "FieldPathProperty" => {
-            cursor.read_name(&header.name_map)?;
-            PropertyInner::FieldPath
+            let class = cursor.read_name(&header.name_map)?;
+            (PropertyInner::FieldPath, RecordTail::Name(class))
         }
         "StructProperty" => {
             let index = take_index(cursor, references)?;
-            PropertyInner::Struct {
-                name: object_name(header, index)
-                    .ok_or_else(|| cursor.err("struct property names no type"))?,
-            }
+            let name = object_name(header, index)
+                .ok_or_else(|| cursor.err("struct property names no type"))?;
+            (PropertyInner::Struct { name }, RecordTail::Index(index))
         }
         "EnumProperty" => {
             let index = take_index(cursor, references)?;
             let name = object_name(header, index).unwrap_or_default();
-            let underlying = read_nested(cursor, header, references, classes)?;
-            PropertyInner::Enum {
-                inner: Box::new(underlying),
-                name,
-            }
+            let (underlying, record) = read_nested(cursor, header, references, classes)?;
+            (
+                PropertyInner::Enum {
+                    inner: Box::new(underlying),
+                    name,
+                },
+                RecordTail::Enum(index, Box::new(record)),
+            )
         }
-        "ArrayProperty" => PropertyInner::Array {
-            inner: Box::new(read_nested(cursor, header, references, classes)?),
-        },
-        "SetProperty" => PropertyInner::Set {
-            key: Box::new(read_nested(cursor, header, references, classes)?),
-        },
+        "ArrayProperty" | "SetProperty" => {
+            let (inner, record) = read_nested(cursor, header, references, classes)?;
+            let inner = Box::new(inner);
+            let inner = if kind == "ArrayProperty" {
+                PropertyInner::Array { inner }
+            } else {
+                PropertyInner::Set { key: inner }
+            };
+            (inner, RecordTail::One(Box::new(record)))
+        }
         "MapProperty" => {
-            let key = read_nested(cursor, header, references, classes)?;
-            let value = read_nested(cursor, header, references, classes)?;
-            PropertyInner::Map {
-                key: Box::new(key),
-                value: Box::new(value),
-            }
+            let (key, key_record) = read_nested(cursor, header, references, classes)?;
+            let (value, value_record) = read_nested(cursor, header, references, classes)?;
+            (
+                PropertyInner::Map {
+                    key: Box::new(key),
+                    value: Box::new(value),
+                },
+                RecordTail::Two(Box::new(key_record), Box::new(value_record)),
+            )
         }
         other => return Err(cursor.err(format!("unknown field type {other}"))),
     };
-    Ok(inner)
+    Ok(read)
 }
 
 /// Container inners and an enum's underlying type are whole field records of their own.
@@ -694,10 +788,9 @@ fn read_nested(
     header: &FLegacyPackageHeader,
     references: &mut Vec<IndexRef>,
     classes: &mut Vec<NamedClass>,
-) -> Result<PropertyInner, String> {
-    Ok(read_field_into(cursor, header, 0, references, classes)?
-        .0
-        .inner)
+) -> Result<(PropertyInner, FieldRecord), String> {
+    let (property, record) = read_field_into(cursor, header, 0, references, classes)?;
+    Ok((property.inner, record))
 }
 
 fn object_name(header: &FLegacyPackageHeader, index: i32) -> Option<String> {

@@ -356,11 +356,18 @@ numbers, strings and names take forms that say which instruction holds them (`5`
 the bytes hold it. A text is assembled only for a function whose own text assembles back to its
 exact bytes, which `asset audit --text-check` counts across the game.
 
-Only a function's own parameters and locals can be named; none can be added. A name or object the
-package does not have yet is added to it. A changed or new call to a Blueprint function is held to
-its parameters; one to a native function the package never calls with as many arguments is refused
-until `--allow-unchecked`. An edit file carries a function's text as `script_texts`, inline
-(`text`) or from a file beside it (`file`).
+A text can give its function locals of its own, one `local Name: Type` line each ahead of the first
+statement; the function gains a field for each after the ones it has, so its parameters stay first.
+A type is `Bool`, `Byte`, `Int`, `Int64`, `Float`, `Double`, `Name`, `Str`, `Text`, `Object<path>`,
+`Class<path>`, `SoftObject<path>`, `SoftClass<path>`, `Interface<path>`, `Struct<path>`,
+`Enum<path>`, `Array<T>`, `Set<T>` or `Map<K, V>`, with every class, struct and enum named by its
+full path, as `Object</Script/Engine.Actor>`. A struct's size comes from another field of it in the
+package, or follows its path, `Struct</Script/CoreUObject.Vector, 24>`. A local of the event graph
+keeps its value between events, one for each object, which is state a class variable would otherwise
+hold. Parameters cannot be added. A name or object the package does not have yet is added to it. A
+changed or new call to a Blueprint function is held to its parameters; one to a native function the
+package never calls with as many arguments is refused until `--allow-unchecked`. An edit file
+carries a function's text as `script_texts`, inline (`text`) or from a file beside it (`file`).
 
 `--pak` takes a pak path or a bare mod name to look up in `~mods`. `--json` makes every command
 emit machine-readable output, and failures exit non-zero. `--dry-run` reports what a write command

@@ -9,12 +9,16 @@
 use std::collections::BTreeSet;
 
 use crate::edit::{AppliedEdit, DRIFT, PackageEdits, ScriptTextEdit, bytes_at};
+use crate::field_record::{
+    NewField, encode_field_record, new_record, record_indices, struct_sizes,
+};
 use crate::header_edit::Tables;
 use crate::kismet::{self, Expr, Script};
 use crate::package::{AssetBundle, ParsedExport, ParsedPackage};
 use crate::relocate::{Change, OffsetMap, Relocated, relocate_through};
 use crate::script_encode::{AssembleOptions, Assembled, Encoded, assemble, lay_out, moved_of};
 use crate::script_text::{Diagnostic, original_offset, print_script};
+use crate::write::Splice;
 
 /// What one text edit writes, and what it moved outside its own script.
 pub(crate) struct TextSplice {
@@ -191,7 +195,12 @@ pub(crate) fn plan_text(
         loaded_len: assembled.loaded_size,
         label: format!("{name}'s script"),
     };
-    let relocated = relocate_through(parsed, edit.export, vec![change], map)?;
+    let mut relocated = relocate_through(parsed, edit.export, vec![change], map)?;
+    let mut links: Vec<(u64, i32)> = assembled
+        .links
+        .iter()
+        .map(|(at, index)| (script.start + at, *index))
+        .collect();
     let mut applied = vec![AppliedEdit {
         name: format!("{name} script text"),
         offset: script.start,
@@ -212,12 +221,17 @@ pub(crate) fn plan_text(
             after: format!("0x{new:04X}"),
         });
     }
+    add_locals(
+        found,
+        parsed,
+        &assembled,
+        tables,
+        &mut relocated,
+        &mut links,
+        &mut applied,
+    )?;
     Ok(TextSplice {
-        links: assembled
-            .links
-            .iter()
-            .map(|(at, index)| (script.start + at, *index))
-            .collect(),
+        links,
         notes: assembled
             .warnings
             .iter()
@@ -226,6 +240,65 @@ pub(crate) fn plan_text(
         relocated,
         applied,
     })
+}
+
+/// Gives the function the locals its text declares: a record for each after the ones it has, so
+/// its parameters stay first, and the count of its fields grown to match. Whatever a record names
+/// is imported, and the function takes a dependency on it.
+fn add_locals(
+    found: &ParsedExport,
+    parsed: &ParsedPackage,
+    assembled: &Assembled,
+    tables: &mut Tables,
+    relocated: &mut Relocated,
+    links: &mut Vec<(u64, i32)>,
+    applied: &mut Vec<AppliedEdit>,
+) -> Result<(), String> {
+    if assembled.locals.is_empty() {
+        return Ok(());
+    }
+    let name = found.object_name.as_str();
+    let layout = found.layout.as_ref().ok_or_else(|| {
+        format!("{name}'s fields were not read whole, so it can take no new local")
+    })?;
+    let sizes = struct_sizes(parsed);
+    let mut bytes = Vec::new();
+    for local in &assembled.locals {
+        let record = new_record(&local.name, &local.ty, NewField::Local, tables, &sizes)
+            .map_err(|reason| format!("{name}, line {}: {reason}", local.pos.line))?;
+        let mut indices = Vec::new();
+        record_indices(&record, &mut indices);
+        links.extend(indices.into_iter().map(|index| (layout.records_end, index)));
+        bytes.extend(encode_field_record(&record, &mut tables.names));
+        applied.push(AppliedEdit {
+            name: format!("{name} local {}", local.name),
+            offset: layout.records_end,
+            offset_after: layout.records_end,
+            element: None,
+            elements_after: None,
+            before: "(none)".into(),
+            after: local.ty.printed(),
+        });
+    }
+    let count = i32::try_from(layout.records.len() + assembled.locals.len())
+        .map_err(|_| format!("{name} would hold too many fields"))?;
+    relocated.splices.push((
+        Splice {
+            start: layout.child_properties_at,
+            end: layout.child_properties_at + 4,
+            bytes: count.to_le_bytes().to_vec(),
+        },
+        format!("{name}'s field count"),
+    ));
+    relocated.splices.push((
+        Splice {
+            start: layout.records_end,
+            end: layout.records_end,
+            bytes,
+        },
+        format!("{name}'s new locals"),
+    ));
+    Ok(())
 }
 
 /// An event stub a text writes enters its event graph where code starts: an entry landing inside
@@ -413,6 +486,157 @@ mod tests {
             }],
             ..Default::default()
         }
+    }
+
+    /// The names and types of a function's locals, in record order.
+    fn locals_of(parsed: &ParsedPackage, export: u32) -> Vec<(String, String)> {
+        parsed.exports[export as usize]
+            .signature
+            .as_ref()
+            .expect("its fields are read")
+            .locals
+            .iter()
+            .map(|local| (local.name.clone(), local.kind.clone()))
+            .collect()
+    }
+
+    /// A declared local is given to the function after the fields it has, so its parameters stay
+    /// first, and the text can name it like any other.
+    #[test]
+    fn a_declared_local_is_given_to_the_function_and_named_by_the_text() {
+        let built = event_graph().build();
+        let printed = print(&built.parsed(), GRAPH);
+        let grown = format!(
+            "local Total: Int
+local Seen: Array<Name>  ; names met so far
+{}",
+            printed.replacen(
+                "Jump LocalVariable(EntryPoint)
+",
+                "Jump LocalVariable(EntryPoint)
+Let LocalVariable(Total) = 6
+",
+                1,
+            )
+        );
+        let saved = save(&built, &text(GRAPH, grown)).expect("saved");
+        let pair = |name: &str, kind: &str| (name.to_string(), kind.to_string());
+        assert_eq!(
+            locals_of(&saved.after, GRAPH),
+            [
+                pair("Flag", "Bool"),
+                pair("Count", "Int"),
+                pair("Total", "Int"),
+                pair("Seen", "Array<Name>"),
+            ]
+        );
+        let params = |parsed: &ParsedPackage| -> Vec<String> {
+            parsed.exports[GRAPH as usize]
+                .signature
+                .as_ref()
+                .expect("its fields are read")
+                .params
+                .iter()
+                .map(|param| param.name.clone())
+                .collect()
+        };
+        assert_eq!(params(&saved.after), params(&saved.before));
+        let graph = print(&saved.after, GRAPH);
+        assert!(graph.contains("Let LocalVariable(Total) = 6"), "{graph}");
+        assert!(
+            saved.applied.iter().any(|applied| applied.name
+                == "ExecuteUbergraph_BP_Test local Total"
+                && applied.after == "Int"),
+            "{:?}",
+            saved.applied
+        );
+    }
+
+    /// A local the function has already, declared with its own type, changes nothing.
+    #[test]
+    fn declaring_a_local_the_function_has_changes_nothing() {
+        let built = event_graph().build();
+        let printed = print(&built.parsed(), GRAPH);
+        let saved = save(
+            &built,
+            &text(
+                GRAPH,
+                format!(
+                    "local Count: Int
+{printed}"
+                ),
+            ),
+        )
+        .expect("saved");
+        assert_eq!(saved.exports, built.exports);
+    }
+
+    #[test]
+    fn a_declaration_that_clashes_or_comes_late_is_refused() {
+        let built = event_graph().build();
+        let printed = print(&built.parsed(), GRAPH);
+        let refused = |text: String| {
+            save(&built, &self::text(GRAPH, text))
+                .err()
+                .expect("refused")
+        };
+        let parameter = refused(format!(
+            "local EntryPoint: Int
+{printed}"
+        ));
+        assert!(
+            parameter.contains("line 1:1: EntryPoint is a parameter of ExecuteUbergraph_BP_Test"),
+            "{parameter}"
+        );
+        let retyped = refused(format!(
+            "local Count: Float
+{printed}"
+        ));
+        assert!(
+            retyped.contains("Count is already a local of ExecuteUbergraph_BP_Test, of type Int"),
+            "{retyped}"
+        );
+        let late = refused(format!(
+            "{printed}
+local Late: Int"
+        ));
+        assert!(
+            late.contains("declare a local before the first statement"),
+            "{late}"
+        );
+        let unknown = refused(format!(
+            "local Where: Vector
+{printed}"
+        ));
+        assert!(unknown.contains("not a type"), "{unknown}");
+        let no_size = refused(format!(
+            "local Where: Struct</Script/CoreUObject.Vector>
+{printed}"
+        ));
+        assert!(
+            no_size.contains("Struct</Script/CoreUObject.Vector, 24>"),
+            "{no_size}"
+        );
+    }
+
+    /// Naming the function as a local's owner does not get round the function having to hold it.
+    #[test]
+    fn a_local_the_function_lacks_is_refused_with_its_owner_written() {
+        let built = event_graph().build();
+        let printed = print(&built.parsed(), GRAPH);
+        let invented = printed.replacen(
+            "Jump LocalVariable(EntryPoint)
+",
+            "Jump LocalVariable(EntryPoint)
+Let LocalVariable(Nope in /Game/Test.BP_Test_C:ExecuteUbergraph_BP_Test) = 6
+",
+            1,
+        );
+        let refused = save(&built, &text(GRAPH, invented)).err().expect("refused");
+        assert!(
+            refused.contains("Nope is not a parameter or local of ExecuteUbergraph_BP_Test"),
+            "{refused}"
+        );
     }
 
     #[test]

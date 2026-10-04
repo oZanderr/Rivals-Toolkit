@@ -113,6 +113,10 @@ pub struct ParsedExport {
     /// A function's parameters and locals, when its layout walk read them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signature: Option<crate::ustruct::FunctionSignature>,
+    /// Where a class or function keeps its field records, functions and function map, when its
+    /// layout walk reached its end.
+    #[serde(skip)]
+    pub layout: Option<crate::ustruct::StructLayout>,
     /// The bytecode this export stores, disassembled. Present for a class or function whose
     /// layout walk reached its script.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -195,6 +199,7 @@ impl ParsedExport {
             string_table: None,
             struct_definition: None,
             signature: None,
+            layout: None,
             trailing_hex: String::new(),
             note: None,
             script: None,
@@ -1184,6 +1189,7 @@ fn parse_one_inner(
                     diagnostics.references.extend(tail.references);
                     bytecode = tail.bytecode;
                     base.signature = tail.signature;
+                    base.layout = Some(tail.layout);
                     super_struct_at = Some(tail.super_struct_at);
                     if let Some((from, to)) = tail.bytecode {
                         let base_at = base.serial_offset.max(0) as u64;
@@ -1360,6 +1366,7 @@ fn skeleton(
         string_table: None,
         struct_definition: None,
         signature: None,
+        layout: None,
         trailing_hex: String::new(),
         note: None,
         script: None,

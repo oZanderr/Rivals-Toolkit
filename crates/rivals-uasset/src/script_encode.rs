@@ -15,7 +15,8 @@ use crate::kismet::{self, Expr, NameId, ObjectRef, PropertyRef, TextLiteral};
 use crate::package::{AssetBundle, ParsedPackage};
 use crate::props::{Ctx, Diagnostics};
 use crate::script_text::{
-    self, Diagnostic, FunctionCx, Note, ParsedScript, Pos, Resolver, Symbols, parse_script,
+    self, Declaration, Diagnostic, FunctionCx, Note, ParsedScript, Pos, Resolver, Symbols,
+    parse_script, split_declarations,
 };
 
 /// The note an expression built without one stands for: nothing written out, nothing labelled.
@@ -590,6 +591,60 @@ pub struct Assembled {
     pub warnings: Vec<Diagnostic>,
     /// The statements as written, every offset they name resolved.
     pub expressions: Vec<Expr>,
+    /// The locals the text declares that the function does not have yet.
+    pub(crate) locals: Vec<Declaration>,
+}
+
+/// The locals a text declares that the function does not have yet, each held to the fields it does
+/// have: a parameter's name is refused, and a local it has already is no change when the type is
+/// the same. The new ones become names the text can use.
+fn new_locals(
+    declared: Vec<Declaration>,
+    parsed: &ParsedPackage,
+    export: u32,
+    cx: &mut Option<FunctionCx>,
+) -> Result<Vec<Declaration>, Vec<Diagnostic>> {
+    if declared.is_empty() {
+        return Ok(declared);
+    }
+    let function = parsed.exports.get(export as usize);
+    let name = function.map_or("the function", |f| f.object_name.as_str());
+    let (Some(signature), Some(cx)) = (function.and_then(|f| f.signature.as_ref()), cx.as_mut())
+    else {
+        return Err(declared
+            .iter()
+            .map(|decl| {
+                decl.pos.error(format!(
+                    "{name}'s fields were not read, so it can take no new local"
+                ))
+            })
+            .collect());
+    };
+    let mut errors = Vec::new();
+    let mut new = Vec::new();
+    for decl in declared {
+        if signature.params.iter().any(|param| param.name == decl.name) {
+            errors.push(
+                decl.pos
+                    .error(format!("{} is a parameter of {name}", decl.name)),
+            );
+        } else if let Some(local) = signature.locals.iter().find(|l| l.name == decl.name) {
+            if local.kind != decl.ty.printed() {
+                errors.push(decl.pos.error(format!(
+                    "{} is already a local of {name}, of type {}",
+                    decl.name, local.kind
+                )));
+            }
+        } else {
+            cx.declare(&decl.name);
+            new.push(decl);
+        }
+    }
+    if errors.is_empty() {
+        Ok(new)
+    } else {
+        Err(errors)
+    }
 }
 
 /// Assembles `text` as the script of `export`, against the package's tables as they stand in
@@ -602,17 +657,20 @@ pub(crate) fn assemble(
     tables: &mut Tables,
     options: AssembleOptions,
 ) -> Result<Assembled, Vec<Diagnostic>> {
+    let (text, declared) = split_declarations(text)?;
+    let mut cx = FunctionCx::of(parsed, export);
+    let locals = new_locals(declared, parsed, export, &mut cx)?;
     let mut work = tables.clone();
     let symbols = Symbols::with_names(parsed, work.names.raw_names().to_vec());
     let mut resolver = Resolver {
         symbols,
-        cx: FunctionCx::of(parsed, export),
+        cx,
         tables: &mut work,
         add_names: options.add_names,
         add_imports: options.add_imports,
         warnings: Vec::new(),
     };
-    let mut script = parse_script(text, &mut resolver)?;
+    let mut script = parse_script(&text, &mut resolver)?;
     let warnings = std::mem::take(&mut resolver.warnings);
     let encoded = encode(&mut script)?;
     read_back(&encoded, &script, header, &work).map_err(|error| vec![error])?;
@@ -634,6 +692,7 @@ pub(crate) fn assemble(
             .collect(),
         bytes: encoded.bytes,
         warnings,
+        locals,
     })
 }
 
@@ -691,19 +750,28 @@ pub(crate) fn lay_out(
     parsed: &ParsedPackage,
     export: u32,
 ) -> Result<(Vec<Expr>, Encoded), Vec<Diagnostic>> {
+    let (text, declared) = split_declarations(text)?;
+    let mut cx = FunctionCx::of(parsed, export);
+    // Every local the text declares is one the saved function has.
+    if let Some(missing) = new_locals(declared, parsed, export, &mut cx)?.first() {
+        return Err(vec![missing.pos.error(format!(
+            "the saved function has no local {}",
+            missing.name
+        ))]);
+    }
     let mut tables = Tables {
         names: retoc::legacy_asset::FPackageNameMap::create_from_names(parsed.names.clone()),
         imports: Vec::new(),
     };
     let mut resolver = Resolver {
         symbols: Symbols::of(parsed),
-        cx: FunctionCx::of(parsed, export),
+        cx,
         tables: &mut tables,
         add_names: false,
         add_imports: false,
         warnings: Vec::new(),
     };
-    let mut script = parse_script(text, &mut resolver)?;
+    let mut script = parse_script(&text, &mut resolver)?;
     let encoded = encode(&mut script)?;
     Ok((
         script

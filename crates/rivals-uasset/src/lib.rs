@@ -9,6 +9,7 @@ mod dependency;
 mod duplicate;
 mod edit;
 mod export_edit;
+mod field_record;
 mod header_edit;
 mod hex;
 mod identity;
@@ -86,6 +87,7 @@ pub use export_edit::{
     EDITABLE_FLAGS, ExportEdit, ExportEditPlan, flag_names, plan_export_edits,
     plan_export_edits_with,
 };
+pub use field_record::{FieldType, NewField, encode_field_record, parse_field_type};
 pub use header_edit::{ImportEdit, ObjectPath, parse_object_path};
 pub use hex::{HexRow, ROW_BYTES, render as render_hex, rows as hex_rows};
 pub use identity::{
@@ -121,9 +123,9 @@ pub use stringtable::{StringEntrySpan, StringTable, StringTableEntry, StringTabl
 pub use structs::stored_whole;
 pub use ustruct::type_text as property_type_text;
 pub use ustruct::{
-    FieldRole, FunctionField, FunctionSignature, StructDefinition, definitions_of,
-    mappings_from_definitions, mappings_from_definitions_with, read_struct_definitions,
-    read_struct_definitions_pathed,
+    FieldRecord, FieldRole, FunctionField, FunctionSignature, RecordTail, StructDefinition,
+    StructLayout, definitions_of, mappings_from_definitions, mappings_from_definitions_with,
+    read_struct_definitions, read_struct_definitions_pathed,
 };
 pub use value::{MapEntry, PropertyEntry, PropertyValue};
 pub use write::{

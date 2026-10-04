@@ -271,6 +271,20 @@ impl FunctionCx {
         })
     }
 
+    /// Lets the text name a local the function is about to be given.
+    pub(crate) fn declare(&mut self, name: &str) {
+        if let Some(locals) = &mut self.locals {
+            locals.insert(name.to_string());
+        }
+    }
+
+    /// Whether `name` is one of the function's parameters or locals, as far as they were read.
+    fn has_local(&self, name: &str) -> bool {
+        self.locals
+            .as_ref()
+            .is_none_or(|locals| locals.contains(name))
+    }
+
     /// The owner a variable takes when the text leaves it out, when it can take one at all.
     fn default_owner(&self, role: Role, first: &str) -> Option<i32> {
         match role {
@@ -1885,7 +1899,22 @@ impl Resolver<'_> {
             .collect::<Vec<_>>()
             .join(".");
         let owner = match &field.owner {
-            Some(owner) => self.object(owner, None)?,
+            Some(owner) => {
+                let owner = self.object(owner, None)?;
+                let first = field
+                    .segments
+                    .first()
+                    .map(|(text, _, _)| text.as_str())
+                    .unwrap_or_default();
+                if role == Role::Local
+                    && let Some(cx) = &self.cx
+                    && owner.index == cx.own
+                    && !cx.has_local(first)
+                {
+                    return Err(self.missing_owner(role, first, field.pos));
+                }
+                owner
+            }
             None => {
                 let first = field
                     .segments
@@ -3246,6 +3275,70 @@ fn parse_f32(text: &str, pos: Pos) -> Result<f32, Diagnostic> {
     }
     text.parse()
         .map_err(|_| pos.error(format!("{text} is not a number")))
+}
+
+/// A local the text declares, `local Name: Type`, ahead of its first statement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Declaration {
+    pub(crate) name: String,
+    pub(crate) ty: crate::field_record::FieldType,
+    pub(crate) pos: Pos,
+}
+
+/// Takes the `local` lines off the head of a text, leaving a blank line in each one's place so
+/// every later line keeps its number. A `local` line after the first statement is an error.
+pub(crate) fn split_declarations(
+    text: &str,
+) -> Result<(String, Vec<Declaration>), Vec<Diagnostic>> {
+    let mut kept = Vec::new();
+    let mut declared: Vec<Declaration> = Vec::new();
+    let mut errors = Vec::new();
+    let mut statements = false;
+    for (at, line) in text.lines().enumerate() {
+        let number = at as u32 + 1;
+        let code = line.split(';').next().unwrap_or_default();
+        let trimmed = code.trim_start();
+        let Some(rest) = trimmed.strip_prefix("local ") else {
+            statements |= !trimmed.trim().is_empty();
+            kept.push(line);
+            continue;
+        };
+        kept.push("");
+        let pos = Pos {
+            line: number,
+            column: (code.len() - trimmed.len()) as u32 + 1,
+        };
+        if statements {
+            errors.push(pos.error("declare a local before the first statement"));
+            continue;
+        }
+        let Some((name, ty)) = rest.split_once(':') else {
+            errors.push(pos.error("a local is declared as `local Name: Type`"));
+            continue;
+        };
+        let name = name.trim();
+        if !is_ident(name) {
+            errors.push(pos.error(format!("{name:?} is not a name a local can take")));
+            continue;
+        }
+        if declared.iter().any(|other| other.name == name) {
+            errors.push(pos.error(format!("{name} is declared twice")));
+            continue;
+        }
+        match crate::field_record::parse_field_type(ty) {
+            Ok(ty) => declared.push(Declaration {
+                name: name.to_string(),
+                ty,
+                pos,
+            }),
+            Err(reason) => errors.push(pos.error(reason)),
+        }
+    }
+    if errors.is_empty() {
+        Ok((kept.join("\n"), declared))
+    } else {
+        Err(errors)
+    }
 }
 
 /// Parses assembler text against the package it was printed from. Names and imports the text
