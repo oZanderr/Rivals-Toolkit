@@ -2506,8 +2506,9 @@ fn asset_script_widen(
     let root = resolve::game_root(cli.game_root.as_deref(), app)?;
     let request = asset_request(cli, app, &args.asset, &root);
     let export = if args.all { None } else { args.export };
+    let mod_name = mod_name_of(app, args.mod_name.as_deref());
     if args.dry_run {
-        let applied = asset::preview_script_widen(&request, export)?;
+        let applied = asset::preview_script_widen(&request, export, mod_name, args.replace)?;
         return emit(cli, &applied, || {
             for done in &applied {
                 outln!("would set {}: {} -> {}", done.name, done.before, done.after);
@@ -2517,12 +2518,7 @@ fn asset_script_widen(
     if !cli.force && rivals_core::game_status::should_block_for_game() {
         return Err(rivals_core::game_status::game_running_error());
     }
-    let message = asset::script_widen(
-        &request,
-        export,
-        mod_name_of(app, args.mod_name.as_deref()),
-        args.replace,
-    )?;
+    let message = asset::script_widen(&request, export, mod_name, args.replace)?;
     emit(cli, &message, || outln!("{message}"))
 }
 
@@ -2557,8 +2553,9 @@ fn asset_script_assemble(
         },
         (None, None) => return Err("give --export, or --new-function to add one".into()),
     };
+    let mod_name = mod_name_of(app, args.mod_name.as_deref());
     if args.dry_run {
-        let preview = asset::preview_changes(&request, edit)?;
+        let preview = asset::preview_edits(&request, mod_name, args.replace, edit)?;
         return emit(cli, &preview, || {
             for done in &preview.applied {
                 outln!("would set {}: {} -> {}", done.name, done.before, done.after);
@@ -2571,12 +2568,7 @@ fn asset_script_assemble(
     if !cli.force && rivals_core::game_status::should_block_for_game() {
         return Err(rivals_core::game_status::game_running_error());
     }
-    let message = asset::save_changes(
-        &request,
-        edit,
-        mod_name_of(app, args.mod_name.as_deref()),
-        args.replace,
-    )?;
+    let message = asset::save_changes(&request, edit, mod_name, args.replace)?;
     emit(cli, &message, || outln!("{message}"))
 }
 
@@ -2595,8 +2587,9 @@ fn asset_add_variable(
         }],
         ..Default::default()
     };
+    let mod_name = mod_name_of(app, args.mod_name.as_deref());
     if args.dry_run {
-        let preview = asset::preview_changes(&request, edit)?;
+        let preview = asset::preview_edits(&request, mod_name, args.replace, edit)?;
         return emit(cli, &preview, || {
             for done in &preview.applied {
                 outln!("would set {}: {} -> {}", done.name, done.before, done.after);
@@ -2609,12 +2602,7 @@ fn asset_add_variable(
     if !cli.force && rivals_core::game_status::should_block_for_game() {
         return Err(rivals_core::game_status::game_running_error());
     }
-    let message = asset::save_changes(
-        &request,
-        edit,
-        mod_name_of(app, args.mod_name.as_deref()),
-        args.replace,
-    )?;
+    let message = asset::save_changes(&request, edit, mod_name, args.replace)?;
     emit(cli, &message, || outln!("{message}"))
 }
 
@@ -2675,8 +2663,9 @@ fn asset_script_set(
         was: None,
         ..Default::default()
     };
+    let mod_name = mod_name_of(app, args.mod_name.as_deref());
     if args.dry_run {
-        let applied = asset::preview_script_set(&request, edit)?;
+        let applied = asset::preview_script_set(&request, edit, mod_name, args.replace)?;
         return emit(cli, &applied, || {
             for done in &applied {
                 outln!(
@@ -2692,12 +2681,7 @@ fn asset_script_set(
     if !cli.force && rivals_core::game_status::should_block_for_game() {
         return Err(rivals_core::game_status::game_running_error());
     }
-    let message = asset::script_set(
-        &request,
-        edit,
-        mod_name_of(app, args.mod_name.as_deref()),
-        args.replace,
-    )?;
+    let message = asset::script_set(&request, edit, mod_name, args.replace)?;
     emit(cli, &message, || outln!("{message}"))
 }
 

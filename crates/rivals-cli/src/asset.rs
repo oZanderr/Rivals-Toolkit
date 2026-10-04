@@ -528,14 +528,11 @@ pub fn script_widen(
 pub fn preview_script_widen(
     request: &Request<'_>,
     export: Option<u32>,
+    mod_name: &str,
+    replace: bool,
 ) -> Result<Vec<rivals_uasset::AppliedEdit>, String> {
-    let schema = mappings::resolve(request.usmap, request.configured_usmap)
-        .and_then(|path| mappings::load(&path))
-        .ok();
     let changes = widening(request, export)?;
-    let (patched, _) =
-        asset_edit::preview_edits(&edit_request(request, "", changes), schema.as_deref())?;
-    Ok(patched.applied)
+    Ok(preview_edits(request, mod_name, replace, changes)?.applied)
 }
 
 /// Writes a save of its own into a mod: a function's script from text, a new function, a new
@@ -549,44 +546,18 @@ pub fn save_changes(
     write_edits(request, mod_name, replace, changes)
 }
 
-/// What a save would do, without writing anything: each change it makes, and what it would say.
-#[derive(Serialize)]
-pub struct SavePreview {
-    pub applied: Vec<rivals_uasset::AppliedEdit>,
-    pub notes: Vec<String>,
-}
-
-/// What `save_changes` would change, patched and verified in memory without writing anything.
-pub fn preview_changes(
-    request: &Request<'_>,
-    changes: PackageEdits,
-) -> Result<SavePreview, String> {
-    let schema = mappings::resolve(request.usmap, request.configured_usmap)
-        .and_then(|path| mappings::load(&path))
-        .ok();
-    let (patched, _) =
-        asset_edit::preview_edits(&edit_request(request, "", changes), schema.as_deref())?;
-    Ok(SavePreview {
-        applied: patched.applied,
-        notes: patched.notes,
-    })
-}
-
 /// What `script_set` would change, patched and verified in memory without writing anything.
 pub fn preview_script_set(
     request: &Request<'_>,
     edit: rivals_uasset::ScriptConstEdit,
+    mod_name: &str,
+    replace: bool,
 ) -> Result<Vec<rivals_uasset::AppliedEdit>, String> {
-    let schema = mappings::resolve(request.usmap, request.configured_usmap)
-        .and_then(|path| mappings::load(&path))
-        .ok();
     let changes = PackageEdits {
         scripts: vec![edit],
         ..Default::default()
     };
-    let (patched, _) =
-        asset_edit::preview_edits(&edit_request(request, "", changes), schema.as_deref())?;
-    Ok(patched.applied)
+    Ok(preview_edits(request, mod_name, replace, changes)?.applied)
 }
 
 /// The bytes of one bulk data resource, wherever its payload sits.
