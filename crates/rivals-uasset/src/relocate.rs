@@ -128,6 +128,51 @@ pub(crate) struct Relocated {
     pub moved: Vec<(String, u32, u32)>,
     /// `((loaded, stored) before, after)`, when the size changed.
     pub sizes: Option<((u32, u32), (u32, u32))>,
+    /// Changes another function has to take for this one: an event stub whose literal cannot hold
+    /// the offset its event enters at now, by the stub's export.
+    pub induced: Vec<(u32, Change)>,
+}
+
+/// What an event stub's literal takes when the offset its event enters at moves: the new value in
+/// place where it fits, or an `IntConst` in place of the literal, which makes the stub longer.
+pub(crate) enum HolderChange {
+    InPlace(Splice),
+    Widened(Change),
+}
+
+pub(crate) fn holder_change(
+    entry: &kismet::Entry,
+    new: u32,
+    label: &str,
+) -> Result<HolderChange, String> {
+    let span = &entry.span;
+    match span.token {
+        0x1D => Ok(HolderChange::InPlace(word(span.at + 1, new))),
+        0x2C if new <= 0xFF => Ok(HolderChange::InPlace(Splice {
+            start: span.at + 1,
+            end: span.at + 2,
+            bytes: vec![new as u8],
+        })),
+        0x2C | 0x25 | 0x26 => {
+            let value = i32::try_from(new)
+                .map_err(|_| format!("{label} 0x{new:X}, past what an entry can hold"))?;
+            let mut bytes = vec![0x1D];
+            bytes.extend_from_slice(&value.to_le_bytes());
+            Ok(HolderChange::Widened(Change {
+                at: span.at,
+                end_at: span.end_at,
+                offset: span.offset,
+                end_offset: span.end_offset,
+                bytes,
+                loaded_len: 5,
+                label: label.to_string(),
+            }))
+        }
+        other => Err(format!(
+            "{label} is held by a {} that cannot hold 0x{new:04X}",
+            kismet::token_name(other).unwrap_or("literal")
+        )),
+    }
 }
 
 /// The splices that make `changes` in the script of `export` and move everything pointing into it.
@@ -237,16 +282,11 @@ pub(crate) fn relocate_through(
             if new == entry.offset {
                 continue;
             }
-            if entry.span.token != 0x1D {
-                return Err(format!(
-                    "an event enters {} through a {} that cannot hold 0x{new:04X}",
-                    found.object_name,
-                    kismet::token_name(entry.span.token).unwrap_or("literal")
-                ));
-            }
             let what = format!("the offset {holder} enters {} at", found.object_name);
-            out.splices
-                .push((word(entry.span.at + 1, new), what.clone()));
+            match holder_change(entry, new, &what)? {
+                HolderChange::InPlace(splice) => out.splices.push((splice, what.clone())),
+                HolderChange::Widened(change) => out.induced.push((entry.export, change)),
+            }
             out.moved.push((what, entry.offset, new));
             out.entries += 1;
         }

@@ -6,6 +6,8 @@
 //! code it named. Verification rebuilds the script the edits should leave from the one that was
 //! read, with every offset mapped, then holds the saved script to it statement by statement.
 
+use std::collections::BTreeMap;
+
 use retoc::zen::FPackageIndex;
 
 use crate::edit::{
@@ -170,10 +172,11 @@ pub(crate) fn script_splices(
     };
     let plans = plan_all(parsed, edits, edits.allow_drift)?;
     let mut labelled: Vec<(Splice, String)> = Vec::new();
+    let mut induced: Vec<(u32, Change)> = Vec::new();
     let mut exports: Vec<u32> = plans.iter().map(|plan| plan.export).collect();
     exports.sort_unstable();
     exports.dedup();
-    for export in exports {
+    for &export in &exports {
         let mine: Vec<&Planned> = plans.iter().filter(|plan| plan.export == export).collect();
         // An offset an edit writes counts in the script as it will be, which only the extents of
         // every edit in it decide.
@@ -214,6 +217,7 @@ pub(crate) fn script_splices(
         let owner = owner.split(" script").next().unwrap_or(owner);
         out.applied
             .extend(layout_line(parsed, export, owner, &relocated));
+        induced.extend(relocated.induced);
         labelled.extend(relocated.splices);
     }
     for edit in &edits.script_texts {
@@ -228,7 +232,34 @@ pub(crate) fn script_splices(
             .map_or_else(|| edit.export.to_string(), |e| e.object_name.clone());
         out.applied
             .extend(layout_line(parsed, edit.export, &owner, &text.relocated));
+        induced.extend(text.relocated.induced);
         labelled.extend(text.relocated.splices);
+    }
+    // A stub whose literal cannot hold where its event enters now takes an `IntConst` instead,
+    // which makes the stub longer and moves whatever follows in it.
+    let mut stubs: BTreeMap<u32, Vec<Change>> = BTreeMap::new();
+    for (stub, change) in induced {
+        stubs.entry(stub).or_default().push(change);
+    }
+    for (stub, changes) in stubs {
+        let name = parsed
+            .exports
+            .get(stub as usize)
+            .map_or_else(|| stub.to_string(), |e| e.object_name.clone());
+        if exports.contains(&stub) || edits.script_texts.iter().any(|t| t.export == stub) {
+            return Err(format!(
+                "{name} has to widen the offset it enters its event graph at, and this save edits {name} too; save one change, then the other"
+            ));
+        }
+        let relocated = relocate(parsed, stub, changes)?;
+        if !relocated.induced.is_empty() {
+            return Err(format!(
+                "widening {name}'s entry would move an entry into {name} as well"
+            ));
+        }
+        out.applied
+            .extend(layout_line(parsed, stub, &name, &relocated));
+        labelled.extend(relocated.splices);
     }
     // An edit in one script can land on bytes another script's relocation rewrites, such as the
     // entry a stub passes an event graph this save moves, or inside a stub given a whole new payload.
@@ -1526,6 +1557,28 @@ pub(crate) fn verify(
         maps.push((laid.export, name, laid.map.clone()));
     }
     let functions = kismet::functions_of(&before.exports);
+    // A stub whose literal could not hold where its event enters now was widened, by the same rule
+    // the save follows, and is longer by it.
+    let mut widened: BTreeMap<u32, Vec<Change>> = BTreeMap::new();
+    for (export, _, map) in &maps {
+        if map.is_identity() {
+            continue;
+        }
+        let Some(target) = functions.iter().find(|f| f.export == *export) else {
+            continue;
+        };
+        for entry in &kismet::inbound(&functions, target).entries {
+            let Ok(new) = map.map(entry.offset) else {
+                continue;
+            };
+            if new != entry.offset
+                && let crate::relocate::HolderChange::Widened(change) =
+                    crate::relocate::holder_change(entry, new, "an entry")?
+            {
+                widened.entry(entry.export).or_default().push(change);
+            }
+        }
+    }
     for was in &before.exports {
         let Some(old) = was.script.as_ref() else {
             continue;
@@ -1559,12 +1612,29 @@ pub(crate) fn verify(
             continue;
         }
         let mine: Vec<&Planned> = plans.iter().filter(|p| p.export == was.index).collect();
-        let own_map = maps
-            .iter()
-            .find(|(export, _, _)| *export == was.index)
-            .map(|(_, _, map)| map.clone())
-            .unwrap_or_default();
-        let wanted_sizes = if mine.is_empty() {
+        let stub = widened.get(&was.index).filter(|_| mine.is_empty());
+        let own_map = match stub {
+            Some(changes) => OffsetMap::new(changes),
+            None => maps
+                .iter()
+                .find(|(export, _, _)| *export == was.index)
+                .map(|(_, _, map)| map.clone())
+                .unwrap_or_default(),
+        };
+        let wanted_sizes = if let Some(changes) = stub {
+            let loaded: i64 = changes
+                .iter()
+                .map(|c| i64::from(c.loaded_len) - i64::from(c.end_offset - c.offset))
+                .sum();
+            let stored: i64 = changes
+                .iter()
+                .map(|c| c.bytes.len() as i64 - (c.end_at - c.at) as i64)
+                .sum();
+            (
+                (i64::from(old.buffer_size) + loaded) as u32,
+                (i64::from(old.storage_size) + stored) as u32,
+            )
+        } else if mine.is_empty() {
             (old.buffer_size, old.storage_size)
         } else {
             let loaded: i64 = mine
@@ -1669,6 +1739,33 @@ fn expected_statements(
         match node_mut(&mut statements, *index) {
             Some(Expr::IntConst { value: held, .. }) => *held = *value as i32,
             Some(Expr::SkipOffsetConst { value: held }) => *held = *value,
+            // A stub's smaller literal keeps its form where the new offset fits it, and is an
+            // `IntConst` otherwise, as the save writes it.
+            Some(
+                node @ (Expr::ByteConst {
+                    name: "IntConstByte",
+                    ..
+                }
+                | Expr::Simple {
+                    name: "IntZero" | "IntOne",
+                }),
+            ) => {
+                if kismet::entry_value(node) != Some(*value) {
+                    let fits = matches!(node, Expr::ByteConst { .. }) && *value <= 0xFF;
+                    *node = if fits {
+                        Expr::ByteConst {
+                            name: "IntConstByte",
+                            value: *value as u8,
+                            at: 0,
+                        }
+                    } else {
+                        Expr::IntConst {
+                            value: *value as i32,
+                            at: 0,
+                        }
+                    };
+                }
+            }
             _ => {
                 return Err(format!(
                     "{owner}: an offset into an edited script is not where it was"
@@ -2666,15 +2763,60 @@ mod tests {
         assert_eq!(lines[6], "0x0094 Return Nothing");
     }
 
-    /// An event entering through a byte-sized literal cannot be moved past what a byte holds, and
-    /// a script that has to keep its size takes a change of the same width only.
-    #[test]
-    fn a_resize_the_stubs_or_the_script_cannot_follow_is_refused() {
-        let byte_entry = [0x2C, 0x18];
-        let edits_long = edits(vec![graph_edit(0, 0x0A, 0x13, "abcdef")]);
-        let refused = save_graph(&edits_long, &byte_entry).expect_err("byte entry");
-        assert!(refused.contains("cannot hold 0x001C"), "{refused}");
+    /// The literal a stub passes its event graph, after a save.
+    fn stub_entry(after: &ParsedPackage) -> Expr {
+        let stub = after.exports[1].script.as_ref().expect("a script");
+        let (Expr::FinalCall { params, .. } | Expr::VirtualCall { params, .. }) =
+            &stub.statements[0].expr
+        else {
+            panic!("the stub calls its event graph");
+        };
+        params[0].clone()
+    }
 
+    /// An event entering through a byte-sized literal keeps it while the new offset fits a byte;
+    /// past that the literal becomes an `IntConst`, which makes the stub longer.
+    #[test]
+    fn a_byte_entry_moves_in_place_and_widens_past_a_byte() {
+        let byte_entry = [0x2C, 0x18];
+        let near = edits(vec![graph_edit(0, 0x0A, 0x13, "abcdef")]);
+        let (after, _) = save_graph(&near, &byte_entry).expect("moved in place");
+        assert!(
+            matches!(
+                stub_entry(&after),
+                Expr::ByteConst {
+                    name: "IntConstByte",
+                    value: 0x1C,
+                    ..
+                }
+            ),
+            "{:?}",
+            stub_entry(&after)
+        );
+        let far = edits(vec![graph_edit(0, 0x0A, 0x13, &"a".repeat(300))]);
+        let (after, applied) = save_graph(&far, &byte_entry).expect("widened");
+        let Expr::IntConst { value, .. } = stub_entry(&after) else {
+            panic!("{:?}", stub_entry(&after));
+        };
+        assert!(value > 0xFF, "{value}");
+        let stub = after.exports[1].script.as_ref().expect("a script");
+        // `IntConstByte` and its byte give way to `IntConst` and its four: three more.
+        let (before, _) = save_graph(&edits(Vec::new()), &byte_entry).expect("saved as it was");
+        let was = before.exports[1].script.as_ref().expect("a script");
+        assert_eq!(stub.buffer_size, was.buffer_size + 3);
+        assert!(
+            applied
+                .iter()
+                .any(|applied| applied.name == "ReceiveBeginPlay script layout"
+                    && applied.after.starts_with("22 bytes loaded")),
+            "{applied:?}"
+        );
+    }
+
+    /// A script that has to keep its size takes a change of the same width only.
+    #[test]
+    fn a_resize_the_script_cannot_follow_is_refused() {
+        let edits_long = edits(vec![graph_edit(0, 0x0A, 0x13, "abcdef")]);
         let header = graph_header();
         let mut locked = graph_script();
         // A computed jump on anything but the entry point goes where nothing can follow.

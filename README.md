@@ -201,15 +201,16 @@ class's own properties come first in every object's layout, so a new one would s
 inherited value in every instance, and a new function needs an export of its own and a place in
 its class's function map. An existing function can be rewritten whole, as text: see below.
 
-`asset script-set` changes one thing inside a function's bytecode, addressed by the statement
-offset `asset script` prints: a literal by its place in the statement (`--const`) or by where it
-starts (`--at`, as `asset script --expressions` lists), an object constant (`--object`), a text
-(`--text`), a call's function (`--call`) or a branch's condition (`--condition`). A value may take
-another width: the code after it moves, and so does everything pointing into the function, the
-event stubs entering an event graph and the latent actions resuming in it. A function something
-points into in a way that cannot be followed keeps its size and takes only a change of the same
-width. A call pointed at a Blueprint function is held to its parameters; a native function's are
-recorded nowhere the toolkit reads, so one is refused until `--allow-unchecked`. `asset
+`asset script-set` changes one thing inside a function's bytecode, addressed by the statement offset
+`asset script` prints: a literal by its place in the statement (`--const`) or by where it starts
+(`--at`, as `asset script --expressions` lists), an object constant (`--object`), a text (`--text`),
+a call's function (`--call`) or a branch's condition (`--condition`). A value may take another
+width: the code after it moves, and so does everything pointing into the function, the event stubs
+entering an event graph and the latent actions resuming in it. A stub holding its entry in a literal
+too small for where the event enters now takes an `IntConst` instead, and grows by it. A function
+something points into in a way that cannot be followed keeps its size and takes only a change of the
+same width. A call pointed at a Blueprint function is held to its parameters; a native function's
+are recorded nowhere the toolkit reads, so one is refused until `--allow-unchecked`. `asset
 script-widen` writes every literal in its widest form, which moves code without changing what it
 does. `--dry-run` shows the change without writing.
 
