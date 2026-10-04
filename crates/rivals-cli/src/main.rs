@@ -630,9 +630,10 @@ struct AssetSearchArgs {
     #[arg(long, value_name = "TEXT")]
     filter: Option<String>,
 
-    /// Only terms of this kind. Repeatable. `write` is where a variable is assigned, or a
-    /// container changed by the engine's array, map and set functions; `read` is everywhere else
-    /// it is named.
+    /// Only terms of this kind. Repeatable. `write` is where a variable is assigned, or changed
+    /// by an engine function known to change what it is handed: an array, map or set, a timer
+    /// handle, a random stream or a gameplay tag container. `read` is everywhere else it is
+    /// named.
     #[arg(long, value_name = "KIND")]
     kind: Vec<SearchKindArg>,
 

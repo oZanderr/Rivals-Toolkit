@@ -2325,7 +2325,7 @@ fn written_child(expr: &Expr, writing: bool) -> Option<&Expr> {
         } => Some(&**value),
         Expr::FinalCall {
             function, params, ..
-        } if changes_first_argument(function) => params.first(),
+        } => changed_argument(function).and_then(|at| params.get(at)),
         Expr::Context { member, .. } if writing => Some(&**member),
         Expr::Member {
             name: "StructMemberContext",
@@ -2337,37 +2337,39 @@ fn written_child(expr: &Expr, writing: bool) -> Option<&Expr> {
     }
 }
 
-/// Whether `function` is one of the engine's container functions that change the array, map or
-/// set they are handed first. Nothing in bytecode says a call changes an argument it is handed;
-/// these are the common ones, and engine functions do not change with the game.
-fn changes_first_argument(function: &ObjectRef) -> bool {
-    let Some((class, name)) = function.path.as_deref().and_then(|p| p.split_once(':')) else {
-        return false;
-    };
-    match class {
-        "/Script/Engine.KismetArrayLibrary" => matches!(
-            name,
-            "Array_Add"
-                | "Array_AddUnique"
-                | "Array_Append"
-                | "Array_Clear"
-                | "Array_Insert"
-                | "Array_Remove"
-                | "Array_RemoveItem"
-                | "Array_Resize"
-                | "Array_Reverse"
-                | "Array_Set"
-                | "Array_Shuffle"
-                | "Array_Swap"
-        ),
-        "/Script/Engine.BlueprintMapLibrary" => {
-            matches!(name, "Map_Add" | "Map_Remove" | "Map_Clear")
-        }
-        "/Script/Engine.BlueprintSetLibrary" => matches!(
-            name,
-            "Set_Add" | "Set_AddItems" | "Set_Remove" | "Set_RemoveItems" | "Set_Clear"
-        ),
-        _ => false,
+/// Which argument `function` changes, for the engine functions known to change one they are
+/// handed: an array, map or set, a timer handle, a random stream or a gameplay tag container.
+/// Nothing in bytecode says a call changes an argument; these are the common ones, and engine
+/// functions do not change with the game. A timer function's handle follows the world context
+/// the compiler passes first.
+fn changed_argument(function: &ObjectRef) -> Option<usize> {
+    let (class, name) = function.path.as_deref()?.split_once(':')?;
+    match (class, name) {
+        (
+            "/Script/Engine.KismetSystemLibrary",
+            "K2_ClearAndInvalidateTimerHandle" | "K2_ClearAndInvalidateCommonTimerHandle",
+        ) => Some(1),
+        (
+            "/Script/Engine.KismetArrayLibrary",
+            "Array_Add" | "Array_AddUnique" | "Array_Append" | "Array_Clear" | "Array_Insert"
+            | "Array_Remove" | "Array_RemoveItem" | "Array_Resize" | "Array_Reverse" | "Array_Set"
+            | "Array_Shuffle" | "Array_Swap",
+        )
+        | ("/Script/Engine.BlueprintMapLibrary", "Map_Add" | "Map_Remove" | "Map_Clear")
+        | (
+            "/Script/Engine.BlueprintSetLibrary",
+            "Set_Add" | "Set_AddItems" | "Set_Remove" | "Set_RemoveItems" | "Set_Clear",
+        )
+        | ("/Script/Engine.KismetSystemLibrary", "K2_InvalidateTimerHandle")
+        | (
+            "/Script/Engine.KismetMathLibrary",
+            "SetRandomStreamSeed" | "SeedRandomStream" | "ResetRandomStream",
+        )
+        | (
+            "/Script/GameplayTags.BlueprintGameplayTagLibrary",
+            "AddGameplayTag" | "RemoveGameplayTag" | "AppendGameplayTagContainers",
+        ) => Some(0),
+        _ => None,
     }
 }
 
@@ -4028,10 +4030,10 @@ mod tests {
         );
     }
 
-    /// The engine's container functions that change what they are handed write it; any other
-    /// call only reads what it is handed.
+    /// The engine functions that change what they are handed write it, a timer's handle after
+    /// the world context included; any other call only reads what it is handed.
     #[test]
-    fn a_container_call_writes_the_container_it_changes() {
+    fn an_engine_call_writes_the_argument_it_changes() {
         let library = |function: &str, params| {
             context(
                 Expr::ObjectConst {
@@ -4074,6 +4076,20 @@ mod tests {
         assert_eq!(
             terms_of(&handed),
             ["Call /Game/X.X_C:Fill", "Read MountedPaths"]
+        );
+        let timer = |function: &str| {
+            call(
+                &format!("/Script/Engine.KismetSystemLibrary:{function}"),
+                vec![Expr::SelfRef, var("InstanceVariable", "PollTimer")],
+            )
+        };
+        assert_eq!(
+            terms_of(&timer("K2_ClearAndInvalidateTimerHandle"))[1..],
+            ["Write PollTimer"]
+        );
+        assert_eq!(
+            terms_of(&timer("K2_PauseTimerHandle"))[1..],
+            ["Read PollTimer"]
         );
     }
 
