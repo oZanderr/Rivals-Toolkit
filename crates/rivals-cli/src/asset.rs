@@ -8,10 +8,10 @@ use rivals_core::asset_edit::{self, AssetEditRequest};
 use rivals_core::inherit;
 use rivals_core::localization;
 use rivals_core::mappings;
-use rivals_core::schema_synth::{self, PackageSource};
+use rivals_core::schema_synth::{self, LayoutReader, PackageSource};
 use rivals_uasset::{
-    AssetBundle, ExportStatus, Mappings, PackageEdits, PackageInfo, ParsedPackage, PropertyEntry,
-    PropertyValue, RemovalPlan,
+    AssetBundle, ExportStatus, Mappings, PackageEdits, PackageInfo, ParseOptions, ParsedPackage,
+    PropertyEntry, PropertyValue, RemovalPlan,
 };
 use serde::Serialize;
 
@@ -3181,6 +3181,7 @@ pub fn audit_dir(
                 entry: &file.to_string_lossy(),
                 kind: AssetSource::Loose,
             },
+            None,
         );
     }
     Ok(acc.finish())
@@ -3214,6 +3215,9 @@ pub fn audit(
     acc.text_check = text_check;
     acc.report.mappings_warning = mappings::drift_warning(game_root, &path);
     let converter = asset::PackageConverter::new(&*store);
+    // Blueprint layouts are read through the same converter, which already holds the headers
+    // their packages import.
+    let layouts = LayoutReader::through(&*store, &converter);
     for (index, (package_id, path)) in packages.iter().take(total).enumerate() {
         progress(index + 1, total);
         acc.report.packages_scanned += 1;
@@ -3228,11 +3232,35 @@ pub fn audit(
                     entry: path,
                     kind: source_of(container),
                 },
+                Some(&layouts),
             ),
             Err(_) => acc.note_failure("legacy conversion failed", Some(path.clone())),
         }
     }
     Ok(acc.finish())
+}
+
+/// Parses a package the way a save checks one, recovering Blueprint layouts through `layouts` when
+/// the walk holds a converter for them.
+fn parse_checked(
+    bundle: &AssetBundle<'_>,
+    schema: &Mappings,
+    source: &PackageSource<'_>,
+    layouts: Option<&LayoutReader<'_>>,
+) -> Result<ParsedPackage, String> {
+    match layouts {
+        Some(layouts) => schema_synth::parse_package_through(
+            bundle,
+            Some(schema),
+            source,
+            layouts,
+            ParseOptions {
+                check_headers: true,
+                ..Default::default()
+            },
+        ),
+        None => schema_synth::parse_package_checked(bundle, Some(schema), source),
+    }
 }
 
 /// Shared tallying so the container walk and the directory walk cannot report differently.
@@ -3384,12 +3412,9 @@ impl Accumulator {
         exports: &[u8],
         schema: &Mappings,
         source: &PackageSource<'_>,
+        layouts: Option<&LayoutReader<'_>>,
     ) {
-        let parsed = match schema_synth::parse_package_checked(
-            &AssetBundle { asset, exports },
-            Some(schema),
-            source,
-        ) {
+        let parsed = match parse_checked(&AssetBundle { asset, exports }, schema, source, layouts) {
             Ok(parsed) => parsed,
             Err(reason) => {
                 self.note_failure(&short_reason(&reason), Some(source.entry.to_string()));
@@ -3539,10 +3564,10 @@ impl Accumulator {
             }
         }
         if self.relocation_check {
-            self.check_relocation(asset, exports, schema, source, &parsed);
+            self.check_relocation(asset, exports, schema, source, layouts, &parsed);
         }
         if self.text_check {
-            self.check_text(asset, exports, schema, source, &parsed);
+            self.check_text(asset, exports, schema, source, layouts, &parsed);
         }
         let census = rivals_uasset::script_census(&parsed);
         for (line, count) in census.counts {
@@ -3564,6 +3589,7 @@ impl Accumulator {
         exports: &[u8],
         schema: &Mappings,
         source: &PackageSource<'_>,
+        layouts: Option<&LayoutReader<'_>>,
         parsed: &rivals_uasset::ParsedPackage,
     ) {
         let scripts = rivals_uasset::widening_edits(parsed, None, true);
@@ -3586,13 +3612,14 @@ impl Accumulator {
             Some(schema),
         )
         .and_then(|patched| {
-            let after = schema_synth::parse_package_checked(
+            let after = parse_checked(
                 &AssetBundle {
                     asset: &patched.asset,
                     exports: &patched.exports,
                 },
-                Some(schema),
+                schema,
                 source,
+                layouts,
             )?;
             rivals_uasset::verify_patch(parsed, &after, &changes, &patched.applied)?;
             // Narrowing each literal back has to give the bytes the package started as: every
@@ -3658,6 +3685,7 @@ impl Accumulator {
         exports: &[u8],
         schema: &Mappings,
         source: &PackageSource<'_>,
+        layouts: Option<&LayoutReader<'_>>,
         parsed: &rivals_uasset::ParsedPackage,
     ) {
         let mut count = |line: String, example: Option<String>| {
@@ -3718,13 +3746,14 @@ impl Accumulator {
             Some(schema),
         )
         .and_then(|patched| {
-            let after = schema_synth::parse_package_checked(
+            let after = parse_checked(
                 &AssetBundle {
                     asset: &patched.asset,
                     exports: &patched.exports,
                 },
-                Some(schema),
+                schema,
                 source,
+                layouts,
             )?;
             rivals_uasset::verify_patch(parsed, &after, &changes, &patched.applied)?;
             same_bytes("header", asset, &patched.asset)?;

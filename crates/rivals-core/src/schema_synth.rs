@@ -5,12 +5,13 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, LazyLock, Mutex};
 
+use retoc::iostore::IoStoreTrait;
 use retoc::legacy_asset::FSerializedAssetBundle;
 use rivals_uasset::{
     AssetBundle, ExportStatus, Mappings, MissingSchema, ParseOptions, ParsedPackage, TraceEntry,
 };
 
-use crate::asset::{self, AssetSource};
+use crate::asset::{self, AssetSource, PackageConverter};
 
 type Cache = Mutex<HashMap<String, Arc<Mappings>>>;
 static CACHE: LazyLock<Cache> = LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -28,9 +29,15 @@ pub struct LayoutReader<'a> {
 }
 
 impl<'a> LayoutReader<'a> {
-    pub fn new(load: impl Fn(&str) -> Result<FSerializedAssetBundle, String> + 'a) -> Self {
+    /// Reads through `converter`, finding each package by name in `store`, the store it converts
+    /// from.
+    pub fn through(store: &'a dyn IoStoreTrait, converter: &'a PackageConverter<'_>) -> Self {
         Self {
-            load: Box::new(load),
+            load: Box::new(move |name: &str| {
+                let path = asset::package_path(store, name)
+                    .ok_or_else(|| format!("{name} is not in the store being read"))?;
+                converter.convert(asset::package_id(name), &path)
+            }),
             recovered: RefCell::new(HashMap::new()),
         }
     }

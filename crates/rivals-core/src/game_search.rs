@@ -21,7 +21,7 @@ use retoc::{EIoChunkType, EIoStoreTocVersion, FIoChunkId, FPackageId};
 use rivals_uasset::{AssetBundle, Mappings, ParseOptions};
 use serde::Serialize;
 
-use crate::asset::{self, AssetSource, PackageConverter, PathFilter};
+use crate::asset::{AssetSource, PackageConverter, PathFilter};
 use crate::mod_search::{Query, SearchHit, search_package};
 use crate::pak::containers::MOUNT_POINT;
 use crate::pak::load_order::{self, LoadOrder};
@@ -188,13 +188,7 @@ pub fn game_search(
             // A value search reads values the way the inspector shows them, which can take layouts
             // recovered from the Blueprints that define them: the copies the game loads, read
             // through the same converter, which already holds the headers they import.
-            let layouts = values.then(|| {
-                LayoutReader::new(|name: &str| {
-                    let path = asset::package_path(&order, name)
-                        .ok_or_else(|| format!("{name} is not a package the game loads"))?;
-                    converter.convert(asset::package_id(name), &path)
-                })
-            });
+            let layouts = values.then(|| LayoutReader::through(&order, &converter));
             let mut found = 0;
             let outcomes: Vec<Outcome> = chunk
                 .iter()
@@ -669,12 +663,9 @@ mod game_data_tests {
         let order = load_order::open(&root, false, false).expect("containers");
         let candidates = winning_copies(&order, &PathFilter::new(Some(SETTINGS)));
         assert!(!candidates.is_empty());
-        let patch = asset::newest_patch(&root).expect("a patch");
+        let patch = crate::asset::newest_patch(&root).expect("a patch");
         let converter = PackageConverter::new(&order);
-        let layouts = LayoutReader::new(|name: &str| {
-            let path = asset::package_path(&order, name).ok_or("missing")?;
-            converter.convert(asset::package_id(name), &path)
-        });
+        let layouts = LayoutReader::through(&order, &converter);
         let json = |parsed: Result<rivals_uasset::ParsedPackage, String>| {
             parsed.map(|parsed| serde_json::to_string(&parsed).expect("json"))
         };

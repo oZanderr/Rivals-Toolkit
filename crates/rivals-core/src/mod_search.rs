@@ -9,7 +9,7 @@ use rivals_uasset::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::asset::{self, AssetSource, PackageConverter, list_packages};
+use crate::asset::{AssetSource, PackageConverter, list_packages};
 use crate::schema_synth::{self, LayoutReader, PackageSource};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -206,11 +206,7 @@ pub fn mod_search(
     let (store, packages) = list_packages(game_root, &utoc)?;
     let converter = PackageConverter::new(store.as_ref());
     // The store holds the mod and the base game, which is where its Blueprints' layouts come from.
-    let layouts = LayoutReader::new(|name: &str| {
-        let path = asset::package_path(store.as_ref(), name)
-            .ok_or_else(|| format!("{name} is in neither the mod nor the base game"))?;
-        converter.convert(asset::package_id(name), &path)
-    });
+    let layouts = LayoutReader::through(store.as_ref(), &converter);
     let mut result = SearchResult::default();
     for (id, path) in &packages {
         let parsed = converter.convert(*id, path).and_then(|bundle| {

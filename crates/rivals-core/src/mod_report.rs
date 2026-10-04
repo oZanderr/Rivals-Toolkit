@@ -10,7 +10,7 @@ use serde::Serialize;
 
 use crate::asset::{AssetSource, PackageConverter, list_packages};
 use crate::pak::containers::open_base_game_paks;
-use crate::schema_synth::{self, PackageSource};
+use crate::schema_synth::{self, LayoutReader, PackageSource};
 
 /// Extensions a script string has to end in to count as a file the mod reads or writes.
 const FILE_EXTENSIONS: &[&str] = &[
@@ -69,6 +69,8 @@ pub fn mod_report(
         .unwrap_or_default()
         .to_string();
     let converter = PackageConverter::new(store.as_ref());
+    // The store holds the mod and the base game, which is where its Blueprints' layouts come from.
+    let layouts = LayoutReader::through(store.as_ref(), &converter);
     let runtime_natives: BTreeSet<String> = crate::script_objects::current().into_iter().collect();
 
     let mut report = ModReport {
@@ -126,7 +128,7 @@ pub fn mod_report(
             .and_then(|s| s.to_str())
             .unwrap_or_default();
         let mut kind = kind_of(&header, stem);
-        match schema_synth::parse_package_opts(
+        match schema_synth::parse_package_through(
             &bundle,
             mappings,
             &PackageSource {
@@ -135,6 +137,7 @@ pub fn mod_report(
                 entry: path,
                 kind: AssetSource::Utoc,
             },
+            &layouts,
             ParseOptions::default(),
         ) {
             Ok(parsed) => {
