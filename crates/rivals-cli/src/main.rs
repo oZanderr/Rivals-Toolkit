@@ -521,7 +521,8 @@ struct AssetSetArgs {
     #[arg(long, value_name = "OFFSET", value_parser = parse_offset)]
     offset: u64,
 
-    /// The kind the value is expected to be, so a stale offset is refused rather than written.
+    /// The kind the value is expected to be, so a stale offset is refused rather than written:
+    /// `int`, `float`, `str`, `struct` and so on, or for a value not stored, the type it declares.
     #[arg(long, value_name = "KIND")]
     kind: String,
 

@@ -11430,7 +11430,7 @@ mod game_data_tests {
             Ok(_) => panic!("a stale request should be refused, not written"),
             Err(error) => error,
         };
-        assert!(error.contains("not a float"), "{error}");
+        assert!(error.contains("reads as str here, not float"), "{error}");
     }
 
     fn row_edit(export: u32, op: RowOp) -> RowEdit {

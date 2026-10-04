@@ -1541,11 +1541,11 @@ pub fn patch_package_with(
             .ok_or_else(|| format!("{} has no recorded position in this package", entry.label()))?;
         // These change which properties the header says are stored, and a tagged package has no
         // such header: each property is a tag of its own.
-        let kind = kind_of(&entry.value);
-        if kind != edit.expect_kind {
+        if !fits_kind(&entry.value, &edit.expect_kind) {
             return Err(format!(
-                "{} is a {kind} here, not a {}. Re-read the asset and try again.",
+                "{} reads as {} here, not {}. Re-read the asset and try again.",
                 entry.label(),
+                read_kind(&entry.value),
                 edit.expect_kind
             ));
         }
@@ -7408,6 +7408,42 @@ pub fn kind_of(value: &PropertyValue) -> String {
     .to_string()
 }
 
+/// Whether an edit made for `expected` still fits the value: the kind it reads as, in any case,
+/// or for a slot storing nothing, the type it declares, which is all a dump or a trace shows of it.
+fn fits_kind(value: &PropertyValue, expected: &str) -> bool {
+    let same = |kind: &str| {
+        kind.replace('_', "")
+            .eq_ignore_ascii_case(&expected.replace('_', ""))
+    };
+    let declared = match value {
+        PropertyValue::Unset { declared, .. } => Some(*declared),
+        PropertyValue::Default { declared, .. } => *declared,
+        _ => None,
+    };
+    same(&kind_of(value))
+        || declared.is_some_and(|declared| {
+            same(declared)
+                || same(match declared {
+                    "Int8" | "Int16" | "Int" | "Int64" => "int",
+                    "UInt16" | "UInt32" | "UInt64" => "uint",
+                    "Float" | "Double" => "float",
+                    other => other,
+                })
+        })
+}
+
+/// The kind a value reads as, with the type a slot storing nothing declares.
+fn read_kind(value: &PropertyValue) -> String {
+    match value {
+        PropertyValue::Unset { declared, .. } => format!("unset ({declared})"),
+        PropertyValue::Default {
+            declared: Some(declared),
+            ..
+        } => format!("default ({declared})"),
+        other => kind_of(other),
+    }
+}
+
 /// How wide a property of this declared type is when stored, for values that have no bytes yet and
 /// so cannot be measured.
 fn declared_width(declared: &str) -> Option<u64> {
@@ -8458,6 +8494,31 @@ mod tests {
         assert_eq!(at(&value, "-1", 2), vec![0xFF, 0xFF]);
         assert_eq!(at(&value, "258", 4), vec![0x02, 0x01, 0, 0]);
         assert_eq!(at(&value, "1", 8).len(), 8);
+    }
+
+    /// A slot storing nothing is expected as what it reads as or as the type it declares, which
+    /// is all a dump or a trace shows of it; a stored value only as its kind.
+    #[test]
+    fn a_slot_storing_nothing_is_expected_as_its_declared_type_too() {
+        let unset = PropertyValue::Unset {
+            declared: "Int64",
+            enum_type: None,
+            fields: Vec::new(),
+        };
+        for fits in ["unset", "Int64", "int64", "int", "INT"] {
+            assert!(fits_kind(&unset, fits), "{fits}");
+        }
+        assert!(!fits_kind(&unset, "str"));
+        let zero = PropertyValue::Default {
+            declared: Some("SoftObject"),
+            fields: Vec::new(),
+        };
+        for fits in ["default", "SoftObject", "soft_object"] {
+            assert!(fits_kind(&zero, fits), "{fits}");
+        }
+        let stored = PropertyValue::Float { value: 1.0 };
+        assert!(fits_kind(&stored, "Float") && !fits_kind(&stored, "int"));
+        assert_eq!(read_kind(&unset), "unset (Int64)");
     }
 
     /// A value that is not stored yet has no width to measure, so the schema has to supply it.
