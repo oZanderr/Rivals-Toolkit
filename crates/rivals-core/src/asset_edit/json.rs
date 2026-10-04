@@ -58,6 +58,10 @@ pub struct EditList {
     /// Empty objects of a class to add. A save of its own.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub add_exports: Vec<rivals_uasset::AddExport>,
+    /// Variables to add to a Blueprint class whose instances all live in its package. A save of
+    /// its own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub add_variables: Vec<rivals_uasset::AddVariable>,
     /// Components to add to a Blueprint by duplicating one. A save of its own.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub add_components: Vec<rivals_uasset::AddComponent>,
@@ -164,6 +168,7 @@ impl EditList {
             && self.field_sets.is_empty()
             && !self.compact_names
             && self.add_exports.is_empty()
+            && self.add_variables.is_empty()
             && self.add_components.is_empty()
             && self.remove_components.is_empty()
             && self.save_as.is_none()
@@ -295,6 +300,7 @@ impl EditList {
             compact_names: self.compact_names,
             add_exports: self.add_exports,
             new_functions,
+            add_variables: self.add_variables,
             add_components: self.add_components,
             remove_components: self.remove_components,
             save_as: self.save_as,

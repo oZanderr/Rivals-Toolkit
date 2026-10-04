@@ -91,6 +91,9 @@ pub fn preview_read_edits(
     if !changes.new_functions.is_empty() {
         return new_function_pass(request, mappings, loaded, parsed);
     }
+    if !changes.add_variables.is_empty() {
+        check_variable_class_is_alone(request, parsed, &changes.add_variables)?;
+    }
     if let Some(add) = changes.add_components.first() {
         if add.from_parent.is_some() {
             return inherited_component_pass(request, mappings, loaded, parsed, add);
@@ -1168,6 +1171,97 @@ fn new_function_pass(
     notes.append(&mut written.notes);
     written.notes = notes;
     Ok((written, loaded))
+}
+
+/// Refuses variables for a class an object in another package is made from, or a class there
+/// derives from: their slots would move under them. The import index lists the packages importing
+/// the class or its default object, built first when it is missing or out of date, and each is read
+/// to tell an instance or a subclass from a package that only calls or casts to the class.
+fn check_variable_class_is_alone(
+    request: &AssetEditRequest<'_>,
+    parsed: &rivals_uasset::ParsedPackage,
+    adds: &[rivals_uasset::AddVariable],
+) -> Result<(), String> {
+    let Some(first) = adds.first() else {
+        return Ok(());
+    };
+    let class = match first.class {
+        Some(index) => parsed.exports.get(index as usize),
+        None => parsed.exports.iter().find(|export| {
+            export
+                .layout
+                .as_ref()
+                .is_some_and(|layout| layout.function_map_at.is_some())
+        }),
+    }
+    .ok_or("this package holds no Blueprint class to add a variable to")?;
+    let class_path = class.path.clone();
+    let (package, name) = class_path
+        .split_once('.')
+        .ok_or_else(|| format!("{class_path} is not a class's path"))?;
+    let defaults = format!("{package}.Default__{name}");
+    let index = match crate::import_index::load(request.game_root)? {
+        Some(index) if !index.is_stale(request.game_root) => index,
+        _ => crate::import_index::build(request.game_root, &mut |_, _| {})?,
+    };
+    let mut importers = index.importers_of(&class_path).packages;
+    importers.extend(index.importers_of(&defaults).packages);
+    importers.sort();
+    importers.dedup();
+    let own = request.entry.replace('\\', "/").to_ascii_lowercase();
+    let mods =
+        crate::import_index::enabled_mod_containers(&crate::paths::paks_dir(request.game_root));
+    let mut holders = Vec::new();
+    for listed in importers {
+        let (path, in_mod) = match listed.split_once(" (in ") {
+            Some((path, name)) => (
+                path.to_string(),
+                Some(name.trim_end_matches(')').to_string()),
+            ),
+            None => (listed.clone(), None),
+        };
+        if path.to_ascii_lowercase() == own {
+            continue;
+        }
+        let container = match &in_mod {
+            Some(name) => mods
+                .iter()
+                .find(|container| {
+                    container.file_stem().and_then(|stem| stem.to_str()) == Some(name.as_str())
+                })
+                .map(|container| container.to_string_lossy().into_owned()),
+            None => Some("pakchunk0-Windows.utoc".to_string()),
+        };
+        let read = container.and_then(|container| {
+            asset::load_bundle(request.game_root, &container, &path, AssetSource::Utoc).ok()
+        });
+        let Some(header) =
+            read.and_then(|loaded| rivals_uasset::read_header(&bundle_of(&loaded)).ok())
+        else {
+            holders.push(format!("{listed}, which did not read"));
+            continue;
+        };
+        let names_it = |index: retoc::zen::FPackageIndex| {
+            index.is_import()
+                && rivals_uasset::dotted_path(&header, index)
+                    .is_some_and(|named| named == class_path || named == defaults)
+        };
+        if header.exports.iter().any(|export| {
+            names_it(export.class_index)
+                || names_it(export.super_index)
+                || names_it(export.template_index)
+        }) {
+            holders.push(listed);
+        }
+    }
+    if holders.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{class_path} is made into objects or derived from in other packages, whose values a new variable would move: {}",
+            holders.join(", ")
+        ))
+    }
 }
 
 /// How many Blueprint parents deep a new function's name is looked for.
@@ -14686,6 +14780,62 @@ mod game_data_tests {
                 assert!(result.is_ok(), "{entry} #{export}: {result:?}");
             }
         }
+    }
+
+    /// A variable added to a Blueprint class goes after the class's own, and the class's default
+    /// object is renumbered to the layout that makes: it reads back every value it held, the new
+    /// one unset. The class reads with its own records from then on, not the mappings file's.
+    #[test]
+    fn a_class_variable_renumbers_the_objects_of_its_class() {
+        let Some(fixture) = Fixture::open(CONSTRAINT_EMITTER) else {
+            return;
+        };
+        let before = fixture.parse();
+        let edits = PackageEdits {
+            add_variables: vec![rivals_uasset::AddVariable {
+                class: None,
+                name: "ToolkitCount".into(),
+                ty: "Int".into(),
+            }],
+            ..Default::default()
+        };
+        let patched = rivals_uasset::patch_package_with(
+            &fixture.bundle(),
+            rivals_uasset::Sidecars::default(),
+            &before,
+            &edits,
+            Some(&fixture.schema),
+        )
+        .expect("patched");
+        let after = schema_synth::parse_package_opts(
+            &AssetBundle {
+                asset: &patched.asset,
+                exports: &patched.exports,
+            },
+            Some(&fixture.schema),
+            &fixture.source(),
+            editor_options(),
+        )
+        .expect("reads back");
+        rivals_uasset::verify_patch(&before, &after, &edits, &patched.applied).expect("verified");
+        assert!(
+            patched
+                .applied
+                .iter()
+                .any(|applied| applied.name == "Default__BP_ConstraintEmitter_C slots"),
+            "{:?}",
+            patched.applied
+        );
+        let class = after
+            .exports
+            .iter()
+            .find(|export| export.object_name == "BP_ConstraintEmitter_C")
+            .expect("the class");
+        let declared = class.struct_definition.as_ref().expect("its fields");
+        assert_eq!(
+            declared.properties.last().map(|p| p.name.as_str()),
+            Some("ToolkitCount")
+        );
     }
 
     /// A function added to a Blueprint class is listed in it and written from its text, and the

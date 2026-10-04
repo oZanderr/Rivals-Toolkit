@@ -538,9 +538,9 @@ pub fn preview_script_widen(
     Ok(patched.applied)
 }
 
-/// Writes a function's whole script anew from assembler text into a mod, or adds a function
-/// written from one.
-pub fn script_assemble(
+/// Writes a save of its own into a mod: a function's script from text, a new function, a new
+/// variable.
+pub fn save_changes(
     request: &Request<'_>,
     changes: PackageEdits,
     mod_name: &str,
@@ -556,9 +556,8 @@ pub struct SavePreview {
     pub notes: Vec<String>,
 }
 
-/// What `script_assemble` would change, assembled, patched and verified in memory without
-/// writing anything.
-pub fn preview_script_assemble(
+/// What `save_changes` would change, patched and verified in memory without writing anything.
+pub fn preview_changes(
     request: &Request<'_>,
     changes: PackageEdits,
 ) -> Result<SavePreview, String> {

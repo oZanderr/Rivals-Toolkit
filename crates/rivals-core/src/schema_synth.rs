@@ -127,7 +127,7 @@ fn synth_for(
     source: &PackageSource<'_>,
     layouts: Option<&LayoutReader<'_>>,
 ) -> Option<Arc<Mappings>> {
-    let (wanted, local) = wanted_definitions(parsed);
+    let (wanted, local) = wanted_definitions(parsed, mappings);
     if wanted.is_empty() && !local {
         return None;
     }
@@ -143,7 +143,10 @@ fn synth_for(
 /// and the Blueprint classes whose instances did not read to their end, which is what a class
 /// revised after the mappings were dumped looks like. The flag says whether such a class is
 /// defined in this very package, whose own definitions then join the second parse.
-fn wanted_definitions(parsed: &ParsedPackage) -> (Vec<MissingSchema>, bool) {
+fn wanted_definitions(
+    parsed: &ParsedPackage,
+    mappings: Option<&Mappings>,
+) -> (Vec<MissingSchema>, bool) {
     let mut wanted: Vec<MissingSchema> = parsed
         .missing_schemas
         .iter()
@@ -152,7 +155,35 @@ fn wanted_definitions(parsed: &ParsedPackage) -> (Vec<MissingSchema>, bool) {
             object_path: missing.object_path.clone(),
         })
         .collect();
-    let mut local = false;
+    // A class the package's own records describe otherwise than the mappings file does, as one
+    // given a variable since the file was dumped or revised by a patch, lays out its objects as
+    // the records say, which a read with the file's entry can get wrong without failing.
+    let mut local = mappings.is_some_and(|mappings| {
+        parsed.exports.iter().any(|export| {
+            let Some(definition) = &export.struct_definition else {
+                return false;
+            };
+            if !export.class_name.ends_with("Class") {
+                return false;
+            }
+            let ours: Vec<&str> = definition
+                .properties
+                .iter()
+                .map(|property| property.name.as_str())
+                .collect();
+            mappings
+                .chain_entries(&definition.name)
+                .first()
+                .is_some_and(|entry| {
+                    let mut theirs: Vec<_> = entry.properties.iter().collect();
+                    theirs.sort_by_key(|property| property.index);
+                    theirs
+                        .iter()
+                        .map(|property| property.name.as_str())
+                        .ne(ours.iter().copied())
+                })
+        })
+    });
     for export in &parsed.exports {
         if matches!(
             export.status,
@@ -297,12 +328,23 @@ fn synthesise(
     }
 
     // The package's own definitions are named by its package name, which an edit can change while
-    // the entry it was read from stays the same.
+    // the entry it was read from stays the same, and so can what they hold: a variable added to a
+    // class leaves every name as it was, so the fields are part of what the layout is kept under.
     let scope = if own.is_empty() {
         String::new()
     } else {
+        use std::hash::{Hash, Hasher};
         let names: Vec<&str> = own.iter().map(|definition| definition.name()).collect();
-        format!("{}\u{2}{}", source.entry, names.join("\u{2}"))
+        let mut fields = std::collections::hash_map::DefaultHasher::new();
+        for definition in &own {
+            format!("{:?}", definition.properties()).hash(&mut fields);
+        }
+        format!(
+            "{}\u{2}{}\u{2}{:016x}",
+            source.entry,
+            names.join("\u{2}"),
+            fields.finish()
+        )
     };
     let joined = entries.join("\u{1}");
     let key = format!("{}\u{1}{scope}\u{1}{joined}", source.container);

@@ -2,6 +2,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 
 mod call_shape;
+mod class_variable;
 mod component;
 mod copy;
 mod datatable;
@@ -61,6 +62,7 @@ mod ustruct;
 mod value;
 mod write;
 
+pub use class_variable::AddVariable;
 pub use component::{
     AddComponent, ChangedList, ComponentPlan, ComponentRemoval, InheritedComponent, ListContext,
     ListEntry, ListScope, NodeParent, RemoveComponent, component_removal_wiring, component_wiring,

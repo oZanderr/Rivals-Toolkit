@@ -10,8 +10,10 @@ use crate::header_edit::{self, Tables};
 use crate::package::ParsedPackage;
 use crate::ustruct::{FieldRecord, RecordTail};
 
-/// `RF_Public`, the only object flag on any field record the game ships.
+/// `RF_Public`, the only object flag on a function's field records and on a container's element.
 const PUBLIC: u32 = 0x1;
+/// What the cook leaves on a class's own variables: `RF_Public` and one more object flag.
+const CLASS_VARIABLE: u32 = 0x0020_0001;
 
 /// `FBoolProperty`'s packing, the same in every bool record the game ships: a one-byte field at
 /// offset zero, masked whole, held as a native bool.
@@ -25,6 +27,9 @@ const OUTPUT: u64 = 0x180;
 const RETURN: u64 = 0x580;
 /// `CPF_ReferenceParm`, which the compiler leaves on the array locals of a function.
 const ARRAY_LOCAL: u64 = 0x0800_0000;
+/// `CPF_Edit | CPF_BlueprintVisible | CPF_DisableEditOnInstance`, a variable as the Blueprint editor
+/// makes one: settable on the class's defaults and readable and writable from its graphs.
+const VARIABLE: u64 = 0x0001_0005;
 
 /// What a new field holds, as a text declares it. Classes, structs and enums are named by their
 /// full path: a short name can stand for more than one.
@@ -68,6 +73,8 @@ pub enum NewField {
     ByReference,
     Output,
     Return,
+    /// A variable of the class itself.
+    Variable,
 }
 
 impl FieldType {
@@ -288,8 +295,13 @@ pub(crate) fn new_record(
         NewField::ByReference => BY_REFERENCE,
         NewField::Output => OUTPUT,
         NewField::Return => RETURN,
+        NewField::Variable => VARIABLE,
     };
-    record(name, ty, flags, tables, sizes)
+    let mut record = record(name, ty, flags, tables, sizes)?;
+    if role == NewField::Variable {
+        record.field_flags = CLASS_VARIABLE;
+    }
+    Ok(record)
 }
 
 fn record(

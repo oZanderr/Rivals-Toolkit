@@ -43,6 +43,17 @@ pub(crate) struct UnversionedHeader {
 }
 
 impl UnversionedHeader {
+    /// Moves every slot at or above `from` up by `by`, as `by` slots put in at `from` leave them.
+    /// The values keep their order, so the bytes after the header stay as they are.
+    pub(crate) fn shift_from(&mut self, from: u32, by: u32) {
+        for item in &mut self.items {
+            if item.schema_index >= from {
+                item.schema_index += by;
+            }
+        }
+        self.normalize();
+    }
+
     /// How many schema slots the fragments describe, stored or skipped. A header written for the
     /// struct this build ships never reaches past the struct's own slot count.
     pub(crate) fn covered_slots(&self) -> usize {
@@ -759,6 +770,25 @@ mod tests {
     fn read(data: &[u8]) -> UnversionedHeader {
         let mut cursor = Cursor::new(data, 0);
         read_header(&mut cursor).expect("header")
+    }
+
+    /// A slot put in moves every slot at or above it up, the values keeping their order and
+    /// whether each is zero, and the header written for them reads back the same.
+    #[test]
+    fn shifting_slots_keeps_the_values_and_their_zero_flags() {
+        let mut header = read(&empty_header(10));
+        header.insert_value(0, false).expect("stored");
+        header.insert_value(2, true).expect("stored");
+        header.insert_value(5, false).expect("stored");
+        header.shift_from(2, 1);
+        assert_eq!(indices(&header), [0, 3, 6]);
+        let zeros: Vec<bool> = header.items.iter().map(|item| item.is_zero).collect();
+        assert_eq!(zeros, [false, true, false]);
+        let again = read(&header.write().expect("written"));
+        assert_eq!(indices(&again), [0, 3, 6]);
+        assert!(again.items[1].is_zero);
+        header.shift_from(0, 2);
+        assert_eq!(indices(&header), [2, 5, 8]);
     }
 
     /// A stored zero struct holds every slot, each flagged zero, so none takes the archetype's

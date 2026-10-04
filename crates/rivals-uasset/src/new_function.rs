@@ -135,11 +135,11 @@ fn is_ident(text: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// The class a new function goes to: the one named, or the package's only Blueprint class.
-pub(crate) fn class_of<'a>(
-    parsed: &'a ParsedPackage,
-    add: &NewFunctionEdit,
-) -> Result<(&'a ParsedExport, &'a StructLayout), String> {
+/// The class something new goes to: the one named, or the package's only Blueprint class.
+pub(crate) fn class_of(
+    parsed: &ParsedPackage,
+    class: Option<u32>,
+) -> Result<(&ParsedExport, &StructLayout), String> {
     let classes: Vec<&ParsedExport> = parsed
         .exports
         .iter()
@@ -150,7 +150,7 @@ pub(crate) fn class_of<'a>(
                 .is_some_and(|layout| layout.function_map_at.is_some())
         })
         .collect();
-    let class = match add.class {
+    let class = match class {
         Some(index) => parsed
             .exports
             .get(index as usize)
@@ -224,7 +224,7 @@ pub(crate) fn add_functions(
         if !is_ident(name) {
             return Err(format!("{name:?} is not a name a function can take"));
         }
-        let (class, layout) = class_of(parsed, add)?;
+        let (class, layout) = class_of(parsed, add.class)?;
         let position = class.index as usize;
         let taken = layout
             .function_map
@@ -445,7 +445,7 @@ fn signature_text(params: &[Param]) -> String {
 
 /// The export a new function was given, found in the package as saved by its class and name.
 pub fn new_function_export(parsed: &ParsedPackage, add: &NewFunctionEdit) -> Result<u32, String> {
-    let (class, _) = class_of(parsed, add)?;
+    let (class, _) = class_of(parsed, add.class)?;
     parsed
         .exports
         .iter()
@@ -500,7 +500,7 @@ pub(crate) fn verify(
                     NewField::ByReference => FieldRole::Ref,
                     NewField::Output => FieldRole::Out,
                     NewField::Return => FieldRole::Return,
-                    NewField::Input | NewField::Local => FieldRole::In,
+                    NewField::Input | NewField::Local | NewField::Variable => FieldRole::In,
                 };
                 (param.name.clone(), param.ty.printed(), role)
             })
@@ -510,7 +510,7 @@ pub(crate) fn verify(
                 "{name} reads back taking {read:?} rather than {asked:?}"
             ));
         }
-        let (class, layout) = class_of(after, add)?;
+        let (class, layout) = class_of(after, add.class)?;
         let package_index = index as i32 + 1;
         if !layout.children.contains(&package_index)
             || !layout

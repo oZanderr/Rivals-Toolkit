@@ -195,10 +195,17 @@ overrides keeps the list in its override record in step the same way.
 `asset remove-component --node N` takes a component out of a Blueprint with its template. The
 components under it take its place, or go with it with `--with-children`; the scene root goes only
 with the components hanging from it. The class keeps the component's variable, which reads None, so
-the save names the functions that read it. A Blueprint variable cannot be added: a class's own
-properties come first in every object's layout, so a new one would shift every inherited value in
-every instance. A function can be added to a Blueprint class, and an existing one rewritten whole,
-as text: see below.
+the save names the functions that read it.
+
+`asset add-variable --name X --type T` adds a variable to a Blueprint class whose objects all live
+in its own package. The class declares it after its own, and since a class's own properties come
+first in every object's layout, each object of the class there is renumbered to match, its values as
+they were and the new one unset until a value edit sets it. A class another package makes objects of
+or derives from is refused, naming those packages: the import index finds them, and is built first
+when it has not been. A type is written as a `local` line takes it (see below), and `--class N`
+picks the class when the package holds more than one. A package whose classes its own records
+describe otherwise than the mappings file does, as after this, is read with its own records. A
+function can be added to a Blueprint class, and an existing one rewritten whole, as text: see below.
 
 `asset script-set` changes one thing inside a function's bytecode, addressed by the statement offset
 `asset script` prints: a literal by its place in the statement (`--const`) or by where it starts
@@ -341,6 +348,7 @@ rivals-cli asset script --container ... --entry ... --export 10 --text > graph.t
 rivals-cli asset script-assemble --container ... --entry ... --export 10 --text-file graph.txt --dry-run
 rivals-cli asset script-assemble --container ... --entry ... --export 10 --text-file graph.txt --mod-name MyMod
 rivals-cli asset script-assemble --container ... --entry ... --new-function Glow --signature "(Strength: Float)" --text-file glow.txt --mod-name MyMod
+rivals-cli asset add-variable --container ... --entry ... --name Charges --type Int --mod-name MyMod
 ```
 
 Labels stand where offsets did, each named after the offset its statement started at (`@0045:`),

@@ -234,6 +234,9 @@ pub struct PackageEdits {
     /// scripts from text takes the package reading again, so the caller does that next: see
     /// `rivals_core::asset_edit::preview_edits`.
     pub new_functions: Vec<crate::new_function::NewFunctionEdit>,
+    /// Variables added to a Blueprint class, its instances in the package renumbered to match. A
+    /// save of its own; the caller holds the class to having no instance in another package.
+    pub add_variables: Vec<crate::class_variable::AddVariable>,
     /// Components added to a Blueprint by copying one its construction script builds. The copy
     /// is this save; wiring it in takes value edits on the result, which the caller makes: see
     /// `rivals_core::asset_edit::preview_edits`.
@@ -801,6 +804,7 @@ impl PackageEdits {
         self.duplicate_exports.extend(other.duplicate_exports);
         self.add_exports.extend(other.add_exports);
         self.new_functions.extend(other.new_functions);
+        self.add_variables.extend(other.add_variables);
         self.add_components.extend(other.add_components);
         self.remove_components.extend(other.remove_components);
         self.dependencies.extend(other.dependencies);
@@ -831,6 +835,7 @@ impl PackageEdits {
             && self.duplicate_exports.is_empty()
             && self.add_exports.is_empty()
             && self.new_functions.is_empty()
+            && self.add_variables.is_empty()
             && self.add_components.is_empty()
             && self.remove_components.is_empty()
             && self.exports.is_empty()
@@ -1234,6 +1239,42 @@ pub fn patch_package_with(
             asset: rewritten.asset,
             exports: rewritten.exports,
             applied: copies.applied,
+            bulk: None,
+            optional_bulk: None,
+            notes: Vec::new(),
+        });
+    }
+    if !edits.add_variables.is_empty() {
+        let alone = PackageEdits {
+            add_variables: Vec::new(),
+            save_as: None,
+            expect: Expected::default(),
+            allow_drift: false,
+            allow_missing: false,
+            allow_unchecked: false,
+            ..edits.clone()
+        };
+        if !alone.is_empty() {
+            return Err(
+                "adding a variable is a save of its own; save or discard the other edits first"
+                    .into(),
+            );
+        }
+        let addition =
+            crate::class_variable::add_variables(parsed, &package, bundle, &edits.add_variables)?;
+        let rewritten = rewrite(
+            bundle,
+            &addition.splices,
+            HeaderDraft {
+                names: Some(addition.tables.names),
+                imports: Some(addition.tables.imports),
+                ..Default::default()
+            },
+        )?;
+        return Ok(PatchedBundle {
+            asset: rewritten.asset,
+            exports: rewritten.exports,
+            applied: addition.applied,
             bulk: None,
             optional_bulk: None,
             notes: Vec::new(),
@@ -5817,6 +5858,9 @@ pub fn verify_patch(
     check_header_shapes(before, after)?;
     if !edits.new_functions.is_empty() {
         return crate::new_function::verify(before, after, &edits.new_functions);
+    }
+    if !edits.add_variables.is_empty() {
+        return crate::class_variable::verify(before, after, &edits.add_variables);
     }
     let removed = if edits.remove_exports.is_empty() {
         Vec::new()
