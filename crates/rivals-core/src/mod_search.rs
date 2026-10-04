@@ -93,6 +93,12 @@ impl Query {
     }
 
     fn matches(&self, text: &str) -> bool {
+        // Most text is ASCII, which is matched where it lies. Anything wider is lowercased whole,
+        // since a character outside ASCII can lowercase into one inside it, as the Kelvin sign
+        // does into `k`.
+        if text.is_ascii() && self.needle.is_ascii() {
+            return self.matches_ascii(text.as_bytes());
+        }
         let text = text.to_lowercase();
         if !self.whole_word {
             return text.contains(&self.needle);
@@ -103,6 +109,29 @@ impl Query {
             !text[..at].chars().next_back().is_some_and(word)
                 && !text[at + found.len()..].chars().next().is_some_and(word)
         })
+    }
+
+    /// [`Query::matches`] for ASCII text and an ASCII needle, without a lowercased copy. A whole
+    /// word is looked for among the same occurrences `match_indices` gives, which do not overlap.
+    fn matches_ascii(&self, text: &[u8]) -> bool {
+        let needle = self.needle.as_bytes();
+        let word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+        let mut at = 0;
+        while at + needle.len() <= text.len() {
+            if !text[at..at + needle.len()].eq_ignore_ascii_case(needle) {
+                at += 1;
+                continue;
+            }
+            let end = at + needle.len();
+            if !self.whole_word
+                || (!at.checked_sub(1).is_some_and(|before| word(text[before]))
+                    && !text.get(end).is_some_and(|&after| word(after)))
+            {
+                return true;
+            }
+            at = end;
+        }
+        false
     }
 
     /// The term a statement is found by: of the ones of a kind asked for that match, the one
@@ -284,14 +313,14 @@ fn values_in(
     query: &Query,
     hit: &mut dyn FnMut(&str, &str),
 ) {
-    let mut at = String::new();
+    let mut path = Vec::new();
     for list in lists {
-        walk_entries(list, &mut at, query, hit);
+        walk_entries(list, &mut path, query, hit);
     }
     for row in table.map_or(&[][..], |table| &table.rows) {
-        at.clear();
-        at.push_str(&row.name);
-        walk_entries(&row.fields, &mut at, query, hit);
+        path.push(Step::Row(&row.name));
+        walk_entries(&row.fields, &mut path, query, hit);
+        path.pop();
     }
     for entry in strings.map_or(&[][..], |strings| &strings.entries) {
         for text in [&entry.key, &entry.source] {
@@ -302,28 +331,52 @@ fn values_in(
     }
 }
 
-fn walk_entries(
-    entries: &[PropertyEntry],
-    at: &mut String,
+/// One step on the way to a value, kept as what it borrows: most values match nothing, so the
+/// path is only written out for one that does.
+enum Step<'a> {
+    Field(&'a PropertyEntry),
+    Row(&'a str),
+    Index(usize),
+    Key(&'a PropertyValue),
+}
+
+/// `A.B`, `A[2]`, `A[Key]`, with a DataTable row's name first.
+fn path_text(path: &[Step<'_>]) -> String {
+    let mut out = String::new();
+    for step in path {
+        match step {
+            Step::Field(entry) => {
+                if !out.is_empty() {
+                    out.push('.');
+                }
+                out.push_str(&entry.label());
+            }
+            Step::Row(name) => out.push_str(name),
+            Step::Index(index) => out.push_str(&format!("[{index}]")),
+            Step::Key(key) => out.push_str(&format!("[{}]", key.summary())),
+        }
+    }
+    out
+}
+
+fn walk_entries<'a>(
+    entries: &'a [PropertyEntry],
+    path: &mut Vec<Step<'a>>,
     query: &Query,
     hit: &mut dyn FnMut(&str, &str),
 ) {
     for entry in entries {
-        let held = at.len();
-        if !at.is_empty() {
-            at.push('.');
-        }
-        at.push_str(&entry.label());
-        walk_value(&entry.value, at, query, hit);
-        at.truncate(held);
+        path.push(Step::Field(entry));
+        walk_value(&entry.value, path, query, hit);
+        path.pop();
     }
 }
 
 /// One value: its own text, when it has text, then whatever it holds. Numbers are never searched,
 /// and neither is a value that is not stored.
-fn walk_value(
-    value: &PropertyValue,
-    at: &mut String,
+fn walk_value<'a>(
+    value: &'a PropertyValue,
+    path: &mut Vec<Step<'a>>,
     query: &Query,
     hit: &mut dyn FnMut(&str, &str),
 ) {
@@ -334,7 +387,7 @@ fn walk_value(
         PropertyValue::Text { value, parts, .. } => match value.as_deref() {
             Some(shown) if query.matches(shown) => Some(shown),
             _ => {
-                walk_entries(parts, at, query, hit);
+                walk_entries(parts, path, query, hit);
                 None
             }
         },
@@ -348,25 +401,23 @@ fn walk_value(
         } => Some(name.as_str()),
         PropertyValue::Delegate { function, .. } => Some(function.as_str()),
         PropertyValue::Struct { fields, .. } => {
-            walk_entries(fields, at, query, hit);
+            walk_entries(fields, path, query, hit);
             None
         }
         PropertyValue::Array { items } | PropertyValue::Set { items } => {
             for (index, item) in items.iter().enumerate() {
-                let held = at.len();
-                at.push_str(&format!("[{index}]"));
-                walk_value(item, at, query, hit);
-                at.truncate(held);
+                path.push(Step::Index(index));
+                walk_value(item, path, query, hit);
+                path.pop();
             }
             None
         }
         PropertyValue::Map { entries } => {
             for pair in entries {
-                let held = at.len();
-                at.push_str(&format!("[{}]", pair.key.summary()));
-                walk_value(&pair.key, at, query, hit);
-                walk_value(&pair.value, at, query, hit);
-                at.truncate(held);
+                path.push(Step::Key(&pair.key));
+                walk_value(&pair.key, path, query, hit);
+                walk_value(&pair.value, path, query, hit);
+                path.pop();
             }
             None
         }
@@ -375,7 +426,7 @@ fn walk_value(
     if let Some(text) = text
         && query.matches(text)
     {
-        hit(at, text);
+        hit(&path_text(path), text);
     }
 }
 
@@ -400,6 +451,33 @@ mod tests {
         assert!(!query.matches("CallFunc_Delay_ReturnValue"));
         let anywhere = Query::new("Delay", Vec::new(), false).unwrap();
         assert!(anywhere.matches("bDelayed"));
+    }
+
+    /// ASCII text is matched where it lies and wider text after lowercasing it, with the same
+    /// answers either way, a character that lowercases into ASCII included.
+    #[test]
+    fn ascii_and_wider_text_match_alike() {
+        let hulk = Query::new("Hulk", Vec::new(), false).unwrap();
+        assert!(hulk.matches("THE HULK"));
+        assert!(hulk.matches("Über Hulk"));
+        assert!(!hulk.matches("Hul"));
+        assert!(!hulk.matches("Über Hul"));
+        let kelvin = Query::new("kelvin", Vec::new(), false).unwrap();
+        assert!(kelvin.matches("\u{212A}elvin"));
+        let word = Query::new("Hulk", Vec::new(), false)
+            .unwrap()
+            .whole_word(true);
+        assert!(word.matches("/Game/Hulk.Hulk_C"));
+        assert!(word.matches("Über Hulk"));
+        assert!(!word.matches("Hulk_Body"));
+        assert!(!word.matches("SmartHulk"));
+        // The occurrences looked at do not overlap, as `match_indices` finds them, so the second
+        // `a.a`, which would stand alone, is never reached either way.
+        let dotted = Query::new("a.a", Vec::new(), false)
+            .unwrap()
+            .whole_word(true);
+        assert!(!dotted.matches("xa.a.a"));
+        assert!(!dotted.matches("\u{e9}xa.a.a"));
     }
 
     #[test]
