@@ -21,11 +21,11 @@ use retoc::{EIoChunkType, EIoStoreTocVersion, FIoChunkId, FPackageId};
 use rivals_uasset::{AssetBundle, Mappings, ParseOptions};
 use serde::Serialize;
 
-use crate::asset::{AssetSource, PackageConverter, PathFilter};
+use crate::asset::{self, AssetSource, PackageConverter, PathFilter};
 use crate::mod_search::{Query, SearchHit, search_package};
 use crate::pak::containers::MOUNT_POINT;
 use crate::pak::load_order::{self, LoadOrder};
-use crate::schema_synth::{self, PackageSource};
+use crate::schema_synth::{self, LayoutReader, PackageSource};
 
 /// What a search is doing, for a caller showing its progress.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -177,16 +177,21 @@ pub fn game_search(
     let done = AtomicUsize::new(0);
     let cap = search.max_hits.unwrap_or(usize::MAX);
     let frontier = Frontier::new(total.div_ceil(PACKAGES_PER_CONVERTER), cap);
-    // A value search reads values the way the inspector shows them, which can take layouts
-    // recovered from the Blueprints that define them, looked up through the newest patch.
-    let patch = values
-        .then(|| crate::asset::newest_patch(game_root))
-        .transpose()?;
     let outcomes: Vec<Outcome> = candidates
         .par_chunks(PACKAGES_PER_CONVERTER)
         .enumerate()
         .flat_map_iter(|(index, chunk)| {
             let converter = PackageConverter::new(&order);
+            // A value search reads values the way the inspector shows them, which can take layouts
+            // recovered from the Blueprints that define them: the copies the game loads, read
+            // through the same converter, which already holds the headers they import.
+            let layouts = values.then(|| {
+                LayoutReader::new(|name: &str| {
+                    let path = asset::package_path(&order, name)
+                        .ok_or_else(|| format!("{name} is not a package the game loads"))?;
+                    converter.convert(asset::package_id(name), &path)
+                })
+            });
             let mut found = 0;
             let outcomes: Vec<Outcome> = chunk
                 .iter()
@@ -201,7 +206,7 @@ pub fn game_search(
                         mappings,
                         search.query,
                         game_root,
-                        patch.as_deref(),
+                        layouts.as_ref(),
                     );
                     if let Outcome::Hits { hits, found: here } = &mut outcome {
                         found += *here;
@@ -217,9 +222,6 @@ pub fn game_search(
                 })
                 .collect();
             frontier.finished(index, found);
-            if values {
-                schema_synth::forget_package_layouts();
-            }
             outcomes
         })
         .collect();
@@ -333,7 +335,7 @@ fn search_one(
     mappings: &Mappings,
     query: &Query,
     game_root: &str,
-    patch: Option<&str>,
+    layouts: Option<&LayoutReader<'_>>,
 ) -> Outcome {
     let unreadable = |reason: String| Outcome::Unreadable(candidate.path.clone(), reason);
     let bundle = match converter.convert(candidate.id, &candidate.path) {
@@ -344,17 +346,18 @@ fn search_one(
         asset: &bundle.asset_file_buffer,
         exports: &bundle.exports_file_buffer,
     };
-    let parsed = match patch {
+    let parsed = match layouts {
         // Values read the way the inspector shows them.
-        Some(patch) => schema_synth::parse_package_opts(
+        Some(layouts) => schema_synth::parse_package_through(
             &bundle,
             Some(mappings),
             &PackageSource {
                 game_root,
-                container: patch,
+                container: &candidate.container,
                 entry: &candidate.path,
                 kind: AssetSource::Utoc,
             },
+            layouts,
             ParseOptions::default(),
         ),
         // Bytecode needs no layout recovered from another Blueprint, so the plain parse does.
@@ -651,5 +654,65 @@ mod game_data_tests {
                 .convert(candidate.id, &candidate.path)
                 .unwrap_or_else(|e| panic!("{}: {e}", candidate.path));
         }
+    }
+
+    /// Layouts a value search recovers through its own converter read every package just as
+    /// layouts recovered from the container do, over the Settings widgets, some of which need one.
+    #[test]
+    fn layouts_read_through_the_search_s_converter_read_as_the_container_s_do() {
+        let Some((root, mappings)) = install() else {
+            return;
+        };
+        let order = load_order::open(&root, false, false).expect("containers");
+        let candidates = winning_copies(&order, &PathFilter::new(Some(SETTINGS)));
+        assert!(!candidates.is_empty());
+        let patch = asset::newest_patch(&root).expect("a patch");
+        let converter = PackageConverter::new(&order);
+        let layouts = LayoutReader::new(|name: &str| {
+            let path = asset::package_path(&order, name).ok_or("missing")?;
+            converter.convert(asset::package_id(name), &path)
+        });
+        let json = |parsed: Result<rivals_uasset::ParsedPackage, String>| {
+            parsed.map(|parsed| serde_json::to_string(&parsed).expect("json"))
+        };
+        let mut recovered = 0;
+        for candidate in &candidates {
+            let bundle = converter
+                .convert(candidate.id, &candidate.path)
+                .expect("converts");
+            let bundle = AssetBundle {
+                asset: &bundle.asset_file_buffer,
+                exports: &bundle.exports_file_buffer,
+            };
+            let source = PackageSource {
+                game_root: &root,
+                container: &patch,
+                entry: &candidate.path,
+                kind: AssetSource::Utoc,
+            };
+            let options = ParseOptions::default();
+            let through = json(schema_synth::parse_package_through(
+                &bundle,
+                Some(&mappings),
+                &source,
+                &layouts,
+                options,
+            ));
+            let from_container = json(schema_synth::parse_package_opts(
+                &bundle,
+                Some(&mappings),
+                &source,
+                options,
+            ));
+            assert!(through == from_container, "{}", candidate.path);
+            let unrecovered = json(rivals_uasset::parse_package_opts(
+                &bundle,
+                Some(&mappings),
+                None,
+                options,
+            ));
+            recovered += usize::from(unrecovered != through);
+        }
+        assert!(recovered > 0, "nothing under {SETTINGS} needed a layout");
     }
 }

@@ -400,12 +400,12 @@ pub fn contained_entry(entry: &str) -> Result<String, String> {
 
 /// A package id is the same lowercase UTF-16 CityHash as a container id, which is the one retoc
 /// exposes.
-fn package_id(package_name: &str) -> retoc::FPackageId {
+pub(crate) fn package_id(package_name: &str) -> retoc::FPackageId {
     retoc::FPackageId(retoc::FIoContainerId::from_name(package_name).0)
 }
 
 /// Where `store` holds a package, looked up by name, as a mount-relative path.
-fn package_path(store: &dyn IoStoreTrait, package_name: &str) -> Option<String> {
+pub(crate) fn package_path(store: &dyn IoStoreTrait, package_name: &str) -> Option<String> {
     let chunk =
         FIoChunkId::from_package_id(package_id(package_name), 0, EIoChunkType::ExportBundleData);
     let path = store.chunk_path(chunk)?;

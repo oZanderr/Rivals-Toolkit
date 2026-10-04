@@ -1,9 +1,11 @@
 //! Recovers a struct's layout from the package that defines it when the mappings file has no entry.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, LazyLock, Mutex};
 
+use retoc::legacy_asset::FSerializedAssetBundle;
 use rivals_uasset::{
     AssetBundle, ExportStatus, Mappings, MissingSchema, ParseOptions, ParsedPackage, TraceEntry,
 };
@@ -13,11 +15,24 @@ use crate::asset::{self, AssetSource};
 type Cache = Mutex<HashMap<String, Arc<Mappings>>>;
 static CACHE: LazyLock<Cache> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Drops the layouts recovered for one package's own classes, which no other package reuses, so a
-/// walk over the whole game does not keep one for every Blueprint it read.
-pub fn forget_package_layouts() {
-    if let Ok(mut cache) = CACHE.lock() {
-        cache.retain(|key, _| key.split('\u{1}').nth(1) == Some(""));
+/// Reads a package by its name, such as `/Game/Marvel/X`.
+type Load<'a> = Box<dyn Fn(&str) -> Result<FSerializedAssetBundle, String> + 'a>;
+
+/// Reads the packages a layout is recovered from through a converter the caller already holds,
+/// rather than opening the game again for each one, and keeps what it recovers for as long as it
+/// lives. A walk over many packages makes one for each run it converts together, so what it keeps
+/// stays bounded, and none of it reaches the layouts kept for the rest of the app.
+pub struct LayoutReader<'a> {
+    load: Load<'a>,
+    recovered: RefCell<HashMap<String, Arc<Mappings>>>,
+}
+
+impl<'a> LayoutReader<'a> {
+    pub fn new(load: impl Fn(&str) -> Result<FSerializedAssetBundle, String> + 'a) -> Self {
+        Self {
+            load: Box::new(load),
+            recovered: RefCell::new(HashMap::new()),
+        }
     }
 }
 
@@ -51,6 +66,27 @@ pub fn parse_package_opts(
     source: &PackageSource<'_>,
     options: ParseOptions,
 ) -> Result<ParsedPackage, String> {
+    parse_with(bundle, mappings, source, None, options)
+}
+
+/// [`parse_package_opts`] reading the packages that define a layout through `layouts`.
+pub fn parse_package_through(
+    bundle: &AssetBundle<'_>,
+    mappings: Option<&Mappings>,
+    source: &PackageSource<'_>,
+    layouts: &LayoutReader<'_>,
+    options: ParseOptions,
+) -> Result<ParsedPackage, String> {
+    parse_with(bundle, mappings, source, Some(layouts), options)
+}
+
+fn parse_with(
+    bundle: &AssetBundle<'_>,
+    mappings: Option<&Mappings>,
+    source: &PackageSource<'_>,
+    layouts: Option<&LayoutReader<'_>>,
+    options: ParseOptions,
+) -> Result<ParsedPackage, String> {
     // Repairs in order: the package's own definitions first (a class recovered from its package
     // is the class that was cooked), then the mappings file's other entries for a name it holds
     // twice, which the reader tries on its own once synthesis has had its turn.
@@ -63,7 +99,7 @@ pub fn parse_package_opts(
             ..options
         },
     )?;
-    let synth = synth_for(&first, mappings, source);
+    let synth = synth_for(&first, mappings, source, layouts);
     if synth.is_none() && !has_failures(&first) {
         return Ok(first);
     }
@@ -82,6 +118,7 @@ fn synth_for(
     parsed: &ParsedPackage,
     mappings: Option<&Mappings>,
     source: &PackageSource<'_>,
+    layouts: Option<&LayoutReader<'_>>,
 ) -> Option<Arc<Mappings>> {
     let (wanted, local) = wanted_definitions(parsed);
     if wanted.is_empty() && !local {
@@ -92,7 +129,7 @@ fn synth_for(
     } else {
         Vec::new()
     };
-    synthesise(&wanted, own, mappings, source)
+    synthesise(&wanted, own, mappings, source, layouts)
 }
 
 /// What a second parse needs the game's own packages for: the structs the mappings file lacks,
@@ -209,7 +246,7 @@ pub fn synthesised(
             ..Default::default()
         },
     )?;
-    Ok(synth_for(&first, mappings, source))
+    Ok(synth_for(&first, mappings, source, None))
 }
 
 /// Definitions for the Blueprint class at `object_path`, recovered from its package and its
@@ -228,16 +265,19 @@ pub fn class_synth(
         Vec::new(),
         mappings,
         source,
+        None,
     )
 }
 
 /// `own` are definitions the package being parsed carries itself, which need no loading but do
-/// make the result specific to that package.
+/// make the result specific to that package. `layouts` reads the packages that define the rest;
+/// without one they are read from `source`'s container.
 fn synthesise(
     missing: &[MissingSchema],
     own: Vec<rivals_uasset::StructDefinition>,
     mappings: Option<&Mappings>,
     source: &PackageSource<'_>,
+    layouts: Option<&LayoutReader<'_>>,
 ) -> Option<Arc<Mappings>> {
     let mut entries: Vec<String> = missing
         .iter()
@@ -257,15 +297,17 @@ fn synthesise(
         let names: Vec<&str> = own.iter().map(|definition| definition.name()).collect();
         format!("{}\u{2}{}", source.entry, names.join("\u{2}"))
     };
-    let key = format!(
-        "{}\u{1}{scope}\u{1}{}",
-        source.container,
-        entries.join("\u{1}")
-    );
-    if let Ok(cache) = CACHE.lock()
-        && let Some(hit) = cache.get(&key)
-    {
-        return Some(Arc::clone(hit));
+    let joined = entries.join("\u{1}");
+    let key = format!("{}\u{1}{scope}\u{1}{joined}", source.container);
+    // A reader keeps only what another package can use: a layout that needs none of this
+    // package's own definitions.
+    let cached = match layouts {
+        Some(reader) if scope.is_empty() => reader.recovered.borrow().get(&joined).cloned(),
+        Some(_) => None,
+        None => CACHE.lock().ok().and_then(|cache| cache.get(&key).cloned()),
+    };
+    if cached.is_some() {
+        return cached;
     }
 
     // A Blueprint class names a Blueprint parent by path, and that parent's package has to join
@@ -281,9 +323,11 @@ fn synthesise(
         queue.dedup();
         for entry in queue.drain(..) {
             loaded.insert(entry.clone());
-            let Ok(bundle) =
-                asset::load_bundle(source.game_root, source.container, &entry, source.kind)
-            else {
+            let bundle = match layouts {
+                Some(reader) => (reader.load)(&entry),
+                None => asset::load_bundle(source.game_root, source.container, &entry, source.kind),
+            };
+            let Ok(bundle) = bundle else {
                 continue;
             };
             let bundle = AssetBundle {
@@ -317,8 +361,19 @@ fn synthesise(
         definitions,
         mappings,
     ));
-    if let Ok(mut cache) = CACHE.lock() {
-        cache.insert(key, Arc::clone(&synth));
+    match layouts {
+        Some(reader) if scope.is_empty() => {
+            reader
+                .recovered
+                .borrow_mut()
+                .insert(joined, Arc::clone(&synth));
+        }
+        Some(_) => {}
+        None => {
+            if let Ok(mut cache) = CACHE.lock() {
+                cache.insert(key, Arc::clone(&synth));
+            }
+        }
     }
     Some(synth)
 }

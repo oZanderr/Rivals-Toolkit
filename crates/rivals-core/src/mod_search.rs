@@ -9,8 +9,8 @@ use rivals_uasset::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::asset::{AssetSource, PackageConverter, list_packages};
-use crate::schema_synth::{self, PackageSource};
+use crate::asset::{self, AssetSource, PackageConverter, list_packages};
+use crate::schema_synth::{self, LayoutReader, PackageSource};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -176,10 +176,16 @@ pub fn mod_search(
     let utoc = utoc_path.to_string_lossy();
     let (store, packages) = list_packages(game_root, &utoc)?;
     let converter = PackageConverter::new(store.as_ref());
+    // The store holds the mod and the base game, which is where its Blueprints' layouts come from.
+    let layouts = LayoutReader::new(|name: &str| {
+        let path = asset::package_path(store.as_ref(), name)
+            .ok_or_else(|| format!("{name} is in neither the mod nor the base game"))?;
+        converter.convert(asset::package_id(name), &path)
+    });
     let mut result = SearchResult::default();
     for (id, path) in &packages {
         let parsed = converter.convert(*id, path).and_then(|bundle| {
-            schema_synth::parse_package_opts(
+            schema_synth::parse_package_through(
                 &AssetBundle {
                     asset: &bundle.asset_file_buffer,
                     exports: &bundle.exports_file_buffer,
@@ -191,6 +197,7 @@ pub fn mod_search(
                     entry: path,
                     kind: AssetSource::Utoc,
                 },
+                &layouts,
                 ParseOptions::default(),
             )
         });
