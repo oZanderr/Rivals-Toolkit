@@ -103,6 +103,16 @@ pub fn preview_read_edits(
     if let Some(remove) = changes.remove_components.first() {
         return component_removal_pass(request, mappings, loaded, parsed, remove);
     }
+    if !changes.exports.is_empty() {
+        let others = PackageEdits {
+            exports: Vec::new(),
+            reset_exports: Vec::new(),
+            ..changes.clone()
+        };
+        if !others.is_empty() {
+            return table_last(request, mappings, loaded, parsed);
+        }
+    }
     if !changes.paths.is_empty() {
         return path_stages(request, mappings, loaded, parsed);
     }
@@ -117,6 +127,63 @@ pub fn preview_read_edits(
         list_pass(request, mappings, patched, loaded, &touches)?
     };
     orphan_pass(request, mappings, parsed, patched, loaded)
+}
+
+/// Makes a save's export table edits after everything else in it, as a stage of their own: they
+/// move objects' paths and the table, and every other edit was addressed against those as they
+/// are. The resets a retype takes go with them.
+fn table_last(
+    request: &AssetEditRequest<'_>,
+    mappings: Option<&Mappings>,
+    loaded: FSerializedAssetBundle,
+    parsed: &rivals_uasset::ParsedPackage,
+) -> Result<(PatchedBundle, FSerializedAssetBundle), String> {
+    let changes = &request.changes;
+    let rest = PackageEdits {
+        exports: Vec::new(),
+        reset_exports: Vec::new(),
+        ..changes.clone()
+    };
+    let (mut first, loaded) = preview_read_edits(
+        &AssetEditRequest {
+            changes: rest,
+            ..*request
+        },
+        mappings,
+        loaded,
+        parsed,
+    )?;
+    let between = reparse(request, mappings, &first.asset, &first.exports)?;
+    // The other edits leave every object where it was, so the table is still the one the edits
+    // were written against; what else they expected reads otherwise once they have landed.
+    let table = PackageEdits {
+        exports: changes.exports.clone(),
+        reset_exports: changes.reset_exports.clone(),
+        expect: rivals_uasset::Expected {
+            exports: changes.expect.exports.clone(),
+            ..Default::default()
+        },
+        allow_drift: changes.allow_drift,
+        allow_missing: changes.allow_missing,
+        allow_unchecked: changes.allow_unchecked,
+        ..Default::default()
+    };
+    let (mut last, _) = preview_read_edits(
+        &AssetEditRequest {
+            changes: table,
+            ..*request
+        },
+        mappings,
+        staged(&first, &loaded),
+        &between,
+    )?;
+    first.applied.append(&mut last.applied);
+    last.applied = first.applied;
+    first.notes.append(&mut last.notes);
+    last.notes = first.notes;
+    last.bulk = last.bulk.or(first.bulk);
+    last.optional_bulk = last.optional_bulk.or(first.optional_bulk);
+    Ok((last, loaded))
 }
 
 /// Places the edits a save addresses by path in the package as it reads, and makes them with the
@@ -10450,6 +10517,55 @@ mod game_data_tests {
         assert!(err.contains("not a Level"), "{err}");
         let err = plan(outside, level).expect_err("an outsider is not this level's actor");
         assert!(err.contains("does not sit in"), "{err}");
+    }
+
+    /// A dump that renames an object and changes a value in it saves in one apply: the value under
+    /// the name it was written against, then the rename, as a stage of its own.
+    #[test]
+    fn a_dump_renaming_an_object_and_changing_it_saves_in_one_apply() {
+        let Some(fixture) = Fixture::open(LEVEL) else {
+            return;
+        };
+        let before = fixture.parse();
+        let target = before
+            .exports
+            .iter()
+            .position(|export| export.object_name == "BodySetup_0")
+            .expect("a body setup to rename");
+        let was = before.exports[target].path.clone();
+        let mut dump = serde_json::to_value(&before).expect("dump");
+        let export = &mut dump["exports"][target];
+        export["object_name"] = serde_json::json!("ProbeRenamed");
+        let flag = export["properties"]
+            .as_array_mut()
+            .expect("properties")
+            .iter_mut()
+            .find(|property| property["value"]["kind"] == "bool")
+            .expect("a bool to change");
+        let now = !flag["value"]["value"].as_bool().expect("a bool");
+        flag["value"]["value"] = serde_json::json!(now);
+
+        let outcome = crate::asset_edit::diff::diff_dump(&before, &dump).expect("diff");
+        assert!(outcome.notes.is_empty(), "{:?}", outcome.notes);
+        assert_eq!(outcome.edits.paths.len(), 1, "{:?}", outcome.edits);
+        assert!(matches!(
+            outcome.edits.export_edits.as_slice(),
+            [ExportEdit::Rename { export, name }] if *export as usize == target && name == "ProbeRenamed"
+        ));
+        let changes = outcome.edits.resolve(Path::new(".")).expect("resolve");
+        let (_, after) = fixture.apply_changes(changes);
+        assert_eq!(after.exports[target].object_name, "ProbeRenamed");
+
+        // Read again, the dump names the object by its new path wherever it is referred to.
+        let moved = was.replace("BodySetup_0", "ProbeRenamed");
+        let text = serde_json::to_string(&dump)
+            .expect("json")
+            .replace(&was, &moved);
+        let mut dump: serde_json::Value = serde_json::from_str(&text).expect("json");
+        dump["imports"] = serde_json::to_value(&after.imports).expect("imports");
+        let settled = crate::asset_edit::diff::diff_dump(&after, &dump).expect("diff");
+        assert!(settled.edits.is_empty(), "{:?}", settled.edits);
+        assert!(settled.notes.is_empty(), "{:?}", settled.notes);
     }
 
     /// A rename moves the export and every path that names it, and nothing else in the package

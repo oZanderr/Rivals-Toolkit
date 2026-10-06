@@ -357,8 +357,10 @@ beside a note still apply. The limits worth knowing:
   and a set or a map inside an element the same save adds, are notes. So are values in a map whose
   pairs moved when a key has no text form to name its pair by. Dump the saved copy and diff again
   for those.
-- **Some changes are not value edits.** Retyping a property and renaming an export are reported,
-  not written.
+- **Some changes are not value edits.** A property given another type is reported, not written,
+  and an object given another class is refused: `asset export-edit --class` does that, emptying
+  it. An object the dump renames is renamed once everything else has been made under its old name.
+  The rename is held by `expect` to that name, so a file holding one applies once.
 - **Bytes are not in the JSON.** Payload and bulk data are named by file in an edit list, never
   dumped inline, and neither is a payload that did not decode: replace it with `asset set --op
   set-raw`, or a `set_raw` edit, which takes any value's bytes as hex.

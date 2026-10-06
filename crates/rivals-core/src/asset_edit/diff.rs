@@ -15,9 +15,9 @@
 use serde_json::Value as Json;
 
 use rivals_uasset::{
-    EditOp, Expected, FieldSet, ImportEdit, PackageEdits, ParsedPackage, PathEdit, PathOp,
-    PropertyEntry, PropertyValue, RowEdit, RowOp, Segment, StringEdit, StringOp, TYPE_FIELD,
-    ValueEdit, kind_of,
+    EditOp, Expected, ExportEdit, FieldSet, ImportEdit, PackageEdits, ParsedPackage, PathEdit,
+    PathOp, PropertyEntry, PropertyValue, RowEdit, RowOp, Segment, StringEdit, StringOp,
+    TYPE_FIELD, ValueEdit, kind_of,
 };
 
 use super::json::EditList;
@@ -106,17 +106,27 @@ pub fn diff_dump(original: &ParsedPackage, edited: &Json) -> Result<DiffOutcome,
     diff_imports(original, edited, &mut out)?;
     for (was, is) in original.exports.iter().zip(exports) {
         let at = was.index;
-        for (field, held) in [
-            ("object_name", was.object_name.as_str()),
-            ("class_name", was.class_name.as_str()),
-        ] {
-            let now = is.get(field).and_then(Json::as_str).unwrap_or(held);
-            if now != held {
-                return Err(format!(
-                    "export {at}'s {field} reads {now} in the edited dump and {held} in the \
-                     package; that is an export table edit, not a value edit"
-                ));
-            }
+        let class = is
+            .get("class_name")
+            .and_then(Json::as_str)
+            .unwrap_or(&was.class_name);
+        if class != was.class_name {
+            return Err(format!(
+                "export {at}'s class_name reads {class} in the edited dump and {} in the package; \
+                 an object takes another class with asset export-edit --class, which empties it",
+                was.class_name
+            ));
+        }
+        // A new name is the export table's own edit, made once everything else has been.
+        let name = is
+            .get("object_name")
+            .and_then(Json::as_str)
+            .unwrap_or(&was.object_name);
+        if name != was.object_name {
+            out.edits.export_edits.push(ExportEdit::Rename {
+                export: at,
+                name: name.to_string(),
+            });
         }
         let Some(properties) = is.get("properties").and_then(Json::as_array) else {
             continue;
