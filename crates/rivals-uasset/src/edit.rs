@@ -192,6 +192,10 @@ pub struct ScriptConstEdit {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ScriptTextEdit {
     pub export: u32,
+    /// The object by path rather than by index, as a path edit names one: the save puts the edit
+    /// at the index that path has in the package it reads. See [`crate::place_named`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object: Option<String>,
     pub text: String,
     /// The text the script printed as when the edit was made. A script that prints otherwise has
     /// changed since, and the edit is refused rather than undoing what changed.
@@ -537,10 +541,30 @@ pub fn expectations(parsed: &ParsedPackage, edits: &PackageEdits) -> Expected {
             imports.push((-index) as u32 - 1);
         }
     };
-    exports.extend(edits.rows.iter().map(|edit| edit.export));
-    exports.extend(edits.strings.iter().map(|edit| edit.export));
+    // An edit naming its object or import by path is its own check: see [`crate::place_named`].
+    let unnamed = |object: &Option<String>| object.is_none();
+    exports.extend(
+        edits
+            .rows
+            .iter()
+            .filter(|edit| unnamed(&edit.object))
+            .map(|edit| edit.export),
+    );
+    exports.extend(
+        edits
+            .strings
+            .iter()
+            .filter(|edit| unnamed(&edit.object))
+            .map(|edit| edit.export),
+    );
     exports.extend(edits.scripts.iter().map(|edit| edit.export));
-    exports.extend(edits.script_texts.iter().map(|edit| edit.export));
+    exports.extend(
+        edits
+            .script_texts
+            .iter()
+            .filter(|edit| unnamed(&edit.object))
+            .map(|edit| edit.export),
+    );
     exports.extend(edits.payloads.iter().map(|edit| edit.export));
     exports.extend(edits.remove_exports.iter().copied());
     exports.extend(edits.reset_exports.iter().copied());
@@ -582,9 +606,13 @@ pub fn expectations(parsed: &ParsedPackage, edits: &PackageEdits) -> Expected {
     }
     for edit in &edits.imports {
         match edit {
-            ImportEdit::Retarget { import, .. } | ImportEdit::Remove { import } => {
-                imports.push(*import)
+            ImportEdit::Retarget {
+                import, from: None, ..
             }
+            | ImportEdit::Remove {
+                import, from: None, ..
+            } => imports.push(*import),
+            ImportEdit::Retarget { .. } | ImportEdit::Remove { .. } => {}
             ImportEdit::Add { .. } => {}
         }
     }
@@ -854,7 +882,12 @@ impl PackageEdits {
 /// within a table and compares without regard to case.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RowEdit {
+    #[serde(default)]
     pub export: u32,
+    /// The object by path rather than by index, as a path edit names one: the save puts the edit
+    /// at the index that path has in the package it reads. See [`crate::place_named`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object: Option<String>,
     #[serde(flatten)]
     pub op: RowOp,
 }
@@ -900,7 +933,12 @@ impl RowOp {
 /// key the caller saw there: a mismatch means the caller is working from a stale read.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StringEdit {
+    #[serde(default)]
     pub export: u32,
+    /// The object by path rather than by index, as a path edit names one: the save puts the edit
+    /// at the index that path has in the package it reads. See [`crate::place_named`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object: Option<String>,
     #[serde(flatten)]
     pub op: StringOp,
 }
@@ -1168,7 +1206,7 @@ pub fn patch_package_with(
         .imports
         .iter()
         .filter_map(|edit| match edit {
-            ImportEdit::Remove { import } => Some(*import),
+            ImportEdit::Remove { import, .. } => Some(*import),
             _ => None,
         })
         .collect();
@@ -1196,6 +1234,13 @@ pub fn patch_package_with(
         return Err(
             "removing a component takes more than one read of the package: save it through \
              rivals_core::asset_edit"
+                .into(),
+        );
+    }
+    if crate::named_edit::names_any(edits) {
+        return Err(
+            "edits naming their object or import by path are put in place first: save them \
+             through rivals_core::asset_edit"
                 .into(),
         );
     }
@@ -5897,7 +5942,7 @@ pub fn verify_patch(
         .imports
         .iter()
         .filter_map(|edit| match edit {
-            ImportEdit::Remove { import } => Some(FPackageIndex::create_import(*import).index),
+            ImportEdit::Remove { import, .. } => Some(FPackageIndex::create_import(*import).index),
             _ => None,
         })
         .collect();
@@ -8893,7 +8938,11 @@ mod tests {
         PackageEdits {
             rows: ops
                 .into_iter()
-                .map(|op| RowEdit { export: 0, op })
+                .map(|op| RowEdit {
+                    export: 0,
+                    op,
+                    object: None,
+                })
                 .collect(),
             ..Default::default()
         }
@@ -9556,6 +9605,7 @@ mod tests {
                     name: "NewRow".into(),
                     at: Some(2),
                 },
+                object: None,
             },
             r#"{"export":0,"op":"add","name":"NewRow","at":2}"#,
         );
@@ -9566,6 +9616,7 @@ mod tests {
                     name: "Old".into(),
                     to: "New".into(),
                 },
+                object: None,
             },
             r#"{"export":0,"op":"rename","name":"Old","to":"New"}"#,
         );
@@ -9578,6 +9629,7 @@ mod tests {
                     id: "Comment".into(),
                     to: "probe".into(),
                 },
+                object: None,
             },
             r#"{"export":0,"op":"set_meta_data","index":12,"key":"Lobby_Play","id":"Comment","to":"probe"}"#,
         );
@@ -9603,6 +9655,7 @@ mod tests {
                 import: 3,
                 path: "/Game/X.X".into(),
                 class: None,
+                from: None,
             },
             r#"{"op":"retarget","import":3,"path":"/Game/X.X"}"#,
         );
@@ -9967,7 +10020,11 @@ mod tests {
         PackageEdits {
             strings: ops
                 .into_iter()
-                .map(|op| StringEdit { export: 0, op })
+                .map(|op| StringEdit {
+                    export: 0,
+                    op,
+                    object: None,
+                })
                 .collect(),
             ..Default::default()
         }

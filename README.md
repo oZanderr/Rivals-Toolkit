@@ -345,14 +345,25 @@ array's slot or a container's element with `[i]`, and into a map's pair or a set
 that has landed, in the same save, so one apply gives a new row its columns, an instanced struct
 given another type that type's fields, and a map whose pairs moved its changed values.
 
+Rows, string table entries and a function's script text name their object the same way, with
+`object` in place of `export`, and a string table entry is found by its key. An import retarget or
+removal names its import by the path it has now, with `from`. One already made is left out, so
+these too can be applied again:
+
+```json
+{"rows": [{"object": "DT_Thing", "op": "add", "name": "NewRow"}],
+ "strings": [{"object": "ST_Menu", "op": "set_source", "key": "Play", "to": "Start"}],
+ "imports": [{"op": "retarget", "from": "/Game/A/M_Old.M_Old", "path": "/Game/A/M_New.M_New"}]}
+```
+
 What the diff cannot express it writes as a note beside the edits rather than guessing. The edits
 beside a note still apply. The limits worth knowing:
 
 - **Not everything has a path.** A field of a map's key keeps its byte offset, which fits only the
-  package it came from, and row, string table, import and script edits name their object or entry
-  by index. Each is held by `expect` to what it was written against. An insert into an array, or a
-  removal from one, by position is held to every element the array held, so applying it a second
-  time is refused as drift rather than adding another.
+  package it came from. Script constant edits, payloads and export table edits still name their
+  object by index. Each is held by `expect` to what it was written against. An insert into an
+  array, or a removal from one, by position is held to every element the array held, so applying
+  it a second time is refused as drift rather than adding another.
 - **A few changes take a second pass.** A set element or a map key with no text form to key it by,
   and a set or a map inside an element the same save adds, are notes. So are values in a map whose
   pairs moved when a key has no text form to name its pair by. Dump the saved copy and diff again

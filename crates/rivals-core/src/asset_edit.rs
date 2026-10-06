@@ -57,6 +57,27 @@ pub fn preview_read_edits(
     parsed: &rivals_uasset::ParsedPackage,
 ) -> Result<(PatchedBundle, FSerializedAssetBundle), String> {
     let changes = &request.changes;
+    // Edits naming their object or import by path take the index it has in what this save reads.
+    if rivals_uasset::names_any(changes) {
+        let mut placed = changes.clone();
+        let mut notes = rivals_uasset::place_named(parsed, &mut placed)?;
+        let (mut patched, loaded) = if placed.is_empty() && placed.save_as.is_none() {
+            (unchanged(&loaded), loaded)
+        } else {
+            preview_read_edits(
+                &AssetEditRequest {
+                    changes: placed,
+                    ..*request
+                },
+                mappings,
+                loaded,
+                parsed,
+            )?
+        };
+        notes.append(&mut patched.notes);
+        patched.notes = notes;
+        return Ok((patched, loaded));
+    }
     if let Some(save_as) = &changes.save_as {
         return save_as_pass(request, mappings, loaded, parsed, save_as);
     }
@@ -127,6 +148,18 @@ pub fn preview_read_edits(
         list_pass(request, mappings, patched, loaded, &touches)?
     };
     orphan_pass(request, mappings, parsed, patched, loaded)
+}
+
+/// A save that changes nothing: the bytes as read.
+fn unchanged(loaded: &FSerializedAssetBundle) -> PatchedBundle {
+    PatchedBundle {
+        asset: loaded.asset_file_buffer.clone(),
+        exports: loaded.exports_file_buffer.clone(),
+        applied: vec![],
+        bulk: None,
+        optional_bulk: None,
+        notes: vec![],
+    }
 }
 
 /// Makes a save's export table edits after everything else in it, as a stage of their own: they
@@ -205,15 +238,7 @@ fn path_stages(
     first.values.extend(lowered.values);
     first.field_sets.extend(lowered.field_sets);
     let (mut patched, loaded) = if first.is_empty() {
-        let unchanged = PatchedBundle {
-            asset: loaded.asset_file_buffer.clone(),
-            exports: loaded.exports_file_buffer.clone(),
-            applied: vec![],
-            bulk: None,
-            optional_bulk: None,
-            notes: vec![],
-        };
-        (unchanged, loaded)
+        (unchanged(&loaded), loaded)
     } else {
         preview_read_edits(
             &AssetEditRequest {
@@ -325,7 +350,7 @@ fn orphan_pass(
     let removal = PackageEdits {
         imports: orphans
             .iter()
-            .map(|&import| ImportEdit::Remove { import })
+            .map(|&import| ImportEdit::Remove { import, from: None })
             .collect(),
         ..Default::default()
     };
@@ -1297,6 +1322,7 @@ fn new_function_pass(
             export: rivals_uasset::new_function_export(&after, add)?,
             text: add.text.clone(),
             was: None,
+            object: None,
         });
     }
     let staged = FSerializedAssetBundle {
@@ -1876,6 +1902,7 @@ pub fn preview_script_text(
                         export,
                         text: text.to_string(),
                         was: None,
+                        object: None,
                     }],
                     allow_unchecked,
                     ..Default::default()
@@ -3217,7 +3244,7 @@ pub fn plan_import_removal(
         .imports
         .iter()
         .filter_map(|edit| match edit {
-            rivals_uasset::ImportEdit::Remove { import } => Some(*import),
+            rivals_uasset::ImportEdit::Remove { import, .. } => Some(*import),
             _ => None,
         })
         .collect();
@@ -8004,6 +8031,7 @@ mod game_data_tests {
                 import: (-index - 1) as u32,
                 path: OTHER_MATERIAL.into(),
                 class: None,
+                from: None,
             }],
         );
 
@@ -8085,6 +8113,7 @@ mod game_data_tests {
                     import: (-left.index - 1) as u32,
                     path: right.path.clone(),
                     class: None,
+                    from: None,
                 }],
                 ..Default::default()
             })
@@ -8335,6 +8364,7 @@ mod game_data_tests {
             ..fixture.request_changes(PackageEdits {
                 imports: vec![ImportEdit::Remove {
                     import: (-tag.index - 1) as u32,
+                    from: None,
                 }],
                 ..Default::default()
             })
@@ -8575,6 +8605,7 @@ mod game_data_tests {
                         import: (-material - 1) as u32,
                         path: format!("{CLONE}.RetargetClone"),
                         class: None,
+                        from: None,
                     }],
                     ..Default::default()
                 })
@@ -9610,13 +9641,17 @@ mod game_data_tests {
         assert_eq!(outcome.edits.paths.len(), 1, "one cell changed");
         assert_eq!(outcome.edits.rows.len(), 1, "one row went");
         // The file says what it was written against, and says it again once read back: the cell
-        // its old value, and the row removal its table.
+        // its old value, and the row removal its table, by path.
         let was = outcome.edits.paths[0].was.clone();
         assert!(was.is_some(), "the cell's old value");
-        assert!(outcome.edits.expect.values.is_empty());
         assert_eq!(
-            outcome.edits.expect.exports.get(&0),
-            Some(&before.exports[0].path)
+            outcome.edits.rows[0].object.as_deref(),
+            Some(rivals_uasset::below_package(&before.exports[0].path))
+        );
+        assert!(
+            outcome.edits.expect.is_empty(),
+            "{:?}",
+            outcome.edits.expect
         );
         let written = serde_json::to_string(&outcome.edits).expect("json");
         let reread: crate::asset_edit::json::EditList =
@@ -9629,10 +9664,15 @@ mod game_data_tests {
             .resolve(std::path::Path::new("."))
             .expect("resolve");
         let (_, after) = fixture.apply_changes(changes.clone());
-        // The cell edit placed in the package it already changed finds its value there.
+        // Placed in the package they already changed, the cell edit finds its value there and the
+        // removal finds the row gone.
         let again = rivals_uasset::lower_paths(&after, &changes).expect("placed");
         assert!(again.values.is_empty(), "{:?}", again.values);
         assert_eq!(again.notes.len(), 1, "{:?}", again.notes);
+        let mut named = changes.clone();
+        let notes = rivals_uasset::place_named(&after, &mut named).expect("placed");
+        assert!(named.rows.is_empty(), "{:?}", named.rows);
+        assert_eq!(notes.len(), 1, "{notes:?}");
         let table = after.exports[0].data_table.as_ref().expect("table");
         assert_eq!(
             table.rows.len(),
@@ -10960,7 +11000,10 @@ mod game_data_tests {
             .collect();
 
         let (_, after) = fixture.apply_changes(PackageEdits {
-            imports: vec![ImportEdit::Remove { import: dropped }],
+            imports: vec![ImportEdit::Remove {
+                import: dropped,
+                from: None,
+            }],
             ..Default::default()
         });
 
@@ -12184,7 +12227,11 @@ mod game_data_tests {
     }
 
     fn row_edit(export: u32, op: RowOp) -> RowEdit {
-        RowEdit { export, op }
+        RowEdit {
+            export,
+            object: None,
+            op,
+        }
     }
 
     /// Rows go in and out by name. Everything the table kept has to read exactly as before, the
@@ -12501,7 +12548,11 @@ mod game_data_tests {
             })
             .expect("a string table");
         assert!(was.entries.len() >= 3, "{} entries", was.entries.len());
-        let string_edit = |op: StringOp| StringEdit { export, op };
+        let string_edit = |op: StringOp| StringEdit {
+            export,
+            op,
+            object: None,
+        };
         let (patched, after) = fixture.apply_changes(PackageEdits {
             strings: vec![
                 string_edit(StringOp::SetSource {
@@ -14540,6 +14591,7 @@ mod game_data_tests {
                     key: was.entries[index].key.clone(),
                     to: String::new(),
                 },
+                object: None,
             }],
             ..Default::default()
         });
@@ -14577,7 +14629,11 @@ mod game_data_tests {
         let (id, _) = was.entries[with].metadata[0].clone();
         let key_with = was.entries[with].key.clone();
         let key_without = was.entries[without].key.clone();
-        let edit = |op: StringOp| StringEdit { export: 0, op };
+        let edit = |op: StringOp| StringEdit {
+            export: 0,
+            op,
+            object: None,
+        };
         let (patched, after) = fixture.apply_changes(PackageEdits {
             strings: vec![
                 edit(StringOp::SetMetaData {
@@ -15374,6 +15430,157 @@ mod game_data_tests {
         );
     }
 
+    /// A function's script given as text, naming the function by path: the index it carries is
+    /// set aside, and applied to what it made, the text finds itself there and changes nothing.
+    #[test]
+    fn a_named_script_text_finds_its_function_and_applies_once() {
+        let Some(fixture) = Fixture::open(DEBUG_AUDIO_ABILITY) else {
+            return;
+        };
+        let before = fixture.parse();
+        let export = function(&before, "Initialize Anim Events");
+        // The function's own text with its first text constant made over.
+        let printed = rivals_uasset::print_script(&before, export.index)
+            .expect("printed")
+            .text();
+        let from = printed.find("TextConst<").expect("a text constant");
+        let mut quoted = false;
+        let mut escaped = false;
+        let mut end = from;
+        for (at, c) in printed[from..].char_indices() {
+            match c {
+                _ if escaped => escaped = false,
+                '\\' if quoted => escaped = true,
+                '"' => quoted = !quoted,
+                ')' if !quoted => {
+                    end = from + at + 1;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let text = format!(
+            "{}TextConst<Invariant>(\"TOOLKIT\"){}",
+            &printed[..from],
+            &printed[end..]
+        );
+        let named = PackageEdits {
+            script_texts: vec![rivals_uasset::ScriptTextEdit {
+                export: u32::MAX,
+                object: Some(rivals_uasset::below_package(&export.path).to_string()),
+                text: text.clone(),
+                was: None,
+            }],
+            ..Default::default()
+        };
+        let (_, after) = fixture.apply_changes(named.clone());
+        let now = rivals_uasset::print_script(&after, export.index)
+            .expect("printed")
+            .text();
+        assert!(now.contains("TextConst<Invariant>(\"TOOLKIT\")"), "{now}");
+        let mut again = named;
+        let notes = rivals_uasset::place_named(&after, &mut again).expect("placed");
+        assert!(again.script_texts.is_empty());
+        assert_eq!(notes.len(), 1, "{notes:?}");
+    }
+
+    /// String table edits naming their table by path find their entries by key, whatever index
+    /// they carry, and applied again find themselves made.
+    #[test]
+    fn named_string_edits_find_their_entries_by_key_and_apply_once() {
+        let Some(fixture) = Fixture::open(STRING_TABLE) else {
+            return;
+        };
+        let before = fixture.parse();
+        let export = before
+            .exports
+            .iter()
+            .find(|export| export.string_table.is_some())
+            .expect("a string table");
+        let table = export.string_table.as_ref().expect("entries");
+        let key = table.entries[1].key.clone();
+        let object = Some(rivals_uasset::below_package(&export.path).to_string());
+        let named = PackageEdits {
+            strings: vec![
+                StringEdit {
+                    export: u32::MAX,
+                    object: object.clone(),
+                    op: StringOp::SetSource {
+                        index: 0,
+                        key: key.clone(),
+                        to: "Rivals Toolkit".into(),
+                    },
+                },
+                StringEdit {
+                    export: u32::MAX,
+                    object,
+                    op: StringOp::Add {
+                        key: "RivalsToolkitKey".into(),
+                        source: "Added".into(),
+                    },
+                },
+            ],
+            ..Default::default()
+        };
+        let (_, after) = fixture.apply_changes(named.clone());
+        let entries = &after.exports[export.index as usize]
+            .string_table
+            .as_ref()
+            .expect("entries")
+            .entries;
+        let source = |key: &str| {
+            entries
+                .iter()
+                .find(|entry| entry.key == key)
+                .map(|entry| entry.source.as_str())
+        };
+        assert_eq!(source(&key), Some("Rivals Toolkit"));
+        assert_eq!(source("RivalsToolkitKey"), Some("Added"));
+        let mut again = named;
+        let notes = rivals_uasset::place_named(&after, &mut again).expect("placed");
+        assert!(again.strings.is_empty(), "{:?}", again.strings);
+        assert_eq!(notes.len(), 2, "{notes:?}");
+    }
+
+    /// An import named by the path it has is retargeted whatever index it carries, and applied
+    /// again finds the import pointing where it asked.
+    #[test]
+    fn an_import_named_by_its_path_is_retargeted_once() {
+        let Some(fixture) = Fixture::open(TITLES) else {
+            return;
+        };
+        let before = fixture.parse();
+        let (_, index) = material_import(&before);
+        let was = before
+            .imports
+            .iter()
+            .find(|import| import.index == index)
+            .expect("the import")
+            .path
+            .clone();
+        let named = PackageEdits {
+            imports: vec![ImportEdit::Retarget {
+                import: u32::MAX,
+                path: OTHER_MATERIAL.into(),
+                class: None,
+                from: Some(was.clone()),
+            }],
+            ..Default::default()
+        };
+        let (_, after) = fixture.apply_changes(named.clone());
+        assert!(
+            after
+                .imports
+                .iter()
+                .any(|import| import.path == OTHER_MATERIAL)
+        );
+        assert!(!after.imports.iter().any(|import| import.path == was));
+        let mut again = named;
+        let notes = rivals_uasset::place_named(&after, &mut again).expect("placed");
+        assert!(again.imports.is_empty(), "{:?}", again.imports);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+    }
+
     /// Every literal in a widget's functions widened at once: nothing means anything else, every
     /// offset after each one moves, and the save's own checks hold every script to that.
     #[test]
@@ -15505,6 +15712,7 @@ mod game_data_tests {
                 export,
                 text,
                 was: None,
+                object: None,
             }],
             ..Default::default()
         }
@@ -15675,6 +15883,7 @@ LocalVirtualFunction ToolkitGlow(1.5f)
                 export: graph.index,
                 text: call,
                 was: None,
+                object: None,
             }],
             ..Default::default()
         });
@@ -15720,6 +15929,7 @@ LocalVirtualFunction ToolkitGlow(1.5f)
                     1,
                 ),
                 was: None,
+                object: None,
             }],
             ..Default::default()
         });

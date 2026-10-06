@@ -478,6 +478,7 @@ mod tests {
                 export,
                 text,
                 was: None,
+                object: None,
             }],
             ..Default::default()
         }
@@ -777,6 +778,7 @@ Let LocalVariable(Nope in /Game/Test.BP_Test_C:ExecuteUbergraph_BP_Test) = 6
             export: GRAPH,
             text: printed,
             was: None,
+            object: None,
         });
         let refused = save(&built, &twice).err().expect("refused");
         assert!(refused.contains("two texts"), "{refused}");

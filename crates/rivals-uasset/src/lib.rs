@@ -18,6 +18,7 @@ mod import_remove;
 mod kismet;
 mod mappings;
 mod moviescene;
+mod named_edit;
 mod names;
 mod new_function;
 mod niagara;
@@ -110,6 +111,7 @@ pub use kismet::{
     script_lines, shape as expression_shape, statement_terms, token_name, ubergraph_entries,
 };
 pub use mappings::{Mappings, Schema, SchemaFixups, SchemaSlot, kind_name};
+pub use named_edit::{names_any, place_named};
 pub use names::unused_names;
 pub use new_function::{NewFunctionEdit, new_function_export};
 pub use package::{

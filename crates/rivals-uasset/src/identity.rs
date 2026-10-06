@@ -378,6 +378,7 @@ pub fn rename_references(
                         import: at as u32,
                         path: renamed,
                         class: None,
+                        from: None,
                     });
                 }
             }

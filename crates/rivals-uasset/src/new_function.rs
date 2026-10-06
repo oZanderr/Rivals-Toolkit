@@ -614,11 +614,13 @@ Return Nothing
 EndOfScript"
                             .into(),
                         was: None,
+                        object: None,
                     },
                     ScriptTextEdit {
                         export: GRAPH,
                         text: graph,
                         was: None,
+                        object: None,
                     },
                 ],
                 ..Default::default()

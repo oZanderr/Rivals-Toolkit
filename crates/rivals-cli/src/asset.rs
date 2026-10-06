@@ -1437,7 +1437,7 @@ pub fn import_remove(
         PackageEdits {
             imports: imports
                 .iter()
-                .map(|&import| rivals_uasset::ImportEdit::Remove { import })
+                .map(|&import| rivals_uasset::ImportEdit::Remove { import, from: None })
                 .collect(),
             ..Default::default()
         },
@@ -1795,7 +1795,7 @@ pub fn plan_import_removal(
             PackageEdits {
                 imports: imports
                     .iter()
-                    .map(|&import| rivals_uasset::ImportEdit::Remove { import })
+                    .map(|&import| rivals_uasset::ImportEdit::Remove { import, from: None })
                     .collect(),
                 ..Default::default()
             },
@@ -3910,6 +3910,7 @@ impl Accumulator {
                             export,
                             text: text.text(),
                             was: None,
+                            object: None,
                         });
                     }
                 }

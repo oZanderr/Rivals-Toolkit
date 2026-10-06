@@ -970,7 +970,7 @@ pub(crate) async fn plan_import_removal(
                 changes: PackageEdits {
                     imports: imports
                         .into_iter()
-                        .map(|import| rivals_uasset::ImportEdit::Remove { import })
+                        .map(|import| rivals_uasset::ImportEdit::Remove { import, from: None })
                         .collect(),
                     ..Default::default()
                 },

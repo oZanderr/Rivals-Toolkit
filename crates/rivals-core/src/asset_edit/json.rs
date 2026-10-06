@@ -110,6 +110,9 @@ pub struct PayloadFile {
 pub struct ScriptTextFile {
     #[serde(default)]
     pub export: u32,
+    /// The function by path rather than by index. See [`rivals_uasset::place_named`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object: Option<String>,
     /// A function to add to the class, by the name it takes, written from this text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub new_function: Option<String>,
@@ -213,6 +216,7 @@ impl EditList {
                 .filter(|entry| entry.new_function.is_none())
                 .map(|entry| ScriptTextEdit {
                     export: entry.export,
+                    object: entry.object.clone(),
                     ..Default::default()
                 })
                 .collect(),
@@ -284,6 +288,7 @@ impl EditList {
                     export: entry.export,
                     text,
                     was: entry.was,
+                    object: entry.object,
                 }),
             }
         }

@@ -14,10 +14,15 @@ pub enum ImportEdit {
     /// Point an existing import at another object. `class` replaces the import's class when given;
     /// otherwise the import keeps the class it had.
     Retarget {
+        #[serde(default)]
         import: u32,
         path: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         class: Option<(String, String)>,
+        /// The import by the path it has rather than by its index: the save retargets the one with
+        /// this path in the package it reads. See [`crate::place_named`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
     },
     /// Add an import for `path`, an object of the given class.
     Add {
@@ -29,7 +34,13 @@ pub enum ImportEdit {
     },
     /// Drop an import the package no longer names. Every index above it moves down, which is why
     /// this is a save of its own.
-    Remove { import: u32 },
+    Remove {
+        #[serde(default)]
+        import: u32,
+        /// The import by its path rather than its index, as for a retarget.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
+    },
 }
 
 /// The class an import is given when nothing says better. The linker accepts any subclass, and
@@ -296,6 +307,7 @@ pub(crate) fn apply_import_edit(
             import,
             path,
             class,
+            ..
         } => {
             let at = *import as usize;
             let index = FPackageIndex::create_import(*import);
@@ -463,6 +475,7 @@ mod tests {
                 import: FPackageIndex { index: mesh }.to_import_index(),
                 path: "/Game/Meshes/SM_B.SM_B".into(),
                 class: None,
+                from: None,
             },
             None,
         )
@@ -497,6 +510,7 @@ mod tests {
             import: FPackageIndex { index: mesh }.to_import_index(),
             path: path.into(),
             class: None,
+            from: None,
         };
         let done = apply_import_edit(
             &mut tables,
@@ -539,6 +553,7 @@ mod tests {
                 import: FPackageIndex { index: class }.to_import_index(),
                 path: "/Script/Engine.SkeletalMesh".into(),
                 class: None,
+                from: None,
             },
             None,
         )

@@ -637,12 +637,14 @@ fn diff_imports(
         let class_package = is.get("class_package").and_then(Json::as_str);
         match original.imports.get(position) {
             Some(was) if was.path == path => {}
-            Some(_) => out.edits.imports.push(ImportEdit::Retarget {
+            // Named by the path it had, which still finds it once a patch has moved the table.
+            Some(was) => out.edits.imports.push(ImportEdit::Retarget {
                 import: position as u32,
                 path: path.to_string(),
                 class: class_package
                     .zip(class_name)
                     .map(|(package, name)| (package.to_string(), name.to_string())),
+                from: Some(was.path.clone()),
             }),
             None => out.edits.imports.push(ImportEdit::Add {
                 path: path.to_string(),
@@ -661,6 +663,7 @@ fn diff_rows(was: &rivals_uasset::ParsedExport, is: &Json, export: u32, out: &mu
     let Some(table) = &was.data_table else {
         return;
     };
+    let rows_before = out.edits.rows.len();
     let Some(rows) = is
         .get("data_table")
         .and_then(|t| t.get("rows"))
@@ -695,6 +698,7 @@ fn diff_rows(was: &rivals_uasset::ParsedExport, is: &Json, export: u32, out: &mu
                         name: name.to_string(),
                         at: Some(position as u32),
                     },
+                    object: None,
                 });
                 // Its columns are filled in once the row is there, in the same save.
                 let fields = row.get("fields").and_then(Json::as_array);
@@ -728,8 +732,24 @@ fn diff_rows(was: &rivals_uasset::ParsedExport, is: &Json, export: u32, out: &mu
                 op: RowOp::Remove {
                     name: row.name.clone(),
                 },
+                object: None,
             });
         }
+    }
+    // Rows are named, and so is their table, which still finds it once a patch has moved it.
+    named_by(was, &mut out.edits.rows[rows_before..], |edit| {
+        &mut edit.object
+    });
+}
+
+/// Names the object each of `edits` changes by its path below the package.
+fn named_by<T>(
+    was: &rivals_uasset::ParsedExport,
+    edits: &mut [T],
+    object: impl Fn(&mut T) -> &mut Option<String>,
+) {
+    for edit in edits {
+        *object(edit) = Some(rivals_uasset::below_package(&was.path).to_string());
     }
 }
 
@@ -739,6 +759,21 @@ fn diff_strings(was: &rivals_uasset::ParsedExport, is: &Json, export: u32, out: 
     let Some(table) = &was.string_table else {
         return;
     };
+    let strings_before = out.edits.strings.len();
+    diff_entries_of(table, is, export, out);
+    // Entries are found by key, and their table by path, once a patch has moved either.
+    named_by(was, &mut out.edits.strings[strings_before..], |edit| {
+        &mut edit.object
+    });
+}
+
+/// [`diff_strings`] for the table's entries.
+fn diff_entries_of(
+    table: &rivals_uasset::StringTable,
+    is: &Json,
+    export: u32,
+    out: &mut DiffOutcome,
+) {
     let Some(entries) = is
         .get("string_table")
         .and_then(|t| t.get("entries"))
@@ -762,6 +797,7 @@ fn diff_strings(was: &rivals_uasset::ParsedExport, is: &Json, export: u32, out: 
                     key: text("key"),
                     source: text("source"),
                 },
+                object: None,
             });
             continue;
         };
@@ -774,6 +810,7 @@ fn diff_strings(was: &rivals_uasset::ParsedExport, is: &Json, export: u32, out: 
                     key: key.clone(),
                     to: text("key"),
                 },
+                object: None,
             });
         }
         if text("source") != before.source {
@@ -784,6 +821,7 @@ fn diff_strings(was: &rivals_uasset::ParsedExport, is: &Json, export: u32, out: 
                     key: key.clone(),
                     to: text("source"),
                 },
+                object: None,
             });
         }
         if text("tag") != before.tag {
@@ -794,6 +832,7 @@ fn diff_strings(was: &rivals_uasset::ParsedExport, is: &Json, export: u32, out: 
                     key: key.clone(),
                     to: text("tag"),
                 },
+                object: None,
             });
         }
         diff_metadata(entry, before, export, index, &key, out);
@@ -805,6 +844,7 @@ fn diff_strings(was: &rivals_uasset::ParsedExport, is: &Json, export: u32, out: 
                 index: position as u32,
                 key: table.entries[position].key.clone(),
             },
+            object: None,
         });
     }
 }
@@ -846,6 +886,7 @@ fn diff_metadata(
                     id: id.clone(),
                     to: value.clone(),
                 },
+                object: None,
             });
         }
     }
@@ -858,6 +899,7 @@ fn diff_metadata(
                     key: key.to_string(),
                     id: id.clone(),
                 },
+                object: None,
             });
         }
     }

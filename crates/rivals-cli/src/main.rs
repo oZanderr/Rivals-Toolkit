@@ -2582,6 +2582,7 @@ fn asset_script_assemble(
                 export,
                 text,
                 was: None,
+                object: None,
             }],
             ..Default::default()
         },
@@ -3287,6 +3288,7 @@ fn asset_import(cli: &Cli, app: &settings::AppSettings, args: &ImportArgs) -> Re
             import: (-index - 1) as u32,
             path: path.clone(),
             class,
+            from: None,
         },
         Some(index) => {
             return Err(format!(
@@ -3550,6 +3552,7 @@ fn asset_row(cli: &Cli, app: &settings::AppSettings, args: &RowArgs) -> Result<(
         rivals_uasset::RowEdit {
             export: args.export,
             op,
+            object: None,
         },
         mod_name_of(app, args.mod_name.as_deref()),
         args.replace,
@@ -3779,6 +3782,7 @@ fn asset_strings(cli: &Cli, app: &settings::AppSettings, args: &StringsArgs) -> 
         rivals_uasset::StringEdit {
             export: args.export,
             op,
+            object: None,
         },
         mod_name_of(app, args.mod_name.as_deref()),
         args.replace,
