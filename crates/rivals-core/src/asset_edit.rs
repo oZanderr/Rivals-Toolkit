@@ -8683,6 +8683,7 @@ mod game_data_tests {
                 exports: vec![rivals_uasset::ExportEdit::Rename {
                     export: 0,
                     name: "RetargetObject".into(),
+                    from: None,
                 }],
                 ..Default::default()
             },
@@ -10589,13 +10590,27 @@ mod game_data_tests {
         let outcome = crate::asset_edit::diff::diff_dump(&before, &dump).expect("diff");
         assert!(outcome.notes.is_empty(), "{:?}", outcome.notes);
         assert_eq!(outcome.edits.paths.len(), 1, "{:?}", outcome.edits);
-        assert!(matches!(
-            outcome.edits.export_edits.as_slice(),
-            [ExportEdit::Rename { export, name }] if *export as usize == target && name == "ProbeRenamed"
-        ));
+        let old = rivals_uasset::below_package(&was).to_string();
+        assert!(
+            matches!(
+                outcome.edits.export_edits.as_slice(),
+                [ExportEdit::Rename { name, from: Some(from), .. }]
+                    if name == "ProbeRenamed" && *from == old
+            ),
+            "{:?}",
+            outcome.edits.export_edits
+        );
+        assert!(
+            outcome.edits.expect.is_empty(),
+            "{:?}",
+            outcome.edits.expect
+        );
         let changes = outcome.edits.resolve(Path::new(".")).expect("resolve");
-        let (_, after) = fixture.apply_changes(changes);
+        let (patched, after) = fixture.apply_changes(changes.clone());
         assert_eq!(after.exports[target].object_name, "ProbeRenamed");
+        // Applied again, the rename finds the object called so already, and the edit naming its old
+        // path finds it under the new one with its value made.
+        applied_again_changes_nothing(&fixture, &changes, &patched, &after);
 
         // Read again, the dump names the object by its new path wherever it is referred to.
         let moved = was.replace("BodySetup_0", "ProbeRenamed");
@@ -10628,6 +10643,7 @@ mod game_data_tests {
             exports: vec![ExportEdit::Rename {
                 export: target,
                 name: "ProbeRenamed".to_string(),
+                from: None,
             }],
             ..Default::default()
         });
@@ -14441,6 +14457,7 @@ mod game_data_tests {
                 rivals_uasset::ExportEdit::Rename {
                     export: record.index,
                     name: "ToolkitRecordL".into(),
+                    from: None,
                 },
                 rivals_uasset::ExportEdit::SetOuter {
                     export: record.index,

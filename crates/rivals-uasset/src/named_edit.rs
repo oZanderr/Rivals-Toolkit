@@ -4,6 +4,7 @@
 //! has moved the tables, and one that has landed already is left out, with a note.
 
 use crate::edit::{PackageEdits, RowOp, StringOp};
+use crate::export_edit::ExportEdit;
 use crate::header_edit::ImportEdit;
 use crate::package::ParsedPackage;
 use crate::path_edit::export_of;
@@ -16,6 +17,10 @@ pub fn names_any(changes: &PackageEdits) -> bool {
             .script_texts
             .iter()
             .any(|edit| edit.object.is_some())
+        || changes
+            .exports
+            .iter()
+            .any(|edit| matches!(edit, ExportEdit::Rename { from: Some(_), .. }))
         || changes.imports.iter().any(|edit| {
             matches!(
                 edit,
@@ -33,11 +38,88 @@ pub fn place_named(
     changes: &mut PackageEdits,
 ) -> Result<Vec<String>, String> {
     let mut notes = Vec::new();
+    place_renames(parsed, changes, &mut notes)?;
     place_rows(parsed, changes, &mut notes)?;
     place_strings(parsed, changes, &mut notes)?;
     place_scripts(parsed, changes, &mut notes)?;
     place_imports(parsed, changes, &mut notes)?;
     Ok(notes)
+}
+
+/// The path an object has below the package once renamed: its old path with its own name, the last
+/// step, replaced.
+fn renamed(from: &str, name: &str) -> String {
+    match from.rfind([':', '.']) {
+        Some(at) => format!("{}{name}", &from[..=at]),
+        None => name.to_string(),
+    }
+}
+
+/// Puts each rename naming its object by path at the object's index. One already made, its old
+/// path naming nothing and its new one an object, is left out, and every edit of the save naming
+/// the old path is pointed at the new one, so a file holding a rename applies again.
+fn place_renames(
+    parsed: &ParsedPackage,
+    changes: &mut PackageEdits,
+    notes: &mut Vec<String>,
+) -> Result<(), String> {
+    let mut moved: Vec<(String, String)> = Vec::new();
+    let mut kept = Vec::new();
+    for edit in std::mem::take(&mut changes.exports) {
+        let ExportEdit::Rename {
+            name,
+            from: Some(from),
+            ..
+        } = edit
+        else {
+            kept.push(edit);
+            continue;
+        };
+        match export_of(parsed, &from) {
+            Ok(export) => kept.push(ExportEdit::Rename {
+                export: export.index,
+                name,
+                from: None,
+            }),
+            Err(why) => {
+                let now = renamed(&from, &name);
+                if export_of(parsed, &now).is_err() {
+                    return Err(why);
+                }
+                notes.push(format!("{from}: already called {name}"));
+                moved.push((from, now));
+            }
+        }
+    }
+    changes.exports = kept;
+    let follow = |selector: &mut String| {
+        if let Some((_, now)) = moved.iter().find(|(from, _)| from == selector.trim()) {
+            *selector = now.clone();
+        }
+    };
+    for edit in &mut changes.paths {
+        follow(&mut edit.export);
+    }
+    let objects = changes
+        .rows
+        .iter_mut()
+        .filter_map(|edit| edit.object.as_mut())
+        .chain(
+            changes
+                .strings
+                .iter_mut()
+                .filter_map(|edit| edit.object.as_mut()),
+        )
+        .chain(
+            changes
+                .script_texts
+                .iter_mut()
+                .filter_map(|edit| edit.object.as_mut()),
+        );
+    for object in objects {
+        follow(object);
+    }
+    Ok(())
 }
 
 fn place_rows(
@@ -299,6 +381,16 @@ fn place_imports(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_renamed_object_keeps_its_outers() {
+        assert_eq!(
+            renamed("Level:PersistentLevel:BodySetup_0", "Probe"),
+            "Level:PersistentLevel:Probe"
+        );
+        assert_eq!(renamed("BP_C.Default__BP_C", "Other"), "BP_C.Other");
+        assert_eq!(renamed("Table", "NewTable"), "NewTable");
+    }
 
     #[test]
     fn a_script_is_the_same_wherever_its_labels_sit() {

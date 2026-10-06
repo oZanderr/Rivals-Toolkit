@@ -1041,6 +1041,7 @@ mod tests {
             &[crate::export_edit::ExportEdit::Rename {
                 export: 2,
                 name: "Renamed".into(),
+                from: None,
             }],
             None,
             &[],

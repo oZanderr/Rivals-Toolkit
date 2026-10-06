@@ -2443,6 +2443,7 @@ fn asset_export_edit(
         edits.push(rivals_uasset::ExportEdit::Rename {
             export,
             name: name.clone(),
+            from: None,
         });
     }
     if args.outer.is_some() || args.outer_root {

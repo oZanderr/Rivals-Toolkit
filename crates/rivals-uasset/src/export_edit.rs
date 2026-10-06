@@ -54,8 +54,14 @@ pub fn flag_names(flags: u32) -> Vec<&'static str> {
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ExportEdit {
     Rename {
+        #[serde(default)]
         export: u32,
         name: String,
+        /// The object by the path it has below the package rather than by its index. Once it
+        /// is renamed, an edit naming that path finds the object under its new name, and the
+        /// rename is left out as made. See [`crate::place_named`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
     },
     /// Move the object under another export, or to the package root with no `outer`.
     SetOuter {
@@ -65,21 +71,12 @@ pub enum ExportEdit {
     },
     /// Retype the object. Its values are written under the old class's schema, so they cannot be
     /// carried across: the export is emptied and takes its new class's defaults.
-    SetClass {
-        export: u32,
-        class: i32,
-    },
+    SetClass { export: u32, class: i32 },
     /// Reparent a class, struct or enum. Every instance of it is read under the flattened chain,
     /// so this changes how other exports decode.
-    SetSuper {
-        export: u32,
-        super_index: i32,
-    },
+    SetSuper { export: u32, super_index: i32 },
     /// Point the object at another archetype, which is what its unset properties inherit from.
-    SetTemplate {
-        export: u32,
-        template: i32,
-    },
+    SetTemplate { export: u32, template: i32 },
     SetFlags {
         export: u32,
         #[serde(default)]
@@ -88,10 +85,7 @@ pub enum ExportEdit {
         clear: u32,
     },
     /// Whether other packages may import the object by hash.
-    SetPublicHash {
-        export: u32,
-        on: bool,
-    },
+    SetPublicHash { export: u32, on: bool },
     /// Whether the object is stripped when the container targets the other side.
     SetFilter {
         export: u32,
@@ -724,7 +718,7 @@ fn final_places(parsed: &ParsedPackage, edits: &[ExportEdit]) -> Vec<(String, i3
         .collect();
     for edit in edits {
         match edit {
-            ExportEdit::Rename { export, name } if name_is_usable(name).is_ok() => {
+            ExportEdit::Rename { export, name, .. } if name_is_usable(name).is_ok() => {
                 if let Some(place) = places.get_mut(*export as usize) {
                     place.0 = name.trim().to_string();
                 }
@@ -1141,6 +1135,7 @@ mod tests {
             &[ExportEdit::Rename {
                 export: 0,
                 name: "Renamed".into(),
+                from: None,
             }],
             None,
         )
@@ -1174,6 +1169,7 @@ mod tests {
             &[ExportEdit::Rename {
                 export: 1,
                 name: "Light".into(),
+                from: None,
             }],
             None,
         )
@@ -1194,6 +1190,7 @@ mod tests {
             &[ExportEdit::Rename {
                 export: 3,
                 name: "Other_C".into(),
+                from: None,
             }],
             None,
         )
@@ -1255,6 +1252,7 @@ mod tests {
                 ExportEdit::Rename {
                     export: 1,
                     name: "MeshL".into(),
+                    from: None,
                 },
                 ExportEdit::SetOuter {
                     export: 1,
@@ -1282,10 +1280,12 @@ mod tests {
                 ExportEdit::Rename {
                     export: 1,
                     name: "Light".into(),
+                    from: None,
                 },
                 ExportEdit::Rename {
                     export: 2,
                     name: "Mesh".into(),
+                    from: None,
                 },
             ],
         );
@@ -1297,10 +1297,12 @@ mod tests {
                 ExportEdit::Rename {
                     export: 1,
                     name: "Lamp".into(),
+                    from: None,
                 },
                 ExportEdit::Rename {
                     export: 2,
                     name: "Lamp".into(),
+                    from: None,
                 },
             ],
         );
@@ -1350,6 +1352,7 @@ mod tests {
                 ExportEdit::Rename {
                     export: 2,
                     name: "Lamp".into(),
+                    from: None,
                 },
                 ExportEdit::SetOuter {
                     export: 1,

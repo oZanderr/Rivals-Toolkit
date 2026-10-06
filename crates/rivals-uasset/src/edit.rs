@@ -576,6 +576,13 @@ pub fn expectations(parsed: &ParsedPackage, edits: &PackageEdits) -> Expected {
             .filter_map(|edit| edit.into_level),
     );
     for edit in &edits.exports {
+        // A rename naming its object by path is its own check: see [`crate::place_named`].
+        if matches!(
+            edit,
+            crate::export_edit::ExportEdit::Rename { from: Some(_), .. }
+        ) {
+            continue;
+        }
         exports.push(edit.export());
         match edit {
             crate::export_edit::ExportEdit::SetOuter {

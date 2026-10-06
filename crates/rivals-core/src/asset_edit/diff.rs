@@ -193,6 +193,7 @@ pub fn diff_dump(original: &ParsedPackage, edited: &Json) -> Result<DiffOutcome,
             out.edits.export_edits.push(ExportEdit::Rename {
                 export: at,
                 name: name.to_string(),
+                from: Some(rivals_uasset::below_package(&was.path).to_string()),
             });
         }
         let Some(properties) = is.get("properties").and_then(Json::as_array) else {
