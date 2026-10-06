@@ -7,9 +7,10 @@
 //! reads, so the list still fits a copy of the package a patch or another save has changed. The
 //! few values no path reaches keep the offset the original recorded, held to it by `expect`.
 //!
-//! What the comparison cannot express it reports as a note rather than guessing. A note is not a
-//! failure: the edits beside it still apply, and the note says what a second dump-edit-diff pass
-//! has to pick up.
+//! A change that has to wait for another, such as a new row's columns or the fields an instanced
+//! struct takes with a new type, is written to wait for the edit that makes its place, so one apply
+//! makes it all. What the comparison cannot express it reports as a note rather than guessing; the
+//! edits beside a note still apply.
 
 use serde_json::Value as Json;
 
@@ -27,6 +28,62 @@ use super::json::EditList;
 pub struct DiffOutcome {
     pub edits: EditList,
     pub notes: Vec<String>,
+    /// Changes that wait for an edit beside them, written out as path edits once the original is
+    /// at hand: see [`to_paths`].
+    follow: Vec<FollowUp>,
+}
+
+/// Where a change that waits for another is written from: a value the original holds, or a row
+/// this diff adds.
+#[derive(Debug, Clone)]
+enum Anchor {
+    Value {
+        offset: u64,
+        name: String,
+        element: Option<u32>,
+    },
+    Row {
+        export: u32,
+        name: String,
+    },
+}
+
+/// A change that lands right only once an edit beside it has, so it is written as a path edit,
+/// which waits for that edit in the same apply.
+#[derive(Debug)]
+enum FollowUp {
+    /// One edit on what `steps` names below the anchor.
+    Edit {
+        anchor: Anchor,
+        steps: Vec<Segment>,
+        op: PathOp,
+        label: String,
+    },
+    /// What the edited dump gives a value the same save makes: see [`fill`].
+    Fill {
+        anchor: Anchor,
+        steps: Vec<Segment>,
+        edited: Json,
+        label: String,
+    },
+    /// An edit worked out against the original that has to name its value by path: one in a map
+    /// whose pairs move, or on an instanced struct whose fields follow its new type.
+    Keyed { edit: Keyed, label: String },
+}
+
+#[derive(Debug)]
+enum Keyed {
+    Value(ValueEdit),
+    Field(FieldSet),
+}
+
+/// The value an edit at `entry` starts from, when the reader recorded where it is.
+fn anchor_of(entry: &PropertyEntry) -> Option<Anchor> {
+    Some(Anchor::Value {
+        offset: entry.span?.0,
+        name: entry.name.clone(),
+        element: entry.element,
+    })
 }
 
 /// Compares an edited dump against the parse it came from. The parse has to be the editor's own,
@@ -71,15 +128,17 @@ pub fn diff_dump(original: &ParsedPackage, edited: &Json) -> Result<DiffOutcome,
         diff_rows(was, is, at, &mut out);
         diff_strings(was, is, at, &mut out);
     }
-    to_paths(original, &mut out.edits);
+    to_paths(original, &mut out);
     out.edits.expect_from(original);
     Ok(out)
 }
 
 /// Rewrites each value edit and field set as a path edit wherever one is placed on the same value,
 /// so the list names what it changes rather than where it sat in this copy of the package. One no
-/// path reaches, such as a field of a map's key, keeps its offset.
-fn to_paths(original: &ParsedPackage, edits: &mut EditList) {
+/// path reaches, such as a field of a map's key, keeps its offset. The changes that wait for an
+/// edit beside them are written out here too.
+fn to_paths(original: &ParsedPackage, out: &mut DiffOutcome) {
+    let edits = &mut out.edits;
     let mut kept = Vec::new();
     for edit in std::mem::take(&mut edits.values) {
         match value_path(original, &edit).filter(|path| placed_alone(original, path, &edit)) {
@@ -88,6 +147,10 @@ fn to_paths(original: &ParsedPackage, edits: &mut EditList) {
         }
     }
     edits.values = kept;
+    for follow in std::mem::take(&mut out.follow) {
+        place_follow_up(original, follow, &mut out.edits.paths, &mut out.notes);
+    }
+    let edits = &mut out.edits;
     let mut kept = Vec::new();
     for set in std::mem::take(&mut edits.field_sets) {
         let path = field_set_path(original, &set)
@@ -149,17 +212,7 @@ fn field_set_path(original: &ParsedPackage, set: &FieldSet) -> Option<PathEdit> 
     let place =
         rivals_uasset::place_of(original, set.offset, &set.expect_name, set.expect_element)?;
     let mut segments = place.segments;
-    for step in &set.path {
-        match step.strip_suffix(']').and_then(|step| step.split_once('[')) {
-            Some((name, at)) => {
-                if !name.is_empty() {
-                    segments.push(Segment::Field(name.to_string()));
-                }
-                segments.push(Segment::Index(at.parse().ok()?));
-            }
-            None => segments.push(Segment::Field(step.clone())),
-        }
-    }
+    segments.extend(steps_of(&set.path));
     Some(PathEdit {
         export: rivals_uasset::below_package(&original.exports.get(place.export as usize)?.path)
             .to_string(),
@@ -171,6 +224,347 @@ fn field_set_path(original: &ParsedPackage, set: &FieldSet) -> Option<PathEdit> 
         },
         was: None,
     })
+}
+
+/// A field set's steps as path segments: a field as `Name` or `Name[slot]`, an element as `[i]`.
+fn steps_of(path: &[String]) -> Vec<Segment> {
+    let mut steps = Vec::new();
+    for step in path {
+        let slot = step
+            .strip_suffix(']')
+            .and_then(|step| step.split_once('['))
+            .and_then(|(name, at)| Some((name, at.parse::<u32>().ok()?)));
+        match slot {
+            Some((name, at)) => {
+                if !name.is_empty() {
+                    steps.push(Segment::Field(name.to_string()));
+                }
+                steps.push(Segment::Index(at));
+            }
+            None => steps.push(Segment::Field(step.clone())),
+        }
+    }
+    steps
+}
+
+/// A field's steps: its name, and its slot for a static array.
+fn field_steps(name: &str, element: Option<u32>) -> Vec<Segment> {
+    let mut steps = vec![Segment::Field(name.to_string())];
+    steps.extend(element.map(Segment::Index));
+    steps
+}
+
+/// The object, row or defaults a path edit starts in.
+struct Head {
+    export: String,
+    row: Option<String>,
+    defaults: bool,
+}
+
+impl Head {
+    fn edit(&self, at: &[Segment], op: PathOp) -> PathEdit {
+        PathEdit {
+            export: self.export.clone(),
+            row: self.row.clone(),
+            defaults: self.defaults,
+            path: rivals_uasset::format_path(at),
+            op,
+            was: None,
+        }
+    }
+}
+
+/// Where an anchor sits in the original, as a path edit names it.
+fn place_anchor(original: &ParsedPackage, anchor: &Anchor) -> Option<(Head, Vec<Segment>)> {
+    let export_named = |index: u32| {
+        original
+            .exports
+            .get(index as usize)
+            .map(|export| rivals_uasset::below_package(&export.path).to_string())
+    };
+    match anchor {
+        Anchor::Value {
+            offset,
+            name,
+            element,
+        } => {
+            let place = rivals_uasset::place_of(original, *offset, name, *element)?;
+            let head = Head {
+                export: export_named(place.export)?,
+                row: place.row,
+                defaults: place.defaults,
+            };
+            Some((head, place.segments))
+        }
+        Anchor::Row { export, name } => {
+            let head = Head {
+                export: export_named(*export)?,
+                row: Some(name.clone()),
+                defaults: false,
+            };
+            Some((head, Vec::new()))
+        }
+    }
+}
+
+/// Writes out a change that waits for an edit beside it, from where its anchor sits in the
+/// original. One that no path reaches is a note.
+fn place_follow_up(
+    original: &ParsedPackage,
+    follow: FollowUp,
+    paths: &mut Vec<PathEdit>,
+    notes: &mut Vec<String>,
+) {
+    let unplaced = |label: &str| {
+        format!(
+            "{label}: this waits for another edit in the save, and no path names where it goes; \
+             dump the saved copy and diff again to make it"
+        )
+    };
+    match follow {
+        FollowUp::Edit {
+            anchor,
+            steps,
+            op,
+            label,
+        } => match place_anchor(original, &anchor) {
+            Some((head, mut at)) => {
+                at.extend(steps);
+                paths.push(head.edit(&at, op));
+            }
+            None => notes.push(unplaced(&label)),
+        },
+        FollowUp::Fill {
+            anchor,
+            steps,
+            edited,
+            label,
+        } => match place_anchor(original, &anchor) {
+            Some((head, mut at)) => {
+                at.extend(steps);
+                fill(&head, at, &edited, &label, false, paths, notes);
+            }
+            None => notes.push(unplaced(&label)),
+        },
+        FollowUp::Keyed { edit, label } => {
+            let path = match &edit {
+                Keyed::Value(value) => {
+                    value_path(original, value).filter(|path| placed_alone(original, path, value))
+                }
+                Keyed::Field(set) => field_set_path(original, set),
+            };
+            match path {
+                Some(path) => paths.push(path),
+                None => notes.push(unplaced(&label)),
+            }
+        }
+    }
+}
+
+/// Path edits giving a value the same save makes what the edited dump says of it. What a save
+/// makes starts unset all the way down, an element of a container at its type's zero, so a value
+/// with a text form is set, a zero is cleared and an unset value left alone. A struct is filled
+/// field by field, an array's elements are added and each filled, a set's elements are keyed in,
+/// and a map's pairs are keyed in and each value filled by its key; one given nothing is stored as
+/// it is. Each edit under one that makes its place waits for it, so a single apply makes them all.
+/// What has no text form is a note. `zeroed` says the value is an element, which starts at zero.
+fn fill(
+    head: &Head,
+    at: Vec<Segment>,
+    edited: &Json,
+    label: &str,
+    zeroed: bool,
+    paths: &mut Vec<PathEdit>,
+    notes: &mut Vec<String>,
+) {
+    let kind = kind_in(edited).unwrap_or_default();
+    let fields = edited.get("fields").and_then(Json::as_array);
+    let started = paths.len();
+    let with = |step: Segment| {
+        let mut here = at.clone();
+        here.push(step);
+        here
+    };
+    match kind {
+        // Left as a new value starts, though an unset struct can still list a field given one.
+        "unset" => {
+            for field in fields.into_iter().flatten() {
+                fill_field(head, &at, field, label, paths, notes);
+            }
+            return;
+        }
+        "default" => {
+            if !zeroed {
+                paths.push(head.edit(&at, PathOp::Clear));
+            }
+            return;
+        }
+        "array" | "set" => {
+            let items = edited.get("items").and_then(Json::as_array);
+            for (index, item) in items.into_iter().flatten().enumerate() {
+                let here = format!("{label}[{index}]");
+                let index = index as u32;
+                if kind == "array" {
+                    paths.push(head.edit(
+                        &at,
+                        PathOp::Insert {
+                            index: Some(index),
+                            key: None,
+                        },
+                    ));
+                    fill(
+                        head,
+                        with(Segment::Index(index)),
+                        item,
+                        &here,
+                        true,
+                        paths,
+                        notes,
+                    );
+                    continue;
+                }
+                // A set's element is its own key.
+                match text_of(item) {
+                    Some(key) => paths.push(head.edit(
+                        &at,
+                        PathOp::Insert {
+                            index: Some(index),
+                            key: Some(key),
+                        },
+                    )),
+                    None => notes.push(format!(
+                        "{here}: this set element has no text form to key it by; add it in the \
+                         editor instead"
+                    )),
+                }
+            }
+        }
+        "map" => {
+            let pairs = edited.get("entries").and_then(Json::as_array);
+            for (index, pair) in pairs.into_iter().flatten().enumerate() {
+                let here = format!("{label}[{index}]");
+                let Some(key) = pair.get("key").and_then(text_of) else {
+                    notes.push(format!(
+                        "{here}: this pair's key has no text form to key it by; add it in the \
+                         editor instead"
+                    ));
+                    continue;
+                };
+                paths.push(head.edit(
+                    &at,
+                    PathOp::Insert {
+                        index: Some(index as u32),
+                        key: Some(key.clone()),
+                    },
+                ));
+                if let Some(value) = pair.get("value") {
+                    fill(
+                        head,
+                        with(Segment::Key(key)),
+                        value,
+                        &here,
+                        true,
+                        paths,
+                        notes,
+                    );
+                }
+            }
+        }
+        _ if fields.is_some() => {
+            for field in fields.into_iter().flatten() {
+                fill_field(head, &at, field, label, paths, notes);
+            }
+        }
+        _ => {
+            let text = match kind {
+                "text" => text_literal_of(edited),
+                _ => text_of(edited),
+            };
+            match text {
+                Some(_) if zeroed && is_zero(edited) => {}
+                Some(text) => paths.push(head.edit(&at, PathOp::Set { text })),
+                None => notes.push(format!(
+                    "{label}: a {kind} has no text form an edit can carry, so it keeps what a new \
+                     one holds"
+                )),
+            }
+        }
+    }
+    // Given nothing inside, it is still stored, as the dump has it.
+    if matches!(kind, "struct" | "array" | "set" | "map") && paths.len() == started && !zeroed {
+        paths.push(head.edit(&at, PathOp::Store));
+    }
+}
+
+/// [`fill`] for one field of a struct, under its name and its slot for a static array.
+fn fill_field(
+    head: &Head,
+    at: &[Segment],
+    field: &Json,
+    label: &str,
+    paths: &mut Vec<PathEdit>,
+    notes: &mut Vec<String>,
+) {
+    let (Some(name), Some(value)) = (field.get("name").and_then(Json::as_str), field.get("value"))
+    else {
+        return;
+    };
+    let element = field
+        .get("element")
+        .and_then(Json::as_u64)
+        .map(|at| at as u32);
+    let mut here = at.to_vec();
+    here.extend(field_steps(name, element));
+    let named = match element {
+        Some(slot) => format!("{label}.{name}[{slot}]"),
+        None => format!("{label}.{name}"),
+    };
+    fill(head, here, value, &named, false, paths, notes);
+}
+
+/// Whether a dumped value is its kind's zero, which a new element of a container already holds.
+fn is_zero(edited: &Json) -> bool {
+    let value = edited.get("value");
+    match kind_in(edited).unwrap_or_default() {
+        "bool" => value.and_then(Json::as_bool) == Some(false),
+        "int" | "uint" | "byte" | "float" | "enum" => value.and_then(Json::as_f64) == Some(0.0),
+        "str" => value.and_then(Json::as_str) == Some(""),
+        "name" => value.and_then(Json::as_str) == Some("None"),
+        _ => false,
+    }
+}
+
+/// What a dumped text is typed as to make it again: a string table entry or a localized text by
+/// the literal that names it, anything else by what it shows. `None` for a text built from parts
+/// no literal spells.
+fn text_literal_of(edited: &Json) -> Option<String> {
+    use rivals_uasset::text_literal::{TextLiteral, format};
+    let field = |name: &str| edited.get(name).and_then(Json::as_str);
+    let parts = edited
+        .get("parts")
+        .and_then(Json::as_array)
+        .filter(|parts| !parts.is_empty());
+    if let Some(parts) = parts {
+        let part = |name: &str| {
+            parts
+                .iter()
+                .find(|part| part.get("name").and_then(Json::as_str) == Some(name))
+                .and_then(|part| part.get("value"))
+                .and_then(text_of)
+        };
+        return Some(format(&TextLiteral::Table {
+            table_id: part("TableId")?,
+            key: part("Key")?,
+        }));
+    }
+    match field("namespace") {
+        Some(namespace) => Some(format(&TextLiteral::Localized {
+            namespace: namespace.to_string(),
+            key: field("key").unwrap_or_default().to_string(),
+            source: field("value").unwrap_or_default().to_string(),
+        })),
+        None => text_of(edited),
+    }
 }
 
 /// Whether a path edit is placed on the original as exactly the value edit it was made from.
@@ -292,11 +686,28 @@ fn diff_rows(was: &rivals_uasset::ParsedExport, is: &Json, export: u32, out: &mu
                         at: Some(position as u32),
                     },
                 });
-                out.notes.push(format!(
-                    "{}: row {name} is added with the row struct's defaults; dump the saved copy \
-                     and diff again to give its columns values",
-                    was.path
-                ));
+                // Its columns are filled in once the row is there, in the same save.
+                let fields = row.get("fields").and_then(Json::as_array);
+                for field in fields.into_iter().flatten() {
+                    let (Some(column), Some(value)) =
+                        (field.get("name").and_then(Json::as_str), field.get("value"))
+                    else {
+                        continue;
+                    };
+                    let element = field
+                        .get("element")
+                        .and_then(Json::as_u64)
+                        .map(|at| at as u32);
+                    out.follow.push(FollowUp::Fill {
+                        anchor: Anchor::Row {
+                            export,
+                            name: name.to_string(),
+                        },
+                        steps: field_steps(column, element),
+                        edited: value.clone(),
+                        label: format!("{}[{name}].{column}", was.path),
+                    });
+                }
             }
         }
     }
@@ -552,7 +963,7 @@ fn diff_in_place(
             let typed = fields.first().filter(|field| field.name == TYPE_FIELD);
             let items = edited.get("fields").and_then(Json::as_array);
             // An instanced struct given another type: the type is the edit, and it then holds its
-            // new type's defaults, which a second pass changes.
+            // new type's defaults, which the fields the dump gives it fill in once it has landed.
             if let (Some(typed), Some(items)) = (typed, items)
                 && let Some(now) = items
                     .iter()
@@ -561,13 +972,61 @@ fn diff_in_place(
                     .get("value")
                     .is_some_and(|value| differs(&typed.value, value))
             {
+                let mut retyped = DiffOutcome::default();
                 let typed = std::slice::from_ref(typed);
-                diff_entries(typed, std::slice::from_ref(now), export, label, out);
-                if items.len() > 1 {
-                    out.notes.push(format!(
-                        "{label}: given another type, it holds that type's defaults; dump the \
-                         saved copy and diff again to change its fields"
-                    ));
+                diff_entries(
+                    typed,
+                    std::slice::from_ref(now),
+                    export,
+                    label,
+                    &mut retyped,
+                );
+                out.notes.append(&mut retyped.notes);
+                let step = match whole {
+                    Whole::Value => Some(None),
+                    Whole::Element(index) => {
+                        Some(Some(rivals_uasset::element_segment(&entry.value, index)))
+                    }
+                    Whole::Key(_) => None,
+                };
+                let (Some(step), Some(anchor)) = (step, anchor_of(entry)) else {
+                    // A map's key has no path to wait by.
+                    out.edits.values.append(&mut retyped.edits.values);
+                    if items.len() > 1 {
+                        out.notes.push(format!(
+                            "{label}: given another type, it holds that type's defaults; dump the \
+                             saved copy and diff again to change its fields"
+                        ));
+                    }
+                    return;
+                };
+                for edit in retyped.edits.values {
+                    out.follow.push(FollowUp::Keyed {
+                        edit: Keyed::Value(edit),
+                        label: label.to_string(),
+                    });
+                }
+                for item in items {
+                    let (Some(name), Some(value)) =
+                        (item.get("name").and_then(Json::as_str), item.get("value"))
+                    else {
+                        continue;
+                    };
+                    if name == TYPE_FIELD {
+                        continue;
+                    }
+                    let element = item
+                        .get("element")
+                        .and_then(Json::as_u64)
+                        .map(|at| at as u32);
+                    let mut steps: Vec<Segment> = step.clone().into_iter().collect();
+                    steps.extend(field_steps(name, element));
+                    out.follow.push(FollowUp::Fill {
+                        anchor: anchor.clone(),
+                        steps,
+                        edited: value.clone(),
+                        label: format!("{label}.{name}"),
+                    });
                 }
                 return;
             }
@@ -789,9 +1248,23 @@ fn diff_retyped(
         }
         return;
     }
-    // Fields filled in inside a struct not stored yet are set through it, which stores it on the
-    // way.
-    if matches!(was, "unset" | "default") && text_of(edited).is_none() {
+    // A struct or a container nothing stores yet is filled in from what the dump gives it, each
+    // edit waiting for the one that makes its place, all in one save.
+    if was == "unset" && text_of(edited).is_none() {
+        out.follow.push(FollowUp::Fill {
+            anchor: Anchor::Value {
+                offset,
+                name: entry.name.clone(),
+                element: entry.element,
+            },
+            steps: Vec::new(),
+            edited: edited.clone(),
+            label: label.to_string(),
+        });
+        return;
+    }
+    // Fields given values inside a zero struct are set through it, which stores it on the way.
+    if was == "default" && text_of(edited).is_none() {
         let preview = match &entry.value {
             PropertyValue::Unset { fields, .. } | PropertyValue::Default { fields, .. } => {
                 &fields[..]
@@ -1080,7 +1553,55 @@ fn element_sets(
         }
         return true;
     }
-    // A container, or a value the loader binds, which a field set cannot write.
+    // An array inside a new element starts as the copy's. Its elements are made over where they
+    // are, and the ones it gains or loses are added or dropped at its end once the element is
+    // there.
+    if kind == "array"
+        && let Some(now) = edited.get("items").and_then(Json::as_array)
+        && let Some(anchor) = anchor_of(entry)
+    {
+        let copied: &[PropertyValue] = match stored {
+            Some(PropertyValue::Array { items }) => items,
+            _ => &[],
+        };
+        let steps = steps_of(&path);
+        let mut complete = true;
+        for (index, item) in now.iter().enumerate() {
+            let mut here = path.clone();
+            here.push(format!("[{index}]"));
+            match copied.get(index) {
+                Some(was) if differs(was, item) => {
+                    complete &= element_sets(entry, Some(was), item, here, label, out);
+                }
+                Some(_) => {}
+                None => {
+                    out.follow.push(FollowUp::Edit {
+                        anchor: anchor.clone(),
+                        steps: steps.clone(),
+                        op: PathOp::Insert {
+                            index: Some(index as u32),
+                            key: None,
+                        },
+                        label: at(),
+                    });
+                    // A new element is a copy of the last one the array held.
+                    complete &= element_sets(entry, copied.last(), item, here, label, out);
+                }
+            }
+        }
+        for index in (now.len()..copied.len()).rev() {
+            let mut steps = steps.clone();
+            steps.push(Segment::Index(index as u32));
+            out.follow.push(FollowUp::Edit {
+                anchor: anchor.clone(),
+                steps,
+                op: PathOp::Remove,
+                label: at(),
+            });
+        }
+        return complete;
+    }
+    // A set or a map, or a value the loader binds, which a field set cannot write.
     let empty = ["items", "entries"].iter().any(|key| {
         edited
             .get(*key)
@@ -1123,8 +1644,8 @@ fn diff_map(
         return;
     }
     // Pairs that only moved are one reorder. Keys that moved while values changed are a reorder
-    // too, since a value set by position would land on the wrong key; the values follow on the
-    // next pass.
+    // too, since a value set by position would land on the wrong key; the values follow by key once
+    // the pairs have moved.
     let pairs: Vec<Json> = entries.iter().map(dumped).collect();
     if let Some(order) = reordered(&pairs, items) {
         return push_reorder(entry, order, label, out);
@@ -1135,11 +1656,55 @@ fn diff_map(
         .map(|item| item.get("key").cloned().unwrap_or_default())
         .collect();
     if let Some(order) = reordered(&keys, &now_keys) {
-        push_reorder(entry, order, label, out);
-        out.notes.push(format!(
-            "{label}: its pairs moved and some of their values changed; this save moves them, \
-             and a dump of the saved copy diffed again changes the values"
-        ));
+        let by_key = (0..entries.len() as u32).all(|index| {
+            matches!(
+                rivals_uasset::element_segment(&entry.value, index),
+                Segment::Key(_)
+            )
+        });
+        if !by_key {
+            push_reorder(entry, order, label, out);
+            out.notes.push(format!(
+                "{label}: its pairs moved and some of their values changed, and not every key has \
+                 a text form to name its pair by; this save moves them, and a dump of the saved \
+                 copy diffed again changes the values"
+            ));
+            return;
+        }
+        let mut moved = DiffOutcome::default();
+        push_reorder(entry, order.clone(), label, &mut moved);
+        for (position, from) in order.iter().enumerate() {
+            let (Some(pair), Some(value)) = (
+                entries.get(*from as usize),
+                items.get(position).and_then(|item| item.get("value")),
+            ) else {
+                continue;
+            };
+            let here = format!("{label}[{position}]");
+            diff_in_place(
+                entry,
+                Whole::Element(*from),
+                &pair.value,
+                value,
+                export,
+                &here,
+                &mut moved,
+            );
+        }
+        out.notes.append(&mut moved.notes);
+        out.follow.append(&mut moved.follow);
+        let keyed = moved
+            .edits
+            .values
+            .into_iter()
+            .map(Keyed::Value)
+            .chain(moved.edits.field_sets.into_iter().map(Keyed::Field));
+        for edit in keyed {
+            out.follow.push(FollowUp::Keyed {
+                edit,
+                label: label.to_string(),
+            });
+        }
         return;
     }
     let held: Vec<Json> = now_keys.iter().map(content).collect();
@@ -1462,9 +2027,9 @@ mod tests {
     }
 
     /// An unset struct has to be stored before its fields can be filled in, so the diff says so
-    /// rather than pretending one pass is enough.
+    /// in the same save, so one given nothing inside is stored as it is.
     #[test]
-    fn an_unset_struct_is_stored_and_noted() {
+    fn an_unset_struct_given_its_stored_form_is_filled_in() {
         let out = one(
             entry(
                 "Where",
@@ -1477,9 +2042,140 @@ mod tests {
             ),
             json!({"kind": "struct", "name": "Vector", "fields": []}),
         );
-        assert!(matches!(value(&out).op, EditOp::Store));
-        assert_eq!(out.notes.len(), 1, "{:?}", out.notes);
-        assert!(out.notes[0].contains("diff again"), "{}", out.notes[0]);
+        assert!(out.edits.is_empty(), "{:?}", out.edits);
+        assert!(out.notes.is_empty(), "{:?}", out.notes);
+        assert_eq!(waiting(&out), [(String::new(), "fill struct".to_string())]);
+        let (paths, notes) = filled(json!({"kind": "struct", "name": "Vector", "fields": []}));
+        assert_eq!(paths, [("Col".to_string(), PathOp::Store)]);
+        assert!(notes.is_empty());
+    }
+
+    /// A value the same save makes starts unset all the way down, and an element of a container at
+    /// its type's zero, so a fill sets what has text, clears a zero and leaves the rest. A
+    /// container's elements go in first and are filled once they are there, a map's by key.
+    #[test]
+    fn a_value_made_in_the_same_save_is_filled_from_its_dump() {
+        let set = |text: &str| PathOp::Set { text: text.into() };
+        let insert = |index: u32, key: Option<&str>| PathOp::Insert {
+            index: Some(index),
+            key: key.map(str::to_string),
+        };
+        let (paths, notes) = filled(json!({"kind": "struct", "name": "Row", "fields": [
+            {"name": "A", "value": {"kind": "int", "value": 3}},
+            {"name": "B", "value": {"kind": "default", "declared": "Int"}},
+            {"name": "C", "value": {"kind": "unset", "declared": "Int"}},
+            {"name": "D", "value": {"kind": "text", "value": "Hi", "namespace": "NS", "key": "K"}},
+            {"name": "E", "value": {"kind": "array", "items": [
+                {"kind": "int", "value": 0},
+                {"kind": "int", "value": 5},
+            ]}},
+            {"name": "F", "value": {"kind": "map", "entries": [
+                {"key": {"kind": "name", "value": "A.B"}, "value": {"kind": "int", "value": 1}},
+            ]}},
+            {"name": "G", "value": {"kind": "set", "items": [{"kind": "name", "value": "X"}]}},
+            {"name": "H", "value": {"kind": "map", "entries": [
+                {"key": {"kind": "struct", "name": "K", "fields": []}, "value": {"kind": "int", "value": 1}},
+            ]}},
+            {"name": "I", "element": 1, "value": {"kind": "struct", "name": "Empty", "fields": []}},
+            {"name": "J", "value": {"kind": "array", "items": [
+                {"kind": "struct", "name": "P", "fields": [
+                    {"name": "X", "value": {"kind": "int", "value": 2}},
+                    {"name": "Y", "value": {"kind": "unset", "declared": "Int"}},
+                ]},
+            ]}},
+        ]}));
+        let expected = [
+            ("Col.A", set("3")),
+            ("Col.B", PathOp::Clear),
+            ("Col.D", set(r#"NSLOCTEXT("NS", "K", "Hi")"#)),
+            ("Col.E", insert(0, None)),
+            ("Col.E", insert(1, None)),
+            ("Col.E[1]", set("5")),
+            ("Col.F", insert(0, Some("A.B"))),
+            ("Col.F{A.B}", set("1")),
+            ("Col.G", insert(0, Some("X"))),
+            ("Col.H", PathOp::Store),
+            ("Col.I[1]", PathOp::Store),
+            ("Col.J", insert(0, None)),
+            ("Col.J[0].X", set("2")),
+        ];
+        assert_eq!(
+            paths,
+            expected
+                .into_iter()
+                .map(|(path, op)| (path.to_string(), op))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].starts_with("Col.H[0]"), "{notes:?}");
+    }
+
+    /// An array inside a new element starts as the copy's: an element that differs is set where it
+    /// is, and one the dump adds goes in once the new element is there, then takes its value.
+    #[test]
+    fn an_array_inside_a_new_element_is_made_over_in_the_same_save() {
+        let holder = |inner: Vec<i64>| PropertyValue::Struct {
+            name: "Holder".into(),
+            fields: vec![entry(
+                "Inner",
+                PropertyValue::Array {
+                    items: inner
+                        .into_iter()
+                        .map(|value| PropertyValue::Int { value })
+                        .collect(),
+                },
+                0x60,
+            )],
+        };
+        let dumped_holder = |inner: &[i64]| {
+            json!({"kind": "struct", "name": "Holder", "fields": [
+                {"name": "Inner", "value": {"kind": "array", "items": inner
+                    .iter()
+                    .map(|value| json!({"kind": "int", "value": value}))
+                    .collect::<Vec<_>>()}},
+            ]})
+        };
+        let out = one(
+            array(vec![holder(vec![1, 2])]),
+            json!({"kind": "array", "items": [dumped_holder(&[1, 2]), dumped_holder(&[1, 7, 9])]}),
+        );
+        assert!(out.notes.is_empty(), "{:?}", out.notes);
+        assert!(matches!(
+            value(&out).op,
+            EditOp::Insert {
+                index: 1,
+                key: None
+            }
+        ));
+        assert_eq!(
+            sets_of(&out),
+            [
+                ("[1].Inner.[1]".to_string(), "7"),
+                ("[1].Inner.[2]".to_string(), "9")
+            ]
+        );
+        assert_eq!(
+            waiting(&out),
+            [(
+                "[1].Inner".to_string(),
+                format!(
+                    "{:?}",
+                    PathOp::Insert {
+                        index: Some(2),
+                        key: None
+                    }
+                )
+            )]
+        );
+
+        // One that loses elements drops them from its end.
+        let out = one(
+            array(vec![holder(vec![1, 2, 3])]),
+            json!({"kind": "array", "items": [dumped_holder(&[1, 2, 3]), dumped_holder(&[1])]}),
+        );
+        assert!(out.notes.is_empty(), "{:?}", out.notes);
+        let removed: Vec<String> = waiting(&out).into_iter().map(|(path, _)| path).collect();
+        assert_eq!(removed, ["[1].Inner[2]", "[1].Inner[1]"]);
     }
 
     /// A retype is refused rather than guessed at: nothing rewrites a property as another type.
@@ -1604,6 +2300,63 @@ mod tests {
                 entry("Y", y, 0x54),
             ],
         }
+    }
+
+    /// The edits that wait to be placed by path, as their ops.
+    fn keyed(out: &DiffOutcome) -> Vec<&EditOp> {
+        out.follow
+            .iter()
+            .filter_map(|follow| match follow {
+                FollowUp::Keyed {
+                    edit: Keyed::Value(edit),
+                    ..
+                } => Some(&edit.op),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The fills and single edits that wait, as the steps below their anchor and what each does.
+    fn waiting(out: &DiffOutcome) -> Vec<(String, String)> {
+        out.follow
+            .iter()
+            .filter_map(|follow| match follow {
+                FollowUp::Fill { steps, edited, .. } => Some((
+                    rivals_uasset::format_path(steps),
+                    format!("fill {}", kind_in(edited).unwrap_or_default()),
+                )),
+                FollowUp::Edit { steps, op, .. } => {
+                    Some((rivals_uasset::format_path(steps), format!("{op:?}")))
+                }
+                FollowUp::Keyed { .. } => None,
+            })
+            .collect()
+    }
+
+    /// What [`fill`] makes of a dumped value at `Col` in a row the same save adds.
+    fn filled(edited: Json) -> (Vec<(String, PathOp)>, Vec<String>) {
+        let head = Head {
+            export: "Table".into(),
+            row: Some("New".into()),
+            defaults: false,
+        };
+        let (mut paths, mut notes) = (Vec::new(), Vec::new());
+        fill(
+            &head,
+            vec![Segment::Field("Col".into())],
+            &edited,
+            "Col",
+            false,
+            &mut paths,
+            &mut notes,
+        );
+        assert!(paths.iter().all(|path| path.export == "Table"
+            && path.row.as_deref() == Some("New")
+            && path.was.is_none()));
+        (
+            paths.into_iter().map(|path| (path.path, path.op)).collect(),
+            notes,
+        )
     }
 
     fn sets_of(out: &DiffOutcome) -> Vec<(String, &str)> {
@@ -2408,7 +3161,7 @@ mod tests {
     }
 
     /// Pairs that only moved are one reorder, never values set by position, which would land on
-    /// the wrong keys. Pairs that moved and changed move first and say the rest needs a second pass.
+    /// the wrong keys. Pairs that moved and changed move, then their values are set by key.
     #[test]
     fn a_reordered_map_is_one_reorder_not_swapped_values() {
         let out = one(
@@ -2422,8 +3175,19 @@ mod tests {
             scores(&[("A", 1), ("B", 2)]),
             scores_json(&[("B", 5), ("A", 1)]),
         );
-        assert!(matches!(&value(&out).op, EditOp::Reorder { order } if *order == [1, 0]));
-        assert!(out.notes[0].contains("diffed again"), "{:?}", out.notes);
+        assert!(out.edits.is_empty(), "{:?}", out.edits);
+        assert!(out.notes.is_empty(), "{:?}", out.notes);
+        assert!(
+            matches!(
+                keyed(&out).as_slice(),
+                [
+                    EditOp::Reorder { order },
+                    EditOp::SetElement { index: 1, text },
+                ] if *order == [1, 0] && text == "5"
+            ),
+            "{:?}",
+            keyed(&out)
+        );
 
         let out = one(
             scores(&[("A", 1), ("B", 2)]),
@@ -2460,7 +3224,7 @@ mod tests {
     }
 
     /// An instanced struct given another type is one object set on its type field; the fields
-    /// the dump gives the new type follow on a second pass.
+    /// the dump gives the new type are filled in once it has landed.
     #[test]
     fn an_instanced_struct_s_type_is_set_and_its_fields_follow() {
         let out = one(
@@ -2487,11 +3251,14 @@ mod tests {
                 {"name": "X", "value": {"kind": "float", "value": 1.0}},
             ]}),
         );
-        let edit = value(&out);
-        assert_eq!((edit.offset, edit.expect_name.as_str()), (0x60, TYPE_FIELD));
-        assert!(matches!(&edit.op, EditOp::Set { text } if text == "/Script/CoreUObject.Vector"));
-        assert_eq!(out.notes.len(), 1, "{:?}", out.notes);
-        assert!(out.notes[0].contains("diff again"), "{}", out.notes[0]);
+        assert!(out.edits.is_empty(), "{:?}", out.edits);
+        assert!(out.notes.is_empty(), "{:?}", out.notes);
+        assert!(
+            matches!(keyed(&out).as_slice(), [EditOp::Set { text }] if text == "/Script/CoreUObject.Vector"),
+            "{:?}",
+            keyed(&out)
+        );
+        assert_eq!(waiting(&out), [("X".to_string(), "fill float".to_string())]);
     }
 
     /// A format text changes through its parts, each at its own offset; what it shows changes

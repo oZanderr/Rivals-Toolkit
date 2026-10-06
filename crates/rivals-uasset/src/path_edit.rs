@@ -772,6 +772,11 @@ fn lower_one(
             if let Some(done) = landed_on_entry(value, &edit.op, edit.was.as_deref()) {
                 return Ok(Lowering::Done(done));
             }
+            // A value stored as a struct that reads as a list, such as a tag container, has no
+            // list to add to until it is stored.
+            if matches!(edit.op, PathOp::Insert { .. }) && listed_once_stored(value) {
+                return Ok(Lowering::Store(at_entry(entry, EditOp::Store, label)?));
+            }
             let whole = matches!(edit.op, PathOp::Reorder { .. } | PathOp::Insert { .. })
                 && held_elements(value).is_some();
             if let Some(was) = was {
@@ -856,6 +861,20 @@ fn lower_one(
             Ok(Lowering::Value(at_entry(container, op, label)?))
         }
     }
+}
+
+/// Whether a value nothing stores yet is declared as something other than a container, so that
+/// only its stored form reads as one.
+fn listed_once_stored(value: &PropertyValue) -> bool {
+    let declared = match value {
+        PropertyValue::Unset { declared, .. } => *declared,
+        PropertyValue::Default {
+            declared: Some(declared),
+            ..
+        } => declared,
+        _ => return false,
+    };
+    !matches!(declared, "Array" | "Set" | "Map") && !declared.starts_with("Multicast")
 }
 
 /// Why an edit on a value itself has landed already, when it has. A reorder has when the elements

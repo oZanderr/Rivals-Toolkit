@@ -342,7 +342,8 @@ write the same edits itself:
 array's slot or a container's element with `[i]`, and into a map's pair or a set's element with
 `{key}`. An edit given `was` is refused as drift once its value reads otherwise, which
 `--allow-drift` overrides. An edit under one that adds, moves or replaces what it names is made once
-that has landed, in the same save.
+that has landed, in the same save, so one apply gives a new row its columns, an instanced struct
+given another type that type's fields, and a map whose pairs moved its changed values.
 
 What the diff cannot express it writes as a note beside the edits rather than guessing. The edits
 beside a note still apply. The limits worth knowing:
@@ -352,9 +353,10 @@ beside a note still apply. The limits worth knowing:
   by index. Each is held by `expect` to what it was written against. An insert into an array, or a
   removal from one, by position is held to every element the array held, so applying it a second
   time is refused as drift rather than adding another.
-- **Some changes take a second pass.** A new container element, table row or stored struct is
-  created with its default, an instanced struct given another type holds that type's defaults, and
-  elements that moved and changed are moved first. Dump the saved copy and diff again for the rest.
+- **A few changes take a second pass.** A set element or a map key with no text form to key it by,
+  and a set or a map inside an element the same save adds, are notes. So are values in a map whose
+  pairs moved when a key has no text form to name its pair by. Dump the saved copy and diff again
+  for those.
 - **Some changes are not value edits.** Retyping a property and renaming an export are reported,
   not written.
 - **Bytes are not in the JSON.** Payload and bulk data are named by file in an edit list, never

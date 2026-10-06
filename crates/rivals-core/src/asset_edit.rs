@@ -4892,6 +4892,64 @@ mod tests {
         ));
     }
 
+    /// A dump giving a map nothing stores its pairs and a struct nothing stores a value saves in
+    /// one apply: the map is stored and keyed, each value set by its key, the struct stored through
+    /// its field. Diffed against the edited dump, the saved package says nothing else.
+    #[test]
+    fn a_dump_filling_unset_values_saves_in_one_apply() {
+        let mut edited = serde_json::Value::Null;
+        let after = preview_sparse(|parsed| {
+            let mut dump = serde_json::to_value(parsed).expect("dump");
+            let holder = dump["exports"][0]["properties"]
+                .as_array_mut()
+                .expect("properties")
+                .iter_mut()
+                .find(|entry| entry["name"] == "Holder")
+                .expect("Holder");
+            for field in holder["value"]["fields"].as_array_mut().expect("fields") {
+                match field["name"].as_str() {
+                    Some("Scores") => {
+                        field["value"] = serde_json::json!({"kind": "map", "entries": [
+                            {"key": {"kind": "name", "value": "Foo"}, "value": {"kind": "int", "value": 3}},
+                            {"key": {"kind": "name", "value": "Label"}, "value": {"kind": "int", "value": 4}},
+                        ]});
+                    }
+                    Some("Nested") => {
+                        field["value"] = serde_json::json!({"kind": "struct", "name": "MyStruct", "fields": [
+                            {"name": "X", "value": {"kind": "unset", "declared": "Int"}},
+                            {"name": "Y", "value": {"kind": "int", "value": 6}},
+                        ]});
+                    }
+                    _ => {}
+                }
+            }
+            let outcome = diff::diff_dump(parsed, &dump).expect("diff");
+            assert!(outcome.notes.is_empty(), "{:?}", outcome.notes);
+            assert!(outcome.edits.values.is_empty(), "{:?}", outcome.edits.values);
+            assert!(outcome.edits.field_sets.is_empty(), "{:?}", outcome.edits);
+            edited = dump;
+            outcome
+                .edits
+                .resolve(std::path::Path::new("."))
+                .expect("resolve")
+        })
+        .expect("saved in one apply");
+        let PropertyValue::Map { entries } = &field(holder_of(&after), "Scores").value else {
+            panic!("Scores is stored");
+        };
+        let pairs: Vec<(String, String)> = entries
+            .iter()
+            .map(|pair| (pair.key.summary(), pair.value.summary()))
+            .collect();
+        assert_eq!(
+            pairs,
+            [("Foo".into(), "3".into()), ("Label".into(), "4".into())]
+        );
+        let settled = diff::diff_dump(&after, &edited).expect("diff");
+        assert!(settled.edits.is_empty(), "{:?}", settled.edits);
+        assert!(settled.notes.is_empty(), "{:?}", settled.notes);
+    }
+
     fn holder_path(path: &str, op: rivals_uasset::PathOp) -> rivals_uasset::PathEdit {
         rivals_uasset::PathEdit {
             export: "TestObject".into(),
@@ -11211,6 +11269,131 @@ mod game_data_tests {
         let now = items_of(&after, "Mappings");
         assert_eq!(now.len(), items.len() + 1);
         assert_eq!(bool_field(&now[items.len()], "bIgnorLowPriority"), !was);
+    }
+
+    /// The first object holding a run of struct values a dump writes: `found` picks the value,
+    /// and the edit is made to it in place.
+    fn edit_first(
+        value: &mut serde_json::Value,
+        found: &dyn Fn(&serde_json::Value) -> bool,
+        edit: &mut dyn FnMut(&mut serde_json::Value),
+    ) -> bool {
+        if found(value) {
+            edit(value);
+            return true;
+        }
+        match value {
+            serde_json::Value::Object(fields) => fields
+                .values_mut()
+                .any(|value| edit_first(value, found, &mut *edit)),
+            serde_json::Value::Array(items) => items
+                .iter_mut()
+                .any(|value| edit_first(value, found, &mut *edit)),
+            _ => false,
+        }
+    }
+
+    /// Applies what an edited dump diffs to, in one apply, and holds the result to it: no note,
+    /// and the saved package diffed against the edited dump says nothing else.
+    fn apply_dump(
+        fixture: &Fixture,
+        before: &rivals_uasset::ParsedPackage,
+        dump: &serde_json::Value,
+    ) {
+        let outcome = crate::asset_edit::diff::diff_dump(before, dump).expect("diff");
+        assert!(outcome.notes.is_empty(), "{:?}", outcome.notes);
+        let changes = outcome.edits.resolve(Path::new(".")).expect("resolve");
+        let (_, after) = fixture.apply_changes(changes);
+        // An import the save adds for an object it names is its own doing, not the dump's.
+        let mut dump = dump.clone();
+        dump["imports"] = serde_json::to_value(&after.imports).expect("imports");
+        let settled = crate::asset_edit::diff::diff_dump(&after, &dump).expect("diff");
+        assert!(settled.edits.is_empty(), "{:?}", settled.edits);
+        assert!(settled.notes.is_empty(), "{:?}", settled.notes);
+    }
+
+    /// A row the dump adds, a copy of another with a cell changed, is added and filled in by one
+    /// apply.
+    #[test]
+    fn a_new_row_in_a_dump_is_added_and_filled_in_one_apply() {
+        let Some(fixture) = Fixture::open(DEFAULTS) else {
+            return;
+        };
+        let before = fixture.parse();
+        let mut dump = serde_json::to_value(&before).expect("dump");
+        let rows = dump["exports"][0]["data_table"]["rows"]
+            .as_array_mut()
+            .expect("rows");
+        let mut copy = rows[0].clone();
+        copy["name"] = serde_json::json!("RivalsToolkitNewRow");
+        let cell = copy["fields"]
+            .as_array_mut()
+            .expect("fields")
+            .iter_mut()
+            .find(|field| field["value"]["kind"] == "int")
+            .expect("an int cell");
+        let was = cell["value"]["value"].as_i64().expect("an int");
+        cell["value"]["value"] = serde_json::json!(was + 1000);
+        rows.push(copy);
+        apply_dump(&fixture, &before, &dump);
+    }
+
+    /// A map whose pairs a dump moves and changes is reordered and has its values set by key in
+    /// one apply.
+    #[test]
+    fn a_map_moved_and_changed_in_a_dump_saves_in_one_apply() {
+        let Some(fixture) = Fixture::open(MAPS) else {
+            return;
+        };
+        let before = fixture.parse();
+        let mut dump = serde_json::to_value(&before).expect("dump");
+        let texted = |value: &serde_json::Value| {
+            matches!(
+                value["kind"].as_str(),
+                Some("name" | "str" | "int" | "enum")
+            )
+        };
+        let found = |value: &serde_json::Value| {
+            value["kind"] == "map"
+                && value["entries"].as_array().is_some_and(|pairs| {
+                    pairs.len() >= 2
+                        && pairs
+                            .iter()
+                            .all(|pair| texted(&pair["key"]) && pair["value"]["kind"] == "int")
+                })
+        };
+        let moved = edit_first(&mut dump["exports"], &found, &mut |map| {
+            let pairs = map["entries"].as_array_mut().expect("pairs");
+            pairs.swap(0, 1);
+            let was = pairs[0]["value"]["value"].as_i64().expect("an int");
+            pairs[0]["value"]["value"] = serde_json::json!(was + 7);
+        });
+        assert!(moved, "{MAPS} holds no map of two int pairs keyed by text");
+        apply_dump(&fixture, &before, &dump);
+    }
+
+    /// An instanced struct given another type, with values for that type's fields, takes the type
+    /// and then its fields in one apply.
+    #[test]
+    fn an_instanced_struct_given_another_type_takes_its_fields_in_one_apply() {
+        let Some(fixture) = Fixture::open(INSTANCED) else {
+            return;
+        };
+        let before = fixture.parse();
+        let mut dump = serde_json::to_value(&before).expect("dump");
+        let instanced = |value: &serde_json::Value| {
+            value["kind"] == "struct" && value["fields"][0]["name"] == rivals_uasset::TYPE_FIELD
+        };
+        let retyped = edit_first(&mut dump["exports"], &instanced, &mut |value| {
+            *value = serde_json::json!({"kind": "struct", "name": "Vector", "fields": [
+                {"name": rivals_uasset::TYPE_FIELD, "value": {"kind": "object", "path": "/Script/CoreUObject.Vector"}},
+                {"name": "X", "value": {"kind": "float", "value": 1.5}},
+                {"name": "Y", "value": {"kind": "float", "value": -2.0}},
+                {"name": "Z", "value": {"kind": "float", "value": 3.25}},
+            ]});
+        });
+        assert!(retyped, "{INSTANCED} holds no instanced struct");
+        apply_dump(&fixture, &before, &dump);
     }
 
     /// An array nothing stores takes two elements and a value for the second in one save: the walk
