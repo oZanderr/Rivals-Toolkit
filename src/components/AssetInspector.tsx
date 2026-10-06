@@ -100,6 +100,7 @@ import {
   type EditSession,
   type EditTarget,
   type NewFunction,
+  type NewVariable,
   type Structural,
   pathCheckText,
   referenceText,
@@ -2111,6 +2112,7 @@ function ScriptPane({
   focus,
   onOpen,
   onAddFunction,
+  onAddVariable,
   addBlocked,
 }: {
   gamePath: string;
@@ -2124,7 +2126,9 @@ function ScriptPane({
   onOpen: (name: string, offset?: number) => void;
   /** Adds a function to the class and saves it, a save of its own. */
   onAddFunction?: (add: NewFunction) => void;
-  /** Why a function cannot be added now, when it cannot. */
+  /** Adds a variable to the class and saves it, a save of its own. */
+  onAddVariable?: (add: NewVariable) => void;
+  /** Why a function or variable cannot be added now, when it cannot. */
   addBlocked?: string | null;
 }) {
   const [view, setView] = useState<ScriptView | null>(null);
@@ -2133,6 +2137,7 @@ function ScriptPane({
   const session = useEditSession();
   const [asText, setAsText] = useState(false);
   const [adding, setAdding] = useState<{ name: string; signature: string } | null>(null);
+  const [variable, setVariable] = useState<{ name: string; type: string } | null>(null);
   const [writing, setWriting] = useState(false);
   const newText = useRef(NEW_FUNCTION_TEXT);
   const textKey = draftKey(scriptTextTarget(exportIndex, ""));
@@ -2311,7 +2316,62 @@ function ScriptPane({
             </Button>
           </Tip>
         )}
+        {onAddVariable && (
+          <Tip content="Add a variable to this function's class. Refused when another package makes objects of the class or derives from it; the first check builds the import index, which takes a minute or two">
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-6 px-2 text-[11px]"
+              onClick={() => setVariable(variable ? null : { name: "", type: "" })}
+            >
+              <Plus size={12} /> New variable
+            </Button>
+          </Tip>
+        )}
       </div>
+      {variable && (
+        <div className="flex flex-wrap items-center gap-2 border-b border-border/60 px-3 py-1.5 text-[11px]">
+          <Input
+            aria-label="New variable name"
+            value={variable.name}
+            onChange={(e) => setVariable({ ...variable, name: e.target.value })}
+            placeholder="Name"
+            className="h-7 w-40 font-mono text-[11px]"
+          />
+          <Input
+            aria-label="New variable type"
+            value={variable.type}
+            onChange={(e) => setVariable({ ...variable, type: e.target.value })}
+            placeholder="Int, Object</Script/Engine.Actor>, Array<Name>"
+            className="h-7 min-w-0 flex-1 font-mono text-[11px]"
+          />
+          <Tip
+            content={
+              addBlocked ??
+              "Save the class with the variable added, unset until a value edit sets it"
+            }
+          >
+            <span>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 px-2 text-[11px]"
+                disabled={
+                  addBlocked != null ||
+                  !/^[A-Za-z_][A-Za-z0-9_]*$/.test(variable.name.trim()) ||
+                  variable.type.trim() === ""
+                }
+                onClick={() => {
+                  onAddVariable?.({ name: variable.name.trim(), type: variable.type.trim() });
+                  setVariable(null);
+                }}
+              >
+                Add variable
+              </Button>
+            </span>
+          </Tip>
+        </div>
+      )}
       {adding && (
         <div className="flex flex-wrap items-center gap-2 border-b border-border/60 px-3 py-1.5 text-[11px]">
           <Input
@@ -8770,6 +8830,9 @@ export default function AssetInspector({
                       onOpen={openScript}
                       onAddFunction={(add) =>
                         void edits.save({ structural: { newFunctions: [add] } })
+                      }
+                      onAddVariable={(add) =>
+                        void edits.save({ structural: { addVariables: [add] } })
                       }
                       addBlocked={
                         edits.saving

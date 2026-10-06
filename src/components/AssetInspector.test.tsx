@@ -907,6 +907,23 @@ describe("AssetInspector script text", () => {
     );
   });
 
+  it("adds a variable to the class from a name and a type, as a save of its own", async () => {
+    mock = tauri(functionPackage()).on("export_script_view", () => textView());
+    installTauri(mock);
+    mount();
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: /New variable/ }));
+    const add = screen.getByRole("button", { name: /Add variable/ }) as HTMLButtonElement;
+    expect(add.disabled).toBe(true);
+    await user.type(screen.getByLabelText("New variable name"), "Charges");
+    await user.type(screen.getByLabelText("New variable type"), "Int");
+    await user.click(add);
+    await waitFor(() =>
+      expect(lastSave().add_variables).toEqual([{ name: "Charges", type: "Int" }])
+    );
+    expect(screen.queryByLabelText("New variable name")).toBeNull();
+  });
+
   it("marks the lines the assembler refuses and lists why", async () => {
     mock = tauri(functionPackage())
       .on("export_script_view", () => textView())

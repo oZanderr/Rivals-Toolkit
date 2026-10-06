@@ -204,8 +204,9 @@ they were and the new one unset until a value edit sets it. A class another pack
 or derives from is refused, naming those packages: the import index finds them, and is built first
 when it has not been. A type is written as a `local` line takes it (see below), and `--class N`
 picks the class when the package holds more than one. A package whose classes its own records
-describe otherwise than the mappings file does, as after this, is read with its own records. A
-function can be added to a Blueprint class, and an existing one rewritten whole, as text: see below.
+describe otherwise than the mappings file does, as after this, is read with its own records. The
+app's script view has New variable, for the class of the function shown. A function can be added to
+a Blueprint class, and an existing one rewritten whole, as text: see below.
 
 `asset script-set` changes one thing inside a function's bytecode, addressed by the statement offset
 `asset script` prints: a literal by its place in the statement (`--const`) or by where it starts

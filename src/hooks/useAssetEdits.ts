@@ -550,6 +550,7 @@ interface EditList {
   field_sets?: FieldSet[];
   compact_names?: boolean;
   add_exports?: { class: string; outer?: number; name: string }[];
+  add_variables?: NewVariable[];
   add_components?: AddComponentEdit[];
   remove_components?: { node: number; with_children: boolean }[];
   save_as?: SaveAs;
@@ -665,6 +666,14 @@ export interface NewFunction {
   text: string;
 }
 
+/** A variable to add to a Blueprint class whose objects all live in its own package, its type as
+ *  a `local` line takes it: `Int`, `Object</Script/Engine.Actor>`, `Array<Name>`. */
+export interface NewVariable {
+  class?: number;
+  name: string;
+  type: string;
+}
+
 function toScriptTextEdit({ target, draft }: DraftRecord): ScriptTextEdit | null {
   if (!target.scriptText || draft.op !== "script_text") return null;
   return { export: target.scriptText.export, text: draft.text, was: target.was };
@@ -698,6 +707,8 @@ export interface Structural {
   addExports?: { class: string; outer?: number; name: string }[];
   /** Functions to add to a Blueprint class, each written from its text. */
   newFunctions?: NewFunction[];
+  /** Variables to add to a Blueprint class. */
+  addVariables?: NewVariable[];
   /** Blueprint components to add by duplicating the one a construction script node builds. */
   addComponents?: AddComponentEdit[];
   /** Blueprint components to take out, by the construction script node that builds each. */
@@ -1125,6 +1136,7 @@ export function useAssetEdits({
           field_sets: fieldSets,
           compact_names: structural?.compactNames ?? false,
           add_exports: structural?.addExports ?? [],
+          add_variables: structural?.addVariables ?? [],
           add_components: structural?.addComponents ?? [],
           remove_components: structural?.removeComponents ?? [],
           save_as: saveAs,
