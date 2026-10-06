@@ -14969,7 +14969,7 @@ LocalVirtualFunction ToolkitGlow(1.5f)
         let text = format!(
             "local ToolkitCount: Int
 local ToolkitTarget: Object</Script/Engine.Actor>
-local ToolkitAt: Struct</Script/CoreUObject.Vector, 24>
+local ToolkitAt: Struct</Script/CoreUObject.Vector>
 {}",
             text_of(&before, "ExecuteUbergraph_").replacen(
                 "Jump LocalVariable(EntryPoint)

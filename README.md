@@ -370,19 +370,17 @@ statement; the function gains a field for each after the ones it has, so its par
 A type is `Bool`, `Byte`, `Int`, `Int64`, `Float`, `Double`, `Name`, `Str`, `Text`, `Object<path>`,
 `Class<path>`, `SoftObject<path>`, `SoftClass<path>`, `Interface<path>`, `Struct<path>`,
 `Enum<path>`, `Array<T>`, `Set<T>` or `Map<K, V>`, with every class, struct and enum named by its
-full path, as `Object</Script/Engine.Actor>`. A struct's size comes from another field of it in the
-package, or follows its path, `Struct</Script/CoreUObject.Vector, 24>`. A local of the event graph
-keeps its value between events, one for each object, which is state a class variable would otherwise
-hold. A function's parameters stay as they are, since callers anywhere in the game pass its
-arguments by position; a new function takes whatever signature is wanted. A name or object the
-package does not have yet is added to it. Where the game reads a value as a variable (a
-`SwitchValue`'s index, a `DoubleToFloat` or `FloatToDouble` cast, a struct member's struct, an array
-element's array, a delegate) the text has to name one, as the compiler always does: a call or
-literal there would be written through a null pointer and crash the game, so a computed value goes
-in a `local` first. A changed or new call to a Blueprint function is held to its parameters; one to
-a native function the package never calls with as many arguments is refused until
-`--allow-unchecked`. An edit file carries a function's text as `script_texts`, inline (`text`) or
-from a file beside it (`file`).
+full path, as `Object</Script/Engine.Actor>`. A local of the event graph keeps its value between
+events, one for each object, which is state a class variable would otherwise hold. A function's
+parameters stay as they are, since callers anywhere in the game pass its arguments by position; a
+new function takes whatever signature is wanted. A name or object the package does not have yet is
+added to it. Where the game reads a value as a variable (a `SwitchValue`'s index, a `DoubleToFloat`
+or `FloatToDouble` cast, a struct member's struct, an array element's array, a delegate) the text
+has to name one, as the compiler always does: a call or literal there would be written through a
+null pointer and crash the game, so a computed value goes in a `local` first. A changed or new call
+to a Blueprint function is held to its parameters; one to a native function the package never calls
+with as many arguments is refused until `--allow-unchecked`. An edit file carries a function's text
+as `script_texts`, inline (`text`) or from a file beside it (`file`).
 
 `--new-function NAME --signature SIG` adds a function to the Blueprint class instead of rewriting
 one, its script written from the text. A signature takes the inputs in parentheses, `ref` before one

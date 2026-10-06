@@ -12,7 +12,6 @@ use serde::{Deserialize, Serialize};
 use crate::edit::AppliedEdit;
 use crate::field_record::{
     FieldType, NewField, encode_field_record, new_record, parse_field_type, record_indices,
-    struct_sizes,
 };
 use crate::header_edit::{Tables, add_import};
 use crate::package::{ParsedExport, ParsedPackage};
@@ -210,7 +209,6 @@ pub(crate) fn add_functions(
         names: header.name_map.clone(),
         imports: header.imports.clone(),
     };
-    let sizes = struct_sizes(parsed);
     let mut exports = header.exports.clone();
     let mut appended = Vec::new();
     let mut applied = Vec::new();
@@ -256,7 +254,7 @@ pub(crate) fn add_functions(
         let mut records = Vec::new();
         let mut kept = Vec::new();
         for param in &params {
-            let record = new_record(&param.name, &param.ty, param.role, &mut tables, &sizes)
+            let record = new_record(&param.name, &param.ty, param.role, &mut tables)
                 .map_err(|reason| format!("{name}: {reason}"))?;
             let mut indices = Vec::new();
             record_indices(&record, &mut indices);

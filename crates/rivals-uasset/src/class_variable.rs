@@ -8,9 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::edit::AppliedEdit;
-use crate::field_record::{
-    NewField, encode_field_record, new_record, parse_field_type, struct_sizes,
-};
+use crate::field_record::{NewField, encode_field_record, new_record, parse_field_type};
 use crate::header_edit::Tables;
 use crate::new_function::class_of;
 use crate::package::{AssetBundle, ParsedExport, ParsedPackage};
@@ -78,7 +76,6 @@ pub(crate) fn add_variables(
         names: header.name_map.clone(),
         imports: header.imports.clone(),
     };
-    let sizes = struct_sizes(parsed);
     let Some(first) = adds.first() else {
         return Err("no variable to add".into());
     };
@@ -119,7 +116,7 @@ pub(crate) fn add_variables(
             ));
         }
         let ty = parse_field_type(&add.ty).map_err(|reason| format!("{name}: {reason}"))?;
-        let record = new_record(name, &ty, NewField::Variable, &mut tables, &sizes)
+        let record = new_record(name, &ty, NewField::Variable, &mut tables)
             .map_err(|reason| format!("{name}: {reason}"))?;
         bytes.extend(encode_field_record(&record, &mut tables.names));
         applied.push(AppliedEdit {

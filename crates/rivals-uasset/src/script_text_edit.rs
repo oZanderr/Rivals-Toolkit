@@ -9,9 +9,7 @@
 use std::collections::BTreeSet;
 
 use crate::edit::{AppliedEdit, DRIFT, PackageEdits, ScriptTextEdit, bytes_at};
-use crate::field_record::{
-    NewField, encode_field_record, new_record, record_indices, struct_sizes,
-};
+use crate::field_record::{NewField, encode_field_record, new_record, record_indices};
 use crate::header_edit::Tables;
 use crate::kismet::{self, Expr, Script};
 use crate::package::{AssetBundle, ParsedExport, ParsedPackage};
@@ -223,7 +221,6 @@ pub(crate) fn plan_text(
     }
     add_locals(
         found,
-        parsed,
         &assembled,
         tables,
         &mut relocated,
@@ -247,7 +244,6 @@ pub(crate) fn plan_text(
 /// is imported, and the function takes a dependency on it.
 fn add_locals(
     found: &ParsedExport,
-    parsed: &ParsedPackage,
     assembled: &Assembled,
     tables: &mut Tables,
     relocated: &mut Relocated,
@@ -261,10 +257,9 @@ fn add_locals(
     let layout = found.layout.as_ref().ok_or_else(|| {
         format!("{name}'s fields were not read whole, so it can take no new local")
     })?;
-    let sizes = struct_sizes(parsed);
     let mut bytes = Vec::new();
     for local in &assembled.locals {
-        let record = new_record(&local.name, &local.ty, NewField::Local, tables, &sizes)
+        let record = new_record(&local.name, &local.ty, NewField::Local, tables)
             .map_err(|reason| format!("{name}, line {}: {reason}", local.pos.line))?;
         let mut indices = Vec::new();
         record_indices(&record, &mut indices);
@@ -609,14 +604,6 @@ local Late: Int"
 {printed}"
         ));
         assert!(unknown.contains("not a type"), "{unknown}");
-        let no_size = refused(format!(
-            "local Where: Struct</Script/CoreUObject.Vector>
-{printed}"
-        ));
-        assert!(
-            no_size.contains("Struct</Script/CoreUObject.Vector, 24>"),
-            "{no_size}"
-        );
     }
 
     /// Naming the function as a local's owner does not get round the function having to hold it.

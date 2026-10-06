@@ -2,12 +2,9 @@
 //! function or class declares. A record read from a package writes back byte for byte, and a new
 //! one is written the way the cook writes every record of its kind.
 
-use std::collections::HashMap;
-
 use retoc::legacy_asset::FPackageNameMap;
 
 use crate::header_edit::{self, Tables};
-use crate::package::ParsedPackage;
 use crate::ustruct::{FieldRecord, RecordTail};
 
 /// `RF_Public`, the only object flag on a function's field records and on a container's element.
@@ -56,8 +53,7 @@ pub enum FieldType {
     /// A class reference, by the class it may hold.
     Class(String),
     SoftClass(String),
-    /// A struct, with its size when the text gives one.
-    Struct(String, Option<i32>),
+    Struct(String),
     /// An enum held in a byte.
     Enum(String),
     Array(Box<FieldType>),
@@ -106,7 +102,7 @@ impl FieldType {
             Self::Interface(path) => format!("Interface<{}>", class(path)),
             Self::Class(path) => format!("Class<{}>", class(path)),
             Self::SoftClass(path) => format!("SoftClass<{}>", class(path)),
-            Self::Struct(path, _) | Self::Enum(path) => class(path),
+            Self::Struct(path) | Self::Enum(path) => class(path),
             Self::Array(inner) => format!("Array<{}>", inner.printed()),
             Self::Set(inner) => format!("Set<{}>", inner.printed()),
             Self::Map(key, value) => format!("Map<{}, {}>", key.printed(), value.printed()),
@@ -115,8 +111,7 @@ impl FieldType {
 }
 
 /// Reads a type as a declaration writes it: `Int`, `Object</Script/Engine.Actor>`,
-/// `Struct</Script/CoreUObject.Vector>`, `Struct</Game/S_Entry.S_Entry, 32>`,
-/// `Map<Name, Array<Int>>`.
+/// `Struct</Script/CoreUObject.Vector>`, `Map<Name, Array<Int>>`.
 pub fn parse_field_type(text: &str) -> Result<FieldType, String> {
     let mut reader = TypeReader {
         chars: text.chars().collect(),
@@ -245,21 +240,7 @@ impl TypeReader {
                 self.expect(',', "a map's key type")?;
                 FieldType::Map(Box::new(key), Box::new(self.ty()?))
             }
-            "Struct" => {
-                let path = self.path("Struct")?;
-                let size = if self.eat(',') {
-                    let text = self.word();
-                    Some(
-                        text.parse::<i32>()
-                            .ok()
-                            .filter(|size| *size > 0)
-                            .ok_or_else(|| format!("{text} is not a struct size in bytes"))?,
-                    )
-                } else {
-                    None
-                };
-                FieldType::Struct(path, size)
-            }
+            "Struct" => FieldType::Struct(self.path("Struct")?),
             "Enum" => FieldType::Enum(self.path("Enum")?),
             object => {
                 let path = self.path(object)?;
@@ -279,14 +260,12 @@ impl TypeReader {
 }
 
 /// The record for a new field, written the way the cook writes every record of its kind. Whatever
-/// it names is imported into `tables` when the package does not have it yet. A struct's size has
-/// to be known: the text can give it, and otherwise a field of the same struct in `sizes` does.
+/// it names is imported into `tables` when the package does not have it yet.
 pub(crate) fn new_record(
     name: &str,
     ty: &FieldType,
     role: NewField,
     tables: &mut Tables,
-    sizes: &HashMap<String, i32>,
 ) -> Result<FieldRecord, String> {
     let flags = match role {
         NewField::Local if matches!(ty, FieldType::Array(_)) => ARRAY_LOCAL,
@@ -297,7 +276,7 @@ pub(crate) fn new_record(
         NewField::Return => RETURN,
         NewField::Variable => VARIABLE,
     };
-    let mut record = record(name, ty, flags, tables, sizes)?;
+    let mut record = record(name, ty, flags, tables)?;
     if role == NewField::Variable {
         record.field_flags = CLASS_VARIABLE;
     }
@@ -309,7 +288,6 @@ fn record(
     ty: &FieldType,
     property_flags: u64,
     tables: &mut Tables,
-    sizes: &HashMap<String, i32>,
 ) -> Result<FieldRecord, String> {
     let plain = |kind: &str, size: i32| (kind.to_string(), size, RecordTail::None);
     let (kind, element_size, tail) = match ty {
@@ -368,12 +346,9 @@ fn record(
                 class_import(tables, path)?,
             ),
         ),
-        FieldType::Struct(path, given) => {
-            let size = given.or_else(|| sizes.get(path).copied()).ok_or_else(|| {
-                format!(
-                    "no field of {path} in this package says how big one is; give its size in bytes, as Struct<{path}, 24>"
-                )
-            })?;
+        // The engine sets a struct field's size from the struct when it links the function or
+        // class, whatever the record says, so a new one leaves it at zero.
+        FieldType::Struct(path) => {
             let class = if path.starts_with("/Script/") {
                 ("/Script/CoreUObject", "ScriptStruct")
             } else {
@@ -381,7 +356,7 @@ fn record(
             };
             (
                 "StructProperty".into(),
-                size,
+                0,
                 RecordTail::Index(import(tables, path, class)?),
             )
         }
@@ -414,19 +389,19 @@ fn record(
         FieldType::Array(inner) => (
             "ArrayProperty".into(),
             16,
-            RecordTail::One(Box::new(record(name, inner, 0, tables, sizes)?)),
+            RecordTail::One(Box::new(record(name, inner, 0, tables)?)),
         ),
         FieldType::Set(inner) => (
             "SetProperty".into(),
             80,
-            RecordTail::One(Box::new(record(name, inner, 0, tables, sizes)?)),
+            RecordTail::One(Box::new(record(name, inner, 0, tables)?)),
         ),
         FieldType::Map(key, value) => (
             "MapProperty".into(),
             80,
             RecordTail::Two(
-                Box::new(record(name, key, 0, tables, sizes)?),
-                Box::new(record(&format!("{name}_Value"), value, 0, tables, sizes)?),
+                Box::new(record(name, key, 0, tables)?),
+                Box::new(record(&format!("{name}_Value"), value, 0, tables)?),
             ),
         ),
     };
@@ -522,51 +497,6 @@ fn name(names: &mut FPackageNameMap, text: &str, out: &mut Vec<u8>) {
     out.extend_from_slice(&id.number.to_le_bytes());
 }
 
-/// The size each struct takes, by its path, as the fields of this package that hold one record it.
-pub(crate) fn struct_sizes(parsed: &ParsedPackage) -> HashMap<String, i32> {
-    let mut out = HashMap::new();
-    let path_of = |index: i32| -> Option<String> {
-        if index < 0 {
-            parsed
-                .imports
-                .get((-index - 1) as usize)
-                .map(|import| import.path.clone())
-        } else if index > 0 {
-            parsed
-                .exports
-                .get((index - 1) as usize)
-                .map(|export| export.path.clone())
-        } else {
-            None
-        }
-    };
-    fn visit(
-        record: &FieldRecord,
-        path_of: &dyn Fn(i32) -> Option<String>,
-        out: &mut HashMap<String, i32>,
-    ) {
-        match &record.tail {
-            RecordTail::Index(index) if record.kind == "StructProperty" => {
-                if let Some(path) = path_of(*index) {
-                    out.entry(path).or_insert(record.element_size);
-                }
-            }
-            RecordTail::Enum(_, inner) | RecordTail::One(inner) => visit(inner, path_of, out),
-            RecordTail::Two(key, value) => {
-                visit(key, path_of, out);
-                visit(value, path_of, out);
-            }
-            _ => {}
-        }
-    }
-    for export in &parsed.exports {
-        for (record, _) in export.layout.iter().flat_map(|layout| &layout.records) {
-            visit(record, &path_of, &mut out);
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
@@ -587,11 +517,11 @@ mod tests {
             ),
             (
                 "Struct</Script/CoreUObject.Vector>",
-                FieldType::Struct("/Script/CoreUObject.Vector".into(), None),
+                FieldType::Struct("/Script/CoreUObject.Vector".into()),
             ),
             (
-                "Struct</Game/S_Entry.S_Entry, 32>",
-                FieldType::Struct("/Game/S_Entry.S_Entry".into(), Some(32)),
+                "Struct</Game/S_Entry.S_Entry>",
+                FieldType::Struct("/Game/S_Entry.S_Entry".into()),
             ),
             (
                 "Map<Name, Array<Int>>",
@@ -659,15 +589,7 @@ mod tests {
     #[test]
     fn a_new_local_takes_the_cooks_flags_and_sizes() {
         let mut tables = tables();
-        let sizes = HashMap::new();
-        let count = new_record(
-            "Count",
-            &FieldType::Int,
-            NewField::Local,
-            &mut tables,
-            &sizes,
-        )
-        .unwrap();
+        let count = new_record("Count", &FieldType::Int, NewField::Local, &mut tables).unwrap();
         assert_eq!(
             (
                 count.kind.as_str(),
@@ -684,8 +606,7 @@ mod tests {
             ),
             (PUBLIC, 1, "None")
         );
-        let flag =
-            new_record("On", &FieldType::Bool, NewField::Input, &mut tables, &sizes).unwrap();
+        let flag = new_record("On", &FieldType::Bool, NewField::Input, &mut tables).unwrap();
         assert_eq!(flag.tail, RecordTail::Bool(BOOL_PACKING));
         assert_eq!(flag.property_flags, INPUT);
         let list = new_record(
@@ -693,7 +614,6 @@ mod tests {
             &FieldType::Array(Box::new(FieldType::Name)),
             NewField::Local,
             &mut tables,
-            &sizes,
         )
         .unwrap();
         assert_eq!(list.property_flags, ARRAY_LOCAL);
@@ -706,7 +626,6 @@ mod tests {
             &FieldType::Map(Box::new(FieldType::Int), Box::new(FieldType::Str)),
             NewField::Return,
             &mut tables,
-            &sizes,
         )
         .unwrap();
         let RecordTail::Two(key, value) = &map.tail else {
@@ -719,18 +638,16 @@ mod tests {
         assert_eq!(map.property_flags, RETURN);
     }
 
-    /// An object type imports its class; a struct of unknown size is refused unless the text says
-    /// how big it is.
+    /// An object type imports its class, and a struct type its struct, with the size left to the
+    /// engine.
     #[test]
-    fn a_new_field_imports_what_it_names_and_needs_a_struct_size() {
+    fn a_new_field_imports_what_it_names() {
         let mut tables = tables();
-        let mut sizes = HashMap::new();
         let actor = new_record(
             "Target",
             &FieldType::Object("/Script/Engine.Actor".into()),
             NewField::Local,
             &mut tables,
-            &sizes,
         )
         .unwrap();
         let RecordTail::Index(index) = actor.tail else {
@@ -741,24 +658,15 @@ mod tests {
             tables.import_class(index),
             Some(("/Script/CoreUObject".into(), "Class".into()))
         );
-        let vector = FieldType::Struct("/Script/CoreUObject.Vector".into(), None);
-        let refused = new_record("At", &vector, NewField::Local, &mut tables, &sizes).unwrap_err();
-        assert!(
-            refused.contains("Struct</Script/CoreUObject.Vector, 24>"),
-            "{refused}"
+        let vector = FieldType::Struct("/Script/CoreUObject.Vector".into());
+        let at = new_record("At", &vector, NewField::Local, &mut tables).unwrap();
+        let RecordTail::Index(index) = at.tail else {
+            panic!("a struct field names its struct");
+        };
+        assert_eq!(
+            tables.import_class(index),
+            Some(("/Script/CoreUObject".into(), "ScriptStruct".into()))
         );
-        sizes.insert("/Script/CoreUObject.Vector".to_string(), 24);
-        let at = new_record("At", &vector, NewField::Local, &mut tables, &sizes).unwrap();
-        assert_eq!(at.element_size, 24);
-        let given = FieldType::Struct("/Script/CoreUObject.Transform".into(), Some(96));
-        let pose = new_record(
-            "Pose",
-            &given,
-            NewField::Local,
-            &mut tables,
-            &HashMap::new(),
-        )
-        .unwrap();
-        assert_eq!(pose.element_size, 96);
+        assert_eq!((at.kind.as_str(), at.element_size), ("StructProperty", 0));
     }
 }
