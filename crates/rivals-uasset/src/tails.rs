@@ -355,7 +355,7 @@ pub(crate) fn read_class_tail(
                 TailOutcome::Consumed
             }
             "Enum" => {
-                read_enum_tail(cursor, &ctx.header.name_map)?;
+                diagnostics.enum_tail = Some(read_enum_tail(cursor, &ctx.header.name_map)?);
                 TailOutcome::Consumed
             }
             // Every font closes with one word that has read zero in every font inspected.
@@ -627,21 +627,50 @@ fn read_counted_payload(
     })
 }
 
-/// `UEnum::Serialize`: the enumerators as name and value pairs, then the `ECppForm` byte. This
-/// build writes no enum flags after it, which the export's declared size confirms.
+/// A Blueprint enum's entries as its export stores them after its properties, `_MAX` last.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EnumTail {
+    pub entries: Vec<EnumEntry>,
+    /// Where the count in front of the entries sits.
+    #[serde(skip)]
+    pub count_at: u64,
+}
+
+/// One entry of an enum: its name, namespaced as the enum's form writes it, and its value.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EnumEntry {
+    pub name: String,
+    pub value: i64,
+    /// Where its name and value sit.
+    #[serde(skip)]
+    pub span: (u64, u64),
+}
+
+/// `UEnum::Serialize` after the properties: the entries, each a name and an int64 value, then the
+/// `ECppForm` byte. This build writes no enum flags after it.
 fn read_enum_tail(
     cursor: &mut Cursor<'_>,
     names: &retoc::legacy_asset::FPackageNameMap,
-) -> Result<(), String> {
+) -> Result<EnumTail, String> {
+    let count_at = cursor.file_offset();
     let count = cursor.read_i32()?;
     if count < 0 || (count as usize).saturating_mul(ENUMERATOR_BYTES) > cursor.remaining() {
         return Err(cursor.err(format!("implausible enumerator count {count}")));
     }
+    let mut entries = Vec::with_capacity(count as usize);
     for _ in 0..count {
-        cursor.read_name(names)?;
-        cursor.skip(8)?;
+        let start = cursor.file_offset();
+        let name = cursor.read_name(names)?;
+        let value = cursor.take(8)?;
+        let value = i64::from_le_bytes(value.try_into().map_err(|_| "a short enumerator value")?);
+        entries.push(EnumEntry {
+            name,
+            value,
+            span: (start, cursor.file_offset()),
+        });
     }
-    cursor.skip(1)
+    cursor.skip(1)?;
+    Ok(EnumTail { entries, count_at })
 }
 
 /// A trailer this reader has only ever seen as zero, consumed only while that holds so a different
@@ -1158,8 +1187,15 @@ mod tests {
         data.extend_from_slice(&[0u8; 32]);
         data.push(2);
         let mut cursor = Cursor::new(&data, 0);
-        read_enum_tail(&mut cursor, &names).expect("consumed");
+        let tail = read_enum_tail(&mut cursor, &names).expect("consumed");
         assert_eq!(cursor.remaining(), 0);
+        assert_eq!(tail.count_at, 0);
+        let read: Vec<(&str, i64, (u64, u64))> = tail
+            .entries
+            .iter()
+            .map(|entry| (entry.name.as_str(), entry.value, entry.span))
+            .collect();
+        assert_eq!(read, [("E::A", 0, (4, 20)), ("E::A", 0, (20, 36))]);
         assert_eq!(
             cursor.take_names(),
             vec![4, 20],

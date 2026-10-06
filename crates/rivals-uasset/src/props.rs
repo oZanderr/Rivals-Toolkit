@@ -396,6 +396,8 @@ pub struct TaggedAbsent {
 
 #[derive(Default, Debug)]
 pub struct Diagnostics {
+    /// The entries of the enum whose tail was just read, taken by the export that holds them.
+    pub enum_tail: Option<crate::tails::EnumTail>,
     /// Structs that had neither a native layout nor a schema, which is the actionable signal for
     /// extending the native table.
     pub unresolved_structs: BTreeSet<String>,

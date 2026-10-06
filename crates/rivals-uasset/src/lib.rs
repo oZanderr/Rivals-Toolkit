@@ -9,6 +9,7 @@ mod datatable;
 mod dependency;
 mod duplicate;
 mod edit;
+mod enum_entry;
 mod export_edit;
 mod field_record;
 mod header_edit;
@@ -65,6 +66,7 @@ mod value;
 mod write;
 
 pub use class_variable::AddVariable;
+pub use component::derived_guid;
 pub use component::{
     AddComponent, ChangedList, ComponentPlan, ComponentRemoval, InheritedComponent, ListContext,
     ListEntry, ListScope, NodeParent, RemoveComponent, component_removal_wiring, component_wiring,
@@ -88,6 +90,7 @@ pub use edit::{
     patch_values, payload_holds, payload_lock, same_enumerator, verify_copy, verify_identity,
     verify_patch, verify_references,
 };
+pub use enum_entry::{AddEnumEntry, EnumLayout, enum_layout, enum_of, new_entry_names};
 pub use export_edit::{
     EDITABLE_FLAGS, ExportEdit, ExportEditPlan, flag_names, plan_export_edits,
     plan_export_edits_with,

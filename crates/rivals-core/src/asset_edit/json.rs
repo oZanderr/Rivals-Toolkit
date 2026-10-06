@@ -67,6 +67,9 @@ pub struct EditList {
     /// its own.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub add_variables: Vec<rivals_uasset::AddVariable>,
+    /// Entries to add to a Blueprint enum, each shown as its display text. A save of its own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub add_enum_entries: Vec<rivals_uasset::AddEnumEntry>,
     /// Components to add to a Blueprint by duplicating one. A save of its own.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub add_components: Vec<rivals_uasset::AddComponent>,
@@ -85,7 +88,8 @@ pub struct EditList {
     /// Save imports that point at nothing the game or an enabled mod has. Set by the caller.
     #[serde(skip)]
     pub allow_missing: bool,
-    /// Save script edits pointing at something whose kind could not be confirmed. Set by the caller.
+    /// Save edits whose target could not be confirmed, as a script edit pointing at something of
+    /// an unknown kind or an enum value the mappings do not name. Set by the caller.
     #[serde(skip)]
     pub allow_unchecked: bool,
 }
@@ -182,6 +186,7 @@ impl EditList {
             && !self.compact_names
             && self.add_exports.is_empty()
             && self.add_variables.is_empty()
+            && self.add_enum_entries.is_empty()
             && self.add_components.is_empty()
             && self.remove_components.is_empty()
             && self.save_as.is_none()
@@ -319,6 +324,7 @@ impl EditList {
             add_exports: self.add_exports,
             new_functions,
             add_variables: self.add_variables,
+            add_enum_entries: self.add_enum_entries,
             add_components: self.add_components,
             remove_components: self.remove_components,
             save_as: self.save_as,

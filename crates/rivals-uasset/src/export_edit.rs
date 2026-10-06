@@ -1079,6 +1079,7 @@ mod tests {
             super_struct_at: None,
             name_refs: Vec::new(),
             names_complete: false,
+            enum_tail: None,
         }
     }
 

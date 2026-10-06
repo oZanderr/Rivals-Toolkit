@@ -130,6 +130,9 @@ pub fn preview_read_edits(
     if !changes.add_variables.is_empty() {
         check_variable_class_is_alone(request, parsed, &changes.add_variables)?;
     }
+    if !changes.add_enum_entries.is_empty() {
+        return enum_entry_pass(request, mappings, loaded, parsed);
+    }
     if let Some(add) = changes.add_components.first() {
         if add.from_parent.is_some() {
             return inherited_component_pass(request, mappings, loaded, parsed, add);
@@ -1366,6 +1369,315 @@ fn new_function_pass(
     notes.append(&mut written.notes);
     written.notes = notes;
     Ok((written, loaded))
+}
+
+/// Adds entries to a Blueprint enum in two stages: the entries before its `_MAX`, then each one's
+/// display name in its `DisplayNameMap`, keyed by the name it took, with the rest of the save. An
+/// entry shown as text the enum shows already is left out, so a file adding one applies again. The
+/// enum is refused when a package replicates it and the entries change how many bits a value of it
+/// takes.
+fn enum_entry_pass(
+    request: &AssetEditRequest<'_>,
+    mappings: Option<&Mappings>,
+    loaded: FSerializedAssetBundle,
+    parsed: &rivals_uasset::ParsedPackage,
+) -> Result<(PatchedBundle, FSerializedAssetBundle), String> {
+    let changes = &request.changes;
+    let first = changes
+        .add_enum_entries
+        .first()
+        .ok_or("no enum entry to add")?;
+    let export = rivals_uasset::enum_of(parsed, first.export)?;
+    let display_names = export
+        .properties
+        .iter()
+        .find(|entry| entry.name == "DisplayNameMap");
+    let (shown, namespace) = match display_names.map(|entry| &entry.value) {
+        Some(PropertyValue::Map { entries }) => (
+            entries
+                .iter()
+                .map(|pair| pair.value.summary())
+                .collect::<Vec<_>>(),
+            entries.iter().find_map(|pair| match &pair.value {
+                PropertyValue::Text { namespace, .. } => namespace.clone(),
+                _ => None,
+            }),
+        ),
+        _ => (Vec::new(), None),
+    };
+    let mut notes = Vec::new();
+    let adds: Vec<rivals_uasset::AddEnumEntry> = changes
+        .add_enum_entries
+        .iter()
+        .filter(|add| {
+            let held = shown.iter().any(|text| text == add.display.trim());
+            if held {
+                notes.push(format!(
+                    "{} already has an entry shown as {}",
+                    export.object_name,
+                    add.display.trim()
+                ));
+            }
+            !held
+        })
+        .cloned()
+        .collect();
+    let rest = PackageEdits {
+        add_enum_entries: Vec::new(),
+        ..changes.clone()
+    };
+    let (mut patched, loaded) = if adds.is_empty() {
+        if rest.is_empty() {
+            (unchanged(&loaded), loaded)
+        } else {
+            preview_read_edits(
+                &AssetEditRequest {
+                    changes: rest,
+                    ..*request
+                },
+                mappings,
+                loaded,
+                parsed,
+            )?
+        }
+    } else {
+        let layout = rivals_uasset::enum_layout(export)?;
+        check_enum_replication(request, mappings, export, layout.max.value, adds.len())?;
+        notes.push(format!(
+            "Blueprints built against {} keep what they knew of it: a Switch on it sends a new              entry to its default, and a loop over its entries stops before the new ones",
+            export.object_name
+        ));
+        let shell = PackageEdits {
+            add_enum_entries: adds.clone(),
+            ..Default::default()
+        };
+        let sidecars = rivals_uasset::Sidecars {
+            bulk: loaded.bulk_data_buffer.as_deref(),
+            optional_bulk: loaded.optional_bulk_data_buffer.as_deref(),
+        };
+        let (created, after) = patch_pass(
+            request,
+            mappings,
+            &bundle_of(&loaded),
+            sidecars,
+            parsed,
+            &shell,
+        )?;
+        // Each entry's display name, keyed by the name it took.
+        let object = rivals_uasset::below_package(&export.path).to_string();
+        let mut paths = rest.paths.clone();
+        for (add, name) in adds
+            .iter()
+            .zip(rivals_uasset::new_entry_names(&layout, adds.len()))
+        {
+            let edit = |path: String, op: rivals_uasset::PathOp| rivals_uasset::PathEdit {
+                export: object.clone(),
+                row: None,
+                defaults: false,
+                path,
+                op,
+                was: None,
+                becomes: None,
+            };
+            paths.push(edit(
+                "DisplayNameMap".into(),
+                rivals_uasset::PathOp::Insert {
+                    index: None,
+                    key: Some(name.clone()),
+                },
+            ));
+            let literal = rivals_uasset::text_literal::format(
+                &rivals_uasset::text_literal::TextLiteral::Localized {
+                    namespace: namespace.clone().unwrap_or_default(),
+                    key: rivals_uasset::derived_guid(&[&export.path, &name]),
+                    source: add.display.trim().to_string(),
+                },
+            );
+            paths.push(edit(
+                format!("DisplayNameMap{{{name}}}"),
+                rivals_uasset::PathOp::Set { text: literal },
+            ));
+        }
+        let (mut written, _) = preview_read_edits(
+            &AssetEditRequest {
+                changes: PackageEdits { paths, ..rest },
+                ..*request
+            },
+            mappings,
+            staged(&created, &loaded),
+            &after,
+        )?;
+        let mut applied = created.applied;
+        applied.append(&mut written.applied);
+        written.applied = applied;
+        (written, loaded)
+    };
+    notes.append(&mut patched.notes);
+    patched.notes = notes;
+    Ok((patched, loaded))
+}
+
+/// Refuses enum entries that change how many bits a replicated value of the enum takes while a
+/// package replicates it: a property sent over the network, or a parameter of a function called
+/// across it, which the unmodded server reads at the old width.
+fn check_enum_replication(
+    request: &AssetEditRequest<'_>,
+    mappings: Option<&Mappings>,
+    export: &rivals_uasset::ParsedExport,
+    max: i64,
+    count: usize,
+) -> Result<(), String> {
+    let bits = |top: i64| 64 - (top.max(0) as u64).leading_zeros();
+    let grown = max + count as i64;
+    // The largest value, `_MAX` counted or not, as the width is taken either way.
+    if bits(max) == bits(grown) && bits(max - 1) == bits(grown - 1) {
+        return Ok(());
+    }
+    let mut replicating = Vec::new();
+    for (listed, read) in read_importers(request, mappings, &export.path)? {
+        match read {
+            Err(why) => replicating.push(format!("{listed}, which did not read ({why})")),
+            Ok(user) => replicating.extend(
+                replicated_uses(&user, &export.path)
+                    .into_iter()
+                    .map(|at| format!("{listed}: {at}")),
+            ),
+        }
+    }
+    if replicating.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "{} is sent over the network, and {count} more entr{} would send it in more bits than \
+         the game's server reads: {}",
+        export.object_name,
+        if count == 1 { "y" } else { "ies" },
+        replicating.join("; ")
+    ))
+}
+
+/// Where `parsed` sends a value of the type at `path` over the network: a property flagged to
+/// replicate, or a parameter of a function called across it.
+fn replicated_uses(parsed: &rivals_uasset::ParsedPackage, path: &str) -> Vec<String> {
+    const CPF_NET: u64 = 0x20;
+    const FUNC_NET: u32 = 0x40;
+    let mut uses = Vec::new();
+    for export in &parsed.exports {
+        let Some(layout) = &export.layout else {
+            continue;
+        };
+        let called_across = export
+            .signature
+            .as_ref()
+            .is_some_and(|signature| signature.flags & FUNC_NET != 0);
+        for (record, _) in &layout.records {
+            if !names_type(parsed, record, path) {
+                continue;
+            }
+            if record.property_flags & CPF_NET != 0 {
+                uses.push(format!(
+                    "{}.{} is replicated",
+                    export.object_name, record.name
+                ));
+            } else if called_across {
+                uses.push(format!(
+                    "{} is called over the network with {}",
+                    export.object_name, record.name
+                ));
+            }
+        }
+    }
+    uses
+}
+
+/// Whether a field record is of the type at `path`, itself or as a container's element, key or
+/// value.
+fn names_type(
+    parsed: &rivals_uasset::ParsedPackage,
+    record: &rivals_uasset::FieldRecord,
+    path: &str,
+) -> bool {
+    let named = |index: i32| match index {
+        index if index < 0 => parsed
+            .imports
+            .get((-index - 1) as usize)
+            .is_some_and(|import| import.path == path),
+        index if index > 0 => parsed
+            .exports
+            .get((index - 1) as usize)
+            .is_some_and(|export| export.path == path),
+        _ => false,
+    };
+    match &record.tail {
+        rivals_uasset::RecordTail::Index(index) | rivals_uasset::RecordTail::Enum(index, _) => {
+            named(*index)
+        }
+        rivals_uasset::RecordTail::One(inner) => names_type(parsed, inner, path),
+        rivals_uasset::RecordTail::Two(key, value) => {
+            names_type(parsed, key, path) || names_type(parsed, value, path)
+        }
+        _ => false,
+    }
+}
+
+/// A package another one's import names, as the import index lists it, read whole or why not.
+type Importer = (String, Result<rivals_uasset::ParsedPackage, String>);
+
+/// Every package the import index says imports `path`, other than this one, each read whole: from
+/// the enabled mod holding it, or the game. One that does not read says why.
+fn read_importers(
+    request: &AssetEditRequest<'_>,
+    mappings: Option<&Mappings>,
+    path: &str,
+) -> Result<Vec<Importer>, String> {
+    let index = match crate::import_index::load(request.game_root)? {
+        Some(index) if !index.is_stale(request.game_root) => index,
+        _ => crate::import_index::build(request.game_root, &mut |_, _| {})?,
+    };
+    let own = request.entry.replace('\\', "/").to_ascii_lowercase();
+    let mods =
+        crate::import_index::enabled_mod_containers(&crate::paths::paks_dir(request.game_root));
+    let mut out = Vec::new();
+    for listed in index.importers_of(path).packages {
+        let (entry, in_mod) = match listed.split_once(" (in ") {
+            Some((entry, name)) => (
+                entry.to_string(),
+                Some(name.trim_end_matches(')').to_string()),
+            ),
+            None => (listed.clone(), None),
+        };
+        if entry.to_ascii_lowercase() == own {
+            continue;
+        }
+        let container = match &in_mod {
+            Some(name) => mods
+                .iter()
+                .find(|container| {
+                    container.file_stem().and_then(|stem| stem.to_str()) == Some(name.as_str())
+                })
+                .map(|container| container.to_string_lossy().into_owned()),
+            None => Some("pakchunk0-Windows.utoc".to_string()),
+        };
+        let read = container
+            .ok_or_else(|| "its mod is not enabled".to_string())
+            .and_then(|container| {
+                let loaded =
+                    asset::load_bundle(request.game_root, &container, &entry, AssetSource::Utoc)?;
+                schema_synth::parse_package_opts(
+                    &bundle_of(&loaded),
+                    mappings,
+                    &PackageSource {
+                        game_root: request.game_root,
+                        container: &container,
+                        entry: &entry,
+                        kind: AssetSource::Utoc,
+                    },
+                    editor_options(),
+                )
+            });
+        out.push((listed, read));
+    }
+    Ok(out)
 }
 
 /// Refuses variables for a class an object in another package is made from, or a class there
@@ -5059,6 +5371,51 @@ mod tests {
         assert!(settled.notes.is_empty(), "{:?}", settled.notes);
     }
 
+    /// A property of a type flagged to replicate, or a parameter of a function called over the
+    /// network, sends the type across it; a property that does neither does not.
+    #[test]
+    fn a_replicated_use_of_a_type_is_found_by_its_records() {
+        use rivals_uasset::tagged_fixture::{sparse_mappings, sparse_package};
+        let (asset, exports) = sparse_package();
+        let mappings = sparse_mappings();
+        let request = request("", "unused");
+        let mut parsed =
+            parse_loaded(&request, Some(&mappings), &sparse_bundle(asset, exports)).expect("parse");
+        let path = parsed.exports[0].path.clone();
+        let record = |flags: u64| rivals_uasset::FieldRecord {
+            kind: "EnumProperty".into(),
+            name: "Mode".into(),
+            field_flags: 0,
+            array_dim: 1,
+            element_size: 1,
+            property_flags: flags,
+            rep_index: 0,
+            rep_notify: String::new(),
+            condition: 0,
+            tail: rivals_uasset::RecordTail::One(Box::new(rivals_uasset::FieldRecord {
+                kind: "EnumProperty".into(),
+                name: "Mode".into(),
+                field_flags: 0,
+                array_dim: 1,
+                element_size: 1,
+                property_flags: 0,
+                rep_index: 0,
+                rep_notify: String::new(),
+                condition: 0,
+                tail: rivals_uasset::RecordTail::Index(1),
+            })),
+        };
+        let mut give = |flags: u64| {
+            parsed.exports[0].layout = Some(rivals_uasset::StructLayout {
+                records: vec![(record(flags), (0, 0))],
+                ..Default::default()
+            });
+            replicated_uses(&parsed, &path)
+        };
+        assert_eq!(give(0x20), ["TestObject.Mode is replicated"]);
+        assert!(give(0x1).is_empty());
+    }
+
     fn holder_path(path: &str, op: rivals_uasset::PathOp) -> rivals_uasset::PathEdit {
         rivals_uasset::PathEdit {
             export: "TestObject".into(),
@@ -5543,6 +5900,9 @@ mod game_data_tests {
     /// A row holding a map keyed by gameplay tags, one pair long, whose value holds a map keyed by an
     /// enum.
     const TAG_KEYED: &str = "Marvel/Content/Marvel/Data/DataTable/MarvelGameMatchModeTable.uasset";
+    /// A Blueprint enum with three entries and `_MAX`, which six packages use and none replicates.
+    const BLUEPRINT_ENUM: &str =
+        "Engine/Content/EditorResources/FieldNodes/_Resources/EFieldShapeType.uasset";
     const INSTANCED: &str =
         "Marvel/Content/Marvel/Data/DataTable/GameMode/2206/AIAutoAbilityTable_Zombie.uasset";
 
@@ -5612,6 +5972,7 @@ mod game_data_tests {
         ("CURVE_ANIM_BP", CURVE_ANIM_BP),
         ("INSTANCED", INSTANCED),
         ("TAG_KEYED", TAG_KEYED),
+        ("BLUEPRINT_ENUM", BLUEPRINT_ENUM),
         ("LEVEL", LEVEL),
         ("CONSTRAINT_EMITTER", CONSTRAINT_EMITTER),
         ("PLAYER_CONTROLLER", PLAYER_CONTROLLER),
@@ -11624,6 +11985,57 @@ mod game_data_tests {
         });
         assert!(moved, "{MAPS} holds no map of two int pairs keyed by text");
         apply_dump(&fixture, &before, &dump);
+    }
+
+    /// An entry added to a Blueprint enum goes in before its `_MAX`, which moves up, and shows as the
+    /// text given. Applied again, the enum shows that text already and nothing changes.
+    #[test]
+    fn a_blueprint_enum_gains_an_entry_shown_as_given() {
+        let Some(fixture) = Fixture::open(BLUEPRINT_ENUM) else {
+            return;
+        };
+        let changes = PackageEdits {
+            add_enum_entries: vec![rivals_uasset::AddEnumEntry {
+                export: None,
+                display: "Cone".into(),
+            }],
+            ..Default::default()
+        };
+        let (patched, after) = fixture.apply_changes(changes.clone());
+        let entries: Vec<(String, i64)> = after.exports[0]
+            .enum_tail
+            .as_ref()
+            .expect("the enum's entries")
+            .entries
+            .iter()
+            .map(|entry| (entry.name.clone(), entry.value))
+            .collect();
+        let named = |name: &str, value: i64| (format!("EFieldShapeType::{name}"), value);
+        assert_eq!(
+            entries,
+            [
+                named("NewEnumerator0", 0),
+                named("NewEnumerator1", 1),
+                named("NewEnumerator2", 2),
+                named("NewEnumerator3", 3),
+                named("EFieldShapeType_MAX", 4),
+            ]
+        );
+        assert!(matches!(after.exports[0].status, ExportStatus::Complete));
+        let shown = after.exports[0]
+            .properties
+            .iter()
+            .find(|entry| entry.name == "DisplayNameMap")
+            .expect("its display names");
+        let PropertyValue::Map { entries } = &shown.value else {
+            panic!("{:?}", shown.value);
+        };
+        let pair = entries
+            .iter()
+            .find(|pair| pair.key.summary() == "NewEnumerator3")
+            .expect("the new entry's display name");
+        assert_eq!(pair.value.summary(), "Cone");
+        applied_again_changes_nothing(&fixture, &changes, &patched, &after);
     }
 
     /// A map keyed by gameplay tags, given a pair under another tag in a dump, takes it in one apply:

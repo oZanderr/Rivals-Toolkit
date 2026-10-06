@@ -90,6 +90,9 @@ pub struct ParsedExport {
     /// The field records a script struct export declares, which is the schema for its own values.
     #[serde(skip)]
     pub struct_definition: Option<usmap::Struct>,
+    /// A Blueprint enum's entries, `_MAX` last, where the export is one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enum_tail: Option<crate::tails::EnumTail>,
     /// Hex preview of the bytes parsing did not account for. On a failure it starts a little
     /// before the break so the run-up is visible, with `|` marking where parsing stopped.
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -208,6 +211,7 @@ impl ParsedExport {
             super_struct_at: None,
             name_refs: Vec::new(),
             names_complete: false,
+            enum_tail: None,
         }
     }
 }
@@ -1153,7 +1157,7 @@ fn parse_one_inner(
         let restore = cursor.position();
         let named = cursor.names_len();
         match tails::read_class_tail(&chain, &mut cursor, ctx, diagnostics, &mut properties) {
-            Ok(tails::TailOutcome::Consumed) => {}
+            Ok(tails::TailOutcome::Consumed) => base.enum_tail = diagnostics.enum_tail.take(),
             Ok(tails::TailOutcome::Payload(kind)) => tail_payload = Some(kind),
             Err(reason) => {
                 base.note = Some(reason);
@@ -1375,6 +1379,7 @@ fn skeleton(
         names_complete: false,
         undecoded: Vec::new(),
         defaults: Vec::new(),
+        enum_tail: None,
     };
     if let Some(export) = export {
         base.object_name = header

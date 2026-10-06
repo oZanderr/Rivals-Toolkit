@@ -836,6 +836,7 @@ mod tests {
             names_complete: false,
             undecoded: Vec::new(),
             defaults: Vec::new(),
+            enum_tail: None,
         }
     }
 

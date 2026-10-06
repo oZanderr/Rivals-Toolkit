@@ -248,6 +248,10 @@ pub struct PackageEdits {
     /// Variables added to a Blueprint class, its instances in the package renumbered to match. A
     /// save of its own; the caller holds the class to having no instance in another package.
     pub add_variables: Vec<crate::class_variable::AddVariable>,
+    /// Entries added to a Blueprint enum before its `_MAX`. A save of its own; the caller gives
+    /// each its display name in the next, and holds the enum to nothing replicating it at another
+    /// width.
+    pub add_enum_entries: Vec<crate::enum_entry::AddEnumEntry>,
     /// Components added to a Blueprint by copying one its construction script builds. The copy
     /// is this save; wiring it in takes value edits on the result, which the caller makes: see
     /// `rivals_core::asset_edit::preview_edits`.
@@ -276,7 +280,9 @@ pub struct PackageEdits {
     pub allow_drift: bool,
     /// Save imports that point at a path neither the game nor an enabled mod has.
     pub allow_missing: bool,
-    /// Save script edits that point at an object or a function whose kind could not be confirmed.
+    /// Save edits whose target could not be confirmed: a script edit pointing at an object or a
+    /// function whose kind could not be, or an enum value the mappings do not name, such as one a
+    /// mod's copy of the enum adds.
     pub allow_unchecked: bool,
 }
 
@@ -862,6 +868,7 @@ impl PackageEdits {
         self.add_exports.extend(other.add_exports);
         self.new_functions.extend(other.new_functions);
         self.add_variables.extend(other.add_variables);
+        self.add_enum_entries.extend(other.add_enum_entries);
         self.add_components.extend(other.add_components);
         self.remove_components.extend(other.remove_components);
         self.dependencies.extend(other.dependencies);
@@ -894,6 +901,7 @@ impl PackageEdits {
             && self.add_exports.is_empty()
             && self.new_functions.is_empty()
             && self.add_variables.is_empty()
+            && self.add_enum_entries.is_empty()
             && self.add_components.is_empty()
             && self.remove_components.is_empty()
             && self.exports.is_empty()
@@ -1351,6 +1359,41 @@ pub fn patch_package_with(
             HeaderDraft {
                 names: Some(addition.tables.names),
                 imports: Some(addition.tables.imports),
+                ..Default::default()
+            },
+        )?;
+        return Ok(PatchedBundle {
+            asset: rewritten.asset,
+            exports: rewritten.exports,
+            applied: addition.applied,
+            bulk: None,
+            optional_bulk: None,
+            notes: Vec::new(),
+        });
+    }
+    if !edits.add_enum_entries.is_empty() {
+        let alone = PackageEdits {
+            add_enum_entries: Vec::new(),
+            save_as: None,
+            expect: Expected::default(),
+            allow_drift: false,
+            allow_missing: false,
+            allow_unchecked: false,
+            ..edits.clone()
+        };
+        if !alone.is_empty() {
+            return Err(
+                "adding an enum entry is a save of its own; save or discard the other edits first"
+                    .into(),
+            );
+        }
+        let addition =
+            crate::enum_entry::add_enum_entries(parsed, &package, &edits.add_enum_entries)?;
+        let rewritten = rewrite(
+            bundle,
+            &addition.splices,
+            HeaderDraft {
+                names: Some(addition.names),
                 ..Default::default()
             },
         )?;
@@ -1846,6 +1889,7 @@ pub fn patch_package_with(
                             && matches!(entry.value, PropertyValue::Enum { .. })
                             && end - start == 8,
                         enums: mappings,
+                        unchecked: edits.allow_unchecked,
                     },
                 )?;
                 if let Some(target) = object_reference(&entry.value, &bytes) {
@@ -1975,6 +2019,7 @@ pub fn patch_package_with(
                         package: &package,
                         element: layout.element_is_enum,
                         enums: mappings,
+                        unchecked: edits.allow_unchecked,
                     },
                 )?;
                 if let Some(target) = object_reference(element, &bytes) {
@@ -4823,6 +4868,7 @@ fn tagged_value(
                 package,
                 element: false,
                 enums: mappings,
+                unchecked: false,
             },
         )
         .map(|bytes| (bytes, false)),
@@ -5983,6 +6029,9 @@ pub fn verify_patch(
     }
     if !edits.add_variables.is_empty() {
         return crate::class_variable::verify(before, after, &edits.add_variables);
+    }
+    if !edits.add_enum_entries.is_empty() {
+        return crate::enum_entry::verify(before, after, &edits.add_enum_entries);
     }
     let removed = if edits.remove_exports.is_empty() {
         Vec::new()
@@ -7594,6 +7643,8 @@ struct Target<'a> {
     element: bool,
     /// The mappings, for turning an enumerator name into its number and back.
     enums: Option<&'a Mappings>,
+    /// Let an enum value the mappings do not name through, as one a mod's enum adds.
+    unchecked: bool,
 }
 
 /// Produces the bytes for a value. Kinds that reach into the package's own tables are handled
@@ -7624,7 +7675,7 @@ fn encode(value: &PropertyValue, text: &str, target: Target<'_>) -> Result<Vec<u
                 resolved.as_str()
             }
             Ok(number) => {
-                check_enum_number(target.enums, enum_type.as_deref(), number)?;
+                check_enum_number(target.enums, enum_type.as_deref(), number, target.unchecked)?;
                 text
             }
             Err(_) => text,
@@ -7639,12 +7690,19 @@ fn encode(value: &PropertyValue, text: &str, target: Target<'_>) -> Result<Vec<u
     {
         let text = text.trim();
         if target.element {
-            let name =
-                element_enumerator(target.enums, enum_type.as_deref(), was.as_deref(), text)?;
+            let name = element_enumerator(
+                target.enums,
+                enum_type.as_deref(),
+                was.as_deref(),
+                text,
+                target.unchecked,
+            )?;
             return Ok(encode_name(&name, &mut target.tables.names));
         }
         match text.parse::<i64>() {
-            Ok(number) => check_enum_number(target.enums, enum_type.as_deref(), number)?,
+            Ok(number) => {
+                check_enum_number(target.enums, enum_type.as_deref(), number, target.unchecked)?
+            }
             Err(_) => {
                 let number = enumerator_value(target.enums, enum_type.as_deref(), text)?;
                 return encode_scalar(value, &number.to_string(), target.width, target.declared);
@@ -7747,6 +7805,7 @@ fn check_enum_number(
     mappings: Option<&Mappings>,
     enum_type: Option<&str>,
     number: i64,
+    unchecked: bool,
 ) -> Result<(), String> {
     /// Enough of a long enum to show what its values look like.
     const LISTED: usize = 12;
@@ -7754,7 +7813,7 @@ fn check_enum_number(
         return Ok(());
     };
     let values = mappings.enumerators(enum_type);
-    if values.is_empty() || values.iter().any(|(value, _)| *value == number) {
+    if unchecked || values.is_empty() || values.iter().any(|(value, _)| *value == number) {
         return Ok(());
     }
     let mut listed: Vec<String> = values
@@ -7766,7 +7825,8 @@ fn check_enum_number(
         listed.push(format!("and {} more", values.len() - LISTED));
     }
     Err(format!(
-        "{enum_type} has no value {number}; its values are {}",
+        "{enum_type} has no value {number}; its values are {}. One a mod's copy of the enum adds is \
+         saved with --allow-unchecked",
         listed.join(", ")
     ))
 }
@@ -7796,11 +7856,13 @@ fn element_enumerator(
     enum_type: Option<&str>,
     was: Option<&str>,
     text: &str,
+    unchecked: bool,
 ) -> Result<String, String> {
     let name = match text.parse::<i64>() {
         Ok(number) => enumerator_name(mappings, enum_type, number)?,
         Err(_) => {
             if let (Some(mappings), Some(enum_type)) = (mappings, enum_type)
+                && !unchecked
                 && !mappings.enumerators(enum_type).is_empty()
             {
                 enumerator_value(Some(mappings), Some(enum_type), text)?;
@@ -7988,7 +8050,7 @@ fn encode_string(text: &str) -> Vec<u8> {
 
 /// An FName is an index into the package name map and a number suffix. Storing one that is not
 /// there yet appends it, which is what makes the header grow.
-fn encode_name(text: &str, names: &mut FPackageNameMap) -> Vec<u8> {
+pub(crate) fn encode_name(text: &str, names: &mut FPackageNameMap) -> Vec<u8> {
     let stored = names.store(text);
     let mut out = Vec::with_capacity(8);
     out.extend_from_slice(&stored.index.to_le_bytes());
@@ -8740,7 +8802,7 @@ mod tests {
     fn an_enum_element_is_checked_and_keeps_the_slots_spelling() {
         let schema = colours();
         let write = |was: Option<&str>, text: &str| {
-            element_enumerator(Some(&schema), Some("EColour"), was, text)
+            element_enumerator(Some(&schema), Some("EColour"), was, text, false)
         };
         assert_eq!(write(Some("EColour::Red"), "2"), Ok("EColour::Blue".into()));
         assert_eq!(
@@ -8758,8 +8820,33 @@ mod tests {
         );
         // An enum the mappings do not list takes the name as typed.
         assert_eq!(
-            element_enumerator(Some(&schema), Some("EShape"), Some("EShape::Box"), "Disc"),
+            element_enumerator(
+                Some(&schema),
+                Some("EShape"),
+                Some("EShape::Box"),
+                "Disc",
+                false
+            ),
             Ok("EShape::Disc".into())
+        );
+        // A value a mod's copy of the enum adds is let through unchecked, spelt as the slot was.
+        assert_eq!(
+            element_enumerator(
+                Some(&schema),
+                Some("EColour"),
+                Some("EColour::Red"),
+                "NewEnumerator3",
+                true
+            ),
+            Ok("EColour::NewEnumerator3".into())
+        );
+        assert!(
+            check_enum_number(Some(&schema), Some("EColour"), 3, false)
+                .is_err_and(|why| why.contains("--allow-unchecked"))
+        );
+        assert_eq!(
+            check_enum_number(Some(&schema), Some("EColour"), 3, true),
+            Ok(())
         );
         assert!(same_enumerator(Some("EColour"), "EColour::Blue", " Blue"));
         assert!(!same_enumerator(Some("EColour"), "EColour::Blue", "Red"));
@@ -8900,6 +8987,7 @@ mod tests {
                 super_struct_at: None,
                 name_refs: Vec::new(),
                 names_complete: false,
+                enum_tail: None,
             }],
             unresolved_structs: Vec::new(),
             property_kinds: Default::default(),

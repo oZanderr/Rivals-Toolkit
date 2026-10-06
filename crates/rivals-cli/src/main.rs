@@ -87,8 +87,9 @@ struct Cli {
     #[arg(long, global = true)]
     allow_missing: bool,
 
-    /// Save script edits that point an object constant or a call at something whose kind cannot
-    /// be confirmed to match what the script held there.
+    /// Save edits whose target cannot be confirmed: a script's object constant or call pointed at
+    /// something whose kind cannot be confirmed to match what the script held there, or an enum
+    /// value the mappings do not name, such as one a mod's copy of the enum adds.
     #[arg(long, global = true)]
     allow_unchecked: bool,
 
@@ -169,6 +170,10 @@ enum AssetCmd {
     /// declares it after its own, and each object of the class there is renumbered to match.
     /// Refused when another package makes an object of the class or a class derived from it.
     AddVariable(AddVariableArgs),
+    /// Add an entry to a Blueprint enum, before its `_MAX`, shown as `--display`. Values other
+    /// packages hold keep their meaning. Refused when a package sends the enum over the network
+    /// and the entry would make a value of it take more bits than the game's server reads.
+    AddEnumEntry(AddEnumEntryArgs),
     /// Change a stored value and write the result into a mod pak.
     Set(Box<AssetSetArgs>),
     /// Set the same properties by name across every package a filter matches, in one mod.
@@ -379,6 +384,33 @@ struct ScriptAssembleArgs {
     replace: bool,
 
     /// Assemble, patch and verify, report what would change, and write nothing.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Args)]
+struct AddEnumEntryArgs {
+    #[command(flatten)]
+    asset: AssetArgs,
+
+    /// What the entry shows, its display name.
+    #[arg(long, value_name = "TEXT")]
+    display: String,
+
+    /// The enum export, when the package holds more than one Blueprint enum.
+    #[arg(long, value_name = "N")]
+    export: Option<u32>,
+
+    /// Mod pak to write into, created in `~mods` if it does not exist. Defaults to the name the
+    /// desktop app last saved into, then to `AssetEdits`.
+    #[arg(long, value_name = "NAME")]
+    mod_name: Option<String>,
+
+    /// Overwrite an edited copy of this asset that the mod pak already holds.
+    #[arg(long)]
+    replace: bool,
+
+    /// Patch and verify, report what would change, and write nothing.
     #[arg(long)]
     dry_run: bool,
 }
@@ -1502,6 +1534,7 @@ fn run(cli: &Cli) -> Result<(), String> {
         Command::Asset(AssetCmd::ScriptWiden(a)) => asset_script_widen(cli, &app, a),
         Command::Asset(AssetCmd::ScriptAssemble(a)) => asset_script_assemble(cli, &app, a),
         Command::Asset(AssetCmd::AddVariable(a)) => asset_add_variable(cli, &app, a),
+        Command::Asset(AssetCmd::AddEnumEntry(a)) => asset_add_enum_entry(cli, &app, a),
         Command::Asset(AssetCmd::Set(a)) => asset_set(cli, &app, a),
         Command::Asset(AssetCmd::Sweep(a)) => asset_sweep(cli, &app, a),
         Command::Asset(AssetCmd::Import(a)) => asset_import(cli, &app, a),
@@ -2608,13 +2641,34 @@ fn asset_script_assemble(
     emit(cli, &message, || outln!("{message}"))
 }
 
+fn asset_add_enum_entry(
+    cli: &Cli,
+    app: &settings::AppSettings,
+    args: &AddEnumEntryArgs,
+) -> Result<(), String> {
+    let edit = rivals_uasset::PackageEdits {
+        add_enum_entries: vec![rivals_uasset::AddEnumEntry {
+            export: args.export,
+            display: args.display.clone(),
+        }],
+        ..Default::default()
+    };
+    save_definition_edit(
+        cli,
+        app,
+        &args.asset,
+        args.mod_name.as_deref(),
+        args.replace,
+        args.dry_run,
+        edit,
+    )
+}
+
 fn asset_add_variable(
     cli: &Cli,
     app: &settings::AppSettings,
     args: &AddVariableArgs,
 ) -> Result<(), String> {
-    let root = resolve::game_root(cli.game_root.as_deref(), app)?;
-    let request = asset_request(cli, app, &args.asset, &root);
     let edit = rivals_uasset::PackageEdits {
         add_variables: vec![rivals_uasset::AddVariable {
             class: args.class,
@@ -2623,9 +2677,32 @@ fn asset_add_variable(
         }],
         ..Default::default()
     };
-    let mod_name = mod_name_of(app, args.mod_name.as_deref());
-    if args.dry_run {
-        let preview = asset::preview_edits(&request, mod_name, args.replace, edit)?;
+    save_definition_edit(
+        cli,
+        app,
+        &args.asset,
+        args.mod_name.as_deref(),
+        args.replace,
+        args.dry_run,
+        edit,
+    )
+}
+
+/// Saves an edit to a Blueprint definition, or with `dry_run` reports what it would change.
+fn save_definition_edit(
+    cli: &Cli,
+    app: &settings::AppSettings,
+    asset_args: &AssetArgs,
+    mod_name: Option<&str>,
+    replace: bool,
+    dry_run: bool,
+    edit: rivals_uasset::PackageEdits,
+) -> Result<(), String> {
+    let root = resolve::game_root(cli.game_root.as_deref(), app)?;
+    let request = asset_request(cli, app, asset_args, &root);
+    let mod_name = mod_name_of(app, mod_name);
+    if dry_run {
+        let preview = asset::preview_edits(&request, mod_name, replace, edit)?;
         return emit(cli, &preview, || {
             for done in &preview.applied {
                 outln!("would set {}: {} -> {}", done.name, done.before, done.after);
@@ -2638,7 +2715,7 @@ fn asset_add_variable(
     if !cli.force && rivals_core::game_status::should_block_for_game() {
         return Err(rivals_core::game_status::game_running_error());
     }
-    let message = asset::save_changes(&request, edit, mod_name, args.replace)?;
+    let message = asset::save_changes(&request, edit, mod_name, replace)?;
     emit(cli, &message, || outln!("{message}"))
 }
 

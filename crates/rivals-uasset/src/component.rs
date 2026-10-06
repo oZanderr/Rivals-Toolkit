@@ -612,8 +612,14 @@ fn copies<'a>(
 /// A guid for a new variable, made from the package, the name and the original's guid, so it is
 /// the same each time the same component is added and differs from every other.
 fn variable_guid(parsed: &ParsedPackage, variable: &str, original: &str) -> String {
+    derived_guid(&[&parsed.info.package_name, variable, original])
+}
+
+/// A guid made from `parts`, as 32 uppercase hex digits: the same each time the same parts make
+/// it, so a save that writes one writes the same bytes again, and different for any others.
+pub fn derived_guid(parts: &[&str]) -> String {
+    let text = parts.join("\u{1}");
     let fnv = |seed: u64| {
-        let text = format!("{}\u{1}{variable}\u{1}{original}", parsed.info.package_name);
         text.bytes().fold(seed, |hash, byte| {
             (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01B3)
         })
