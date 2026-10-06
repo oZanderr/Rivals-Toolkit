@@ -1630,10 +1630,7 @@ fn read_importers(
     mappings: Option<&Mappings>,
     path: &str,
 ) -> Result<Vec<Importer>, String> {
-    let index = match crate::import_index::load(request.game_root)? {
-        Some(index) if !index.is_stale(request.game_root) => index,
-        _ => crate::import_index::build(request.game_root, &mut |_, _| {})?,
-    };
+    let index = crate::import_index::current(request.game_root)?;
     let own = request.entry.replace('\\', "/").to_ascii_lowercase();
     let mods =
         crate::import_index::enabled_mod_containers(&crate::paths::paks_dir(request.game_root));
@@ -1707,10 +1704,7 @@ fn check_variable_class_is_alone(
         .split_once('.')
         .ok_or_else(|| format!("{class_path} is not a class's path"))?;
     let defaults = format!("{package}.Default__{name}");
-    let index = match crate::import_index::load(request.game_root)? {
-        Some(index) if !index.is_stale(request.game_root) => index,
-        _ => crate::import_index::build(request.game_root, &mut |_, _| {})?,
-    };
+    let index = crate::import_index::current(request.game_root)?;
     let mut importers = index.importers_of(class_path).packages;
     importers.extend(index.importers_of(&defaults).packages);
     importers.sort();
@@ -11994,6 +11988,9 @@ mod game_data_tests {
         let Some(fixture) = Fixture::open(BLUEPRINT_ENUM) else {
             return;
         };
+        // The save reads the import index, which every mod goes into, so it waits out the tests
+        // writing a probe mod rather than finding the index stale and building it again.
+        let _turn = crate::paths::ModsTurn::take();
         let changes = PackageEdits {
             add_enum_entries: vec![rivals_uasset::AddEnumEntry {
                 export: None,
@@ -16364,6 +16361,9 @@ mod game_data_tests {
         let Some(fixture) = Fixture::open(CONSTRAINT_EMITTER) else {
             return;
         };
+        // The save reads the import index, which every mod goes into, so it waits out the tests
+        // writing a probe mod rather than finding the index stale and building it again.
+        let _turn = crate::paths::ModsTurn::take();
         let before = fixture.parse();
         let edits = PackageEdits {
             add_variables: vec![rivals_uasset::AddVariable {

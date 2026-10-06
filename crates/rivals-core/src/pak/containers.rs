@@ -159,11 +159,11 @@ fn open_store(
         let meta = std::fs::metadata(file).map_err(|e| format!("{}: {e}", file.display()))?;
         key.push((file.clone(), meta.len(), meta.modified().ok()));
     }
-    if let Some((cached, store)) = BASE_STORE
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .as_ref()
-        && *cached == key
+    // Held while opening, so callers asking at once wait for the one store rather than each
+    // opening the whole game for themselves.
+    let mut cached = BASE_STORE.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some((held, store)) = cached.as_ref()
+        && *held == key
     {
         return Ok(Arc::clone(store));
     }
@@ -176,7 +176,7 @@ fn open_store(
         )
         .map_err(|e| e.to_string())?,
     );
-    *BASE_STORE.lock().unwrap_or_else(PoisonError::into_inner) = Some((key, Arc::clone(&store)));
+    *cached = Some((key, Arc::clone(&store)));
     Ok(store)
 }
 

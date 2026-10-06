@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::{Cursor, ErrorKind};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use retoc::iostore::IoStoreTrait;
@@ -162,6 +162,18 @@ fn fingerprint(game_root: &str) -> Result<Vec<u8>, String> {
         out.extend_from_slice(&mtime.to_le_bytes());
     }
     Ok(out)
+}
+
+/// The index as the game and its mods are now: the cached one, or one built afresh when there is
+/// none or it is stale. One caller builds at a time, so callers asking at once share one build
+/// rather than each walking the whole game.
+pub fn current(game_root: &str) -> Result<ImportIndex, String> {
+    static BUILDING: Mutex<()> = Mutex::new(());
+    let _turn = BUILDING.lock().unwrap_or_else(PoisonError::into_inner);
+    match load(game_root)? {
+        Some(index) if !index.is_stale(game_root) => Ok(index),
+        _ => build(game_root, &mut |_, _| {}),
+    }
 }
 
 /// Walks every package once and writes the index to the cache. `progress` is told how many
