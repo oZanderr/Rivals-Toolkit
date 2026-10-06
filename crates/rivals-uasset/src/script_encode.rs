@@ -1034,6 +1034,29 @@ mod tests {
         );
     }
 
+    /// The VM never reads a struct literal's size, so a text may leave it out and gets 0 there,
+    /// with every other byte as the compiler wrote it.
+    #[test]
+    fn a_struct_literal_may_leave_out_its_size() {
+        let built = event_graph().build();
+        let printed = text_of(&built.parsed(), 1);
+        let sized = assemble_over(&built, 1, &printed, ADD)
+            .0
+            .expect("assembles");
+        let bare = printed.replace("LatentActionInfo, 24>", "LatentActionInfo>");
+        assert_ne!(bare, printed);
+        let bare = assemble_over(&built, 1, &bare, ADD).0.expect("assembles");
+        assert_eq!(sized.bytes.len(), bare.bytes.len());
+        let differing: Vec<(u8, u8)> = sized
+            .bytes
+            .iter()
+            .zip(&bare.bytes)
+            .filter(|(a, b)| a != b)
+            .map(|(a, b)| (*a, *b))
+            .collect();
+        assert_eq!(differing, vec![(24, 0)]);
+    }
+
     #[test]
     fn every_function_comes_back_byte_for_byte() {
         let built = event_graph().build();

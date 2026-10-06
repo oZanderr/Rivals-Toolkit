@@ -378,10 +378,12 @@ new function takes whatever signature is wanted. A name or object the package do
 added to it. Where the game reads a value as a variable (a `SwitchValue`'s index, a `DoubleToFloat`
 or `FloatToDouble` cast, a struct member's struct, an array element's array, a delegate) the text
 has to name one, as the compiler always does: a call or literal there would be written through a
-null pointer and crash the game, so a computed value goes in a `local` first. A changed or new call
-to a Blueprint function is held to its parameters; one to a native function the package never calls
-with as many arguments is refused until `--allow-unchecked`. An edit file carries a function's text
-as `script_texts`, inline (`text`) or from a file beside it (`file`).
+null pointer and crash the game, so a computed value goes in a `local` first. A struct literal can
+leave out the size the compiler writes after its path, as
+`StructConst</Script/CoreUObject.Vector2D>(1.0, 0.0)`: the game never reads it. A changed or new
+call to a Blueprint function is held to its parameters; one to a native function the package never
+calls with as many arguments is refused until `--allow-unchecked`. An edit file carries a function's
+text as `script_texts`, inline (`text`) or from a file beside it (`file`).
 
 `--new-function NAME --signature SIG` adds a function to the Blueprint class instead of rewriting
 one, its script written from the text. A signature takes the inputs in parentheses, `ref` before one

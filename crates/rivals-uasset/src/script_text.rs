@@ -2890,14 +2890,20 @@ impl Parser<'_, '_> {
             0x2F => {
                 self.expect("<")?;
                 let struct_type = self.object(Some(("/Script/CoreUObject", "ScriptStruct")))?;
-                self.expect(",")?;
-                let (size, size_pos) = self.int("the struct's size")?;
+                // The VM builds the struct from its fields and never reads the size, so a text may
+                // leave it out; the compiler's own is kept where the text says it.
+                let size = if self.eat(",") {
+                    let (size, size_pos) = self.int("the struct's size")?;
+                    Self::fits(size, size_pos, "a struct's size")?
+                } else {
+                    0
+                };
                 self.expect(">")?;
                 let (fields, notes) = self.args()?;
                 Self::with(
                     Expr::StructConst {
                         struct_type,
-                        size: Self::fits(size, size_pos, "a struct's size")?,
+                        size,
                         fields,
                     },
                     pos,
