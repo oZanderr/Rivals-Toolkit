@@ -341,9 +341,12 @@ write the same edits itself:
 `export` is the object's path below the package. `path` steps into a field with `.`, into a static
 array's slot or a container's element with `[i]`, and into a map's pair or a set's element with
 `{key}`. An edit given `was` is refused as drift once its value reads otherwise, which
-`--allow-drift` overrides. An edit under one that adds, moves or replaces what it names is made once
-that has landed, in the same save, so one apply gives a new row its columns, an instanced struct
-given another type that type's fields, and a map whose pairs moved its changed values.
+`--allow-drift` overrides. An insert into an array, a removal from one or a reorder also records
+what the array `becomes`, so applying it again finds it made rather than adding another, and an
+array that reads as neither is refused as drift. An edit under one that adds, moves or replaces
+what it names is made once that has landed, in the same save, so one apply gives a new row its
+columns, an instanced struct given another type that type's fields, and a map whose pairs moved its
+changed values.
 
 Rows, string table entries and a function's script text name their object the same way, with
 `object` in place of `export`, and a string table entry is found by its key. An import retarget or
@@ -361,9 +364,7 @@ beside a note still apply. The limits worth knowing:
 
 - **Not everything has a path.** A field of a map's key keeps its byte offset, which fits only the
   package it came from. Script constant edits, payloads and export table edits still name their
-  object by index. Each is held by `expect` to what it was written against. An insert into an
-  array, or a removal from one, by position is held to every element the array held, so applying
-  it a second time is refused as drift rather than adding another.
+  object by index. Each is held by `expect` to what it was written against.
 - **A few changes take a second pass.** A set element or a map key with no text form to key it by,
   and a set or a map inside an element the same save adds, are notes. So are values in a map whose
   pairs moved when a key has no text form to name its pair by. Dump the saved copy and diff again

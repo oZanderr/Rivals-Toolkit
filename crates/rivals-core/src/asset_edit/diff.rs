@@ -31,6 +31,72 @@ pub struct DiffOutcome {
     /// Changes that wait for an edit beside them, written out as path edits once the original is
     /// at hand: see [`to_paths`].
     follow: Vec<FollowUp>,
+    /// What each container the edits add to, drop from or reorder holds once they have, by where
+    /// it sits: see [`PathEdit::becomes`].
+    becomes: Vec<Becomes>,
+}
+
+/// A container, by where the original holds it, and what the edited dump says it holds.
+#[derive(Debug)]
+struct Becomes {
+    offset: u64,
+    name: String,
+    element: Option<u32>,
+    elements: String,
+}
+
+/// Records what the edited dump says a container holds, for the edits that add to, drop from or
+/// reorder it.
+fn record_becomes(entry: &PropertyEntry, edited: &Json, out: &mut DiffOutcome) {
+    if let (Some((offset, _)), Some(elements)) = (entry.span, elements_in(edited)) {
+        out.becomes.push(Becomes {
+            offset,
+            name: entry.name.clone(),
+            element: entry.element,
+            elements,
+        });
+    }
+}
+
+/// A dumped container's elements as `rivals_uasset::elements_of` lists a container's: each
+/// element's halves as text, `null` for one with no text form.
+fn elements_in(edited: &Json) -> Option<String> {
+    let halves: Vec<Vec<Option<String>>> = match edited.get("entries").and_then(Json::as_array) {
+        Some(pairs) => pairs
+            .iter()
+            .map(|pair| {
+                vec![
+                    pair.get("key").and_then(text_of),
+                    pair.get("value").and_then(text_of),
+                ]
+            })
+            .collect(),
+        None => edited
+            .get("items")
+            .and_then(Json::as_array)?
+            .iter()
+            .map(|item| vec![text_of(item)])
+            .collect(),
+    };
+    serde_json::to_string(&halves).ok()
+}
+
+/// What the container an edit adds to, drops from or reorders becomes, where the diff recorded it.
+fn becomes_of(becomes: &[Becomes], edit: &ValueEdit) -> Option<String> {
+    if !matches!(
+        edit.op,
+        EditOp::Insert { .. } | EditOp::Remove { .. } | EditOp::Reorder { .. }
+    ) {
+        return None;
+    }
+    becomes
+        .iter()
+        .find(|held| {
+            held.offset == edit.offset
+                && held.name == edit.expect_name
+                && held.element == edit.expect_element
+        })
+        .map(|held| held.elements.clone())
 }
 
 /// Where a change that waits for another is written from: a value the original holds, or a row
@@ -57,6 +123,7 @@ enum FollowUp {
         anchor: Anchor,
         steps: Vec<Segment>,
         op: PathOp,
+        becomes: Option<String>,
         label: String,
     },
     /// What the edited dump gives a value the same save makes: see [`fill`].
@@ -152,13 +219,22 @@ fn to_paths(original: &ParsedPackage, out: &mut DiffOutcome) {
     let mut kept = Vec::new();
     for edit in std::mem::take(&mut edits.values) {
         match value_path(original, &edit).filter(|path| placed_alone(original, path, &edit)) {
-            Some(path) => edits.paths.push(path),
+            Some(mut path) => {
+                path.becomes = becomes_of(&out.becomes, &edit);
+                edits.paths.push(path);
+            }
             None => kept.push(edit),
         }
     }
     edits.values = kept;
     for follow in std::mem::take(&mut out.follow) {
-        place_follow_up(original, follow, &mut out.edits.paths, &mut out.notes);
+        place_follow_up(
+            original,
+            follow,
+            &out.becomes,
+            &mut out.edits.paths,
+            &mut out.notes,
+        );
     }
     let edits = &mut out.edits;
     let mut kept = Vec::new();
@@ -214,6 +290,7 @@ fn value_path(original: &ParsedPackage, edit: &ValueEdit) -> Option<PathEdit> {
         path: rivals_uasset::format_path(&segments),
         op,
         was,
+        becomes: None,
     })
 }
 
@@ -233,6 +310,7 @@ fn field_set_path(original: &ParsedPackage, set: &FieldSet) -> Option<PathEdit> 
             text: set.text.clone(),
         },
         was: None,
+        becomes: None,
     })
 }
 
@@ -280,6 +358,7 @@ impl Head {
             path: rivals_uasset::format_path(at),
             op,
             was: None,
+            becomes: None,
         }
     }
 }
@@ -322,6 +401,7 @@ fn place_anchor(original: &ParsedPackage, anchor: &Anchor) -> Option<(Head, Vec<
 fn place_follow_up(
     original: &ParsedPackage,
     follow: FollowUp,
+    becomes: &[Becomes],
     paths: &mut Vec<PathEdit>,
     notes: &mut Vec<String>,
 ) {
@@ -336,11 +416,15 @@ fn place_follow_up(
             anchor,
             steps,
             op,
+            becomes,
             label,
         } => match place_anchor(original, &anchor) {
             Some((head, mut at)) => {
                 at.extend(steps);
-                paths.push(head.edit(&at, op));
+                paths.push(PathEdit {
+                    becomes,
+                    ..head.edit(&at, op)
+                });
             }
             None => notes.push(unplaced(&label)),
         },
@@ -358,9 +442,12 @@ fn place_follow_up(
         },
         FollowUp::Keyed { edit, label } => {
             let path = match &edit {
-                Keyed::Value(value) => {
-                    value_path(original, value).filter(|path| placed_alone(original, path, value))
-                }
+                Keyed::Value(value) => value_path(original, value)
+                    .filter(|path| placed_alone(original, path, value))
+                    .map(|path| PathEdit {
+                        becomes: becomes_of(becomes, value),
+                        ..path
+                    }),
                 Keyed::Field(set) => field_set_path(original, set),
             };
             match path {
@@ -411,17 +498,21 @@ fn fill(
         }
         "array" | "set" => {
             let items = edited.get("items").and_then(Json::as_array);
+            let becomes = elements_in(edited);
             for (index, item) in items.into_iter().flatten().enumerate() {
                 let here = format!("{label}[{index}]");
                 let index = index as u32;
                 if kind == "array" {
-                    paths.push(head.edit(
-                        &at,
-                        PathOp::Insert {
-                            index: Some(index),
-                            key: None,
-                        },
-                    ));
+                    paths.push(PathEdit {
+                        becomes: becomes.clone(),
+                        ..head.edit(
+                            &at,
+                            PathOp::Insert {
+                                index: Some(index),
+                                key: None,
+                            },
+                        )
+                    });
                     fill(
                         head,
                         with(Segment::Index(index)),
@@ -1461,7 +1552,11 @@ fn diff_items(
     };
     let was: Vec<Json> = items.iter().map(dumped).collect();
     if let Some(order) = reordered(&was, now) {
+        record_becomes(entry, edited, out);
         return push_reorder(entry, order, label, out);
+    }
+    if now.len() != items.len() {
+        record_becomes(entry, edited, out);
     }
     for (position, (before, after)) in items.iter().zip(now).enumerate() {
         let at = Whole::Element(position as u32);
@@ -1630,6 +1725,7 @@ fn element_sets(
             _ => &[],
         };
         let steps = steps_of(&path);
+        let becomes = elements_in(edited);
         let mut complete = true;
         for (index, item) in now.iter().enumerate() {
             let mut here = path.clone();
@@ -1647,6 +1743,7 @@ fn element_sets(
                             index: Some(index as u32),
                             key: None,
                         },
+                        becomes: becomes.clone(),
                         label: at(),
                     });
                     // A new element is a copy of the last one the array held.
@@ -1661,6 +1758,7 @@ fn element_sets(
                 anchor: anchor.clone(),
                 steps,
                 op: PathOp::Remove,
+                becomes: becomes.clone(),
                 label: at(),
             });
         }
@@ -1713,6 +1811,7 @@ fn diff_map(
     // the pairs have moved.
     let pairs: Vec<Json> = entries.iter().map(dumped).collect();
     if let Some(order) = reordered(&pairs, items) {
+        record_becomes(entry, edited, out);
         return push_reorder(entry, order, label, out);
     }
     let keys: Vec<Json> = entries.iter().map(|pair| dumped(&pair.key)).collect();
@@ -1721,6 +1820,7 @@ fn diff_map(
         .map(|item| item.get("key").cloned().unwrap_or_default())
         .collect();
     if let Some(order) = reordered(&keys, &now_keys) {
+        record_becomes(entry, edited, out);
         let by_key = (0..entries.len() as u32).all(|index| {
             matches!(
                 rivals_uasset::element_segment(&entry.value, index),

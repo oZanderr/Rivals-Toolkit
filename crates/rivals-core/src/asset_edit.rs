@@ -5052,6 +5052,7 @@ mod tests {
             path: format!("Holder.{path}"),
             op,
             was: None,
+            becomes: None,
         }
     }
 
@@ -11425,10 +11426,67 @@ mod game_data_tests {
         );
 
         let changes = outcome.edits.resolve(Path::new(".")).expect("resolve");
-        let (_, after) = fixture.apply_changes(changes);
+        let (patched, after) = fixture.apply_changes(changes.clone());
         let now = items_of(&after, "Mappings");
         assert_eq!(now.len(), items.len() + 1);
         assert_eq!(bool_field(&now[items.len()], "bIgnorLowPriority"), !was);
+        applied_again_changes_nothing(&fixture, &changes, &patched, &after);
+
+        // An array that has lost an element since the dump is neither what the edits were
+        // written against nor what they make, and the insert is refused.
+        let (shrunk, short) = fixture.apply_changes(PackageEdits {
+            paths: vec![rivals_uasset::PathEdit {
+                export: rivals_uasset::below_package(&before.exports[0].path).to_string(),
+                row: None,
+                defaults: false,
+                path: "Mappings[0]".into(),
+                op: rivals_uasset::PathOp::Remove,
+                was: None,
+                becomes: None,
+            }],
+            ..Default::default()
+        });
+        let refused = preview_read_edits(
+            &fixture.request_changes(changes),
+            Some(&fixture.schema),
+            FSerializedAssetBundle {
+                asset_file_buffer: shrunk.asset,
+                exports_file_buffer: shrunk.exports,
+                bulk_data_buffer: None,
+                optional_bulk_data_buffer: None,
+                memory_mapped_bulk_data_buffer: None,
+            },
+            &short,
+        )
+        .err()
+        .expect("drift");
+        assert!(refused.starts_with(rivals_uasset::DRIFT), "{refused}");
+    }
+
+    /// The edits that made `after` applied to it again: each finds itself made, and nothing is
+    /// written.
+    fn applied_again_changes_nothing(
+        fixture: &Fixture,
+        changes: &PackageEdits,
+        patched: &PatchedBundle,
+        after: &rivals_uasset::ParsedPackage,
+    ) {
+        let (again, _) = preview_read_edits(
+            &fixture.request_changes(changes.clone()),
+            Some(&fixture.schema),
+            FSerializedAssetBundle {
+                asset_file_buffer: patched.asset.clone(),
+                exports_file_buffer: patched.exports.clone(),
+                bulk_data_buffer: None,
+                optional_bulk_data_buffer: None,
+                memory_mapped_bulk_data_buffer: None,
+            },
+            after,
+        )
+        .expect("applied again");
+        assert!(again.applied.is_empty(), "{:?}", again.applied);
+        assert_eq!(again.asset, patched.asset);
+        assert_eq!(again.exports, patched.exports);
     }
 
     /// The first object holding a run of struct values a dump writes: `found` picks the value,
@@ -11463,7 +11521,8 @@ mod game_data_tests {
         let outcome = crate::asset_edit::diff::diff_dump(before, dump).expect("diff");
         assert!(outcome.notes.is_empty(), "{:?}", outcome.notes);
         let changes = outcome.edits.resolve(Path::new(".")).expect("resolve");
-        let (_, after) = fixture.apply_changes(changes);
+        let (patched, after) = fixture.apply_changes(changes.clone());
+        applied_again_changes_nothing(fixture, &changes, &patched, &after);
         // An import the save adds for an object it names is its own doing, not the dump's.
         let mut dump = dump.clone();
         dump["imports"] = serde_json::to_value(&after.imports).expect("imports");

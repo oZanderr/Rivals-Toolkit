@@ -3127,6 +3127,7 @@ fn path_edit(args: &AssetSetArgs, path: &str) -> Result<rivals_uasset::PathEdit,
         path,
         op,
         was: None,
+        becomes: None,
     })
 }
 

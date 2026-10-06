@@ -38,6 +38,11 @@ pub struct PathEdit {
     /// since, and the edit is refused rather than undoing that, unless the save allows drift.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub was: Option<String>,
+    /// For an edit adding, dropping or moving a container's elements, what the container holds
+    /// once every edit of the file on it has landed, listed as `was` lists one. A container that
+    /// holds that already has had them, and the edit is left out rather than made again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub becomes: Option<String>,
 }
 
 /// What a path edit does to what its path names. The path names the element an element's edit
@@ -610,6 +615,8 @@ pub fn lower_paths(parsed: &ParsedPackage, changes: &PackageEdits) -> Result<Low
         if let Lowering::Drift(why) = lowering {
             if !changes.allow_drift {
                 drift.push(format!("{label} {why}"));
+                // What is under it is no more placed than it is.
+                changing.push((root.clone(), segments.clone()));
                 continue;
             }
             lowering = lower_one(edit, &reached, &label, false)?;
@@ -772,6 +779,11 @@ fn lower_one(
             if let Some(done) = landed_on_entry(value, &edit.op, edit.was.as_deref()) {
                 return Ok(Lowering::Done(done));
             }
+            if became(value, edit) {
+                return Ok(Lowering::Done(
+                    "already holds what the edits make of it".into(),
+                ));
+            }
             // A value stored as a struct that reads as a list, such as a tag container, has no
             // list to add to until it is stored.
             if matches!(edit.op, PathOp::Insert { .. }) && listed_once_stored(value) {
@@ -815,6 +827,11 @@ fn lower_one(
             Ok(Lowering::Value(at_entry(entry, op, label)?))
         }
         Reached::Element { container, index } => {
+            if became(&container.value, edit) {
+                return Ok(Lowering::Done(
+                    "already holds what the edits make of it".into(),
+                ));
+            }
             let index = *index;
             let item = element_value(&container.value, index);
             let key = element_key(&container.value, index);
@@ -861,6 +878,19 @@ fn lower_one(
             Ok(Lowering::Value(at_entry(container, op, label)?))
         }
     }
+}
+
+/// Whether a container already holds what an edit's file makes of it, and so has had its edits.
+/// One that still reads as it did before them has not, however alike the two read: an element
+/// with no text form matches any.
+fn became(value: &PropertyValue, edit: &PathEdit) -> bool {
+    edit.becomes
+        .as_deref()
+        .is_some_and(|becomes| same_elements(value, becomes))
+        && !edit
+            .was
+            .as_deref()
+            .is_some_and(|was| same_elements(value, was))
 }
 
 /// Whether a value nothing stores yet is declared as something other than a container, so that
@@ -1082,6 +1112,7 @@ mod tests {
             path: path.into(),
             op,
             was: None,
+            becomes: None,
         }
     }
 
@@ -1386,6 +1417,48 @@ mod tests {
             lower(&parsed, vec![insert]).is_err(),
             "it held two elements"
         );
+    }
+
+    /// An insert or a removal by position that records what its array becomes is left out once
+    /// the array holds that, and made while it holds what it held before.
+    #[test]
+    fn an_array_edit_that_has_made_its_array_is_left_out() {
+        let (before, asset, exports) = fixture();
+        let insert = PathEdit {
+            was: elements_of(top(&before, "Values")),
+            becomes: Some(r#"[["1"],["7"],["7"]]"#.into()),
+            ..at(
+                "Values",
+                PathOp::Insert {
+                    index: None,
+                    key: None,
+                },
+            )
+        };
+        let removal = PathEdit {
+            was: Some("bb".into()),
+            becomes: Some(r#"[["a"]]"#.into()),
+            ..at("Words[1]", PathOp::Remove)
+        };
+        let edits = vec![insert, removal];
+        let (after, _, _) = apply(&before, &asset, &exports, edits.clone());
+        let again = lower(&after, edits).expect("lowers");
+        assert!(again.values.is_empty(), "{:?}", again.values);
+        assert_eq!(again.notes.len(), 2, "{:?}", again.notes);
+        // An array that is neither what it was nor what it becomes has changed since.
+        let other = PathEdit {
+            was: Some(r#"[["1"],["2"]]"#.into()),
+            becomes: Some(r#"[["1"],["2"],["2"]]"#.into()),
+            ..at(
+                "Values",
+                PathOp::Insert {
+                    index: None,
+                    key: None,
+                },
+            )
+        };
+        let refused = lower(&before, vec![other]).expect_err("drift");
+        assert!(refused.starts_with(DRIFT_START), "{refused}");
     }
 
     #[test]
