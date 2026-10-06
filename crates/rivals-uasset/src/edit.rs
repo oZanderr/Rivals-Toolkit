@@ -252,6 +252,9 @@ pub struct PackageEdits {
     /// each its display name in the next, and holds the enum to nothing replicating it at another
     /// width.
     pub add_enum_entries: Vec<crate::enum_entry::AddEnumEntry>,
+    /// Fields added to a Blueprint struct after its own. A save of its own; the caller holds the
+    /// struct to nothing laying it out by position.
+    pub add_fields: Vec<crate::struct_field::AddField>,
     /// Components added to a Blueprint by copying one its construction script builds. The copy
     /// is this save; wiring it in takes value edits on the result, which the caller makes: see
     /// `rivals_core::asset_edit::preview_edits`.
@@ -869,6 +872,7 @@ impl PackageEdits {
         self.new_functions.extend(other.new_functions);
         self.add_variables.extend(other.add_variables);
         self.add_enum_entries.extend(other.add_enum_entries);
+        self.add_fields.extend(other.add_fields);
         self.add_components.extend(other.add_components);
         self.remove_components.extend(other.remove_components);
         self.dependencies.extend(other.dependencies);
@@ -902,6 +906,7 @@ impl PackageEdits {
             && self.new_functions.is_empty()
             && self.add_variables.is_empty()
             && self.add_enum_entries.is_empty()
+            && self.add_fields.is_empty()
             && self.add_components.is_empty()
             && self.remove_components.is_empty()
             && self.exports.is_empty()
@@ -1394,6 +1399,41 @@ pub fn patch_package_with(
             &addition.splices,
             HeaderDraft {
                 names: Some(addition.names),
+                ..Default::default()
+            },
+        )?;
+        return Ok(PatchedBundle {
+            asset: rewritten.asset,
+            exports: rewritten.exports,
+            applied: addition.applied,
+            bulk: None,
+            optional_bulk: None,
+            notes: Vec::new(),
+        });
+    }
+    if !edits.add_fields.is_empty() {
+        let alone = PackageEdits {
+            add_fields: Vec::new(),
+            save_as: None,
+            expect: Expected::default(),
+            allow_drift: false,
+            allow_missing: false,
+            allow_unchecked: false,
+            ..edits.clone()
+        };
+        if !alone.is_empty() {
+            return Err(
+                "adding a struct field is a save of its own; save or discard the other edits first"
+                    .into(),
+            );
+        }
+        let addition = crate::struct_field::add_fields(parsed, &package, &edits.add_fields)?;
+        let rewritten = rewrite(
+            bundle,
+            &addition.splices,
+            HeaderDraft {
+                names: Some(addition.tables.names),
+                imports: Some(addition.tables.imports),
                 ..Default::default()
             },
         )?;
@@ -6033,6 +6073,9 @@ pub fn verify_patch(
     if !edits.add_enum_entries.is_empty() {
         return crate::enum_entry::verify(before, after, &edits.add_enum_entries);
     }
+    if !edits.add_fields.is_empty() {
+        return crate::struct_field::verify(before, after, &edits.add_fields);
+    }
     let removed = if edits.remove_exports.is_empty() {
         Vec::new()
     } else {
@@ -8990,6 +9033,7 @@ mod tests {
                 enum_tail: None,
             }],
             unresolved_structs: Vec::new(),
+            outgrown_structs: Vec::new(),
             property_kinds: Default::default(),
             schema_fixups: Vec::new(),
             missing_schemas: Vec::new(),

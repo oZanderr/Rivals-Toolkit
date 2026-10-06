@@ -49,6 +49,11 @@ pub struct PackageSource<'a> {
     pub container: &'a str,
     pub entry: &'a str,
     pub kind: AssetSource,
+    /// The container of the mod a save writes into, when it has one already. The packages this
+    /// one references are read through it, its copies over the game's, and every Blueprint struct
+    /// this one imports is read from its own package rather than taken from the mappings, as the
+    /// mod may have given one a field.
+    pub mod_container: Option<String>,
 }
 
 /// Parses, and when the mappings file lacks a struct that another package defines, reads the
@@ -127,7 +132,7 @@ fn synth_for(
     source: &PackageSource<'_>,
     layouts: Option<&LayoutReader<'_>>,
 ) -> Option<Arc<Mappings>> {
-    let (wanted, local) = wanted_definitions(parsed, mappings);
+    let (wanted, local) = wanted_definitions(parsed, mappings, source.mod_container.is_some());
     if wanted.is_empty() && !local {
         return None;
     }
@@ -143,9 +148,11 @@ fn synth_for(
 /// and the Blueprint classes whose instances did not read to their end, which is what a class
 /// revised after the mappings were dumped looks like. The flag says whether such a class is
 /// defined in this very package, whose own definitions then join the second parse.
+/// `every_struct` wants each Blueprint struct the package imports, failed on or not.
 fn wanted_definitions(
     parsed: &ParsedPackage,
     mappings: Option<&Mappings>,
+    every_struct: bool,
 ) -> (Vec<MissingSchema>, bool) {
     let mut wanted: Vec<MissingSchema> = parsed
         .missing_schemas
@@ -218,15 +225,17 @@ fn wanted_definitions(
         });
     }
     // A Blueprint struct is defined by the package the import of it points into: one a property
-    // failed on, and, where the package's own classes are recovered, any it imports, since the
-    // first read stopped at the class before reaching them.
+    // failed on, as one the mappings lack or one given a field since they were dumped, and, where
+    // the package's own classes are recovered, any it imports, since the first read stopped at the
+    // class before reaching them.
     for import in parsed
         .imports
         .iter()
         .filter(|import| import.class_name == "UserDefinedStruct")
     {
-        let failed_on = parsed.unresolved_structs.contains(&import.object_name);
-        if (local || failed_on)
+        let failed_on = parsed.unresolved_structs.contains(&import.object_name)
+            || parsed.outgrown_structs.contains(&import.object_name);
+        if (local || failed_on || every_struct)
             && !wanted
                 .iter()
                 .any(|missing| missing.object_path == import.path)
@@ -346,8 +355,14 @@ fn synthesise(
             fields.finish()
         )
     };
+    // A save's mod is read through, and its container is rewritten in place by each save into
+    // it, so what it holds is told apart by its size and time as well as its path.
+    let container = source.mod_container.as_deref().unwrap_or(source.container);
+    let stamp = std::fs::metadata(container)
+        .ok()
+        .map(|meta| (meta.len(), meta.modified().ok()));
     let joined = entries.join("\u{1}");
-    let key = format!("{}\u{1}{scope}\u{1}{joined}", source.container);
+    let key = format!("{container}\u{1}{stamp:?}\u{1}{scope}\u{1}{joined}");
     // A reader keeps only what another package can use: a layout that needs none of this
     // package's own definitions.
     let cached = match layouts {
@@ -374,7 +389,7 @@ fn synthesise(
             loaded.insert(entry.clone());
             let bundle = match layouts {
                 Some(reader) => (reader.load)(&entry),
-                None => asset::load_bundle(source.game_root, source.container, &entry, source.kind),
+                None => asset::load_bundle(source.game_root, container, &entry, source.kind),
             };
             let Ok(bundle) = bundle else {
                 continue;
@@ -496,6 +511,7 @@ mod tests {
             container: "c.utoc",
             entry,
             kind,
+            mod_container: None,
         }
     }
 
@@ -590,6 +606,7 @@ mod game_data_tests {
                 container: &container,
                 entry: TABLE,
                 kind: AssetSource::Utoc,
+                mod_container: None,
             },
         )
         .expect("parse");

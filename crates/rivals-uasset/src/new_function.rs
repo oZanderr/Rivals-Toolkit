@@ -498,7 +498,9 @@ pub(crate) fn verify(
                     NewField::ByReference => FieldRole::Ref,
                     NewField::Output => FieldRole::Out,
                     NewField::Return => FieldRole::Return,
-                    NewField::Input | NewField::Local | NewField::Variable => FieldRole::In,
+                    NewField::Input | NewField::Local | NewField::Variable | NewField::Member => {
+                        FieldRole::In
+                    }
                 };
                 (param.name.clone(), param.ty.printed(), role)
             })

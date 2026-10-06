@@ -192,7 +192,7 @@ pub(crate) fn add_variables(
     })
 }
 
-fn is_ident(text: &str) -> bool {
+pub(crate) fn is_ident(text: &str) -> bool {
     let mut chars = text.chars();
     matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')

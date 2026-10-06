@@ -221,6 +221,20 @@ entries stops before it. The mappings do not know the entry, so setting a value 
 in another package asks for `--allow-unchecked`. `--export N` picks the enum when the package holds
 more than one.
 
+`asset add-field --name X --type T` adds a field to a Blueprint struct after its own, named as the
+editor names a member: `X_<n>_<GUID>`, the guid the same each time the same field is added. Each
+stored value of a struct says which of its fields it holds, so table rows, values and the struct's
+own defaults read as before in every package, the new field unset until a value edit sets it. A
+package read for a save into the mod holding the struct reads it with the mod's fields, so a row of
+a table in the game can be given the new field in that mod. A field the struct has already, by name
+and type, is left out, so a file adding one applies again. The type is one value of a native type,
+as a `local` line takes it (see below); a container or a Blueprint type is refused, as is a struct
+deriving from another. The flags the compiler sets from what the members are (zero constructed,
+plain old data, no destructor) are cleared, which suits any member. A struct another package lays
+out by position is refused, naming the package: a script building it as a constant, a value of it
+sent over the network, a Niagara asset, or a map or set keyed by it when the new field cannot be
+hashed. `--struct N` picks the struct when the package holds more than one.
+
 `asset script-set` changes one thing inside a function's bytecode, addressed by the statement offset
 `asset script` prints: a literal by its place in the statement (`--const`) or by where it starts
 (`--at`, as `asset script --expressions` lists), an object constant (`--object`), a text (`--text`),
@@ -262,6 +276,7 @@ rivals-cli asset add-component --container ... --entry ... --node 5 --name Stati
 rivals-cli asset remove-component --container ... --entry ... --node 18 --mod-name MyMod
 rivals-cli asset add-component --container ... --entry ... --from-parent StaticMesh --name StaticMeshCopy --mod-name MyMod
 rivals-cli asset add-enum-entry --container ... --entry ... --display "Cone" --mod-name MyMod
+rivals-cli asset add-field --container ... --entry ... --name Rarity --type Int --mod-name MyMod
 rivals-cli asset save-as --container ... --entry ... --to /Game/Mods/MyThing/DA_Copy --mod-name MyMod
 rivals-cli asset rename-package --container ~mods/MyMod_9999999_P.utoc --entry ... --to /Game/Mods/MyThing/DA_New
 rivals-cli asset deps    --container ... --entry ... --export 3                         # load order

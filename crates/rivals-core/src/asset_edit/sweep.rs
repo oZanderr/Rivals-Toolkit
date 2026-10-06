@@ -1126,6 +1126,7 @@ mod tests {
                     container: &utoc.to_string_lossy(),
                     entry,
                     kind: crate::asset::AssetSource::Utoc,
+                    mod_container: None,
                 },
             )
             .expect("parse");

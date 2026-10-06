@@ -401,6 +401,9 @@ pub struct Diagnostics {
     /// Structs that had neither a native layout nor a schema, which is the actionable signal for
     /// extending the native table.
     pub unresolved_structs: BTreeSet<String>,
+    /// Structs a value's header reached past the end of, as one given a field since the mappings
+    /// were dumped does.
+    pub outgrown_structs: BTreeSet<String>,
     pub unsupported: BTreeSet<String>,
     /// How many values of each property type were actually read. A type the mappings declare but
     /// that never appears here is never serialized, which is the difference between code that is
@@ -545,6 +548,9 @@ pub(crate) fn read_property_block(
     // culprit; reading on would fail somewhere unrelated.
     let covered = header.covered_slots();
     if covered > schema.len() {
+        diagnostics
+            .outgrown_structs
+            .insert(schema.name().to_string());
         return Err(cursor.err(format!(
             "{} has {} schema slots but the header covers {covered}. The mappings file does not match this build, or the struct has a native serializer.",
             schema.name(),

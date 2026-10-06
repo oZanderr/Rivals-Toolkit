@@ -865,6 +865,7 @@ mod tests {
             ],
             dependencies: None,
             unresolved_structs: Vec::new(),
+            outgrown_structs: Vec::new(),
             property_kinds: Default::default(),
             schema_fixups: Default::default(),
             missing_schemas: Default::default(),

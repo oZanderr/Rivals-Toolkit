@@ -199,6 +199,7 @@ fn parse(
             container,
             entry,
             kind,
+            mod_container: None,
         },
         // Inherited values are shown so they can be given one of their own.
         rivals_uasset::ParseOptions {
@@ -255,6 +256,7 @@ fn bytes_view(
         container,
         entry,
         kind: source_of(container),
+        mod_container: None,
     };
     let (stopped_at, ranges) =
         match schema_synth::parse_package_traced(&bundle, schema.as_deref(), &source) {

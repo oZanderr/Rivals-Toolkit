@@ -88,6 +88,7 @@ impl ArchetypeSource<'_> {
                 container: &container,
                 entry: name,
                 kind: AssetSource::Utoc,
+                mod_container: None,
             },
             ParseOptions::default(),
         )?;
@@ -366,6 +367,7 @@ mod tests {
                 container,
                 entry,
                 kind: AssetSource::Utoc,
+                mod_container: None,
             },
             ParseOptions {
                 declared_slots: declared,

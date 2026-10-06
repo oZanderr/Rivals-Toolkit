@@ -136,6 +136,7 @@ pub fn mod_report(
                 container: &utoc,
                 entry: path,
                 kind: AssetSource::Utoc,
+                mod_container: None,
             },
             &layouts,
             ParseOptions::default(),

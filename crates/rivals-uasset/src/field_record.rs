@@ -9,7 +9,8 @@ use crate::ustruct::{FieldRecord, RecordTail};
 
 /// `RF_Public`, the only object flag on a function's field records and on a container's element.
 const PUBLIC: u32 = 0x1;
-/// What the cook leaves on a class's own variables: `RF_Public` and one more object flag.
+/// What the cook leaves on a class's own variables and a Blueprint struct's members: `RF_Public`
+/// and one more object flag.
 const CLASS_VARIABLE: u32 = 0x0020_0001;
 
 /// `FBoolProperty`'s packing, the same in every bool record the game ships: a one-byte field at
@@ -27,6 +28,9 @@ const ARRAY_LOCAL: u64 = 0x0800_0000;
 /// `CPF_Edit | CPF_BlueprintVisible | CPF_DisableEditOnInstance`, a variable as the Blueprint editor
 /// makes one: settable on the class's defaults and readable and writable from its graphs.
 const VARIABLE: u64 = 0x0001_0005;
+/// `CPF_Edit | CPF_BlueprintVisible`, which every member of every Blueprint struct the game ships
+/// carries.
+const MEMBER: u64 = 0x5;
 
 /// What a new field holds, as a text declares it. Classes, structs and enums are named by their
 /// full path: a short name can stand for more than one.
@@ -71,9 +75,20 @@ pub enum NewField {
     Return,
     /// A variable of the class itself.
     Variable,
+    /// A member of a Blueprint struct.
+    Member,
 }
 
 impl FieldType {
+    /// Whether a value of the type can be hashed, which every field of a struct keying a map or
+    /// held in a set needs. How a struct hashes is not known from here, so one counts as not.
+    pub fn hashes(&self) -> bool {
+        !matches!(
+            self,
+            Self::Text | Self::Struct(_) | Self::Array(_) | Self::Set(_) | Self::Map(..)
+        )
+    }
+
     /// The type as a function's signature prints it, so a declaration can be held to a field the
     /// function already has.
     pub fn printed(&self) -> String {
@@ -275,9 +290,10 @@ pub(crate) fn new_record(
         NewField::Output => OUTPUT,
         NewField::Return => RETURN,
         NewField::Variable => VARIABLE,
+        NewField::Member => MEMBER,
     };
     let mut record = record(name, ty, flags, tables)?;
-    if role == NewField::Variable {
+    if matches!(role, NewField::Variable | NewField::Member) {
         record.field_flags = CLASS_VARIABLE;
     }
     Ok(record)

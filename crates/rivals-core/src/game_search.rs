@@ -348,6 +348,7 @@ fn search_one(
                 container: &candidate.container,
                 entry: &candidate.path,
                 kind: AssetSource::Utoc,
+                mod_container: None,
             },
             layouts,
             ParseOptions::default(),
@@ -680,6 +681,7 @@ mod game_data_tests {
                 container: &patch,
                 entry: &candidate.path,
                 kind: AssetSource::Utoc,
+                mod_container: None,
             };
             let options = ParseOptions::default();
             let through = json(schema_synth::parse_package_through(

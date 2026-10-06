@@ -28,31 +28,7 @@ const LARGEST: i64 = 255;
 
 /// The Blueprint enum a save adds entries to: the export named, or the package's only one.
 pub fn enum_of(parsed: &ParsedPackage, export: Option<u32>) -> Result<&ParsedExport, String> {
-    let found = match export {
-        Some(index) => parsed
-            .exports
-            .get(index as usize)
-            .ok_or_else(|| format!("this package has no export {index}"))?,
-        None => {
-            let enums: Vec<&ParsedExport> = parsed
-                .exports
-                .iter()
-                .filter(|export| export.class_name == "UserDefinedEnum")
-                .collect();
-            match enums.as_slice() {
-                [one] => *one,
-                [] => return Err("this package holds no Blueprint enum".into()),
-                _ => return Err("this package holds several Blueprint enums: name one".into()),
-            }
-        }
-    };
-    if found.class_name != "UserDefinedEnum" {
-        return Err(format!(
-            "{} is a {}, not a Blueprint enum",
-            found.object_name, found.class_name
-        ));
-    }
-    Ok(found)
+    crate::struct_field::definition_of(parsed, export, "UserDefinedEnum", "Blueprint enum")
 }
 
 /// How a Blueprint enum lays out its entries: values 0 to N-1, then `<P>_MAX` at N.

@@ -48,6 +48,7 @@ pub use script_text::{
     Diagnostic, ScriptPrinter, ScriptText, TextLabel, TextLine, print_expr, print_script,
 };
 mod stringtable;
+mod struct_field;
 mod structs;
 mod tagged;
 #[cfg(test)]
@@ -134,6 +135,7 @@ pub use props::{
 };
 pub use remove::{ClearedReference, Importers, RemovalPlan, RemovedExport, plan_removal};
 pub use stringtable::{StringEntrySpan, StringTable, StringTableEntry, StringTableLayout};
+pub use struct_field::{AddField, fields_held, member_shown_as, new_field_names, struct_of};
 pub use structs::stored_whole;
 pub use ustruct::type_text as property_type_text;
 pub use ustruct::{

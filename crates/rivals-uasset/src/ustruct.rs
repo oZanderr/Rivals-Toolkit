@@ -327,6 +327,8 @@ pub struct StructLayout {
     pub function_map: Vec<(String, i32)>,
     /// Where a function's `FunctionFlags` sit.
     pub function_flags_at: Option<u64>,
+    /// Where a script struct's `StructFlags` sit, and what they hold.
+    pub struct_flags: Option<(u64, u32)>,
 }
 
 /// What a `UStruct`-derived export stores after its properties, as far as the scanner follows it:
@@ -456,7 +458,7 @@ pub(crate) fn scan_struct_tail(
         // `UScriptStruct::Serialize` adds the struct flags. A Blueprint struct then writes its
         // default instance, which the caller reads with the fields scanned above; its guid is one
         // of its properties, not part of this tail.
-        cursor.skip(4)?;
+        layout.struct_flags = Some((cursor.file_offset(), cursor.read_u32()?));
         return Ok(StructTail {
             references,
             bytecode,

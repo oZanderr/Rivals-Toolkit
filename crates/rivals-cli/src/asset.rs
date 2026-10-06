@@ -71,6 +71,7 @@ fn parse(request: &Request<'_>) -> Result<ParsedPackage, String> {
             container: request.container,
             entry: request.entry,
             kind: source,
+            mod_container: None,
         },
         rivals_uasset::ParseOptions {
             declared_slots: request.declared,
@@ -1884,6 +1885,7 @@ pub fn trace(
             container: request.container,
             entry: request.entry,
             kind: source,
+            mod_container: None,
         },
     )?;
     let window = only.and_then(|index| {
@@ -3248,6 +3250,7 @@ pub fn audit_dir(
                         container: "",
                         entry: &file.to_string_lossy(),
                         kind: AssetSource::Loose,
+                        mod_container: None,
                     },
                     None,
                 ),
@@ -3306,6 +3309,7 @@ pub fn audit(
                         container,
                         entry: path,
                         kind: source_of(container),
+                        mod_container: None,
                     },
                     Some(&layouts),
                 ),
@@ -4663,6 +4667,7 @@ pub fn diagnose(
                 } else {
                     AssetSource::Utoc
                 },
+                mod_container: None,
             };
             schema_synth::synthesised(bundle, Some(&schema), &source)
                 .ok()
@@ -4939,6 +4944,7 @@ mod tests {
                     container: "",
                     entry: &format!("P{at}"),
                     kind: AssetSource::Loose,
+                    mod_container: None,
                 },
                 None,
             );

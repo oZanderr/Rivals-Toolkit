@@ -221,6 +221,7 @@ pub fn mod_search(
                     container: &utoc,
                     entry: path,
                     kind: AssetSource::Utoc,
+                    mod_container: None,
                 },
                 &layouts,
                 ParseOptions::default(),

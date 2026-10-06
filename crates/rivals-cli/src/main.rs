@@ -174,6 +174,11 @@ enum AssetCmd {
     /// packages hold keep their meaning. Refused when a package sends the enum over the network
     /// and the entry would make a value of it take more bits than the game's server reads.
     AddEnumEntry(AddEnumEntryArgs),
+    /// Add a field to a Blueprint struct, after its own, named as the editor names a member.
+    /// Values other packages hold read as before, the new field unset. Refused when another
+    /// package lays the struct out by position: a script building it as a constant, a value of it
+    /// sent over the network, or a Niagara asset.
+    AddField(AddFieldArgs),
     /// Change a stored value and write the result into a mod pak.
     Set(Box<AssetSetArgs>),
     /// Set the same properties by name across every package a filter matches, in one mod.
@@ -400,6 +405,38 @@ struct AddEnumEntryArgs {
     /// The enum export, when the package holds more than one Blueprint enum.
     #[arg(long, value_name = "N")]
     export: Option<u32>,
+
+    /// Mod pak to write into, created in `~mods` if it does not exist. Defaults to the name the
+    /// desktop app last saved into, then to `AssetEdits`.
+    #[arg(long, value_name = "NAME")]
+    mod_name: Option<String>,
+
+    /// Overwrite an edited copy of this asset that the mod pak already holds.
+    #[arg(long)]
+    replace: bool,
+
+    /// Patch and verify, report what would change, and write nothing.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Args)]
+struct AddFieldArgs {
+    #[command(flatten)]
+    asset: AssetArgs,
+
+    /// The name the field shows.
+    #[arg(long, value_name = "NAME")]
+    name: String,
+
+    /// Its type, as a `local` line takes it: `Int`, `Name`, `Struct</Script/CoreUObject.Vector>`.
+    /// One value of a native type; a container or a Blueprint type is refused.
+    #[arg(long = "type", value_name = "TYPE")]
+    ty: String,
+
+    /// The struct export, when the package holds more than one Blueprint struct.
+    #[arg(long = "struct", value_name = "N")]
+    strukt: Option<u32>,
 
     /// Mod pak to write into, created in `~mods` if it does not exist. Defaults to the name the
     /// desktop app last saved into, then to `AssetEdits`.
@@ -1535,6 +1572,7 @@ fn run(cli: &Cli) -> Result<(), String> {
         Command::Asset(AssetCmd::ScriptAssemble(a)) => asset_script_assemble(cli, &app, a),
         Command::Asset(AssetCmd::AddVariable(a)) => asset_add_variable(cli, &app, a),
         Command::Asset(AssetCmd::AddEnumEntry(a)) => asset_add_enum_entry(cli, &app, a),
+        Command::Asset(AssetCmd::AddField(a)) => asset_add_field(cli, &app, a),
         Command::Asset(AssetCmd::Set(a)) => asset_set(cli, &app, a),
         Command::Asset(AssetCmd::Sweep(a)) => asset_sweep(cli, &app, a),
         Command::Asset(AssetCmd::Import(a)) => asset_import(cli, &app, a),
@@ -2650,6 +2688,30 @@ fn asset_add_enum_entry(
         add_enum_entries: vec![rivals_uasset::AddEnumEntry {
             export: args.export,
             display: args.display.clone(),
+        }],
+        ..Default::default()
+    };
+    save_definition_edit(
+        cli,
+        app,
+        &args.asset,
+        args.mod_name.as_deref(),
+        args.replace,
+        args.dry_run,
+        edit,
+    )
+}
+
+fn asset_add_field(
+    cli: &Cli,
+    app: &settings::AppSettings,
+    args: &AddFieldArgs,
+) -> Result<(), String> {
+    let edit = rivals_uasset::PackageEdits {
+        add_fields: vec![rivals_uasset::AddField {
+            strukt: args.strukt,
+            name: args.name.clone(),
+            ty: args.ty.clone(),
         }],
         ..Default::default()
     };

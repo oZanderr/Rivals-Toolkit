@@ -1103,6 +1103,7 @@ mod tests {
                 export(3, "Thing_C", "BlueprintGeneratedClass", 0),
             ],
             unresolved_structs: Vec::new(),
+            outgrown_structs: Vec::new(),
             property_kinds: Default::default(),
             schema_fixups: Vec::new(),
             missing_schemas: Vec::new(),

@@ -519,6 +519,7 @@ mod tests {
                 enum_tail: None,
             }],
             unresolved_structs: Vec::new(),
+            outgrown_structs: Vec::new(),
             property_kinds: Default::default(),
             schema_fixups: Vec::new(),
             missing_schemas: Vec::new(),

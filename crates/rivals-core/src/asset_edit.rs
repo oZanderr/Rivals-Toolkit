@@ -133,6 +133,9 @@ pub fn preview_read_edits(
     if !changes.add_enum_entries.is_empty() {
         return enum_entry_pass(request, mappings, loaded, parsed);
     }
+    if !changes.add_fields.is_empty() {
+        return struct_field_pass(request, mappings, loaded, parsed);
+    }
     if let Some(add) = changes.add_components.first() {
         if add.from_parent.is_some() {
             return inherited_component_pass(request, mappings, loaded, parsed, add);
@@ -1517,6 +1520,203 @@ fn enum_entry_pass(
     Ok((patched, loaded))
 }
 
+/// Adds fields to a Blueprint struct, then makes the save's other edits on the result. A field the
+/// struct has already, shown as the same name with the same type, is left out, so a file adding
+/// one applies again. The struct is refused when another package lays it out by position.
+fn struct_field_pass(
+    request: &AssetEditRequest<'_>,
+    mappings: Option<&Mappings>,
+    loaded: FSerializedAssetBundle,
+    parsed: &rivals_uasset::ParsedPackage,
+) -> Result<(PatchedBundle, FSerializedAssetBundle), String> {
+    let changes = &request.changes;
+    let header = rivals_uasset::read_header(&bundle_of(&loaded))?;
+    let held = rivals_uasset::fields_held(parsed, &header, &changes.add_fields)?;
+    let mut notes = Vec::new();
+    let mut adds = Vec::new();
+    for (add, held) in changes.add_fields.iter().zip(held) {
+        if held {
+            let strukt = rivals_uasset::struct_of(parsed, add.strukt)?;
+            notes.push(format!(
+                "{} already has a field {}",
+                strukt.object_name,
+                add.name.trim()
+            ));
+        } else {
+            adds.push(add.clone());
+        }
+    }
+    let rest = PackageEdits {
+        add_fields: Vec::new(),
+        ..changes.clone()
+    };
+    let others = |loaded, parsed: &rivals_uasset::ParsedPackage| {
+        preview_read_edits(
+            &AssetEditRequest {
+                changes: rest.clone(),
+                ..*request
+            },
+            mappings,
+            loaded,
+            parsed,
+        )
+    };
+    let (mut patched, loaded) = match adds.first() {
+        None if rest.is_empty() => (unchanged(&loaded), loaded),
+        None => others(loaded, parsed)?,
+        Some(first) => {
+            let strukt = rivals_uasset::struct_of(parsed, first.strukt)?;
+            check_struct_is_free(request, mappings, strukt, &adds)?;
+            let shell = PackageEdits {
+                add_fields: adds,
+                ..Default::default()
+            };
+            let sidecars = rivals_uasset::Sidecars {
+                bulk: loaded.bulk_data_buffer.as_deref(),
+                optional_bulk: loaded.optional_bulk_data_buffer.as_deref(),
+            };
+            let (created, after) = patch_pass(
+                request,
+                mappings,
+                &bundle_of(&loaded),
+                sidecars,
+                parsed,
+                &shell,
+            )?;
+            if rest.is_empty() {
+                (created, loaded)
+            } else {
+                let (mut written, _) = others(staged(&created, &loaded), &after)?;
+                let mut applied = created.applied;
+                applied.append(&mut written.applied);
+                written.applied = applied;
+                (written, loaded)
+            }
+        }
+    };
+    notes.append(&mut patched.notes);
+    patched.notes = notes;
+    Ok((patched, loaded))
+}
+
+/// Refuses fields for a Blueprint struct another package lays out by position, which a field
+/// more would put out of step: a script building it as a constant, which lists every field; a
+/// value of it sent over the network, which the game's server reads with the fields it had; a
+/// Niagara asset, which bakes the layouts of the types it uses; and a map keyed or a set held by
+/// it, when a new field's type cannot be hashed. A package that does not read, or a script that
+/// does not decode whole, is refused too, as what it does with the struct is unknown.
+fn check_struct_is_free(
+    request: &AssetEditRequest<'_>,
+    mappings: Option<&Mappings>,
+    strukt: &rivals_uasset::ParsedExport,
+    adds: &[rivals_uasset::AddField],
+) -> Result<(), String> {
+    let unhashed: Vec<String> = adds
+        .iter()
+        .filter_map(|add| {
+            let ty = rivals_uasset::parse_field_type(&add.ty).ok()?;
+            (!ty.hashes()).then(|| format!("{} ({})", add.name.trim(), ty.printed()))
+        })
+        .collect();
+    let mut found = Vec::new();
+    for (listed, read) in read_importers(request, mappings, &strukt.path)? {
+        let user = match read {
+            Ok(user) => user,
+            Err(why) => {
+                found.push(format!("{listed}, which did not read ({why})"));
+                continue;
+            }
+        };
+        if user
+            .exports
+            .iter()
+            .any(|export| export.class_name.starts_with("Niagara"))
+        {
+            found.push(format!(
+                "{listed}, a Niagara asset, which bakes the layouts of the types it uses"
+            ));
+            continue;
+        }
+        let mut uses = built_as_constant(&user, &strukt.path);
+        uses.extend(replicated_uses(&user, &strukt.path));
+        if !unhashed.is_empty() {
+            uses.extend(
+                hashed_uses(&user, &strukt.path)
+                    .into_iter()
+                    .map(|at| format!("{at}, and {} cannot be hashed", unhashed.join(", "))),
+            );
+        }
+        found.extend(uses.into_iter().map(|at| format!("{listed}: {at}")));
+    }
+    if found.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "{} is laid out by position where another package uses it, which a field more would put \
+         out of step: {}",
+        strukt.object_name,
+        found.join("; ")
+    ))
+}
+
+/// Where `parsed`'s scripts build a value of the type at `path` as a constant, which lists one
+/// value per field, or might: a script that does not decode whole.
+fn built_as_constant(parsed: &rivals_uasset::ParsedPackage, path: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for export in &parsed.exports {
+        let Some(script) = &export.script else {
+            continue;
+        };
+        if !script.complete() {
+            found.push(format!(
+                "{}'s script does not decode whole",
+                export.object_name
+            ));
+        } else if script
+            .statements
+            .iter()
+            .any(|statement| builds_constant(&statement.expr, path))
+        {
+            found.push(format!("{} builds it as a constant", export.object_name));
+        }
+    }
+    found
+}
+
+/// Whether `expr`, or anything inside it, builds a value of the struct at `path` as a constant.
+fn builds_constant(expr: &rivals_uasset::Expr, path: &str) -> bool {
+    matches!(expr, rivals_uasset::Expr::StructConst { struct_type, .. }
+        if struct_type.path.as_deref() == Some(path))
+        || rivals_uasset::expression_children(expr)
+            .into_iter()
+            .any(|child| builds_constant(child, path))
+}
+
+/// Where `parsed` keys a map or holds a set by the type at `path`.
+fn hashed_uses(parsed: &rivals_uasset::ParsedPackage, path: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for export in &parsed.exports {
+        for (record, _) in export.layout.iter().flat_map(|layout| &layout.records) {
+            let hashed = match &record.tail {
+                rivals_uasset::RecordTail::Two(key, _) if record.kind == "MapProperty" => {
+                    names_type(parsed, key, path)
+                }
+                rivals_uasset::RecordTail::One(element) if record.kind == "SetProperty" => {
+                    names_type(parsed, element, path)
+                }
+                _ => false,
+            };
+            if hashed {
+                found.push(format!(
+                    "{}.{} is keyed by it",
+                    export.object_name, record.name
+                ));
+            }
+        }
+    }
+    found
+}
+
 /// Refuses enum entries that change how many bits a replicated value of the enum takes while a
 /// package replicates it: a property sent over the network, or a parameter of a function called
 /// across it, which the unmodded server reads at the old width.
@@ -1668,6 +1868,7 @@ fn read_importers(
                         container: &container,
                         entry: &entry,
                         kind: AssetSource::Utoc,
+                        mod_container: None,
                     },
                     editor_options(),
                 )
@@ -3407,6 +3608,7 @@ fn load_sources(
                 container: &container,
                 entry: &source.entry,
                 kind,
+                mod_container: None,
             },
             editor_options(),
         )?;
@@ -3654,7 +3856,19 @@ fn source_of<'a>(request: &AssetEditRequest<'a>) -> PackageSource<'a> {
         container: request.container,
         entry: request.entry,
         kind: request.kind,
+        mod_container: save_container(request),
     }
+}
+
+/// The IoStore container of the mod a save writes into, when it exists already and the package is
+/// read from IoStore too.
+fn save_container(request: &AssetEditRequest<'_>) -> Option<String> {
+    if request.kind != AssetSource::Utoc {
+        return None;
+    }
+    let pak = mods_dir(request.game_root).join(normalize_pak_filename(request.mod_name).ok()?);
+    let utoc = pak.with_extension("utoc");
+    utoc.is_file().then(|| utoc.to_string_lossy().into_owned())
 }
 
 fn editor_options() -> ParseOptions {
@@ -5369,45 +5583,109 @@ mod tests {
     /// network, sends the type across it; a property that does neither does not.
     #[test]
     fn a_replicated_use_of_a_type_is_found_by_its_records() {
+        let (mut parsed, path) = scanned_package();
+        let mut give = |flags: u64| {
+            let mut record = record("EnumProperty", one(record("EnumProperty", type_of(1))));
+            record.property_flags = flags;
+            replicated_uses(holding(&mut parsed, record), &path)
+        };
+        assert_eq!(give(0x20), ["TestObject.Mode is replicated"]);
+        assert!(give(0x1).is_empty());
+    }
+
+    /// A map keyed or a set held by a type hashes every field of it; a map holding it as a value
+    /// does not.
+    #[test]
+    fn a_hashed_use_of_a_type_is_found_by_its_records() {
+        let (mut parsed, path) = scanned_package();
+        let element = || record("StructProperty", type_of(1));
+        let other = || record("StructProperty", type_of(0));
+        let two = |key, value| rivals_uasset::RecordTail::Two(Box::new(key), Box::new(value));
+        for keyed in [
+            record("MapProperty", two(element(), other())),
+            record("SetProperty", one(element())),
+        ] {
+            assert_eq!(
+                hashed_uses(holding(&mut parsed, keyed), &path),
+                ["TestObject.Mode is keyed by it"]
+            );
+        }
+        let valued = record("MapProperty", two(other(), element()));
+        assert!(hashed_uses(holding(&mut parsed, valued), &path).is_empty());
+    }
+
+    /// A struct built as a constant anywhere in an expression, inside another constant's fields
+    /// included, is found; a struct of another type is not.
+    #[test]
+    fn a_struct_built_as_a_constant_is_found_inside_an_expression() {
+        let built = |path: &str, fields| rivals_uasset::Expr::StructConst {
+            struct_type: rivals_uasset::ObjectRef {
+                index: -1,
+                path: Some(path.into()),
+            },
+            size: 0,
+            fields,
+        };
+        let statement = rivals_uasset::Expr::Return {
+            value: Box::new(built(
+                "/Script/Engine.Outer",
+                vec![built("/Game/Data/Card.Card", Vec::new())],
+            )),
+        };
+        assert!(builds_constant(&statement, "/Game/Data/Card.Card"));
+        assert!(builds_constant(&statement, "/Script/Engine.Outer"));
+        assert!(!builds_constant(&statement, "/Game/Data/Other.Other"));
+    }
+
+    /// A parsed package whose records the scans are given, and the path of its first export, which
+    /// a record's `type_of(1)` names.
+    fn scanned_package() -> (rivals_uasset::ParsedPackage, String) {
         use rivals_uasset::tagged_fixture::{sparse_mappings, sparse_package};
         let (asset, exports) = sparse_package();
-        let mappings = sparse_mappings();
-        let request = request("", "unused");
-        let mut parsed =
-            parse_loaded(&request, Some(&mappings), &sparse_bundle(asset, exports)).expect("parse");
+        let parsed = parse_loaded(
+            &request("", "unused"),
+            Some(&sparse_mappings()),
+            &sparse_bundle(asset, exports),
+        )
+        .expect("parse");
         let path = parsed.exports[0].path.clone();
-        let record = |flags: u64| rivals_uasset::FieldRecord {
-            kind: "EnumProperty".into(),
+        (parsed, path)
+    }
+
+    /// `parsed` with its first export declaring `record` alone.
+    fn holding(
+        parsed: &mut rivals_uasset::ParsedPackage,
+        record: rivals_uasset::FieldRecord,
+    ) -> &rivals_uasset::ParsedPackage {
+        parsed.exports[0].layout = Some(rivals_uasset::StructLayout {
+            records: vec![(record, (0, 0))],
+            ..Default::default()
+        });
+        parsed
+    }
+
+    fn record(kind: &str, tail: rivals_uasset::RecordTail) -> rivals_uasset::FieldRecord {
+        rivals_uasset::FieldRecord {
+            kind: kind.into(),
             name: "Mode".into(),
             field_flags: 0,
             array_dim: 1,
             element_size: 1,
-            property_flags: flags,
+            property_flags: 0,
             rep_index: 0,
             rep_notify: String::new(),
             condition: 0,
-            tail: rivals_uasset::RecordTail::One(Box::new(rivals_uasset::FieldRecord {
-                kind: "EnumProperty".into(),
-                name: "Mode".into(),
-                field_flags: 0,
-                array_dim: 1,
-                element_size: 1,
-                property_flags: 0,
-                rep_index: 0,
-                rep_notify: String::new(),
-                condition: 0,
-                tail: rivals_uasset::RecordTail::Index(1),
-            })),
-        };
-        let mut give = |flags: u64| {
-            parsed.exports[0].layout = Some(rivals_uasset::StructLayout {
-                records: vec![(record(flags), (0, 0))],
-                ..Default::default()
-            });
-            replicated_uses(&parsed, &path)
-        };
-        assert_eq!(give(0x20), ["TestObject.Mode is replicated"]);
-        assert!(give(0x1).is_empty());
+            tail,
+        }
+    }
+
+    fn one(inner: rivals_uasset::FieldRecord) -> rivals_uasset::RecordTail {
+        rivals_uasset::RecordTail::One(Box::new(inner))
+    }
+
+    /// A tail naming the object at package index `index`.
+    fn type_of(index: i32) -> rivals_uasset::RecordTail {
+        rivals_uasset::RecordTail::Index(index)
     }
 
     fn holder_path(path: &str, op: rivals_uasset::PathOp) -> rivals_uasset::PathEdit {
@@ -5897,6 +6175,13 @@ mod game_data_tests {
     /// A Blueprint enum with three entries and `_MAX`, which six packages use and none replicates.
     const BLUEPRINT_ENUM: &str =
         "Engine/Content/EditorResources/FieldNodes/_Resources/EFieldShapeType.uasset";
+    /// A Blueprint struct with five fields and no derived flags, which one table's rows store and
+    /// nothing else uses.
+    const BLUEPRINT_STRUCT: &str = "Marvel/Content/Marvel/Data/Struct/CardData.uasset";
+    /// The table of `BLUEPRINT_STRUCT` rows.
+    const STRUCT_TABLE: &str = "Marvel/Content/Marvel/Data/DataTable/UI/CardTable.uasset";
+    /// A Blueprint struct of two fields the compiler marked plain old data, a table's rows.
+    const PLAIN_STRUCT: &str = "Marvel/Content/Marvel/Data/DataTable/UI/Setting/GameUserSettingStructure/GradeLevelSetting.uasset";
     const INSTANCED: &str =
         "Marvel/Content/Marvel/Data/DataTable/GameMode/2206/AIAutoAbilityTable_Zombie.uasset";
 
@@ -5967,6 +6252,9 @@ mod game_data_tests {
         ("INSTANCED", INSTANCED),
         ("TAG_KEYED", TAG_KEYED),
         ("BLUEPRINT_ENUM", BLUEPRINT_ENUM),
+        ("BLUEPRINT_STRUCT", BLUEPRINT_STRUCT),
+        ("STRUCT_TABLE", STRUCT_TABLE),
+        ("PLAIN_STRUCT", PLAIN_STRUCT),
         ("LEVEL", LEVEL),
         ("CONSTRAINT_EMITTER", CONSTRAINT_EMITTER),
         ("PLAYER_CONTROLLER", PLAYER_CONTROLLER),
@@ -6173,6 +6461,7 @@ mod game_data_tests {
                 container: &self.container,
                 entry: self.entry,
                 kind: AssetSource::Utoc,
+                mod_container: None,
             }
         }
 
@@ -9184,6 +9473,7 @@ mod game_data_tests {
                 container: &container,
                 entry: fixture.entry,
                 kind: AssetSource::Utoc,
+                mod_container: None,
             },
         )
     }
@@ -9956,6 +10246,7 @@ mod game_data_tests {
                 container: &container,
                 entry: fixture.entry,
                 kind: AssetSource::Utoc,
+                mod_container: None,
             },
         );
         let now = after.exports[0].data_table.as_ref().expect("table").rows[0]
@@ -10395,6 +10686,7 @@ mod game_data_tests {
                 container: &fixture.container,
                 entry: STALE_CLASS_MAP,
                 kind: AssetSource::Utoc,
+                mod_container: None,
             },
         );
         // An actor that owns a component, both reading to their end.
@@ -10586,6 +10878,7 @@ mod game_data_tests {
                 container: &fixture.container,
                 entry: skin,
                 kind: AssetSource::Utoc,
+                mod_container: None,
             },
         );
         let baton = from_parsed
@@ -11979,6 +12272,197 @@ mod game_data_tests {
         });
         assert!(moved, "{MAPS} holds no map of two int pairs keyed by text");
         apply_dump(&fixture, &before, &dump);
+    }
+
+    fn new_field(name: &str, ty: &str) -> rivals_uasset::AddField {
+        rivals_uasset::AddField {
+            strukt: None,
+            name: name.into(),
+            ty: ty.into(),
+        }
+    }
+
+    fn member_names(export: &rivals_uasset::ParsedExport) -> Vec<String> {
+        export
+            .struct_definition
+            .as_ref()
+            .map(|definition| {
+                definition
+                    .properties
+                    .iter()
+                    .map(|property| property.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Fields added to a Blueprint struct follow its own, named as the editor names a member, and
+    /// its defaults read as before but for one the same apply gives the new field. Applied again,
+    /// the struct has them and nothing changes.
+    #[test]
+    fn a_blueprint_struct_gains_fields_after_its_own() {
+        let Some(fixture) = Fixture::open(BLUEPRINT_STRUCT) else {
+            return;
+        };
+        // The save reads the import index, which every mod goes into, so it waits out the tests
+        // writing a probe mod rather than finding the index stale and building it again.
+        let _turn = crate::paths::ModsTurn::take();
+        let before = fixture.parse();
+        let add_fields = vec![new_field("Rarity", "Int"), new_field("Tag", "Name")];
+        let rarity = rivals_uasset::new_field_names(&before.exports[0], &add_fields).remove(0);
+        let changes = PackageEdits {
+            add_fields,
+            paths: vec![rivals_uasset::PathEdit {
+                export: "CardData".into(),
+                row: None,
+                defaults: true,
+                path: rarity.clone(),
+                op: rivals_uasset::PathOp::Set { text: "5".into() },
+                was: None,
+                becomes: None,
+            }],
+            ..Default::default()
+        };
+        let (patched, after) = fixture.apply_changes(changes.clone());
+        let strukt = &after.exports[0];
+        assert!(matches!(strukt.status, ExportStatus::Complete));
+        let names = member_names(strukt);
+        assert_eq!(names[..5], member_names(&before.exports[0])[..]);
+        assert!(names[5].starts_with("Rarity_78_"), "{names:?}");
+        assert!(names[6].starts_with("Tag_79_"), "{names:?}");
+        let stored = |export: &rivals_uasset::ParsedExport| -> Vec<(String, String)> {
+            export
+                .defaults
+                .iter()
+                .filter(|entry| !matches!(entry.value, PropertyValue::Unset { .. }))
+                .map(|entry| (entry.label(), entry.value.summary()))
+                .collect()
+        };
+        let mut wanted = stored(&before.exports[0]);
+        wanted.push((rarity, "5".into()));
+        assert_eq!(stored(strukt), wanted);
+        applied_again_changes_nothing(&fixture, &changes, &patched, &after);
+    }
+
+    /// A Blueprint struct the compiler marked plain old data loses the flags a text field makes
+    /// untrue when one is added.
+    #[test]
+    fn a_text_field_clears_the_flags_it_makes_untrue() {
+        let Some(fixture) = Fixture::open(PLAIN_STRUCT) else {
+            return;
+        };
+        // The save reads the import index, which every mod goes into, so it waits out the tests
+        // writing a probe mod rather than finding the index stale and building it again.
+        let _turn = crate::paths::ModsTurn::take();
+        let flags = |parsed: &rivals_uasset::ParsedPackage| {
+            parsed.exports[0]
+                .layout
+                .as_ref()
+                .and_then(|layout| layout.struct_flags)
+                .expect("the struct's flags")
+                .1
+        };
+        assert_eq!(flags(&fixture.parse()), 0xE000);
+        let (_, after) = fixture.apply_changes(PackageEdits {
+            add_fields: vec![new_field("Note", "Text")],
+            ..Default::default()
+        });
+        assert_eq!(flags(&after), 0);
+        assert!(matches!(after.exports[0].status, ExportStatus::Complete));
+    }
+
+    /// A field a mod gives a Blueprint struct is one every row of a table of it declares when the
+    /// table is read for a save into that mod, unset and the rest as before. A row given a value
+    /// for it holds it, and the mod's table then reads on its own with the mod's struct.
+    #[test]
+    fn a_row_sets_a_field_its_struct_gained_in_the_same_mod() {
+        let (Some(strukt), Some(table)) =
+            (Fixture::open(BLUEPRINT_STRUCT), Fixture::open(STRUCT_TABLE))
+        else {
+            return;
+        };
+        let scratch = ScratchMod::new(strukt.root.clone(), "RivalsToolkitFieldProbe");
+        let into_mod = |fixture: &Fixture, changes: PackageEdits| {
+            let request = AssetEditRequest {
+                mod_name: scratch.name,
+                ..fixture.request_changes(changes)
+            };
+            save_edits(&request, Some(&fixture.schema), &SaveOptions::default()).expect("save");
+        };
+        into_mod(
+            &strukt,
+            PackageEdits {
+                add_fields: vec![new_field("Rarity", "Int")],
+                ..Default::default()
+            },
+        );
+        let rows = |parsed: &rivals_uasset::ParsedPackage| -> Vec<(String, Vec<PropertyEntry>)> {
+            parsed.exports[0]
+                .data_table
+                .as_ref()
+                .expect("a table")
+                .rows
+                .iter()
+                .map(|row| (row.name.clone(), row.fields.clone()))
+                .collect()
+        };
+        let rarity = |fields: &[PropertyEntry]| {
+            fields
+                .iter()
+                .find(|field| field.name.starts_with("Rarity_"))
+                .cloned()
+        };
+        let others = |fields: &[PropertyEntry]| -> Vec<(String, String)> {
+            fields
+                .iter()
+                .filter(|field| !field.name.starts_with("Rarity_"))
+                .map(|field| (field.label(), field.value.summary()))
+                .collect()
+        };
+        let request = AssetEditRequest {
+            mod_name: scratch.name,
+            ..table.request_changes(PackageEdits::default())
+        };
+        let read = parse_loaded(&request, Some(&table.schema), &table.loaded).expect("read");
+        let game = rows(&table.parse());
+        for ((name, fields), (_, was)) in rows(&read).iter().zip(&game) {
+            let unset = rarity(fields).unwrap_or_else(|| panic!("row {name} lacks the field"));
+            assert!(
+                matches!(unset.value, PropertyValue::Unset { .. }),
+                "{unset:?}"
+            );
+            assert_eq!(others(fields), others(was), "row {name}");
+        }
+        let (row, fields) = &rows(&read)[1];
+        let name = rarity(fields).expect("the field").name;
+        into_mod(
+            &table,
+            PackageEdits {
+                paths: vec![rivals_uasset::PathEdit {
+                    export: "CardTable".into(),
+                    row: Some(row.clone()),
+                    defaults: false,
+                    path: name,
+                    op: rivals_uasset::PathOp::Set { text: "7".into() },
+                    was: None,
+                    becomes: None,
+                }],
+                ..Default::default()
+            },
+        );
+        let after = read_back(&table, &scratch.container());
+        assert!(
+            after
+                .exports
+                .iter()
+                .all(|export| matches!(export.status, ExportStatus::Complete))
+        );
+        let held = rows(&after);
+        assert_eq!(
+            rarity(&held[1].1).map(|field| field.value.summary()),
+            Some("7".into())
+        );
+        assert_eq!(others(&held[1].1), others(&game[1].1));
     }
 
     /// An entry added to a Blueprint enum goes in before its `_MAX`, which moves up, and shows as the

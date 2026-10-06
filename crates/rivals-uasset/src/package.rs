@@ -153,6 +153,7 @@ impl ParsedPackage {
             exports,
             dependencies: None,
             unresolved_structs: Vec::new(),
+            outgrown_structs: Vec::new(),
             property_kinds: Default::default(),
             schema_fixups: Vec::new(),
             missing_schemas: Vec::new(),
@@ -308,6 +309,10 @@ pub struct ParsedPackage {
     pub dependencies: Option<Vec<crate::dependency::Runs>>,
     /// Structs encountered with neither a native layout nor a schema entry.
     pub unresolved_structs: Vec<String>,
+    /// Structs a value's header reached past the end of, as one given a field since the mappings
+    /// were dumped does.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub outgrown_structs: Vec<String>,
     /// How many values of each property type were read while parsing this package.
     pub property_kinds: std::collections::BTreeMap<&'static str, usize>,
     /// Slots the mappings declare that this build does not serialize, found while parsing. Empty
@@ -660,6 +665,7 @@ fn parse_inner(
             exports,
             dependencies: crate::dependency::runs_of(&header).ok(),
             unresolved_structs: diagnostics.unresolved_structs.into_iter().collect(),
+            outgrown_structs: diagnostics.outgrown_structs.into_iter().collect(),
             property_kinds: diagnostics.property_kinds,
             schema_fixups,
             missing_schemas: diagnostics.missing_schemas,
