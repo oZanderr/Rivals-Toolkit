@@ -1230,7 +1230,7 @@ mod tests {
         // members, casts and conversions
         code = var(code.op(0x42).field("X", vector), "Values");
         code = var(code.op(0x64).field("Count", own), "Count");
-        code = code.ops(&[0x38, 0x03, 0x1E]).ops(&2.0f32.to_le_bytes());
+        code = var(code.ops(&[0x38, 0x03]), "Values");
         code = code.ops(&[0x38, 0x41, 0x17]);
         code = code.op(0x2E).int(actor).op(0x17);
         code = code.op(0x13).int(actor).op(0x17);
@@ -1329,7 +1329,7 @@ mod tests {
             "ArrayConst<Values in /Game/Test.BP_Cat_C:Catalogue>(IntZero, IntOne)",
             "SetConst<Values in /Game/Test.BP_Cat_C:Catalogue, #5>(IntZero)",
             "StructMemberContext<X in /Script/CoreUObject.Vector>(LocalVariable(Values))",
-            "Cast<DoubleToFloat>(2.0f)",
+            "Cast<DoubleToFloat>(LocalVariable(Values))",
             "Cast<0x41>(Self)",
             "DynamicCast</Script/Engine.Actor>(Self)",
             "MetaCast</Script/Engine.Actor>(Self)",
@@ -1457,6 +1457,47 @@ mod tests {
             errors[0].message.contains("already defined on line 1"),
             "{errors:?}"
         );
+    }
+
+    /// Where the VM evaluates an operand with nowhere to put a result and reads the variable it
+    /// leaves behind, a call or a literal would be written through a null pointer in game.
+    #[test]
+    fn an_operand_the_vm_reads_as_a_variable_has_to_be_one() {
+        let built = event_graph().build();
+        let add = "CallMath /Script/Engine.KismetMathLibrary:Add_IntInt(1, 2)";
+        for (text, column) in [
+            ("Cast<DoubleToFloat>(1.0)".to_string(), 48),
+            (format!("Cast<FloatToDouble>({add})"), 48),
+            (format!("SwitchValue({add}, default => 1)"), 40),
+        ] {
+            let text = format!("Let LocalVariable(Count) = {text}\n");
+            let (result, _) = assemble_over(&built, 1, &text, ADD);
+            let errors = result.expect_err("refused");
+            assert_eq!(
+                (errors[0].line, errors[0].column),
+                (1, column),
+                "{errors:?}"
+            );
+            assert!(
+                errors[0].message.contains("has to be a variable"),
+                "{errors:?}"
+            );
+        }
+        for text in [
+            "Cast<DoubleToFloat>(LocalVariable(Count))",
+            "SwitchValue(LocalVariable(Flag), default => 1)",
+        ] {
+            let text = format!("Let LocalVariable(Count) = {text}\n");
+            let (result, _) = assemble_over(&built, 1, &text, ADD);
+            if let Err(errors) = result {
+                assert!(
+                    errors
+                        .iter()
+                        .all(|error| !error.message.contains("has to be a variable")),
+                    "{errors:?}"
+                );
+            }
+        }
     }
 
     #[test]

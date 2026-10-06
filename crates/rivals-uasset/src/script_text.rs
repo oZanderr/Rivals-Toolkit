@@ -1963,6 +1963,32 @@ impl Resolver<'_> {
     }
 }
 
+/// Whether evaluating `expr` leaves the VM pointing at a variable: a variable itself, a struct's
+/// member or an array's element, one of those read through an object, or a choice between them,
+/// which hands on the place it was given to the one it picks.
+fn names_a_variable(expr: &Expr) -> bool {
+    match expr {
+        Expr::Variable { .. } | Expr::Member { .. } | Expr::ArrayGetByRef { .. } => true,
+        Expr::Context { member, .. } => names_a_variable(member),
+        Expr::SwitchValue { cases, default, .. } => {
+            cases.iter().all(|case| names_a_variable(&case.result)) && names_a_variable(default)
+        }
+        _ => false,
+    }
+}
+
+/// Refuses anything but a variable where the VM evaluates an operand with nowhere to put a result
+/// and then reads the variable that leaves behind: a call or a literal there writes through a null
+/// pointer and takes the game down. The compiler always puts a variable there.
+fn reads_a_variable(expr: &Expr, pos: Pos, what: &str) -> Result<(), Diagnostic> {
+    if names_a_variable(expr) {
+        return Ok(());
+    }
+    Err(pos.error(format!(
+        "{what} has to be a variable, which the game reads it from; keep the value in a local first: `local Name: Type`, then `Let LocalVariable(Name) = ...`"
+    )))
+}
+
 /// `/Script/Engine.Texture2D` as the package and name of the class.
 fn split_class(class: &str) -> Option<(String, String)> {
     let (package, name) = class.rsplit_once('.')?;
@@ -2884,6 +2910,7 @@ impl Parser<'_, '_> {
                     return Err(pos.error("SetArray takes the array, then its items"));
                 }
                 let array = items.remove(0);
+                reads_a_variable(&array, notes[0].pos, "SetArray's array")?;
                 Self::with(
                     Expr::SetArray {
                         array: Box::new(array),
@@ -2915,6 +2942,11 @@ impl Parser<'_, '_> {
                 };
                 self.expect(">")?;
                 let (value, note) = self.one_arg()?;
+                if let Some(kind @ ("DoubleToFloat" | "FloatToDouble")) =
+                    kismet::conversion_name(conversion)
+                {
+                    reads_a_variable(&value, note.pos, &format!("What a {kind} conversion takes"))?;
+                }
                 Self::with(
                     Expr::Conversion {
                         conversion,
@@ -2937,6 +2969,7 @@ impl Parser<'_, '_> {
                     return Err(pos.error(format!("{word} takes its target, then its items")));
                 }
                 let target = items.remove(0);
+                reads_a_variable(&target, notes[0].pos, &format!("{word}'s target"))?;
                 let count = match raw {
                     Some((count, count_pos)) => Self::fits(count, count_pos, "a count")?,
                     None => container_count(name, items.len()),
@@ -3005,6 +3038,9 @@ impl Parser<'_, '_> {
                 self.expect(">")?;
                 let property = self.resolver.field(&field, role_of(name), None)?;
                 let (value, note) = self.one_arg()?;
+                if token == 0x42 {
+                    reads_a_variable(&value, note.pos, "StructMemberContext's struct")?;
+                }
                 Self::with(
                     Expr::Member {
                         name,
@@ -3017,6 +3053,9 @@ impl Parser<'_, '_> {
             }
             0x4F | 0x51 | 0x5D | 0x67 | 0x6D => {
                 let (value, note) = self.one_arg()?;
+                if token == 0x5D {
+                    reads_a_variable(&value, note.pos, "ClearMulticastDelegate's delegate")?;
+                }
                 Self::with(
                     Expr::Unary {
                         name,
@@ -3041,6 +3080,7 @@ impl Parser<'_, '_> {
             }
             0x5C | 0x62 => {
                 let ((delegate, first), (value, second)) = self.two_args()?;
+                reads_a_variable(&delegate, first.pos, &format!("{word}'s delegate"))?;
                 Self::with(
                     Expr::DelegateOp {
                         name,
@@ -3056,6 +3096,7 @@ impl Parser<'_, '_> {
                 let (function, id) = self.name_operand()?;
                 self.expect(">")?;
                 let ((delegate, first), (object, second)) = self.two_args()?;
+                reads_a_variable(&delegate, first.pos, "BindDelegate's delegate")?;
                 Self::with(
                     Expr::BindDelegate {
                         function,
@@ -3074,6 +3115,7 @@ impl Parser<'_, '_> {
                     return Err(pos.error("CallMulticastDelegate takes the delegate, then its arguments"));
                 }
                 let delegate = params.remove(0);
+                reads_a_variable(&delegate, notes[0].pos, "CallMulticastDelegate's delegate")?;
                 Self::with(
                     Expr::CallMulticastDelegate {
                         signature,
@@ -3110,6 +3152,7 @@ impl Parser<'_, '_> {
             }
             0x6B => {
                 let ((array, first), (index, second)) = self.two_args()?;
+                reads_a_variable(&array, first.pos, "ArrayGetByRef's array")?;
                 Self::with(
                     Expr::ArrayGetByRef {
                         array: Box::new(array),
@@ -3202,6 +3245,7 @@ impl Parser<'_, '_> {
         };
         self.expect("(")?;
         let (index, index_note) = self.expr()?;
+        reads_a_variable(&index, index_note.pos, "SwitchValue's index")?;
         let mut children = vec![index_note];
         let mut cases = Vec::new();
         let mut raw_next = Vec::new();
