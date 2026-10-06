@@ -380,10 +380,15 @@ or `FloatToDouble` cast, a struct member's struct, an array element's array, a d
 has to name one, as the compiler always does: a call or literal there would be written through a
 null pointer and crash the game, so a computed value goes in a `local` first. A struct literal can
 leave out the size the compiler writes after its path, as
-`StructConst</Script/CoreUObject.Vector2D>(1.0, 0.0)`: the game never reads it. A changed or new
-call to a Blueprint function is held to its parameters; one to a native function the package never
-calls with as many arguments is refused until `--allow-unchecked`. An edit file carries a function's
-text as `script_texts`, inline (`text`) or from a file beside it (`file`).
+`StructConst</Script/CoreUObject.Vector2D>(1.0, 0.0)`: the game never reads it. What a `Let` stores,
+and each field of a struct literal, is held to the type of where it goes wherever both are known:
+the game copies a value's bytes as they are, so a Float is never a Double (`1.0f` and `1.0`) and a
+Bool never an Int. A literal giving a struct a different number of fields than the mappings list
+asks for `--allow-unchecked`, since a struct's transient fields are in its layout and not in a
+literal. A changed or new call to a Blueprint function is held to its parameters; one to a native
+function the package never calls with as many arguments is refused until `--allow-unchecked`. An
+edit file carries a function's text as `script_texts`, inline (`text`) or from a file beside it
+(`file`).
 
 `--new-function NAME --signature SIG` adds a function to the Blueprint class instead of rewriting
 one, its script written from the text. A signature takes the inputs in parentheses, `ref` before one

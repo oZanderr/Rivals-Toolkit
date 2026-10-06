@@ -35,7 +35,7 @@ mod script_text;
 mod script_text_edit;
 pub use call_shape::{
     CallShape, CallSite, Fit, compare as compare_calls, render as render_call_shape,
-    shape_of_signature, site_at,
+    shape_of_signature, site_at, stores_in,
 };
 pub use script_edit::{narrowing_edits, widening_edits};
 pub use script_encode::{

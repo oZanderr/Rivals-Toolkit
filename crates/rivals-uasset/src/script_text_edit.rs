@@ -547,6 +547,39 @@ Let LocalVariable(Total) = 6
         );
     }
 
+    /// A conversion has the type it converts to and a choice the type its results share, so what
+    /// either stores is held to where it goes. A choice between unlike results is not judged.
+    #[test]
+    fn a_conversion_or_a_choice_stored_in_another_type_is_found() {
+        let built = event_graph().build();
+        let printed = print(&built.parsed(), GRAPH);
+        let lines = [
+            "Let LocalVariable(Count) = Cast<DoubleToFloat>(LocalVariable(Amount))",
+            "Let LocalVariable(Count) = SwitchValue(LocalVariable(Flag), True => 1.0f, default => 2.0f)",
+            "Let LocalVariable(Count) = SwitchValue(LocalVariable(Flag), True => 1, default => 2.0f)",
+        ];
+        let stored = format!(
+            "local Amount: Double\n{}",
+            printed.replacen(
+                "Jump LocalVariable(EntryPoint)\n",
+                &format!("Jump LocalVariable(EntryPoint)\n{}\n", lines.join("\n")),
+                1,
+            )
+        );
+        let saved = save(&built, &text(GRAPH, stored)).expect("saved");
+        let found: Vec<String> = crate::call_shape::stores_in(&saved.after, GRAPH, None)
+            .into_iter()
+            .map(|(_, fit)| format!("{fit:?}"))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                "Mismatch(\"stores a Float in Count, which is a Int\")",
+                "Mismatch(\"stores a Float in Count, which is a Int\")",
+            ],
+        );
+    }
+
     /// A local the function has already, declared with its own type, changes nothing.
     #[test]
     fn declaring_a_local_the_function_has_changes_nothing() {

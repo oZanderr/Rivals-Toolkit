@@ -1495,6 +1495,17 @@ fn check_script_calls(
                 rivals_uasset::Fit::Unknown(reason) => doubts.push(format!("{call}: {reason}")),
             }
         }
+        for (statement, fit) in text_stores(mappings, before, after, edit.export) {
+            match fit {
+                rivals_uasset::Fit::Fits => {}
+                rivals_uasset::Fit::Mismatch(reason) => {
+                    return Err(format!("{statement} {reason}"));
+                }
+                rivals_uasset::Fit::Unknown(reason) => {
+                    doubts.push(format!("{statement}: {reason}"));
+                }
+            }
+        }
     }
     for edit in &request.changes.scripts {
         let Some(at) = edit.at else {
@@ -1529,10 +1540,46 @@ fn check_script_calls(
         return Ok(());
     }
     Err(format!(
-        "{}:\n  {}\nSave anyway if you know the new function takes what the call passes and gives back what it keeps.",
+        "{}:\n  {}\nSave anyway if you know each of these fits.",
         crate::object_check::UNCHECKED,
         doubts.join("\n  ")
     ))
+}
+
+/// What the statements of the function at `export` store once written from text, each held to
+/// where it stores it. A statement the function already had is left as the compiler wrote it.
+fn text_stores(
+    mappings: Option<&Mappings>,
+    before: &rivals_uasset::ParsedPackage,
+    after: &rivals_uasset::ParsedPackage,
+    export: u32,
+) -> Vec<(String, rivals_uasset::Fit)> {
+    let unchanged: std::collections::HashSet<String> = before
+        .exports
+        .get(export as usize)
+        .and_then(|found| found.script.as_ref())
+        .map(|script| {
+            script
+                .statements
+                .iter()
+                .map(|statement| rivals_uasset::expression_shape(&statement.expr))
+                .collect()
+        })
+        .unwrap_or_default();
+    let Some(found) = after.exports.get(export as usize) else {
+        return Vec::new();
+    };
+    let Some(script) = found.script.as_ref() else {
+        return Vec::new();
+    };
+    rivals_uasset::stores_in(after, export, mappings)
+        .into_iter()
+        .filter_map(|(offset, fit)| {
+            let statement = script.statements.iter().find(|s| s.offset == offset)?;
+            (!unchanged.contains(&rivals_uasset::expression_shape(&statement.expr)))
+                .then(|| (format!("{} at 0x{offset:04X}", found.object_name), fit))
+        })
+        .collect()
 }
 
 /// Every call a function makes, as the statement and expression it starts at with how it reads.
@@ -15109,6 +15156,76 @@ Let LocalVariable(ToolkitCount) = 3
             refused.contains("IsActiveAbility at 0x0139 calls /Game/Marvel/Blueprints/LevelGameplay/Base/MarvelPlayerControllerBP.MarvelPlayerControllerBP_C:IsActiveAbility"),
             "{refused}"
         );
+    }
+
+    /// What a text stores is held to where it stores it. Nothing converts between a Float and a
+    /// Double, or a Bool and an Int, so either would be a wrong value in game; a struct literal's
+    /// fields are held to the struct's.
+    #[test]
+    fn a_text_storing_a_value_of_the_wrong_type_is_refused() {
+        let Some(fixture) = Fixture::open(CONSTRAINT_EMITTER) else {
+            return;
+        };
+        let before = fixture.parse();
+        let graph = function(&before, "ExecuteUbergraph_").index;
+        let with = |lines: &str| {
+            format!(
+                "local ToolkitAmount: Double\nlocal ToolkitCount: Int\nlocal ToolkitAt: Struct</Script/CoreUObject.Vector2D>\n{}",
+                text_of(&before, "ExecuteUbergraph_").replacen(
+                    "Jump LocalVariable(EntryPoint)\n",
+                    &format!("Jump LocalVariable(EntryPoint)\n{lines}"),
+                    1,
+                )
+            )
+        };
+        let refused = |lines: &str| match preview_edits(
+            &fixture.request_changes(text_edit(graph, with(lines))),
+            Some(&fixture.schema),
+        ) {
+            Ok(_) => panic!("{lines} should be refused"),
+            Err(refused) => refused,
+        };
+        let float = refused("Let LocalVariable(ToolkitAmount) = 1.0f\n");
+        assert!(
+            float.contains("stores a Float in ToolkitAmount, which is a Double"),
+            "{float}"
+        );
+        let bool = refused("Let LocalVariable(ToolkitCount) = True\n");
+        assert!(
+            bool.contains("stores a Bool in ToolkitCount, which is a Int"),
+            "{bool}"
+        );
+        let fields = refused(
+            "Let LocalVariable(ToolkitAt) = StructConst</Script/CoreUObject.Vector2D>(0.0f, 0)\n",
+        );
+        assert!(
+            fields
+                .contains("field 0 of a Vector2D literal is a Float, and Vector2D holds a Double"),
+            "{fields}"
+        );
+        let previewed = preview_script_text(
+            &fixture.request_changes(PackageEdits::default()),
+            Some(&fixture.schema),
+            graph,
+            &with("Let LocalVariable(ToolkitAmount) = 1.0f\n"),
+        )
+        .expect("previewed");
+        assert!(
+            previewed
+                .refused
+                .as_deref()
+                .is_some_and(|refused| refused.contains("stores a Float in ToolkitAmount")),
+            "{:?}",
+            previewed.refused
+        );
+        let fitting = with(
+            "Let LocalVariable(ToolkitAmount) = 1.0\nLet LocalVariable(ToolkitCount) = 2\nLet LocalVariable(ToolkitAt) = StructConst</Script/CoreUObject.Vector2D>(0.0, 0.0)\n",
+        );
+        preview_edits(
+            &fixture.request_changes(text_edit(graph, fitting)),
+            Some(&fixture.schema),
+        )
+        .expect("what fits saves");
     }
 
     /// A function named with spaces prints quoted and assembles back to itself.

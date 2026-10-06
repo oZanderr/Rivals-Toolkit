@@ -125,10 +125,33 @@ impl<'a> Types<'a> {
                     .find(|property| property.name == name)
             });
         let found = own.or_else(|| self.mappings?.member(owner, name))?;
-        Some(match found.inner {
-            usmap::PropertyInner::WeakObject | usmap::PropertyInner::LazyObject => "Object".into(),
-            _ => crate::ustruct::type_text(&found.inner),
-        })
+        Some(held_as(&found.inner))
+    }
+
+    /// The type of each field a struct holds, in the order a struct literal gives them: from the
+    /// mappings, or from the package's own definition of a Blueprint struct.
+    fn fields_of(&self, name: &str) -> Option<Vec<String>> {
+        if let Some(schema) = self.mappings.and_then(|mappings| mappings.schema(name)) {
+            return Some(
+                schema
+                    .iter()
+                    .map(|slot| held_as(&slot.property.inner))
+                    .collect(),
+            );
+        }
+        let definition = self
+            .parsed
+            .exports
+            .iter()
+            .filter_map(|export| export.struct_definition.as_ref())
+            .find(|definition| definition.name == name)?;
+        Some(
+            definition
+                .properties
+                .iter()
+                .map(|property| held_as(&property.inner))
+                .collect(),
+        )
     }
 
     /// The type of an object a script names outright: `Class<Name>` for a class, else an object
@@ -152,6 +175,15 @@ impl<'a> Types<'a> {
         } else {
             format!("Object<{class}>")
         })
+    }
+}
+
+/// A declared type as a script reads it: a weak or lazy pointer reaches a script as the object it
+/// points at.
+fn held_as(inner: &usmap::PropertyInner) -> String {
+    match inner {
+        usmap::PropertyInner::WeakObject | usmap::PropertyInner::LazyObject => "Object".into(),
+        _ => crate::ustruct::type_text(inner),
     }
 }
 
@@ -258,8 +290,155 @@ fn arg_type(expr: &Expr, types: &Types<'_>) -> Option<String> {
         } => types.member(property)?,
         // What another object holds is the member read from it.
         Expr::Context { member, .. } => return arg_type(member, types),
+        Expr::Conversion { conversion, .. } => match kismet::conversion_name(*conversion)? {
+            "DoubleToFloat" => "Float".into(),
+            "FloatToDouble" => "Double".into(),
+            _ => return None,
+        },
+        // A choice is what each of its results is, when they all agree.
+        Expr::SwitchValue { cases, default, .. } => {
+            let first = arg_type(default, types)?;
+            for case in cases {
+                if arg_type(&case.result, types)? != first {
+                    return None;
+                }
+            }
+            first
+        }
         _ => return None,
     })
+}
+
+/// The name of the variable an expression stands for, for a message.
+fn variable_name(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Variable { property, .. } | Expr::Member { property, .. } => {
+            Some(property.path.as_str())
+        }
+        Expr::Context { member, .. } => variable_name(member),
+        _ => None,
+    }
+}
+
+/// What each statement of export `export` stores, held to where it stores it: the value a `Let`
+/// puts in a variable, and each field of a struct literal. The VM copies a value's bytes as they
+/// are, so a Float stored in a Double, or a Bool in an Int, is a wrong value in game rather than a
+/// conversion. Only what is known on both sides is judged: anything a native call returns, an
+/// enum, or a class the hierarchy cannot place is left alone. One finding, by the statement's
+/// offset, for each statement that does not fit.
+pub fn stores_in(
+    parsed: &ParsedPackage,
+    export: u32,
+    mappings: Option<&Mappings>,
+) -> Vec<(u32, Fit)> {
+    let Some(found) = parsed.exports.iter().find(|e| e.index == export) else {
+        return Vec::new();
+    };
+    let Some(script) = found.script.as_ref() else {
+        return Vec::new();
+    };
+    let types = Types::of(parsed, found, mappings);
+    script
+        .statements
+        .iter()
+        .filter_map(|statement| {
+            let mut fit = Fit::Fits;
+            let mut pending = vec![&statement.expr];
+            while let Some(expr) = pending.pop() {
+                fit = fit.or(store_fit(expr, &types));
+                pending.extend(kismet::children(expr));
+            }
+            (fit != Fit::Fits).then_some((statement.offset, fit))
+        })
+        .collect()
+}
+
+/// Whether one expression stores what fits where it stores it.
+fn store_fit(expr: &Expr, types: &Types<'_>) -> Fit {
+    match expr {
+        Expr::Let {
+            name,
+            variable,
+            value,
+            ..
+        } => {
+            let Some(to) = arg_type(variable, types) else {
+                return Fit::Fits;
+            };
+            let target = variable_name(variable).unwrap_or("the variable");
+            // `LetBool` writes a bool and `LetObj` an object pointer, whatever they are given.
+            let known = known_kind(&to, types.mappings);
+            match *name {
+                "LetBool" if known && to != "Bool" => {
+                    return Fit::Mismatch(format!(
+                        "stores a Bool with LetBool in {target}, which is a {to}"
+                    ));
+                }
+                "LetObj" if known && !object_like(&to) => {
+                    return Fit::Mismatch(format!(
+                        "stores an object with LetObj in {target}, which is a {to}"
+                    ));
+                }
+                _ => {}
+            }
+            let Some(from) = arg_type(value, types) else {
+                return Fit::Fits;
+            };
+            match relate(&from, &to, true, types.mappings) {
+                Err(Why::Differs) => {
+                    Fit::Mismatch(format!("stores a {from} in {target}, which is a {to}"))
+                }
+                _ => Fit::Fits,
+            }
+        }
+        Expr::StructConst {
+            struct_type,
+            fields,
+            ..
+        } => {
+            let Some(name) = struct_type
+                .path
+                .as_deref()
+                .and_then(|path| path.rsplit(['.', ':']).next())
+            else {
+                return Fit::Fits;
+            };
+            let Some(held) = types.fields_of(name) else {
+                return Fit::Fits;
+            };
+            // A struct's transient fields are in its layout and not in a literal of it, so a count
+            // that differs may still be right.
+            if held.len() != fields.len() {
+                return Fit::Unknown(format!(
+                    "a {name} literal gives {} field(s), and {name} has {}",
+                    fields.len(),
+                    held.len()
+                ));
+            }
+            for (at, (field, to)) in fields.iter().zip(&held).enumerate() {
+                let Some(from) = arg_type(field, types) else {
+                    continue;
+                };
+                if relate(&from, to, true, types.mappings) == Err(Why::Differs) {
+                    return Fit::Mismatch(format!(
+                        "field {at} of a {name} literal is a {from}, and {name} holds a {to} there"
+                    ));
+                }
+            }
+            Fit::Fits
+        }
+        _ => Fit::Fits,
+    }
+}
+
+/// Whether a type is one whose bytes are known: a primitive, an object or a struct the mappings
+/// hold, rather than an enum or a name nothing places.
+fn known_kind(text: &str, mappings: Option<&Mappings>) -> bool {
+    let head = without_classes(text);
+    let head = head.split('<').next().unwrap_or_default();
+    PRIMITIVES.contains(&head)
+        || OBJECTS.contains(&head)
+        || mappings.is_some_and(|m| m.has_struct(head) && !m.has_enum(head))
 }
 
 /// Whether a call reads `arg` rather than writing into it. A Blueprint wires a function's output
@@ -621,6 +800,16 @@ fn relate(from: &str, to: &str, subclass: bool, mappings: Option<&Mappings>) -> 
             .unwrap_or_default()
             .to_string()
     };
+    // A class is an object held the same way, and the mappings record a class reference as an
+    // object one naming no class: a class may be what such a reference holds.
+    let any_object = |text: &str, word: &str| matches!(top_class(text), Some((kind, class)) if kind == word && class.is_none_or(|class| class == "Object"));
+    for (class, object) in [("Class", "Object"), ("SoftClass", "SoftObject")] {
+        if (head(from) == class && any_object(to, object))
+            || (head(to) == class && any_object(from, object))
+        {
+            return Err(Why::Unplaced);
+        }
+    }
     // An enum is laid out as the integer under it, and a name the mappings cannot place may be
     // one, so neither is known to differ from what it meets.
     let plain = |word: &str| {
