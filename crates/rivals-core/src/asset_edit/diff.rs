@@ -731,9 +731,14 @@ fn field_sets_in(
         };
         let mut here = path.to_vec();
         here.push(segment);
-        let inner = preview
+        let held = preview
             .iter()
-            .find(|held| held.name == name && held.element == element)
+            .find(|held| held.name == name && held.element == element);
+        // A field the dump shows as it already reads is not a change.
+        if held.is_some_and(|held| !differs(&held.value, value)) {
+            continue;
+        }
+        let inner = held
             .and_then(|held| match &held.value {
                 PropertyValue::Unset { fields, .. } | PropertyValue::Default { fields, .. } => {
                     Some(&fields[..])
@@ -1967,16 +1972,42 @@ mod tests {
             0x800,
         ));
         entries.push(table_text("Play"));
+        // A float held as a 32-bit value, whose decimal form only reads back exactly when the
+        // parser is exact.
+        entries.push(entry(
+            "Fraction",
+            PropertyValue::Float {
+                value: f64::from(0.968_249_9_f32),
+            },
+            0x900,
+        ));
+        // A struct stored as all zero shows its fields, which say nothing new.
+        let zero = |name: &str| PropertyEntry {
+            span: None,
+            ..entry(name, PropertyValue::Float { value: 0.0 }, 0)
+        };
+        entries.push(entry(
+            "Rotation",
+            PropertyValue::Default {
+                declared: Some("Struct"),
+                fields: vec![zero("Pitch"), zero("Yaw"), zero("Roll")],
+            },
+            0x910,
+        ));
         entries
     }
 
-    /// A dump read back untouched says nothing at all, for every kind of value however it nests.
+    /// A dump read back untouched says nothing at all, for every kind of value however it nests,
+    /// once it has been written out as text and read in again.
     #[test]
     fn an_untouched_dump_of_every_kind_diffs_to_nothing() {
         let entries = every_kind();
         let json: Vec<Json> = entries
             .iter()
-            .map(|entry| serde_json::to_value(entry).unwrap())
+            .map(|entry| {
+                let text = serde_json::to_string(entry).unwrap();
+                serde_json::from_str(&text).unwrap()
+            })
             .collect();
         let mut out = DiffOutcome::default();
         diff_entries(&entries, &json, 0, "/Game/Thing.Thing", &mut out);
