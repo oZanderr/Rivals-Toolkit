@@ -103,6 +103,9 @@ pub fn preview_read_edits(
     if let Some(remove) = changes.remove_components.first() {
         return component_removal_pass(request, mappings, loaded, parsed, remove);
     }
+    if !changes.paths.is_empty() {
+        return path_stages(request, mappings, loaded, parsed);
+    }
     if changes.is_empty() {
         return Err("No changes to save".into());
     }
@@ -114,6 +117,90 @@ pub fn preview_read_edits(
         list_pass(request, mappings, patched, loaded, &touches)?
     };
     orphan_pass(request, mappings, parsed, patched, loaded)
+}
+
+/// Places the edits a save addresses by path in the package as it reads, and makes them with the
+/// rest of the save. One that names what another edit makes, moves or replaces is placed once that
+/// has landed, in a stage of its own, and so on until every one has been. One that has landed
+/// already is left out, and the save says so.
+fn path_stages(
+    request: &AssetEditRequest<'_>,
+    mappings: Option<&Mappings>,
+    loaded: FSerializedAssetBundle,
+    parsed: &rivals_uasset::ParsedPackage,
+) -> Result<(PatchedBundle, FSerializedAssetBundle), String> {
+    let changes = &request.changes;
+    let lowered = rivals_uasset::lower_paths(parsed, changes)?;
+    let mut first = PackageEdits {
+        paths: Vec::new(),
+        ..changes.clone()
+    };
+    first.values.extend(lowered.values);
+    first.field_sets.extend(lowered.field_sets);
+    let (mut patched, loaded) = if first.is_empty() {
+        let unchanged = PatchedBundle {
+            asset: loaded.asset_file_buffer.clone(),
+            exports: loaded.exports_file_buffer.clone(),
+            applied: vec![],
+            bulk: None,
+            optional_bulk: None,
+            notes: vec![],
+        };
+        (unchanged, loaded)
+    } else {
+        preview_read_edits(
+            &AssetEditRequest {
+                changes: first,
+                ..*request
+            },
+            mappings,
+            loaded,
+            parsed,
+        )?
+    };
+    let mut notes = lowered.notes;
+    notes.append(&mut patched.notes);
+    patched.notes = notes;
+    if lowered.waiting.is_empty() {
+        return Ok((patched, loaded));
+    }
+    // A stage that changed nothing leaves the package reading as it did, and what waits on it
+    // would wait for ever.
+    if patched.applied.is_empty() {
+        return Err(format!(
+            "nothing in this save makes what these name: {}",
+            lowered
+                .waiting
+                .iter()
+                .map(|edit| format!("{} {}", edit.export, edit.path))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    let between = reparse(request, mappings, &patched.asset, &patched.exports)?;
+    let next = PackageEdits {
+        paths: lowered.waiting,
+        allow_drift: changes.allow_drift,
+        allow_missing: changes.allow_missing,
+        allow_unchecked: changes.allow_unchecked,
+        ..Default::default()
+    };
+    let (mut later, _) = preview_read_edits(
+        &AssetEditRequest {
+            changes: next,
+            ..*request
+        },
+        mappings,
+        staged(&patched, &loaded),
+        &between,
+    )?;
+    patched.applied.append(&mut later.applied);
+    later.applied = patched.applied;
+    patched.notes.append(&mut later.notes);
+    later.notes = patched.notes;
+    later.bulk = later.bulk.or(patched.bulk);
+    later.optional_bulk = later.optional_bulk.or(patched.optional_bulk);
+    Ok((later, loaded))
 }
 
 /// Removes the imports a retarget left naming nothing: the package, and any objects on the path,
@@ -2479,10 +2566,22 @@ fn field_step(
             ),
             None => (segment.as_str(), None),
         };
-        let field = fields
-            .iter()
-            .find(|field| field.name == name && field.element == element)
-            .ok_or_else(|| format!("{} has no field {segment}", entry.label()))?;
+        let slot = |element: Option<u32>| {
+            fields
+                .iter()
+                .find(|field| field.name == name && field.element == element)
+        };
+        // `Name[i]` is a static array's slot, or else element `i` of the container `Name`.
+        let container = element.and_then(|at| Some((at, slot(None)?)));
+        let field = match (slot(element), container) {
+            (Some(field), _) => field,
+            (None, Some((at, field))) => {
+                walk.path[0] = name.to_string();
+                walk.path.insert(1, format!("[{at}]"));
+                field
+            }
+            (None, None) => return Err(format!("{} has no field {segment}", entry.label())),
+        };
         let (start, _) = field
             .span
             .ok_or_else(|| format!("{} has no recorded position", field.label()))?;
@@ -4762,7 +4861,23 @@ mod tests {
             }
             let outcome = diff::diff_dump(parsed, &dump).expect("diff");
             assert!(outcome.notes.is_empty(), "{:?}", outcome.notes);
-            assert_eq!(outcome.edits.values.len(), 2, "{:?}", outcome.edits.values);
+            assert!(
+                outcome.edits.values.is_empty(),
+                "{:?}",
+                outcome.edits.values
+            );
+            let paths: Vec<&str> = outcome
+                .edits
+                .paths
+                .iter()
+                .map(|edit| edit.path.as_str())
+                .collect();
+            assert_eq!(paths, ["Holder.Count", "Holder.Extra"]);
+            assert!(
+                outcome.edits.expect.is_empty(),
+                "{:?}",
+                outcome.edits.expect
+            );
             outcome
                 .edits
                 .resolve(std::path::Path::new("."))
@@ -4775,6 +4890,157 @@ mod tests {
             field(holder, "Count").value,
             PropertyValue::Unset { .. }
         ));
+    }
+
+    fn holder_path(path: &str, op: rivals_uasset::PathOp) -> rivals_uasset::PathEdit {
+        rivals_uasset::PathEdit {
+            export: "TestObject".into(),
+            row: None,
+            defaults: false,
+            path: format!("Holder.{path}"),
+            op,
+            was: None,
+        }
+    }
+
+    fn holder_set(path: &str, text: &str) -> rivals_uasset::PathEdit {
+        holder_path(path, rivals_uasset::PathOp::Set { text: text.into() })
+    }
+
+    /// Edits keyed into a map and set inside an unset struct, which applied again find in place.
+    fn settled_paths() -> Vec<rivals_uasset::PathEdit> {
+        use rivals_uasset::PathOp;
+        vec![
+            holder_set("Count", "7"),
+            holder_set("Nested.Y", "4"),
+            holder_path(
+                "Scores",
+                PathOp::Insert {
+                    index: None,
+                    key: Some("Foo".into()),
+                },
+            ),
+            holder_set("Scores{Foo}", "6"),
+        ]
+    }
+
+    /// Edits named by path are placed in the package as it reads: a field set through a struct
+    /// not stored yet, an element set once the insert that makes it has landed, a pair by its key.
+    #[test]
+    fn path_edits_save_in_as_many_stages_as_they_take() {
+        use rivals_uasset::PathOp;
+        let mut paths = settled_paths();
+        paths.push(holder_path(
+            "Counts",
+            PathOp::Insert {
+                index: None,
+                key: None,
+            },
+        ));
+        paths.push(holder_set("Counts[0]", "5"));
+        let after = preview_sparse(|_| PackageEdits {
+            paths,
+            ..Default::default()
+        })
+        .expect("saved");
+        let holder = holder_of(&after);
+        assert_eq!(field(holder, "Count").value.summary(), "7");
+        let PropertyValue::Struct { fields, .. } = &field(holder, "Nested").value else {
+            panic!("Nested is stored");
+        };
+        assert_eq!(field(fields, "Y").value.summary(), "4");
+        let PropertyValue::Array { items } = &field(holder, "Counts").value else {
+            panic!("Counts is stored");
+        };
+        assert_eq!(
+            items.iter().map(PropertyValue::summary).collect::<Vec<_>>(),
+            ["5"]
+        );
+        let PropertyValue::Map { entries } = &field(holder, "Scores").value else {
+            panic!("Scores is stored");
+        };
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].key.summary(), "Foo");
+        assert_eq!(entries[0].value.summary(), "6");
+    }
+
+    /// A store and an edit under what it stores are two stages, made in one save.
+    #[test]
+    fn an_edit_under_a_store_waits_for_it() {
+        use rivals_uasset::PathOp;
+        let after = preview_sparse(|_| PackageEdits {
+            paths: vec![
+                holder_path("Chain.Level2", PathOp::Store),
+                holder_set("Chain.Level2.Level3.Leaf", "3"),
+            ],
+            ..Default::default()
+        })
+        .expect("saved");
+        let PropertyValue::Struct { fields, .. } = &field(holder_of(&after), "Chain").value else {
+            panic!("Chain is stored");
+        };
+        let PropertyValue::Struct { fields, .. } = &field(fields, "Level2").value else {
+            panic!("Level2 is stored");
+        };
+        let PropertyValue::Struct { fields, .. } = &field(fields, "Level3").value else {
+            panic!("Level3 is stored");
+        };
+        assert_eq!(field(fields, "Leaf").value.summary(), "3");
+    }
+
+    /// Path edits applied to the package they produced find each change made, and save it
+    /// unchanged.
+    #[test]
+    fn path_edits_applied_again_change_nothing() {
+        use rivals_uasset::tagged_fixture::{sparse_mappings, sparse_package};
+        let mappings = sparse_mappings();
+        let (asset, exports) = sparse_package();
+        let mut request = request("", "unused, preview writes nothing");
+        request.changes = PackageEdits {
+            paths: settled_paths(),
+            ..Default::default()
+        };
+        let loaded = sparse_bundle(asset, exports);
+        let parsed = parse_loaded(&request, Some(&mappings), &loaded).expect("parse");
+        let (once, _) =
+            preview_read_edits(&request, Some(&mappings), loaded, &parsed).expect("saved");
+        let saved = sparse_bundle(once.asset.clone(), once.exports.clone());
+        let parsed = parse_loaded(&request, Some(&mappings), &saved).expect("parse");
+        let (twice, _) =
+            preview_read_edits(&request, Some(&mappings), saved, &parsed).expect("saved again");
+        assert!(twice.applied.is_empty(), "{:?}", twice.applied);
+        assert_eq!(twice.notes.len(), 4, "{:?}", twice.notes);
+        assert_eq!(twice.asset, once.asset);
+        assert_eq!(twice.exports, once.exports);
+    }
+
+    /// A path naming nothing is refused by the step that names nothing, and one written against a
+    /// value that has changed since is refused as drift unless drift is allowed.
+    #[test]
+    fn a_path_edit_is_refused_for_a_typo_and_for_drift() {
+        let refused = preview_sparse(|_| PackageEdits {
+            paths: vec![holder_set("Cuont", "7")],
+            ..Default::default()
+        })
+        .expect_err("refused");
+        assert!(refused.contains("Holder.Cuont names nothing"), "{refused}");
+        let stale = || rivals_uasset::PathEdit {
+            was: Some("2".into()),
+            ..holder_set("Count", "7")
+        };
+        let refused = preview_sparse(|_| PackageEdits {
+            paths: vec![stale()],
+            ..Default::default()
+        })
+        .expect_err("drift");
+        assert!(refused.starts_with(rivals_uasset::DRIFT), "{refused}");
+        let after = preview_sparse(|_| PackageEdits {
+            paths: vec![stale()],
+            allow_drift: true,
+            ..Default::default()
+        })
+        .expect("saved anyway");
+        assert_eq!(field(holder_of(&after), "Count").value.summary(), "7");
     }
 
     /// An edit at an absent tagged property of the synthetic package.
@@ -4896,7 +5162,14 @@ mod tests {
             leaf["value"] = serde_json::json!({"kind": "int", "value": 6});
             let outcome = diff::diff_dump(parsed, &dump).expect("diff");
             assert!(outcome.notes.is_empty(), "{:?}", outcome.notes);
-            assert_eq!(outcome.edits.field_sets.len(), 1);
+            assert!(outcome.edits.field_sets.is_empty());
+            let paths: Vec<&str> = outcome
+                .edits
+                .paths
+                .iter()
+                .map(|edit| edit.path.as_str())
+                .collect();
+            assert_eq!(paths, ["Holder.Chain.Level2.Level3.Leaf"]);
             outcome
                 .edits
                 .resolve(std::path::Path::new("."))
@@ -8652,8 +8925,19 @@ mod game_data_tests {
             .expect("a string cell");
         cell["value"]["value"] = serde_json::json!("Layered");
         let outcome = crate::asset_edit::diff::diff_dump(&copy, &dump).expect("diff");
-        assert_eq!(outcome.edits.values.len(), 1, "{:?}", outcome.notes);
-        let at = outcome.edits.values[0].offset;
+        assert_eq!(outcome.edits.paths.len(), 1, "{:?}", outcome.notes);
+        let row = &copy.exports[0].data_table.as_ref().expect("table").rows[1].name;
+        assert_eq!(outcome.edits.paths[0].row.as_ref(), Some(row));
+        // Placed in the copy, the edit lands where the cell sits there, which row 0 growing moved.
+        let placed = rivals_uasset::lower_paths(
+            &copy,
+            &PackageEdits {
+                paths: outcome.edits.paths.clone(),
+                ..Default::default()
+            },
+        )
+        .expect("placed");
+        let at = placed.values[0].offset;
         assert_eq!(at, row_strings(&copy)[1].span.expect("a span").0);
         assert_ne!(
             at,
@@ -8672,6 +8956,122 @@ mod game_data_tests {
             })
             .collect();
         assert_eq!(texts, [grown.as_str(), "Layered"]);
+    }
+
+    /// An edit file diffed from one copy of a table lands on another that a patch has shifted: its
+    /// path finds the row and the cell where they sit now, where the same edit by offset is
+    /// refused, and applied a second time it finds its value made and writes nothing.
+    #[test]
+    fn a_diffed_edit_lands_on_a_copy_a_patch_has_shifted() {
+        let Some(fixture) = Fixture::open(STRINGS) else {
+            return;
+        };
+        let cell_of = |parsed: &rivals_uasset::ParsedPackage, row: usize| -> PropertyEntry {
+            parsed.exports[0].data_table.as_ref().expect("table").rows[row]
+                .fields
+                .iter()
+                .find(|field| matches!(field.value, PropertyValue::Str { .. }))
+                .expect("a string cell")
+                .clone()
+        };
+        let bundle = |asset: &[u8], exports: &[u8]| FSerializedAssetBundle {
+            asset_file_buffer: asset.to_vec(),
+            exports_file_buffer: exports.to_vec(),
+            bulk_data_buffer: None,
+            optional_bulk_data_buffer: None,
+            memory_mapped_bulk_data_buffer: None,
+        };
+        let read = |patched: &PatchedBundle| {
+            Fixture::parse_bundle(
+                &AssetBundle {
+                    asset: &patched.asset,
+                    exports: &patched.exports,
+                },
+                &fixture.schema,
+                &fixture.source(),
+            )
+        };
+        let before = fixture.parse();
+        let mut dump = serde_json::to_value(&before).expect("dump");
+        let cell = dump["exports"][0]["data_table"]["rows"][1]["fields"]
+            .as_array_mut()
+            .expect("fields")
+            .iter_mut()
+            .find(|field| field["value"]["kind"] == "str")
+            .expect("a string cell");
+        cell["value"]["value"] = serde_json::json!("Diffed");
+        let outcome = crate::asset_edit::diff::diff_dump(&before, &dump).expect("diff");
+        assert!(
+            outcome.edits.values.is_empty(),
+            "{:?}",
+            outcome.edits.values
+        );
+        assert_eq!(outcome.edits.paths.len(), 1, "{:?}", outcome.notes);
+        let changes = outcome.edits.resolve(Path::new(".")).expect("resolve");
+        // The same edit by offset, as a diff wrote it before edits had paths.
+        let values = rivals_uasset::lower_paths(&before, &changes)
+            .expect("placed")
+            .values;
+        let by_offset = PackageEdits {
+            expect: rivals_uasset::expectations(
+                &before,
+                &PackageEdits {
+                    values: values.clone(),
+                    ..Default::default()
+                },
+            ),
+            values,
+            ..Default::default()
+        };
+
+        // A patch grows row 0's text, which moves every cell after it.
+        let first = cell_of(&before, 0);
+        let PropertyValue::Str { value: text } = &first.value else {
+            unreachable!()
+        };
+        let grown = format!("{text} and then some");
+        let (shifted, moved) = fixture.apply(vec![ValueEdit {
+            offset: first.span.expect("a span").0,
+            expect_name: first.name.clone(),
+            expect_element: first.element,
+            expect_kind: "str".into(),
+            op: EditOp::Set {
+                text: grown.clone(),
+            },
+        }]);
+        assert_ne!(cell_of(&moved, 1).span, cell_of(&before, 1).span);
+
+        let (landed, _) = preview_read_edits(
+            &fixture.request_changes(changes.clone()),
+            Some(&fixture.schema),
+            bundle(&shifted.asset, &shifted.exports),
+            &moved,
+        )
+        .expect("the path lands");
+        let after = read(&landed);
+        assert_eq!(cell_of(&after, 0).value.summary(), grown);
+        assert_eq!(cell_of(&after, 1).value.summary(), "Diffed");
+        let refused = preview_read_edits(
+            &fixture.request_changes(by_offset),
+            Some(&fixture.schema),
+            bundle(&shifted.asset, &shifted.exports),
+            &moved,
+        )
+        .err()
+        .expect("the offset is refused");
+        assert!(!refused.is_empty());
+
+        let (again, _) = preview_read_edits(
+            &fixture.request_changes(changes),
+            Some(&fixture.schema),
+            bundle(&landed.asset, &landed.exports),
+            &after,
+        )
+        .expect("applied again");
+        assert!(again.applied.is_empty(), "{:?}", again.applied);
+        assert_eq!(again.notes.len(), 1, "{:?}", again.notes);
+        assert_eq!(again.asset, landed.asset);
+        assert_eq!(again.exports, landed.exports);
     }
 
     /// Several packages saved into one mod go in with a single container rewrite, and a second mod
@@ -9077,10 +9477,18 @@ mod game_data_tests {
 
         let outcome = crate::asset_edit::diff::diff_dump(&before, &dump).expect("diff");
         assert!(outcome.notes.is_empty(), "{:?}", outcome.notes);
-        assert_eq!(outcome.edits.values.len(), 1, "one cell changed");
+        assert!(
+            outcome.edits.values.is_empty(),
+            "{:?}",
+            outcome.edits.values
+        );
+        assert_eq!(outcome.edits.paths.len(), 1, "one cell changed");
         assert_eq!(outcome.edits.rows.len(), 1, "one row went");
-        // The file says what it was written against, and says it again once read back.
-        assert_eq!(outcome.edits.expect.values.len(), 1, "the cell's old value");
+        // The file says what it was written against, and says it again once read back: the cell
+        // its old value, and the row removal its table.
+        let was = outcome.edits.paths[0].was.clone();
+        assert!(was.is_some(), "the cell's old value");
+        assert!(outcome.edits.expect.values.is_empty());
         assert_eq!(
             outcome.edits.expect.exports.get(&0),
             Some(&before.exports[0].path)
@@ -9089,15 +9497,17 @@ mod game_data_tests {
         let reread: crate::asset_edit::json::EditList =
             serde_json::from_str(&written).expect("read back");
         assert_eq!(reread.expect, outcome.edits.expect);
+        assert_eq!(reread.paths, outcome.edits.paths);
 
         let changes = outcome
             .edits
             .resolve(std::path::Path::new("."))
             .expect("resolve");
         let (_, after) = fixture.apply_changes(changes.clone());
-        // The same edits against the package they already changed find a different cell value.
-        let err = rivals_uasset::check_expectations(&after, &changes).expect_err("drift");
-        assert!(err.starts_with(rivals_uasset::DRIFT), "{err}");
+        // The cell edit placed in the package it already changed finds its value there.
+        let again = rivals_uasset::lower_paths(&after, &changes).expect("placed");
+        assert!(again.values.is_empty(), "{:?}", again.values);
+        assert_eq!(again.notes.len(), 1, "{:?}", again.notes);
         let table = after.exports[0].data_table.as_ref().expect("table");
         assert_eq!(
             table.rows.len(),
@@ -9171,10 +9581,10 @@ mod game_data_tests {
         let (first, second) = swap_first_map(&mut dump["exports"]).expect("a map of two pairs");
         let outcome = crate::asset_edit::diff::diff_dump(&before, &dump).expect("diff");
         assert!(outcome.notes.is_empty(), "{:?}", outcome.notes);
-        assert_eq!(outcome.edits.values.len(), 1, "{:?}", outcome.edits.values);
+        assert_eq!(outcome.edits.paths.len(), 1, "{:?}", outcome.edits);
         assert!(matches!(
-            &outcome.edits.values[0].op,
-            EditOp::Reorder { order } if order[..2] == [1, 0]
+            &outcome.edits.paths[0].op,
+            rivals_uasset::PathOp::Reorder { order } if order[..2] == [1, 0]
         ));
         let changes = outcome
             .edits
@@ -10778,8 +11188,23 @@ mod game_data_tests {
         }
         let outcome = crate::asset_edit::diff::diff_dump(&before, &dump).expect("diff");
         assert!(outcome.notes.is_empty(), "{:?}", outcome.notes);
-        assert_eq!(outcome.edits.values.len(), 1, "the insert");
-        assert_eq!(outcome.edits.field_sets.len(), 1, "the flag");
+        let paths: Vec<(&str, &rivals_uasset::PathOp)> = outcome
+            .edits
+            .paths
+            .iter()
+            .map(|edit| (edit.path.as_str(), &edit.op))
+            .collect();
+        let flag = format!("Mappings[{}].bIgnorLowPriority", items.len());
+        assert!(
+            matches!(
+                paths.as_slice(),
+                [
+                    ("Mappings", rivals_uasset::PathOp::Insert { .. }),
+                    (path, rivals_uasset::PathOp::Set { .. }),
+                ] if *path == flag
+            ),
+            "{paths:?}"
+        );
 
         let changes = outcome.edits.resolve(Path::new(".")).expect("resolve");
         let (_, after) = fixture.apply_changes(changes);

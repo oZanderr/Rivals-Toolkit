@@ -170,7 +170,7 @@ enum AssetCmd {
     /// Refused when another package makes an object of the class or a class derived from it.
     AddVariable(AddVariableArgs),
     /// Change a stored value and write the result into a mod pak.
-    Set(AssetSetArgs),
+    Set(Box<AssetSetArgs>),
     /// Set the same properties by name across every package a filter matches, in one mod.
     Sweep(SweepArgs),
     /// Point an import at another object, or add one, and write the result into a mod pak.
@@ -517,19 +517,50 @@ struct AssetSetArgs {
     #[command(flatten)]
     asset: AssetArgs,
 
+    /// The object the value is in, for an edit named by `--path`: its path below the package
+    /// (`Table`, `BP_C:Mesh_GEN_VARIABLE`), its full path, its name when no other object has it,
+    /// or its index.
+    #[arg(long, value_name = "OBJECT", requires = "path")]
+    export: Option<String>,
+
+    /// The DataTable row `--path` starts in.
+    #[arg(
+        long,
+        value_name = "NAME",
+        requires = "path",
+        conflicts_with = "defaults"
+    )]
+    row: Option<String>,
+
+    /// `--path` starts in the default values a Blueprint struct keeps.
+    #[arg(long, requires = "path")]
+    defaults: bool,
+
+    /// The value by the fields leading to it, rather than by offset: `A.B.C`, with `Name[2]` for a
+    /// static array's slot or a container's element and `Name{Key}` for a map's pair or a set's
+    /// element by its key. It is found in the package as the save reads it, so the same command
+    /// fits a copy a patch has moved, and a value it already holds is left as it is.
+    #[arg(
+        long,
+        value_name = "PATH",
+        requires = "export",
+        conflicts_with_all = ["offset", "kind", "name", "element", "field"]
+    )]
+    path: Option<String>,
+
     /// File offset of the value, as reported by `asset dump` or `asset trace`.
-    #[arg(long, value_name = "OFFSET", value_parser = parse_offset)]
-    offset: u64,
+    #[arg(long, value_name = "OFFSET", value_parser = parse_offset, required_unless_present = "path")]
+    offset: Option<u64>,
 
     /// The kind the value is expected to be, so a stale offset is refused rather than written:
     /// `int`, `float`, `str`, `struct` and so on, or for a value not stored, the type it declares.
-    #[arg(long, value_name = "KIND")]
-    kind: String,
+    #[arg(long, value_name = "KIND", required_unless_present = "path")]
+    kind: Option<String>,
 
     /// The property's name. A value holding its default occupies no bytes, so it shares its
     /// offset with the one stored next and the name is what picks between them.
-    #[arg(long, value_name = "NAME")]
-    name: String,
+    #[arg(long, value_name = "NAME", required_unless_present = "path")]
+    name: Option<String>,
 
     /// Which slot of a static array, when the property declares more than one.
     #[arg(long, value_name = "N")]
@@ -547,7 +578,9 @@ struct AssetSetArgs {
     /// `set-element`, `insert` and `remove` act on the container element at `--index`, and
     /// `set-key` gives the map pair there the key `--key`. In a set or a map, `insert` takes the
     /// new element's key from `--key`, or from `--value`. `reorder` puts the elements in the
-    /// order `--order` gives. `set-raw` replaces the value's bytes with `--hex`.
+    /// order `--order` gives. `set-raw` replaces the value's bytes with `--hex`. With `--path`,
+    /// the element is the one the path names, `--index` adds it to the path, and an insert with
+    /// no `--index` goes last.
     #[arg(long, value_name = "OP", default_value = "set")]
     op: String,
 
@@ -2999,11 +3032,34 @@ fn asset_set(cli: &Cli, app: &settings::AppSettings, args: &AssetSetArgs) -> Res
     let root = resolve::game_root(cli.game_root.as_deref(), app)?;
     let request = asset_request(cli, app, &args.asset, &root);
     let mod_name = mod_name_of(app, args.mod_name.as_deref());
-    let changes = match &args.field {
+    let changes = set_edits(args)?;
+    if args.dry_run {
+        let preview = asset::preview_edits(&request, mod_name, args.replace, changes)?;
+        return emit(cli, &preview, || print_edit_preview(&preview));
+    }
+    let message = asset::set(&request, changes, mod_name, args.replace)?;
+    emit(cli, &message, || outln!("{message}"))
+}
+
+/// The edit `asset set` makes: by path, into a struct by `--field`, or at an offset.
+fn set_edits(args: &AssetSetArgs) -> Result<rivals_uasset::PackageEdits, String> {
+    if let Some(path) = &args.path {
+        return Ok(rivals_uasset::PackageEdits {
+            paths: vec![path_edit(args, path)?],
+            ..Default::default()
+        });
+    }
+    // Present unless `--path` is, which clap holds to.
+    let (Some(offset), Some(name), Some(kind)) = (args.offset, &args.name, &args.kind) else {
+        return Err(
+            "name the value by --offset, --name and --kind, or by --export and --path".into(),
+        );
+    };
+    Ok(match &args.field {
         Some(field) => rivals_uasset::PackageEdits {
             field_sets: vec![rivals_uasset::FieldSet {
-                offset: args.offset,
-                expect_name: args.name.clone(),
+                offset,
+                expect_name: name.clone(),
                 expect_element: args.element,
                 path: field.split('.').map(str::to_string).collect(),
                 text: args.value.clone(),
@@ -3012,21 +3068,65 @@ fn asset_set(cli: &Cli, app: &settings::AppSettings, args: &AssetSetArgs) -> Res
         },
         None => rivals_uasset::PackageEdits {
             values: vec![rivals_uasset::ValueEdit {
-                offset: args.offset,
-                expect_name: args.name.clone(),
+                offset,
+                expect_name: name.clone(),
                 expect_element: args.element,
-                expect_kind: args.kind.clone(),
+                expect_kind: kind.clone(),
                 op: value_op(args)?,
             }],
             ..Default::default()
         },
+    })
+}
+
+/// The edit `--op` makes on what `--path` names. An `--index` names an element of it, except for
+/// an insert, where it is the new element's position.
+fn path_edit(args: &AssetSetArgs, path: &str) -> Result<rivals_uasset::PathEdit, String> {
+    use rivals_uasset::PathOp;
+    let op = match args.op.as_str() {
+        "set" | "set-element" => PathOp::Set {
+            text: args.value.clone(),
+        },
+        "clear" => PathOp::Clear,
+        "store" => PathOp::Store,
+        "unset" => PathOp::Unset,
+        "insert" => PathOp::Insert {
+            index: args.index,
+            key: args
+                .key
+                .clone()
+                .or_else(|| (!args.value.is_empty()).then(|| args.value.clone())),
+        },
+        "remove" => PathOp::Remove,
+        "set-key" => PathOp::SetKey {
+            text: args.key.clone().ok_or("--op set-key needs --key")?,
+        },
+        "reorder" => PathOp::Reorder {
+            order: args.order.clone().ok_or("--op reorder needs --order")?,
+        },
+        "set-raw" => PathOp::SetRaw {
+            hex: args.hex.clone().ok_or("--op set-raw needs --hex")?,
+        },
+        other => {
+            return Err(format!(
+                "--op {other} is not an edit this command makes: use set, clear, store, unset, \
+                 set-element, insert, remove, set-key, reorder or set-raw"
+            ));
+        }
     };
-    if args.dry_run {
-        let preview = asset::preview_edits(&request, mod_name, args.replace, changes)?;
-        return emit(cli, &preview, || print_edit_preview(&preview));
-    }
-    let message = asset::set(&request, changes, mod_name, args.replace)?;
-    emit(cli, &message, || outln!("{message}"))
+    let path = match args.index {
+        Some(at) if !matches!(op, PathOp::Insert { .. }) => format!("{path}[{at}]"),
+        _ => path.to_string(),
+    };
+    rivals_uasset::parse_path(&path)?;
+    Ok(rivals_uasset::PathEdit {
+        export: args.export.clone().ok_or("--path needs --export")?,
+        row: args.row.clone(),
+        defaults: args.defaults,
+        path,
+        op,
+        was: None,
+    })
 }
 
 /// The edit `--op` names. One it does not know, or one missing the element it acts on, is refused
@@ -4301,7 +4401,7 @@ mod parse_tests {
         ]
         .concat();
         match asset(&args) {
-            AssetCmd::Set(args) => args,
+            AssetCmd::Set(args) => *args,
             _ => panic!("not set"),
         }
     }
@@ -4347,6 +4447,68 @@ mod parse_tests {
             op(&["--op", "insert", "--index", "0", "--key", "K"]),
             Ok(EditOp::Insert { index: 0, key: Some(key) }) if key == "K"
         ));
+    }
+
+    fn path_set(extra: &[&str]) -> Result<rivals_uasset::PathEdit, String> {
+        let args = [&["set"][..], &PACKAGE, &["--export", "Table"], extra].concat();
+        match asset(&args) {
+            AssetCmd::Set(args) => path_edit(&args, args.path.as_deref().expect("a path")),
+            _ => panic!("not set"),
+        }
+    }
+
+    /// A value named by path needs no offset, kind or name, takes an element's index onto its
+    /// path, and appends where an insert names no position.
+    #[test]
+    fn a_value_edit_is_named_by_path() {
+        use rivals_uasset::PathOp;
+        let edit = path_set(&["--row", "Row_A", "--path", "Damage", "--value", "5"]).expect("set");
+        assert_eq!(edit.export, "Table");
+        assert_eq!(edit.row.as_deref(), Some("Row_A"));
+        assert_eq!(edit.op, PathOp::Set { text: "5".into() });
+        let remove =
+            path_set(&["--path", "Items", "--op", "remove", "--index", "3"]).expect("remove");
+        assert_eq!(remove.path, "Items[3]");
+        assert_eq!(remove.op, PathOp::Remove);
+        let insert = path_set(&["--path", "Items", "--op", "insert"]).expect("insert");
+        assert_eq!(insert.path, "Items");
+        assert_eq!(
+            insert.op,
+            PathOp::Insert {
+                index: None,
+                key: None
+            }
+        );
+        let keyed =
+            path_set(&["--path", "Scores{A}", "--op", "set-key", "--key", "B"]).expect("key");
+        assert_eq!(keyed.op, PathOp::SetKey { text: "B".into() });
+        assert!(path_set(&["--path", "A..B"]).is_err());
+        assert!(path_set(&["--path", "A", "--op", "nope"]).is_err());
+
+        let conflicting = [
+            &["rivals-cli", "asset", "set"][..],
+            &PACKAGE,
+            &["--export", "Table", "--path", "A", "--offset", "8"],
+        ];
+        assert!(Cli::try_parse_from(conflicting.concat()).is_err());
+        let unplaced = [
+            &["rivals-cli", "asset", "set"][..],
+            &PACKAGE,
+            &["--path", "A"],
+        ];
+        assert!(
+            Cli::try_parse_from(unplaced.concat()).is_err(),
+            "--path needs --export"
+        );
+        let neither = [
+            &["rivals-cli", "asset", "set"][..],
+            &PACKAGE,
+            &["--value", "1"],
+        ];
+        assert!(
+            Cli::try_parse_from(neither.concat()).is_err(),
+            "an offset or a path"
+        );
     }
 
     #[test]

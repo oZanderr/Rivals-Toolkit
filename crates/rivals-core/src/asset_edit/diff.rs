@@ -2,9 +2,10 @@
 //!
 //! The dump is the readable form of a package; editing it by hand is how a change gets described
 //! without knowing byte offsets. What comes back is compared against the parse the dump came from,
-//! and every difference becomes the edit that would make it, addressed by the offset the original
-//! recorded. That ties an edit list to one source state: an offset from this dump only means
-//! anything against this package, and only until an earlier edit moves it.
+//! and every difference becomes the edit that would make it, addressed by the object and property
+//! path leading to it, with what it read as there. Such an edit is placed in whatever the save
+//! reads, so the list still fits a copy of the package a patch or another save has changed. The
+//! few values no path reaches keep the offset the original recorded, held to it by `expect`.
 //!
 //! What the comparison cannot express it reports as a note rather than guessing. A note is not a
 //! failure: the edits beside it still apply, and the note says what a second dump-edit-diff pass
@@ -13,8 +14,9 @@
 use serde_json::Value as Json;
 
 use rivals_uasset::{
-    EditOp, ImportEdit, ParsedPackage, PropertyEntry, PropertyValue, RowEdit, RowOp, StringEdit,
-    StringOp, TYPE_FIELD, ValueEdit, kind_of,
+    EditOp, Expected, FieldSet, ImportEdit, PackageEdits, ParsedPackage, PathEdit, PathOp,
+    PropertyEntry, PropertyValue, RowEdit, RowOp, Segment, StringEdit, StringOp, TYPE_FIELD,
+    ValueEdit, kind_of,
 };
 
 use super::json::EditList;
@@ -69,8 +71,141 @@ pub fn diff_dump(original: &ParsedPackage, edited: &Json) -> Result<DiffOutcome,
         diff_rows(was, is, at, &mut out);
         diff_strings(was, is, at, &mut out);
     }
+    to_paths(original, &mut out.edits);
     out.edits.expect_from(original);
     Ok(out)
+}
+
+/// Rewrites each value edit and field set as a path edit wherever one is placed on the same value,
+/// so the list names what it changes rather than where it sat in this copy of the package. One no
+/// path reaches, such as a field of a map's key, keeps its offset.
+fn to_paths(original: &ParsedPackage, edits: &mut EditList) {
+    let mut kept = Vec::new();
+    for edit in std::mem::take(&mut edits.values) {
+        match value_path(original, &edit).filter(|path| placed_alone(original, path, &edit)) {
+            Some(path) => edits.paths.push(path),
+            None => kept.push(edit),
+        }
+    }
+    edits.values = kept;
+    let mut kept = Vec::new();
+    for set in std::mem::take(&mut edits.field_sets) {
+        let path = field_set_path(original, &set)
+            .filter(|path| set_placed(original, path, &set, &edits.paths, &edits.rows));
+        match path {
+            Some(path) => edits.paths.push(path),
+            None => kept.push(set),
+        }
+    }
+    edits.field_sets = kept;
+}
+
+/// A value edit as a path edit: where its value sits, an element it acts on by key where that is
+/// unique and by position where not, and what the value read as, which is what `expect` would have
+/// held it to. A positional insert into an array is held to every element the array held.
+fn value_path(original: &ParsedPackage, edit: &ValueEdit) -> Option<PathEdit> {
+    let place = rivals_uasset::place_of(
+        original,
+        edit.offset,
+        &edit.expect_name,
+        edit.expect_element,
+    )?;
+    let entry = rivals_uasset::entry_named_at(
+        original,
+        edit.offset,
+        &edit.expect_name,
+        edit.expect_element,
+    )?;
+    let (element, op) = PathOp::split(edit.op.clone());
+    let mut segments = place.segments;
+    if let Some(index) = element {
+        segments.push(rivals_uasset::element_segment(&entry.value, index));
+    }
+    let skeleton = PackageEdits {
+        values: vec![edit.clone()],
+        ..Default::default()
+    };
+    let mut was = rivals_uasset::expectations(original, &skeleton)
+        .values
+        .remove(&Expected::value_key(edit));
+    if matches!(edit.op, EditOp::Insert { .. })
+        && matches!(entry.value, PropertyValue::Array { .. })
+    {
+        was = rivals_uasset::elements_of(&entry.value);
+    }
+    Some(PathEdit {
+        export: rivals_uasset::below_package(&original.exports.get(place.export as usize)?.path)
+            .to_string(),
+        row: place.row,
+        defaults: place.defaults,
+        path: rivals_uasset::format_path(&segments),
+        op,
+        was,
+    })
+}
+
+/// A field set as a path edit: where the value it goes through sits, then its own steps.
+fn field_set_path(original: &ParsedPackage, set: &FieldSet) -> Option<PathEdit> {
+    let place =
+        rivals_uasset::place_of(original, set.offset, &set.expect_name, set.expect_element)?;
+    let mut segments = place.segments;
+    for step in &set.path {
+        match step.strip_suffix(']').and_then(|step| step.split_once('[')) {
+            Some((name, at)) => {
+                if !name.is_empty() {
+                    segments.push(Segment::Field(name.to_string()));
+                }
+                segments.push(Segment::Index(at.parse().ok()?));
+            }
+            None => segments.push(Segment::Field(step.clone())),
+        }
+    }
+    Some(PathEdit {
+        export: rivals_uasset::below_package(&original.exports.get(place.export as usize)?.path)
+            .to_string(),
+        row: place.row,
+        defaults: place.defaults,
+        path: rivals_uasset::format_path(&segments),
+        op: PathOp::Set {
+            text: set.text.clone(),
+        },
+        was: None,
+    })
+}
+
+/// Whether a path edit is placed on the original as exactly the value edit it was made from.
+fn placed_alone(original: &ParsedPackage, path: &PathEdit, edit: &ValueEdit) -> bool {
+    let changes = PackageEdits {
+        paths: vec![path.clone()],
+        ..Default::default()
+    };
+    rivals_uasset::lower_paths(original, &changes).is_ok_and(|lowered| {
+        lowered.values == [edit.clone()]
+            && lowered.field_sets.is_empty()
+            && lowered.waiting.is_empty()
+            && lowered.notes.is_empty()
+    })
+}
+
+/// Whether a field set's path edit is placed on the original as that field set, or waits on an
+/// edit beside it that makes what it goes into, as the field set would have.
+fn set_placed(
+    original: &ParsedPackage,
+    path: &PathEdit,
+    set: &FieldSet,
+    placed: &[PathEdit],
+    rows: &[RowEdit],
+) -> bool {
+    let beside = placed.iter().filter(|other| {
+        other.export == path.export && other.row == path.row && other.defaults == path.defaults
+    });
+    let changes = PackageEdits {
+        paths: beside.cloned().chain([path.clone()]).collect(),
+        rows: rows.to_vec(),
+        ..Default::default()
+    };
+    rivals_uasset::lower_paths(original, &changes)
+        .is_ok_and(|lowered| lowered.waiting.contains(path) || lowered.field_sets == [set.clone()])
 }
 
 /// An import whose path moved is retargeted, and one appended to the table is added. Imports the

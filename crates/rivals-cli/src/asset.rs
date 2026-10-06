@@ -1500,7 +1500,9 @@ pub fn diff(
 pub fn print_diff(file: &asset_edit::json::EditFile, out: &mut impl FnMut(String)) {
     let edits = &file.edits;
     let counts = [
+        ("path", edits.paths.len()),
         ("value", edits.values.len()),
+        ("field", edits.field_sets.len()),
         ("import", edits.imports.len()),
         ("row", edits.rows.len()),
         ("string", edits.strings.len()),

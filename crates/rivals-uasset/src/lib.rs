@@ -22,6 +22,7 @@ mod names;
 mod new_function;
 mod niagara;
 mod package;
+mod path_edit;
 mod props;
 mod reader;
 mod relocate;
@@ -117,6 +118,10 @@ pub use package::{
     lost_import_warning, package_info, package_names, parse_package, parse_package_checked,
     parse_package_opts, parse_package_probed, parse_package_traced, parse_package_traced_with,
     parse_package_with, read_header, unresolved_import_note, unresolved_imports,
+};
+pub use path_edit::{
+    Lowered, PathEdit, PathOp, Place, Segment, below_package, element_segment, elements_of,
+    export_of, format_path, lower_paths, parse_path, place_of, was_of,
 };
 pub use props::{
     ContainerLayout, Diagnostics, IndexRef, InstancedLayout, MapKeys, MissingSchema, OddHeader,

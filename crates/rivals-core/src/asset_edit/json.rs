@@ -52,6 +52,11 @@ pub struct EditList {
     /// Values set inside structs that store nothing yet. See [`rivals_uasset::FieldSet`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub field_sets: Vec<rivals_uasset::FieldSet>,
+    /// Changes named by object and property path, placed in the package as the save reads it.
+    /// Each holds itself to what it was written against, so these need no `expect`. See
+    /// [`rivals_uasset::PathEdit`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<rivals_uasset::PathEdit>,
     /// Drop the names nothing in the package uses. A save of its own.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub compact_names: bool,
@@ -166,6 +171,7 @@ impl EditList {
             && self.export_edits.is_empty()
             && self.dependencies.is_empty()
             && self.field_sets.is_empty()
+            && self.paths.is_empty()
             && !self.compact_names
             && self.add_exports.is_empty()
             && self.add_variables.is_empty()
@@ -297,6 +303,7 @@ impl EditList {
             exports: self.export_edits,
             dependencies: self.dependencies,
             field_sets: self.field_sets,
+            paths: self.paths,
             compact_names: self.compact_names,
             add_exports: self.add_exports,
             new_functions,
@@ -512,6 +519,48 @@ mod tests {
         let edits = list.resolve(Path::new("")).expect("resolve");
         assert_eq!(edits.values.len(), 8);
         assert_eq!(edits.duplicate_exports[0].name, "Copy");
+    }
+
+    /// Edits named by path carry every op, each with what it was written against where it has one,
+    /// and reach the save as they were written.
+    #[test]
+    fn path_edits_read_every_op() {
+        let json = r#"{"paths": [
+            {"export": "Table", "row": "Row_A", "path": "Damage", "op": "set", "text": "5", "was": "4"},
+            {"export": "Table", "path": "Tags{Hero.A}", "op": "remove"},
+            {"export": "Table", "path": "Scores{A}", "op": "set_key", "text": "B"},
+            {"export": "BP_C:Mesh_GEN_VARIABLE", "path": "Items", "op": "insert"},
+            {"export": "BP_C:Mesh_GEN_VARIABLE", "path": "Owners", "op": "insert", "index": 0, "key": "K"},
+            {"export": "Struct", "defaults": true, "path": "Inner.X", "op": "clear"},
+            {"export": "0", "path": "Extra", "op": "store"},
+            {"export": "0", "path": "Extra", "op": "unset"},
+            {"export": "0", "path": "Tags", "op": "reorder", "order": [1, 0]},
+            {"export": "0", "path": "Blob", "op": "set_raw", "hex": "0a000000"}
+        ]}"#;
+        let list: EditList = serde_json::from_str(json).expect("parse");
+        assert!(!list.is_empty());
+        let edits = list.clone().resolve(Path::new("")).expect("resolve");
+        assert_eq!(edits.paths, list.paths);
+        assert_eq!(edits.paths.len(), 10);
+        assert_eq!(edits.paths[0].was.as_deref(), Some("4"));
+        assert!(edits.paths[5].defaults);
+        assert!(matches!(
+            edits.paths[3].op,
+            rivals_uasset::PathOp::Insert {
+                index: None,
+                key: None
+            }
+        ));
+        let written = serde_json::to_value(&list).expect("json");
+        assert_eq!(
+            written["paths"][3],
+            serde_json::json!({"export": "BP_C:Mesh_GEN_VARIABLE", "path": "Items", "op": "insert"})
+        );
+        let error = serde_json::from_str::<EditList>(
+            r#"{"paths": [{"export": "0", "path": "A", "op": "set_element", "index": 1}]}"#,
+        )
+        .expect_err("refused");
+        assert!(error.to_string().contains("set_element"), "{error}");
     }
 
     /// A misspelt op is refused rather than quietly dropped, which is what makes a hand written

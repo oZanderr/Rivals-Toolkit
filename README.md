@@ -236,6 +236,7 @@ rivals-cli asset set --container ... --entry ...   --offset 0xBE6 --kind float -
 rivals-cli asset set --container ... --entry ...   --offset 0x3A0 --kind map --name Scores --op set-key --index 1 --key Hulk --mod-name MyMod
 rivals-cli asset set --container ... --entry ...   --offset 0x3A0 --kind array --name Tags --op reorder --order 2,0,1 --mod-name MyMod
 rivals-cli asset set --container ... --entry ...   --offset 0x4C0 --kind struct --name Payload --op set-raw --hex "0a 00 00 00" --mod-name MyMod
+rivals-cli asset set --container ... --entry ...   --export DT_Thing --row Hulk --path "Scores{Ranked}" --value 7 --mod-name MyMod
 rivals-cli asset row     --container ... --entry ... --export 0 --op add --row NewRow
 rivals-cli asset strings --container ... --entry ... --export 0 --op set-source --index 3 --to "Hello"
 
@@ -322,12 +323,35 @@ rivals-cli asset apply --edits thing.edits.json              # write it
 `asset apply` also takes `--manifest`, a file naming several edit files, or holding them inline, so
 a set of packages goes into one mod in one run.
 
+The diff writes each value change as the object, row and property path leading to it, such as
+`Mappings[3].Key` or `Options{Hero.Ability}.Value`, with what it read as there. A save finds the
+value in whatever it reads, so an edit file still fits a copy that a game patch or an earlier save
+has moved, and applied a second time it finds its changes made and writes nothing. A script can
+write the same edits itself:
+
+```json
+{"container": "pakchunk0-Windows.utoc", "entry": "Marvel/Content/.../DT_Thing.uasset",
+ "edits": {"paths": [
+   {"export": "DT_Thing", "row": "Hulk", "path": "Damage", "op": "set", "text": "42.5"},
+   {"export": "DT_Thing", "row": "Hulk", "path": "Tags", "op": "insert", "key": "Hero.Tank"},
+   {"export": "DT_Thing", "row": "Hulk", "path": "Scores{Ranked}", "op": "remove"}
+ ]}}
+```
+
+`export` is the object's path below the package. `path` steps into a field with `.`, into a static
+array's slot or a container's element with `[i]`, and into a map's pair or a set's element with
+`{key}`. An edit given `was` is refused as drift once its value reads otherwise, which
+`--allow-drift` overrides. An edit under one that adds, moves or replaces what it names is made once
+that has landed, in the same save.
+
 What the diff cannot express it writes as a note beside the edits rather than guessing. The edits
 beside a note still apply. The limits worth knowing:
 
-- **Offsets are one-shot.** An edit file addresses the package state its dump came from. Applying it
-  twice, or applying two files to one entry expecting them to stack, does not work: dump the saved
-  copy and diff again from there.
+- **Not everything has a path.** A field of a map's key keeps its byte offset, which fits only the
+  package it came from, and row, string table, import and script edits name their object or entry
+  by index. Each is held by `expect` to what it was written against. An insert into an array, or a
+  removal from one, by position is held to every element the array held, so applying it a second
+  time is refused as drift rather than adding another.
 - **Some changes take a second pass.** A new container element, table row or stored struct is
   created with its default, an instanced struct given another type holds that type's defaults, and
   elements that moved and changed are moved first. Dump the saved copy and diff again for the rest.

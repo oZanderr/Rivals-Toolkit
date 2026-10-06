@@ -250,6 +250,9 @@ pub struct PackageEdits {
     pub dependencies: Vec<crate::dependency::DependencyEdit>,
     /// Values set inside a struct that is not stored yet, which it is stored to hold.
     pub field_sets: Vec<FieldSet>,
+    /// Edits naming what they change by object and property path. Each is resolved against the
+    /// package as the save reads it, which the caller does: see `rivals_core::asset_edit`.
+    pub paths: Vec<crate::path_edit::PathEdit>,
     /// Drop the names nothing in the package uses. A save of its own: it renumbers every name.
     pub compact_names: bool,
     /// Save the package under another name, once every other edit here has been made. Applied by
@@ -701,7 +704,7 @@ fn element_halves(value: &PropertyValue) -> Option<Vec<Vec<&PropertyValue>>> {
 /// A container's elements as JSON, in the order they read: for each, a list of its halves as each
 /// is typed, `null` for one with no text form. This is what a reorder is held to, element by
 /// element, so the app can spell it from what it shows.
-fn held_elements(value: &PropertyValue) -> Option<String> {
+pub(crate) fn held_elements(value: &PropertyValue) -> Option<String> {
     let texts: Vec<Vec<Option<String>>> = element_halves(value)?
         .into_iter()
         .map(|halves| halves.into_iter().map(value_text).collect())
@@ -711,7 +714,7 @@ fn held_elements(value: &PropertyValue) -> Option<String> {
 
 /// Whether a container still holds what [`held_elements`] listed: as many elements, each half
 /// reading as its text, where it had one.
-fn same_elements(value: &PropertyValue, was: &str) -> bool {
+pub(crate) fn same_elements(value: &PropertyValue, was: &str) -> bool {
     let (Some(now), Ok(was)) = (
         element_halves(value),
         serde_json::from_str::<Vec<Vec<Option<String>>>>(was),
@@ -749,7 +752,7 @@ fn script_sizes(script: &kismet::Script) -> String {
 }
 
 /// A value as an edit would type it, for the kinds that can be compared that way.
-fn value_text(value: &PropertyValue) -> Option<String> {
+pub(crate) fn value_text(value: &PropertyValue) -> Option<String> {
     let text = match value {
         PropertyValue::Str { value } | PropertyValue::Name { value } => value.clone(),
         PropertyValue::SoftObject { path } => path.clone(),
@@ -809,6 +812,7 @@ impl PackageEdits {
         self.remove_components.extend(other.remove_components);
         self.dependencies.extend(other.dependencies);
         self.field_sets.extend(other.field_sets);
+        self.paths.extend(other.paths);
         self.compact_names |= other.compact_names;
         if other.save_as.is_some() {
             self.save_as = other.save_as;
@@ -841,6 +845,7 @@ impl PackageEdits {
             && self.exports.is_empty()
             && self.dependencies.is_empty()
             && self.field_sets.is_empty()
+            && self.paths.is_empty()
             && !self.compact_names
     }
 }
@@ -1191,6 +1196,13 @@ pub fn patch_package_with(
         return Err(
             "removing a component takes more than one read of the package: save it through \
              rivals_core::asset_edit"
+                .into(),
+        );
+    }
+    if !edits.paths.is_empty() {
+        return Err(
+            "edits addressed by path are placed in the package as it reads first: save them \
+             through rivals_core::asset_edit"
                 .into(),
         );
     }
@@ -5696,14 +5708,14 @@ fn row_splices(
 }
 
 /// The key of a map's pair `index`.
-fn element_key(container: &PropertyValue, index: u32) -> Option<&PropertyValue> {
+pub(crate) fn element_key(container: &PropertyValue, index: u32) -> Option<&PropertyValue> {
     match container {
         PropertyValue::Map { entries } => entries.get(index as usize).map(|pair| &pair.key),
         _ => None,
     }
 }
 
-fn element_value(container: &PropertyValue, index: u32) -> Option<&PropertyValue> {
+pub(crate) fn element_value(container: &PropertyValue, index: u32) -> Option<&PropertyValue> {
     match container {
         PropertyValue::Array { items } | PropertyValue::Set { items } => items.get(index as usize),
         PropertyValue::Map { entries } => entries.get(index as usize).map(|pair| &pair.value),
@@ -8304,7 +8316,7 @@ fn parse<T: std::str::FromStr>(text: &str) -> Result<T, String> {
 
 /// Compares the decoded value with what was asked for, tolerating the formatting differences that
 /// come from parsing text (`1.5` against `1.50`, `true` against `1`).
-fn reads_back_as(value: &PropertyValue, text: &str) -> bool {
+pub(crate) fn reads_back_as(value: &PropertyValue, text: &str) -> bool {
     match value {
         // A guid reads back as its 32 hex digits, whatever case or dashes it was typed with.
         PropertyValue::Str { value } => value == text || same_guid(value, text),
