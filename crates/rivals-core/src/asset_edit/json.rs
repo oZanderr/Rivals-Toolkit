@@ -100,7 +100,11 @@ pub struct BulkFile {
 /// New bytes for an export's payload, as a file to read them from.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PayloadFile {
+    #[serde(default)]
     pub export: u32,
+    /// The object by path rather than by index. See [`rivals_uasset::place_named`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object: Option<String>,
     pub file: String,
 }
 
@@ -202,6 +206,7 @@ impl EditList {
                 .map(|entry| PayloadEdit {
                     export: entry.export,
                     bytes: Vec::new(),
+                    object: entry.object.clone(),
                 })
                 .collect(),
             values: self.values.clone(),
@@ -255,6 +260,7 @@ impl EditList {
             payloads.push(PayloadEdit {
                 export: entry.export,
                 bytes: read(&entry.file)?,
+                object: entry.object.clone(),
             });
         }
         let mut script_texts = Vec::with_capacity(self.script_texts.len());
@@ -599,6 +605,7 @@ mod tests {
             payloads: vec![PayloadFile {
                 export: 0,
                 file: "gone.bin".into(),
+                object: None,
             }],
             ..Default::default()
         };

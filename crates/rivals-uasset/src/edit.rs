@@ -151,6 +151,8 @@ pub struct BulkEdit {
 pub struct PayloadEdit {
     pub export: u32,
     pub bytes: Vec<u8>,
+    /// The object by path rather than by index. See [`crate::place_named`].
+    pub object: Option<String>,
 }
 
 /// A change inside a function's bytecode, addressed the way the disassembly prints it: the
@@ -161,6 +163,11 @@ pub struct PayloadEdit {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ScriptConstEdit {
     pub export: u32,
+    /// The object by path rather than by index, here the function: the save puts the edit
+    /// at the index that path has in the package it reads. See [`crate::place_named`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object: Option<String>,
+
     /// The statement's loaded offset, as the disassembly prints at the start of its line.
     pub statement: u32,
     /// Which literal in that statement, counted from 0 in bytecode order. Unused when `at` names
@@ -557,7 +564,13 @@ pub fn expectations(parsed: &ParsedPackage, edits: &PackageEdits) -> Expected {
             .filter(|edit| unnamed(&edit.object))
             .map(|edit| edit.export),
     );
-    exports.extend(edits.scripts.iter().map(|edit| edit.export));
+    exports.extend(
+        edits
+            .scripts
+            .iter()
+            .filter(|edit| unnamed(&edit.object))
+            .map(|edit| edit.export),
+    );
     exports.extend(
         edits
             .script_texts
@@ -565,7 +578,13 @@ pub fn expectations(parsed: &ParsedPackage, edits: &PackageEdits) -> Expected {
             .filter(|edit| unnamed(&edit.object))
             .map(|edit| edit.export),
     );
-    exports.extend(edits.payloads.iter().map(|edit| edit.export));
+    exports.extend(
+        edits
+            .payloads
+            .iter()
+            .filter(|edit| unnamed(&edit.object))
+            .map(|edit| edit.export),
+    );
     exports.extend(edits.remove_exports.iter().copied());
     exports.extend(edits.reset_exports.iter().copied());
     exports.extend(edits.duplicate_exports.iter().map(|edit| edit.export));
@@ -690,7 +709,7 @@ pub fn expectations(parsed: &ParsedPackage, edits: &PackageEdits) -> Expected {
                 .insert(Expected::script_size_key(edit.export), script_sizes(script));
         }
     }
-    for edit in &edits.scripts {
+    for edit in edits.scripts.iter().filter(|edit| edit.object.is_none()) {
         let script = parsed
             .exports
             .get(edit.export as usize)
@@ -3763,6 +3782,26 @@ pub fn payload_lock(
 }
 
 /// Where an export's payload sits: after the properties, to the export's end.
+/// Whether export `export`'s payload already holds `bytes`, so giving it them again changes
+/// nothing.
+pub fn payload_holds(
+    bundle: &AssetBundle<'_>,
+    parsed: &ParsedPackage,
+    export: u32,
+    bytes: &[u8],
+) -> bool {
+    let Some((start, end)) = parsed.exports.get(export as usize).and_then(payload_range) else {
+        return false;
+    };
+    let Ok(base) = header_size(bundle) else {
+        return false;
+    };
+    buffer_at(bundle, base, start)
+        .ok()
+        .and_then(|(buffer, at)| buffer.get(at..at + (end - start) as usize))
+        .is_some_and(|held| held == bytes)
+}
+
 pub(crate) fn payload_range(export: &ParsedExport) -> Option<(u64, u64)> {
     match &export.status {
         ExportStatus::Payload {
@@ -10629,6 +10668,7 @@ mod tests {
             payloads: vec![PayloadEdit {
                 export: 1,
                 bytes: vec![0x0B, 0x0B, 0x0B, 0x0B, 0x53],
+                object: None,
             }],
             ..Default::default()
         };
@@ -10648,6 +10688,7 @@ mod tests {
             payloads: vec![PayloadEdit {
                 export: 1,
                 bytes: vec![9; 5],
+                object: None,
             }],
             ..Default::default()
         };
@@ -10672,6 +10713,7 @@ mod tests {
             payloads: vec![PayloadEdit {
                 export: 1,
                 bytes: vec![9, 9, 9, 9],
+                object: None,
             }],
             ..Default::default()
         };
@@ -10688,6 +10730,7 @@ mod tests {
             payloads: vec![PayloadEdit {
                 export: 1,
                 bytes: vec![9; 5],
+                object: None,
             }],
             ..Default::default()
         };

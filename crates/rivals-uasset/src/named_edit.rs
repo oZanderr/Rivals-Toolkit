@@ -21,6 +21,8 @@ pub fn names_any(changes: &PackageEdits) -> bool {
             .exports
             .iter()
             .any(|edit| matches!(edit, ExportEdit::Rename { from: Some(_), .. }))
+        || changes.scripts.iter().any(|edit| edit.object.is_some())
+        || changes.payloads.iter().any(|edit| edit.object.is_some())
         || changes.imports.iter().any(|edit| {
             matches!(
                 edit,
@@ -42,6 +44,12 @@ pub fn place_named(
     place_rows(parsed, changes, &mut notes)?;
     place_strings(parsed, changes, &mut notes)?;
     place_scripts(parsed, changes, &mut notes)?;
+    place_constants(parsed, changes, &mut notes)?;
+    for edit in &mut changes.payloads {
+        if let Some(object) = edit.object.take() {
+            edit.export = export_of(parsed, &object)?.index;
+        }
+    }
     place_imports(parsed, changes, &mut notes)?;
     Ok(notes)
 }
@@ -332,6 +340,40 @@ fn labels_in_order(text: &str) -> String {
     }
     out.push_str(rest);
     out
+}
+
+fn place_constants(
+    parsed: &ParsedPackage,
+    changes: &mut PackageEdits,
+    notes: &mut Vec<String>,
+) -> Result<(), String> {
+    let mut kept = Vec::new();
+    for mut edit in std::mem::take(&mut changes.scripts) {
+        let Some(object) = edit.object.take() else {
+            kept.push(edit);
+            continue;
+        };
+        let export = export_of(parsed, &object)?;
+        edit.export = export.index;
+        // A literal already reading the value given has had this edit; a change of form has not.
+        let held = export.script.as_ref().and_then(|script| match edit.at {
+            Some(at) => crate::kismet::expression_starting(script, edit.statement, at),
+            None => crate::kismet::literal_at(script, edit.statement, edit.constant).ok(),
+        });
+        let reads = held
+            .and_then(|expr| crate::kismet::literal_slots(expr).into_iter().next())
+            .is_some_and(|slot| slot.value.trim() == edit.value.trim());
+        if reads && !edit.widen && !edit.narrow {
+            notes.push(format!(
+                "{object}: the literal at {:#06X} already reads {}",
+                edit.statement, edit.value
+            ));
+            continue;
+        }
+        kept.push(edit);
+    }
+    changes.scripts = kept;
+    Ok(())
 }
 
 fn place_imports(

@@ -61,6 +61,21 @@ pub fn preview_read_edits(
     if rivals_uasset::names_any(changes) {
         let mut placed = changes.clone();
         let mut notes = rivals_uasset::place_named(parsed, &mut placed)?;
+        // A payload named by path that already holds the bytes given has had them.
+        let bundle = bundle_of(&loaded);
+        let mut named = changes.payloads.iter().map(|edit| edit.object.clone());
+        placed.payloads.retain(|edit| {
+            let Some(Some(object)) = named.next() else {
+                return true;
+            };
+            let held = rivals_uasset::payload_holds(&bundle, parsed, edit.export, &edit.bytes);
+            if held {
+                notes.push(format!(
+                    "{object}: its payload already holds the bytes given"
+                ));
+            }
+            !held
+        });
         let (mut patched, loaded) = if placed.is_empty() && placed.save_as.is_none() {
             (unchanged(&loaded), loaded)
         } else {
@@ -13867,6 +13882,83 @@ mod game_data_tests {
         assert!(err.contains("holds no literal constant"), "{err}");
     }
 
+    /// A payload naming its object by path lands whatever index it carries, and given again finds
+    /// the object holding those bytes already.
+    #[test]
+    fn a_named_payload_lands_once() {
+        let Some(fixture) = Fixture::open(LEVEL) else {
+            return;
+        };
+        let before = fixture.parse();
+        let event = before
+            .exports
+            .iter()
+            .find(|e| e.object_name == "ReceiveBeginPlay")
+            .expect("the level's begin play event");
+        let ExportStatus::Payload {
+            consumed,
+            payload_bytes,
+            ..
+        } = &event.status
+        else {
+            unreachable!("a function with bytecode is a payload")
+        };
+        let bundle = fixture.bundle();
+        let header = rivals_uasset::read_header(&bundle).expect("header");
+        let (slice, _) = rivals_uasset::export_bytes(&bundle, &header, event.index).expect("bytes");
+        let mut bytes = slice[*consumed as usize..(*consumed + *payload_bytes) as usize].to_vec();
+        let last = bytes.len() - 1;
+        bytes.insert(last, 0x0B);
+        let named = PackageEdits {
+            payloads: vec![PayloadEdit {
+                export: u32::MAX,
+                bytes,
+                object: Some(rivals_uasset::below_package(&event.path).to_string()),
+            }],
+            ..Default::default()
+        };
+        let (patched, after) = fixture.apply_changes(named.clone());
+        let now = export_at(&after, event.index);
+        assert_eq!(now.serial_size, event.serial_size + 1);
+        applied_again_changes_nothing(&fixture, &named, &patched, &after);
+    }
+
+    /// A script constant naming its function by path lands whatever index it carries, and given
+    /// again finds its literal reading the value already.
+    #[test]
+    fn a_named_script_constant_lands_once() {
+        let Some(fixture) = Fixture::open(DEBUG_AUDIO_ABILITY) else {
+            return;
+        };
+        let before = fixture.parse();
+        let export = function(&before, "Initialize Anim Events");
+        let (statement, at) = first_slot(
+            &before,
+            export.index,
+            rivals_uasset::SlotKind::Literal,
+            "IntConst",
+        );
+        let named = PackageEdits {
+            scripts: vec![ScriptConstEdit {
+                export: u32::MAX,
+                object: Some(rivals_uasset::below_package(&export.path).to_string()),
+                statement,
+                at: Some(at),
+                value: "4321".into(),
+                ..ScriptConstEdit::default()
+            }],
+            ..Default::default()
+        };
+        let (patched, after) = fixture.apply_changes(named.clone());
+        assert!(
+            lines_of(&after, "Initialize Anim Events")
+                .iter()
+                .any(|line| line.text.contains("4321")),
+            "the literal reads the new value"
+        );
+        applied_again_changes_nothing(&fixture, &named, &patched, &after);
+    }
+
     /// A script that disassembles can be replaced at another length, because its loaded size can
     /// be worked out and the two words in front of it rewritten to match.
     #[test]
@@ -13900,6 +13992,7 @@ mod game_data_tests {
             payloads: vec![PayloadEdit {
                 export: event.index,
                 bytes: bytes.clone(),
+                object: None,
             }],
             ..Default::default()
         });
@@ -13948,6 +14041,7 @@ mod game_data_tests {
             payloads: vec![PayloadEdit {
                 export: export.index,
                 bytes: bytes.clone(),
+                object: None,
             }],
             ..Default::default()
         });
@@ -14001,6 +14095,7 @@ mod game_data_tests {
                 payloads: vec![PayloadEdit {
                     export: graph.index,
                     bytes,
+                    object: None,
                 }],
                 ..Default::default()
             },
@@ -14050,6 +14145,7 @@ mod game_data_tests {
             payloads: vec![PayloadEdit {
                 export: function.index,
                 bytes: script.clone(),
+                object: None,
             }],
             ..Default::default()
         });
@@ -14085,6 +14181,7 @@ mod game_data_tests {
                 payloads: vec![PayloadEdit {
                     export: function.index,
                     bytes: script,
+                    object: None,
                 }],
                 ..Default::default()
             },

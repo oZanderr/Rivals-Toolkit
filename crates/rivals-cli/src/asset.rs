@@ -587,7 +587,11 @@ pub fn replace_payload(
         mod_name,
         replace,
         PackageEdits {
-            payloads: vec![rivals_uasset::PayloadEdit { export, bytes }],
+            payloads: vec![rivals_uasset::PayloadEdit {
+                export,
+                bytes,
+                object: None,
+            }],
             ..Default::default()
         },
     )

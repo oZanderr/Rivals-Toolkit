@@ -2854,6 +2854,7 @@ mod tests {
         payload.payloads.push(crate::edit::PayloadEdit {
             export: 1,
             bytes: stub_script(&int_literal(0x26)),
+            object: None,
         });
         let refused = save_graph(&payload, &int_literal(0x18)).expect_err("collides");
         assert!(

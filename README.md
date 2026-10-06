@@ -348,10 +348,11 @@ what it names is made once that has landed, in the same save, so one apply gives
 columns, an instanced struct given another type that type's fields, and a map whose pairs moved its
 changed values.
 
-Rows, string table entries and a function's script text name their object the same way, with
-`object` in place of `export`, and a string table entry is found by its key. An import retarget or
-removal names its import by the path it has now, with `from`. One already made is left out, so
-these too can be applied again:
+Rows, string table entries, payloads, and a function's script text or script constants name their
+object the same way, with `object` in place of `export`, and a string table entry is found by its
+key. A script constant still names its literal by the statement's offset, and `was` holds it to
+what it read there. An import retarget or removal names its import by the path it has now, with
+`from`. One already made is left out, so these too can be applied again:
 
 ```json
 {"rows": [{"object": "DT_Thing", "op": "add", "name": "NewRow"}],
@@ -363,8 +364,8 @@ What the diff cannot express it writes as a note beside the edits rather than gu
 beside a note still apply. The limits worth knowing:
 
 - **Not everything has a path.** A field of a map's key keeps its byte offset, which fits only the
-  package it came from. Script constant edits, payloads and export table edits still name their
-  object by index. Each is held by `expect` to what it was written against.
+  package it came from. Export table edits other than a rename, and bulk data, still name their
+  object by index, held by `expect` to what it was written against.
 - **A few changes take a second pass.** Sets and maps gain and lose elements by key, and a key is
   typed as text: its own, or the one field of a struct holding one, as a gameplay tag is typed by
   its name. A key with no such text form, such as a struct of several fields, is a note, and so are
