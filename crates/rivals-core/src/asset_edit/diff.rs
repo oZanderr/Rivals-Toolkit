@@ -862,12 +862,21 @@ fn diff_entries(
     owner: &str,
     out: &mut DiffOutcome,
 ) {
+    let named = |held: &&Json, name: &str, element: Option<u32>| {
+        held.get("name").and_then(Json::as_str) == Some(name)
+            && held.get("element").and_then(Json::as_u64).map(|e| e as u32) == element
+    };
+    // An object whose class writes values of its own after its properties can list a name twice,
+    // so each one is paired with the one in the same place among those so named.
+    let mut seen: std::collections::BTreeMap<(&str, Option<u32>), usize> = Default::default();
     for entry in was {
         let element = entry.element;
-        let found = is.iter().find(|held| {
-            held.get("name").and_then(Json::as_str) == Some(entry.name.as_str())
-                && held.get("element").and_then(Json::as_u64).map(|e| e as u32) == element
-        });
+        let nth = seen.entry((entry.name.as_str(), element)).or_default();
+        let found = is
+            .iter()
+            .filter(|held| named(held, &entry.name, element))
+            .nth(*nth);
+        *nth += 1;
         let Some(found) = found else {
             out.notes.push(format!(
                 "{owner}.{}: the edited dump has no such property, so nothing is changed",
@@ -880,13 +889,17 @@ fn diff_entries(
         };
         diff_value(entry, value, export, owner, out);
     }
+    let mut listed: std::collections::BTreeMap<(&str, Option<u32>), usize> = Default::default();
     for held in is {
         let name = held.get("name").and_then(Json::as_str).unwrap_or_default();
         let element = held.get("element").and_then(Json::as_u64).map(|e| e as u32);
-        if !was
+        let nth = listed.entry((name, element)).or_default();
+        *nth += 1;
+        let held_here = was
             .iter()
-            .any(|entry| entry.name == name && entry.element == element)
-        {
+            .filter(|entry| entry.name == name && entry.element == element)
+            .count();
+        if *nth > held_here {
             let label = match element {
                 Some(at) => format!("{name}[{at}]"),
                 None => name.to_string(),
@@ -2176,6 +2189,47 @@ mod tests {
         assert!(out.notes.is_empty(), "{:?}", out.notes);
         let removed: Vec<String> = waiting(&out).into_iter().map(|(path, _)| path).collect();
         assert_eq!(removed, ["[1].Inner[2]", "[1].Inner[1]"]);
+    }
+
+    /// A name listed twice, as an object whose class writes values of its own after its properties
+    /// lists it, pairs each with its own, so an untouched list is no change.
+    #[test]
+    fn a_name_listed_twice_pairs_each_with_its_own() {
+        let was = [
+            entry(
+                "NavListStart",
+                PropertyValue::Unset {
+                    declared: "Object",
+                    enum_type: None,
+                    fields: Vec::new(),
+                },
+                0x40,
+            ),
+            entry(
+                "NavListStart",
+                PropertyValue::Object {
+                    index: 3,
+                    path: Some("/Game/Map.Map:PersistentLevel.Start".into()),
+                },
+                0x80,
+            ),
+        ];
+        let listed: Vec<Json> = was
+            .iter()
+            .map(|entry| json!({"name": entry.name, "value": dumped(&entry.value)}))
+            .collect();
+        let mut out = DiffOutcome::default();
+        diff_entries(&was, &listed, 0, "/Game/Map.Map", &mut out);
+        assert!(out.edits.is_empty(), "{:?}", out.edits);
+        assert!(out.notes.is_empty(), "{:?}", out.notes);
+
+        // A third one is more than the package holds.
+        let mut more = listed.clone();
+        more.push(listed[1].clone());
+        let mut out = DiffOutcome::default();
+        diff_entries(&was, &more, 0, "/Game/Map.Map", &mut out);
+        assert_eq!(out.notes.len(), 1, "{:?}", out.notes);
+        assert!(out.notes[0].contains("no such property"), "{:?}", out.notes);
     }
 
     /// A retype is refused rather than guessed at: nothing rewrites a property as another type.

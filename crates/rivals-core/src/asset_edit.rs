@@ -9600,6 +9600,7 @@ mod game_data_tests {
             AUDIO_SETTINGS,
             CONSTRAINT_EMITTER,
             SHAKE,
+            LEVEL,
         ] {
             let Some(fixture) = Fixture::open(path) else {
                 return;
