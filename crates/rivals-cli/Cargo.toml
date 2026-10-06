@@ -16,5 +16,9 @@ rivals-uasset = { path = "../rivals-uasset" }
 clap.workspace = true
 dirs.workspace = true
 mimalloc.workspace = true
+rayon.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+rivals-uasset = { path = "../rivals-uasset", features = ["test-support"] }

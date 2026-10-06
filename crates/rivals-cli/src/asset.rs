@@ -2,7 +2,9 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
+use rayon::prelude::*;
 use rivals_core::asset::{self, AssetSource};
 use rivals_core::asset_edit::{self, AssetEditRequest};
 use rivals_core::inherit;
@@ -2876,6 +2878,96 @@ pub struct AuditReport {
     pub relocation_examples: Vec<ClassExamples>,
 }
 
+impl AuditReport {
+    /// Adds the counts of a report on other packages. What `Accumulator::finish` works out from
+    /// the counts is left to it, and the source and the mappings warning are the walk's own. Taken
+    /// apart field by field, so a field added to the report has to be added up here too.
+    fn add(&mut self, other: AuditReport) {
+        let AuditReport {
+            container: _,
+            mappings_warning: _,
+            packages_scanned,
+            exports_blueprint_skipped,
+            exports_total,
+            exports_complete,
+            exports_partial,
+            exports_payload,
+            exports_failed,
+            failed_missing_from_mappings: _,
+            distinct_failure_causes: _,
+            decoded_percent: _,
+            exact_percent: _,
+            property_kinds: _,
+            top_failures: _,
+            failure_examples: _,
+            unresolved_structs: _,
+            partial_classes: _,
+            partial_examples: _,
+            payload_kinds: _,
+            status_by_class: _,
+            packages_repaired,
+            schema_fixups: _,
+            mappings_gaps: _,
+            headers_checked,
+            headers_differing,
+            header_shapes: _,
+            packages_header_broken,
+            resources_separate,
+            resources_inline,
+            inline_placed,
+            inline_unplaced,
+            failed_class_recovery,
+            class_recovery_failures: _,
+            class_recovery_examples: _,
+            text_histories: _,
+            text_flags: _,
+            packages_tagged,
+            packages_twinned,
+            twins: _,
+            undecoded_payloads,
+            undecoded_causes: _,
+            undecoded_examples: _,
+            scripts_total,
+            scripts_complete,
+            scripts_stopped,
+            script_stops: _,
+            script_stop_examples: _,
+            script_tokens: _,
+            relocation: _,
+            relocation_examples: _,
+        } = other;
+        for (into, from) in [
+            (&mut self.packages_scanned, packages_scanned),
+            (
+                &mut self.exports_blueprint_skipped,
+                exports_blueprint_skipped,
+            ),
+            (&mut self.exports_total, exports_total),
+            (&mut self.exports_complete, exports_complete),
+            (&mut self.exports_partial, exports_partial),
+            (&mut self.exports_payload, exports_payload),
+            (&mut self.exports_failed, exports_failed),
+            (&mut self.packages_repaired, packages_repaired),
+            (&mut self.headers_checked, headers_checked),
+            (&mut self.headers_differing, headers_differing),
+            (&mut self.packages_header_broken, packages_header_broken),
+            (&mut self.resources_separate, resources_separate),
+            (&mut self.resources_inline, resources_inline),
+            (&mut self.inline_placed, inline_placed),
+            (&mut self.inline_unplaced, inline_unplaced),
+            (&mut self.failed_class_recovery, failed_class_recovery),
+            (&mut self.packages_tagged, packages_tagged),
+            (&mut self.packages_twinned, packages_twinned),
+            (&mut self.undecoded_payloads, undecoded_payloads),
+            (&mut self.scripts_total, scripts_total),
+            (&mut self.scripts_complete, scripts_complete),
+            (&mut self.scripts_stopped, scripts_stopped),
+        ] {
+            *into += from;
+        }
+    }
+}
+
 #[derive(Serialize)]
 pub struct SynthCheckReport {
     pub packages_scanned: usize,
@@ -3085,6 +3177,23 @@ pub struct ClassStatus {
     pub failed: usize,
 }
 
+impl ClassStatus {
+    fn add(&mut self, other: ClassStatus) {
+        let ClassStatus {
+            name,
+            exact,
+            payload,
+            unexplained,
+            failed,
+        } = other;
+        self.name = name;
+        self.exact += exact;
+        self.payload += payload;
+        self.unexplained += unexplained;
+        self.failed += failed;
+    }
+}
+
 #[derive(Serialize)]
 pub struct Count {
     pub name: String,
@@ -3110,7 +3219,7 @@ pub fn audit_dir(
     usmap: Option<&str>,
     configured_usmap: Option<&str>,
     skip_blueprint: bool,
-    mut progress: impl FnMut(usize, usize),
+    progress: impl Fn(usize, usize) + Sync,
 ) -> Result<AuditReport, String> {
     let path = mappings::resolve(usmap, configured_usmap)?;
     let schema = mappings::load(&path)?;
@@ -3122,29 +3231,30 @@ pub fn audit_dir(
     let total = limit.map_or(files.len(), |l| l.min(files.len()));
 
     let mut acc = Accumulator::new(dir.to_string(), skip_blueprint);
-    for (index, file) in files.iter().take(total).enumerate() {
-        progress(index + 1, total);
-        acc.report.packages_scanned += 1;
-        let Ok(bundle) = asset::load_from_disk(file) else {
-            acc.note_failure(
-                "could not read from disk",
-                Some(file.to_string_lossy().into_owned()),
-            );
-            continue;
-        };
-        acc.absorb(
-            &bundle.asset_file_buffer,
-            &bundle.exports_file_buffer,
-            &schema,
-            &PackageSource {
-                game_root: "",
-                container: "",
-                entry: &file.to_string_lossy(),
-                kind: AssetSource::Loose,
-            },
-            None,
-        );
-    }
+    acc.walk(&files[..total], &progress, |run, part, step| {
+        for file in run {
+            part.report.packages_scanned += 1;
+            match asset::load_from_disk(file) {
+                Ok(bundle) => part.absorb(
+                    &bundle.asset_file_buffer,
+                    &bundle.exports_file_buffer,
+                    &schema,
+                    &PackageSource {
+                        game_root: "",
+                        container: "",
+                        entry: &file.to_string_lossy(),
+                        kind: AssetSource::Loose,
+                    },
+                    None,
+                ),
+                Err(_) => part.note_failure(
+                    "could not read from disk",
+                    Some(file.to_string_lossy().into_owned()),
+                ),
+            }
+            step();
+        }
+    });
     Ok(acc.finish())
 }
 
@@ -3159,7 +3269,7 @@ pub fn audit(
     skip_blueprint: bool,
     relocation_check: bool,
     text_check: bool,
-    mut progress: impl FnMut(usize, usize),
+    progress: impl Fn(usize, usize) + Sync,
 ) -> Result<AuditReport, String> {
     let path = mappings::resolve(usmap, configured_usmap)?;
     let schema = mappings::load(&path)?;
@@ -3175,29 +3285,31 @@ pub fn audit(
     acc.relocation_check = relocation_check;
     acc.text_check = text_check;
     acc.report.mappings_warning = mappings::drift_warning(game_root, &path);
-    let converter = asset::PackageConverter::new(&*store);
-    // Blueprint layouts are read through the same converter, which already holds the headers
-    // their packages import.
-    let layouts = LayoutReader::through(&*store, &converter);
-    for (index, (package_id, path)) in packages.iter().take(total).enumerate() {
-        progress(index + 1, total);
-        acc.report.packages_scanned += 1;
-        match converter.convert(*package_id, path) {
-            Ok(bundle) => acc.absorb(
-                &bundle.asset_file_buffer,
-                &bundle.exports_file_buffer,
-                &schema,
-                &PackageSource {
-                    game_root,
-                    container,
-                    entry: path,
-                    kind: source_of(container),
-                },
-                Some(&layouts),
-            ),
-            Err(_) => acc.note_failure("legacy conversion failed", Some(path.clone())),
+    acc.walk(&packages[..total], &progress, |run, part, step| {
+        let converter = asset::PackageConverter::new(&*store);
+        // Blueprint layouts are read through the same converter, which already holds the headers
+        // their packages import.
+        let layouts = LayoutReader::through(&*store, &converter);
+        for (package_id, path) in run {
+            part.report.packages_scanned += 1;
+            match converter.convert(*package_id, path) {
+                Ok(bundle) => part.absorb(
+                    &bundle.asset_file_buffer,
+                    &bundle.exports_file_buffer,
+                    &schema,
+                    &PackageSource {
+                        game_root,
+                        container,
+                        entry: path,
+                        kind: source_of(container),
+                    },
+                    Some(&layouts),
+                ),
+                Err(_) => part.note_failure("legacy conversion failed", Some(path.clone())),
+            }
+            step();
         }
-    }
+    });
     Ok(acc.finish())
 }
 
@@ -3352,6 +3464,122 @@ impl Accumulator {
             relocation_examples: BTreeMap::new(),
             tokens: BTreeMap::new(),
             shapes: BTreeMap::new(),
+        }
+    }
+
+    /// An empty accumulator that tallies the way this one does.
+    fn alike(&self) -> Self {
+        let mut alike = Self::new(self.report.container.clone(), self.skip_blueprint);
+        alike.relocation_check = self.relocation_check;
+        alike.text_check = self.text_check;
+        alike
+    }
+
+    /// Tallies `items` on every thread, a run of them at a time: `run` takes one run and an
+    /// accumulator of its own, set up like this one, and calls `step` after each item. The runs
+    /// are added up in the walk's order, so the report reads exactly as one walk through them in
+    /// turn would have written it.
+    fn walk<T: Sync>(
+        &mut self,
+        items: &[T],
+        progress: &(impl Fn(usize, usize) + Sync),
+        run: impl Fn(&[T], &mut Accumulator, &dyn Fn()) + Sync,
+    ) {
+        let total = items.len();
+        let done = AtomicUsize::new(0);
+        let step = || progress(done.fetch_add(1, Ordering::Relaxed) + 1, total);
+        let this = &*self;
+        let runs: Vec<Accumulator> = items
+            .par_chunks(asset::PACKAGES_PER_CONVERTER)
+            // Each run is a job of its own: neighbours by path cost alike, so a thread handed
+            // several at once can be left with all of a folder of maps while the rest wait.
+            .with_max_len(1)
+            .map(|items| {
+                let mut part = this.alike();
+                run(items, &mut part, &step);
+                part
+            })
+            .collect();
+        // Threads report out of turn, so the count shown last may be an earlier one.
+        if total > 0 {
+            progress(total, total);
+        }
+        for part in runs {
+            self.merge(part);
+        }
+    }
+
+    /// Adds what another accumulator counted over packages after this one's in the walk. Each
+    /// example list keeps its first few, this one's before the other's, so adding runs up in walk
+    /// order holds what one accumulator walking them in turn would. Taken apart field by field, so
+    /// a field added to the accumulator has to be added up here too.
+    fn merge(&mut self, other: Accumulator) {
+        let Accumulator {
+            skip_blueprint: _,
+            relocation_check: _,
+            text_check: _,
+            report,
+            kinds,
+            failures,
+            failure_examples,
+            unresolved,
+            partial,
+            partial_examples,
+            payloads,
+            classes,
+            fixups,
+            recovery,
+            recovery_examples,
+            histories,
+            text_flags,
+            twinned,
+            undecoded,
+            undecoded_examples,
+            stops,
+            relocation,
+            relocation_examples,
+            stop_examples,
+            tokens,
+            shapes,
+        } = other;
+        self.report.add(report);
+        for (into, from) in [
+            (&mut self.kinds, kinds),
+            (&mut self.failures, failures),
+            (&mut self.unresolved, unresolved),
+            (&mut self.partial, partial),
+            (&mut self.payloads, payloads),
+            (&mut self.fixups, fixups),
+            (&mut self.recovery, recovery),
+            (&mut self.histories, histories),
+            (&mut self.text_flags, text_flags),
+            (&mut self.twinned, twinned),
+            (&mut self.undecoded, undecoded),
+            (&mut self.stops, stops),
+            (&mut self.relocation, relocation),
+            (&mut self.tokens, tokens),
+            (&mut self.shapes, shapes),
+        ] {
+            for (key, count) in from {
+                *into.entry(key).or_default() += count;
+            }
+        }
+        for (into, from) in [
+            (&mut self.failure_examples, failure_examples),
+            (&mut self.partial_examples, partial_examples),
+            (&mut self.recovery_examples, recovery_examples),
+            (&mut self.undecoded_examples, undecoded_examples),
+            (&mut self.relocation_examples, relocation_examples),
+            (&mut self.stop_examples, stop_examples),
+        ] {
+            for (key, examples) in from {
+                let seen = into.entry(key).or_default();
+                let room = PARTIAL_EXAMPLES.saturating_sub(seen.len());
+                seen.extend(examples.into_iter().take(room));
+            }
+        }
+        for (name, status) in classes {
+            self.classes.entry(name).or_default().add(status);
         }
     }
 
@@ -4680,6 +4908,59 @@ pub fn print_diagnose(report: &DiagnoseReport, out: &mut impl FnMut(String)) {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// Packages tallied in one walk, and the same packages split into runs added up in order, give
+    /// the same report, down to which few examples each list keeps: the walk's first.
+    #[test]
+    fn runs_added_up_in_order_report_as_one_walk() {
+        use rivals_uasset::tagged_fixture::{sparse_mappings, sparse_package, tagged_package};
+        let schema = sparse_mappings();
+        let packages = [
+            tagged_package(),
+            sparse_package(),
+            tagged_package(),
+            sparse_package(),
+            tagged_package(),
+        ];
+        let feed = |acc: &mut Accumulator, at: usize| {
+            let (asset, exports) = &packages[at];
+            acc.report.packages_scanned += 1;
+            acc.absorb(
+                asset,
+                exports,
+                &schema,
+                &PackageSource {
+                    game_root: "",
+                    container: "",
+                    entry: &format!("P{at}"),
+                    kind: AssetSource::Loose,
+                },
+                None,
+            );
+            acc.note_failure("broken", Some(format!("P{at}")));
+        };
+        let mut whole = Accumulator::new("walk".into(), false);
+        whole.text_check = true;
+        let mut split = whole.alike();
+        for at in 0..packages.len() {
+            feed(&mut whole, at);
+        }
+        for run in [0..1, 1..3, 3..5] {
+            let mut part = split.alike();
+            for at in run {
+                feed(&mut part, at);
+            }
+            split.merge(part);
+        }
+        let whole = serde_json::to_value(whole.finish()).expect("json");
+        assert_eq!(serde_json::to_value(split.finish()).expect("json"), whole);
+        assert_eq!(whole["packages_scanned"], 5);
+        assert!(whole["exports_total"].as_u64() > Some(0), "{whole}");
+        assert_eq!(
+            whole["failure_examples"][0]["examples"],
+            serde_json::json!(["P0", "P1", "P2"])
+        );
+    }
 
     #[test]
     fn a_container_path_selects_the_iostore_loader() {

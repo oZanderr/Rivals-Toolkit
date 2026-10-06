@@ -515,6 +515,12 @@ pub fn list_packages_via(
 /// Conversion has nothing to say, and a context borrows its log for as long as it lives.
 static LOG: LazyLock<retoc::logging::Log> = LazyLock::new(retoc::logging::Log::no_log);
 
+/// Packages one converter reads before it is dropped, which is also how a walk over many packages
+/// splits them between threads. A converter keeps the header of every package it converts and
+/// every one those import, so a long walk with one would hold the whole game's headers; making one
+/// costs about forty packages' worth of work.
+pub const PACKAGES_PER_CONVERTER: usize = 512;
+
 /// The conversion caches for one store, held across as many packages as the caller reads.
 ///
 /// A context fills with the store's script object table and the header of every package an import

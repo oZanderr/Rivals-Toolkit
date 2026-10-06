@@ -21,7 +21,7 @@ use retoc::{EIoChunkType, EIoStoreTocVersion, FIoChunkId, FPackageId};
 use rivals_uasset::{AssetBundle, Mappings, ParseOptions};
 use serde::Serialize;
 
-use crate::asset::{AssetSource, PackageConverter, PathFilter};
+use crate::asset::{AssetSource, PACKAGES_PER_CONVERTER, PackageConverter, PathFilter};
 use crate::mod_search::{Query, SearchHit, search_package};
 use crate::pak::containers::MOUNT_POINT;
 use crate::pak::load_order::{self, LoadOrder};
@@ -70,11 +70,6 @@ pub struct GameSearchResult {
     /// The search was cancelled, and the hits are the ones found before it stopped.
     pub cancelled: bool,
 }
-
-/// Packages one converter reads before it is dropped. A converter keeps the header of every
-/// package it converts and every one those import, so a long walk with one would hold the whole
-/// game's headers; making one costs about forty packages' worth of work.
-const PACKAGES_PER_CONVERTER: usize = 512;
 
 const ENGINE_VERSION: EngineVersion = EngineVersion::UE5_3;
 

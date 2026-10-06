@@ -3489,6 +3489,7 @@ dependencies = [
  "clap",
  "dirs 5.0.1",
  "mimalloc",
+ "rayon",
  "rivals-core",
  "rivals-uasset",
  "serde",

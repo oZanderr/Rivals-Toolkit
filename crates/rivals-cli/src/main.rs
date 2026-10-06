@@ -1228,7 +1228,7 @@ struct AuditArgs {
     container: Option<String>,
 
     /// Walk every package the game loads, each from the container that wins: the newest patch
-    /// declares them all. Takes about an hour.
+    /// declares them all. Takes a minute or two, spread over every core.
     #[arg(long, conflicts_with_all = ["container", "dir"])]
     all: bool,
 
