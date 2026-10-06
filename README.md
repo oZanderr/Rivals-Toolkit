@@ -365,10 +365,11 @@ beside a note still apply. The limits worth knowing:
 - **Not everything has a path.** A field of a map's key keeps its byte offset, which fits only the
   package it came from. Script constant edits, payloads and export table edits still name their
   object by index. Each is held by `expect` to what it was written against.
-- **A few changes take a second pass.** A set element or a map key with no text form to key it by,
-  and a set or a map inside an element the same save adds, are notes. So are values in a map whose
-  pairs moved when a key has no text form to name its pair by. Dump the saved copy and diff again
-  for those.
+- **A few changes take a second pass.** Sets and maps gain and lose elements by key, and a key is
+  typed as text: its own, or the one field of a struct holding one, as a gameplay tag is typed by
+  its name. A key with no such text form, such as a struct of several fields, is a note, and so are
+  values in a map whose pairs moved when a key has none. A map's new pairs go in after the ones it
+  keeps; one the dump puts before them is a note. Dump the saved copy and diff again for those.
 - **Some changes are not value edits.** A property given another type is reported, not written,
   and an object given another class is refused: `asset export-edit --class` does that, emptying
   it. An object the dump renames is renamed once everything else has been made under its old name.

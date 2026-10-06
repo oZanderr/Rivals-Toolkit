@@ -201,6 +201,8 @@ pub struct ContainerLayout {
     pub default_recipe: Option<Vec<DefaultPart>>,
     /// For a map, where each pair's key sits and how a fresh key is written.
     pub keys: Option<MapKeys>,
+    /// For a set of structs holding one field, how an element is written from that field's text.
+    pub element_field: Option<KeyField>,
     /// Set for a container the header does not store, by its header block and schema slot: it has
     /// no count yet, so the first element added writes one ahead of itself.
     pub absent: Option<(u64, u32)>,
@@ -218,6 +220,48 @@ pub struct MapKeys {
     pub default_name: Option<String>,
     /// A native struct key's default in parts, for the layouts that spell a name inside.
     pub default_recipe: Option<Vec<DefaultPart>>,
+    /// For a struct key holding one field, how a key is written from that field's text.
+    pub field: Option<KeyField>,
+}
+
+/// A struct whose one field has a text form, such as a gameplay tag, which a key or a set's element
+/// of it is written from: the struct's header storing that field, then the field.
+#[derive(Debug, Clone)]
+pub struct KeyField {
+    /// The kind the field is stored as.
+    pub kind: &'static str,
+    /// The struct's header storing just that field.
+    pub header: Vec<u8>,
+}
+
+/// How a key or a set's element of struct type `inner` is written from text, where its struct holds
+/// one field that has a text form and the package stores properties unversioned.
+fn key_field(inner: &PropertyInner, ctx: &Ctx<'_>) -> Option<KeyField> {
+    let PropertyInner::Struct { name } = inner else {
+        return None;
+    };
+    let unversioned = ctx
+        .header
+        .summary
+        .has_package_flags(retoc::legacy_asset::EPackageFlags::UsesUnversionedProperties);
+    if !unversioned || native_parts(name, ctx).is_some() {
+        return None;
+    }
+    let schema = ctx.schema(name)?;
+    if schema.len() != 1 {
+        return None;
+    }
+    let kind = kind_name(&schema.slot(0)?.property.inner);
+    if !matches!(kind, "Name" | "Str" | "SoftObject" | "Object") {
+        return None;
+    }
+    let empty = unversioned::empty_header(1);
+    let mut header = unversioned::read_header(&mut Cursor::new(&empty, 0)).ok()?;
+    header.insert_value(0, false).ok()?;
+    Some(KeyField {
+        kind,
+        header: header.write().ok()?,
+    })
 }
 
 /// Where a stored `FPackageIndex` sits in the property data, and what it holds. Recorded for
@@ -1890,6 +1934,7 @@ pub(crate) fn record_container_width(
         element_enum: enum_type_of(element),
         default_name,
         default_recipe,
+        element_field: keys.is_none().then(|| key_field(element, ctx)).flatten(),
         keys: keys.map(|(spans, key)| {
             let (default, default_name, default_recipe) = element_default(key, ctx);
             MapKeys {
@@ -1900,6 +1945,7 @@ pub(crate) fn record_container_width(
                 default,
                 default_name,
                 default_recipe,
+                field: key_field(key, ctx),
             }
         }),
     });
@@ -1948,6 +1994,7 @@ pub(crate) fn native_list(
         default_name: None,
         default_recipe: (!bytes_only).then_some(recipe),
         keys: None,
+        element_field: None,
     });
     Ok(PropertyEntry {
         name: name.to_string(),

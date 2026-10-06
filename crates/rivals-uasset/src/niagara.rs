@@ -232,6 +232,7 @@ fn var_data(
         default_name: None,
         default_recipe: None,
         keys: None,
+        element_field: None,
     });
     Ok(PropertyEntry {
         name: "VarData".to_string(),

@@ -580,6 +580,7 @@ fn gameplay_tag_container(
         default_name: Some("None".to_string()),
         default_recipe: None,
         keys: None,
+        element_field: None,
     });
     Ok(PropertyValue::Array { items })
 }

@@ -2109,7 +2109,7 @@ pub fn patch_package_with(
                 })?;
                 let was = element_key(&entry.value, *index)
                     .ok_or_else(|| format!("{} has no pair {index}", entry.label()))?;
-                if let PropertyValue::Struct { .. } = was {
+                if let (PropertyValue::Struct { .. }, None) = (was, &keys.field) {
                     return Err(format!(
                         "{}[{index}]'s key is a struct, whose fields are edited one at a time",
                         entry.label()
@@ -2121,6 +2121,7 @@ pub fn patch_package_with(
                 let bytes = encode_key(
                     keys.kind,
                     keys.is_enum.then_some(keys.enum_type.as_deref()),
+                    keys.field.as_ref(),
                     text.trim(),
                     &mut tables,
                     &package,
@@ -4305,7 +4306,13 @@ fn insertion(
         let mut bytes = match (keyed, typed) {
             (false, _) => value(&mut tables.names)?,
             (true, Some(text)) => {
-                encode_key(key_kind, key_enum, text, tables, package, mappings, entry)?
+                let field = match &layout.keys {
+                    Some(keys) => keys.field.as_ref(),
+                    None => layout.element_field.as_ref(),
+                };
+                encode_key(
+                    key_kind, key_enum, field, text, tables, package, mappings, entry,
+                )?
             }
             (true, None) if layout.elements.is_empty() || key_kind == "Struct" => fresh_element(
                 key_kind,
@@ -4386,11 +4393,13 @@ fn held_key(
 
 /// A typed key written in the key's own kind. An enum key is the enumerator's name (a number is
 /// named through the mappings), an object key a path the package already names, a number the
-/// width its kind declares. A struct key has no text form, so it is refused rather than guessed.
+/// width its kind declares. A struct key holding one field with a text form, as a gameplay tag
+/// does, is typed as that field; any other struct key is refused rather than guessed.
 #[allow(clippy::too_many_arguments)]
 fn encode_key(
     kind: &str,
     enum_type: Option<Option<&str>>,
+    field: Option<&crate::props::KeyField>,
     text: &str,
     tables: &mut Tables,
     package: &retoc::legacy_asset::FLegacyPackageHeader,
@@ -4417,10 +4426,20 @@ fn encode_key(
         "Byte" => scalar(PropertyValue::Byte { value: 0 }),
         "Bool" => scalar(PropertyValue::Bool { value: false }),
         "Float" | "Double" => scalar(PropertyValue::Float { value: 0.0 }),
-        "Struct" => Err(format!(
-            "{}: a struct key cannot be typed; edit an existing element instead",
-            entry.label()
-        )),
+        // A struct holding one field with a text form is typed as that field.
+        "Struct" => match field {
+            Some(field) => {
+                let mut bytes = field.header.clone();
+                bytes.extend(encode_key(
+                    field.kind, None, None, text, tables, package, mappings, entry,
+                )?);
+                Ok(bytes)
+            }
+            None => Err(format!(
+                "{}: a struct key cannot be typed; edit an existing element instead",
+                entry.label()
+            )),
+        },
         other => Err(format!("{}: a {other} key cannot be typed", entry.label())),
     }
 }
@@ -9726,6 +9745,7 @@ mod tests {
             default_name: default_name.map(str::to_string),
             default_recipe: None,
             keys,
+            element_field: None,
         }
     }
 
@@ -9891,6 +9911,7 @@ mod tests {
             default: Some(vec![0; 4]),
             default_name: None,
             default_recipe: None,
+            field: None,
         };
         let map = container(
             "Int",
@@ -9916,6 +9937,7 @@ mod tests {
             default: Some(vec![7, 0, 0, 0]),
             default_name: None,
             default_recipe: None,
+            field: None,
         };
         let map = container(
             "Int",
@@ -9984,6 +10006,7 @@ mod tests {
             default: Some(vec![0; 4]),
             default_name: None,
             default_recipe: None,
+            field: None,
         };
         let map = container(
             "Str",

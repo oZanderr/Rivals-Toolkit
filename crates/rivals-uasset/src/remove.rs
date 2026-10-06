@@ -1116,6 +1116,7 @@ mod tests {
             default_name: None,
             default_recipe: None,
             keys: None,
+            element_field: None,
         });
         parsed.references = vec![IndexRef { at, index: 3 }];
         let plan = plan_removal(&parsed, &[2]).expect("plan");

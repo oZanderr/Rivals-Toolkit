@@ -526,7 +526,7 @@ fn fill(
                     continue;
                 }
                 // A set's element is its own key.
-                match text_of(item) {
+                match key_text_of(item) {
                     Some(key) => paths.push(head.edit(
                         &at,
                         PathOp::Insert {
@@ -545,7 +545,7 @@ fn fill(
             let pairs = edited.get("entries").and_then(Json::as_array);
             for (index, pair) in pairs.into_iter().flatten().enumerate() {
                 let here = format!("{label}[{index}]");
-                let Some(key) = pair.get("key").and_then(text_of) else {
+                let Some(key) = pair.get("key").and_then(key_text_of) else {
                     notes.push(format!(
                         "{here}: this pair's key has no text form to key it by; add it in the \
                          editor instead"
@@ -1574,7 +1574,7 @@ fn diff_items(
     for (position, added) in now.iter().enumerate().skip(items.len()) {
         // A set's element is its own key, so the new value goes in with the insert. One with no
         // text form, such as a struct, can only come in as the default.
-        let key = if is_set { text_of(added) } else { None };
+        let key = if is_set { key_text_of(added) } else { None };
         if is_set && key.is_none() && !items.is_empty() && added.get("fields").is_none() {
             out.notes.push(format!(
                 "{label}[{position}]: this set element has no text form to key it by; add it in \
@@ -1765,7 +1765,72 @@ fn element_sets(
         }
         return complete;
     }
-    // A set or a map, or a value the loader binds, which a field set cannot write.
+    // A set or a map inside a new element starts as the copy's too. Its elements are keyed, so the
+    // ones it gains go in by key and the ones it loses come out by key once the element is there,
+    // and a pair whose value changed is filled in through its key.
+    if matches!(kind, "set" | "map")
+        && let Some(anchor) = anchor_of(entry)
+        && let Some(held) = keyed_elements(stored, kind)
+        && let Some(now) = keyed_in(edited, kind)
+    {
+        let steps = steps_of(&path);
+        let at_key = |key: &str| {
+            let mut here = steps.clone();
+            here.push(Segment::Key(key.to_string()));
+            here
+        };
+        for (key, value) in &now {
+            match held.iter().find(|(held, _)| held == key) {
+                None => {
+                    out.follow.push(FollowUp::Edit {
+                        anchor: anchor.clone(),
+                        steps: steps.clone(),
+                        op: PathOp::Insert {
+                            index: None,
+                            key: Some(key.clone()),
+                        },
+                        becomes: None,
+                        label: at(),
+                    });
+                    if let Some(value) = value {
+                        out.follow.push(FollowUp::Fill {
+                            anchor: anchor.clone(),
+                            steps: at_key(key),
+                            edited: (*value).clone(),
+                            label: format!("{}{{{key}}}", at()),
+                        });
+                    }
+                }
+                Some((_, was)) => {
+                    if let (Some(value), Some(was)) = (value, was)
+                        && differs(was, value)
+                    {
+                        out.follow.push(FollowUp::Fill {
+                            anchor: anchor.clone(),
+                            steps: at_key(key),
+                            edited: (*value).clone(),
+                            label: format!("{}{{{key}}}", at()),
+                        });
+                    }
+                }
+            }
+        }
+        for (key, _) in held
+            .iter()
+            .filter(|(key, _)| !now.iter().any(|(now, _)| now == key))
+        {
+            out.follow.push(FollowUp::Edit {
+                anchor: anchor.clone(),
+                steps: at_key(key),
+                op: PathOp::Remove,
+                becomes: None,
+                label: at(),
+            });
+        }
+        return true;
+    }
+    // A set or a map with a key no text names, or a value the loader binds, which a field set
+    // cannot write.
     let empty = ["items", "entries"].iter().any(|key| {
         edited
             .get(*key)
@@ -1786,6 +1851,154 @@ fn element_sets(
     same
 }
 
+/// A map the edited dump gives pairs it lacks or drops pairs it has: each dropped pair comes out
+/// by its key, each kept one has its value compared in place, and each new one goes in last by its
+/// key, its value filled in once it is there. `false`, with nothing done, when a key has no text
+/// form, a key is repeated, or a new pair sits before one the map keeps.
+fn regrow_map(
+    entry: &PropertyEntry,
+    entries: &[rivals_uasset::MapEntry],
+    items: &[Json],
+    export: u32,
+    label: &str,
+    out: &mut DiffOutcome,
+) -> bool {
+    let held: Option<Vec<String>> = entries
+        .iter()
+        .map(|pair| key_text_of(&dumped(&pair.key)))
+        .collect();
+    let now: Option<Vec<String>> = items
+        .iter()
+        .map(|item| item.get("key").and_then(key_text_of))
+        .collect();
+    let (Some(held), Some(now)) = (held, now) else {
+        return false;
+    };
+    let unique = |keys: &[String]| (1..keys.len()).all(|at| !keys[..at].contains(&keys[at]));
+    let kept: Vec<&String> = now.iter().filter(|key| held.contains(key)).collect();
+    let first_new = now.iter().position(|key| !held.contains(key));
+    let new_last = first_new.is_none_or(|at| now[at..].iter().all(|key| !held.contains(key)));
+    let in_order = held
+        .iter()
+        .filter(|key| now.contains(key))
+        .eq(kept.iter().copied());
+    let (Some((offset, _)), true, true, true, true) =
+        (entry.span, unique(&held), unique(&now), new_last, in_order)
+    else {
+        return false;
+    };
+    let kind = kind_of(&entry.value);
+    let Some(anchor) = anchor_of(entry) else {
+        return false;
+    };
+    for (index, key) in held.iter().enumerate() {
+        if !now.contains(key) {
+            out.edits.values.push(ValueEdit {
+                offset,
+                expect_name: entry.name.clone(),
+                expect_element: entry.element,
+                expect_kind: kind.clone(),
+                op: EditOp::Remove {
+                    index: index as u32,
+                },
+            });
+        }
+    }
+    for (position, (key, item)) in now.iter().zip(items).enumerate() {
+        let here = format!("{label}{{{key}}}");
+        match held.iter().position(|held| held == key) {
+            Some(index) => {
+                if let Some(value) = item.get("value") {
+                    diff_in_place(
+                        entry,
+                        Whole::Element(index as u32),
+                        &entries[index].value,
+                        value,
+                        export,
+                        &here,
+                        out,
+                    );
+                }
+            }
+            None => {
+                out.edits.values.push(ValueEdit {
+                    offset,
+                    expect_name: entry.name.clone(),
+                    expect_element: entry.element,
+                    expect_kind: kind.clone(),
+                    op: EditOp::Insert {
+                        index: (entries.len() + position - kept.len()) as u32,
+                        key: Some(key.clone()),
+                    },
+                });
+                if let Some(value) = item.get("value") {
+                    out.follow.push(FollowUp::Fill {
+                        anchor: anchor.clone(),
+                        steps: vec![Segment::Key(key.clone())],
+                        edited: value.clone(),
+                        label: here,
+                    });
+                }
+            }
+        }
+    }
+    true
+}
+
+/// The text a dumped key is typed as: its own, or that of the one field a struct holding one
+/// field with a text form has, as a gameplay tag is typed by its name.
+fn key_text_of(edited: &Json) -> Option<String> {
+    text_of(edited).or_else(|| {
+        let fields = edited.get("fields").and_then(Json::as_array)?;
+        let texts: Vec<String> = fields
+            .iter()
+            .filter_map(|field| field.get("value").and_then(text_of))
+            .collect();
+        match (fields.len(), texts.as_slice()) {
+            (1, [only]) => Some(only.clone()),
+            _ => None,
+        }
+    })
+}
+
+/// A set's or a map's elements as their keys' text and, for a map, each value, from a stored
+/// container of the kind. `None` when one has no text form; an absent container holds none.
+fn keyed_elements<'a>(
+    stored: Option<&'a PropertyValue>,
+    kind: &str,
+) -> Option<Vec<(String, Option<&'a PropertyValue>)>> {
+    match (stored, kind) {
+        (Some(PropertyValue::Set { items }), "set") => items
+            .iter()
+            .map(|item| Some((key_text_of(&dumped(item))?, None)))
+            .collect(),
+        (Some(PropertyValue::Map { entries }), "map") => entries
+            .iter()
+            .map(|pair| Some((key_text_of(&dumped(&pair.key))?, Some(&pair.value))))
+            .collect(),
+        (None, _) => Some(Vec::new()),
+        _ => None,
+    }
+}
+
+/// The same for a dumped set or map.
+fn keyed_in<'a>(edited: &'a Json, kind: &str) -> Option<Vec<(String, Option<&'a Json>)>> {
+    match kind {
+        "set" => edited
+            .get("items")
+            .and_then(Json::as_array)?
+            .iter()
+            .map(|item| Some((key_text_of(item)?, None)))
+            .collect(),
+        _ => edited
+            .get("entries")
+            .and_then(Json::as_array)?
+            .iter()
+            .map(|pair| Some((pair.get("key").and_then(key_text_of)?, pair.get("value"))))
+            .collect(),
+    }
+}
+
 /// A map against its edited form, pair by pair: each key and each value keeps its place.
 fn diff_map(
     entry: &PropertyEntry,
@@ -1799,12 +2012,15 @@ fn diff_map(
         return;
     };
     if items.len() != entries.len() {
-        out.notes.push(format!(
-            "{label}: the map holds {} entries and the edited dump {}; adding or dropping one is \
-             keyed, so make it in the editor rather than in the dump",
-            entries.len(),
-            items.len()
-        ));
+        if !regrow_map(entry, entries, items, export, label, out) {
+            out.notes.push(format!(
+                "{label}: the map holds {} entries and the edited dump {}; pairs are added and \
+                 dropped by key, which takes every key a text form of its own and the new pairs \
+                 after the ones it keeps",
+                entries.len(),
+                items.len()
+            ));
+        }
         return;
     }
     // Pairs that only moved are one reorder. Keys that moved while values changed are a reorder
@@ -3402,6 +3618,130 @@ mod tests {
         );
         assert!(out.edits.is_empty(), "{:?}", out.edits);
         assert!(out.notes[0].contains("same key"), "{:?}", out.notes);
+    }
+
+    fn tag(name: &str) -> PropertyValue {
+        PropertyValue::Struct {
+            name: "GameplayTag".into(),
+            fields: vec![entry(
+                "TagName",
+                PropertyValue::Name { value: name.into() },
+                0x50,
+            )],
+        }
+    }
+
+    fn tag_json(name: &str) -> Json {
+        json!({"kind": "struct", "name": "GameplayTag", "fields": [
+            {"name": "TagName", "value": {"kind": "name", "value": name}},
+        ]})
+    }
+
+    /// A map keyed by gameplay tags gains a pair by its tag's name and loses one by it: the new
+    /// pair goes in last, keyed, and its value is filled in once it is there.
+    #[test]
+    fn a_tag_keyed_map_gains_and_loses_pairs_by_tag() {
+        let map = entry(
+            "Modes",
+            PropertyValue::Map {
+                entries: ["A.One", "A.Two"]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(at, name)| rivals_uasset::MapEntry {
+                        key: tag(name),
+                        value: PropertyValue::Int { value: at as i64 },
+                    })
+                    .collect(),
+            },
+            0x40,
+        );
+        let out = one(
+            map,
+            json!({"kind": "map", "entries": [
+                {"key": tag_json("A.One"), "value": {"kind": "int", "value": 5}},
+                {"key": tag_json("A.Three"), "value": {"kind": "int", "value": 7}},
+                {"key": tag_json("A.Four"), "value": {"kind": "int", "value": 8}},
+            ]}),
+        );
+        assert!(out.notes.is_empty(), "{:?}", out.notes);
+        let ops: Vec<&EditOp> = out.edits.values.iter().map(|edit| &edit.op).collect();
+        assert!(
+            matches!(
+                ops.as_slice(),
+                [
+                    EditOp::Remove { index: 1 },
+                    EditOp::SetElement { index: 0, text },
+                    EditOp::Insert { key: Some(three), .. },
+                    EditOp::Insert { key: Some(four), .. },
+                ] if text == "5" && three == "A.Three" && four == "A.Four"
+            ),
+            "{ops:?}"
+        );
+        assert_eq!(
+            waiting(&out),
+            [
+                ("{A.Three}".to_string(), "fill int".to_string()),
+                ("{A.Four}".to_string(), "fill int".to_string()),
+            ]
+        );
+
+        // A new pair before one the map keeps is left as it was, with a note.
+        let out = one(
+            entry(
+                "Modes",
+                PropertyValue::Map {
+                    entries: vec![rivals_uasset::MapEntry {
+                        key: tag("A.One"),
+                        value: PropertyValue::Int { value: 0 },
+                    }],
+                },
+                0x40,
+            ),
+            json!({"kind": "map", "entries": [
+                {"key": tag_json("A.Zero"), "value": {"kind": "int", "value": 7}},
+                {"key": tag_json("A.One"), "value": {"kind": "int", "value": 0}},
+            ]}),
+        );
+        assert!(out.edits.is_empty(), "{:?}", out.edits);
+        assert_eq!(out.notes.len(), 1, "{:?}", out.notes);
+    }
+
+    /// A set inside an element the save adds gains and loses elements by key, once the element is
+    /// there.
+    #[test]
+    fn a_set_inside_a_new_element_gains_and_loses_by_key() {
+        let holder = |names: &[&str]| PropertyValue::Struct {
+            name: "Holder".into(),
+            fields: vec![entry(
+                "Tags",
+                PropertyValue::Set {
+                    items: names.iter().map(|name| tag(name)).collect(),
+                },
+                0x60,
+            )],
+        };
+        let dumped_holder = |names: &[&str]| {
+            json!({"kind": "struct", "name": "Holder", "fields": [
+                {"name": "Tags", "value": {"kind": "set", "items": names
+                    .iter()
+                    .map(|name| tag_json(name))
+                    .collect::<Vec<_>>()}},
+            ]})
+        };
+        let out = one(
+            array(vec![holder(&["A.One", "A.Two"])]),
+            json!({"kind": "array", "items": [
+                dumped_holder(&["A.One", "A.Two"]),
+                dumped_holder(&["A.One", "A.Three"]),
+            ]}),
+        );
+        assert!(out.notes.is_empty(), "{:?}", out.notes);
+        let waits = waiting(&out);
+        assert_eq!(waits.len(), 2, "{waits:?}");
+        assert_eq!(waits[0].0, "[1].Tags");
+        assert!(waits[0].1.contains("A.Three"), "{waits:?}");
+        assert_eq!(waits[1].0, "[1].Tags{A.Two}");
+        assert!(waits[1].1.contains("Remove"), "{waits:?}");
     }
 
     /// Repeated elements keep their order among themselves, so a reorder moves only what moved.

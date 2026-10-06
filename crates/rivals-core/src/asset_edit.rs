@@ -5525,6 +5525,9 @@ mod game_data_tests {
         "Marvel/Content/Marvel/Characters/1011/1011001/1011001_AnimBP.uasset";
     /// Rows holding instanced structs, each guarded by a byte length that has to follow the width
     /// of whatever is edited inside.
+    /// A row holding a map keyed by gameplay tags, one pair long, whose value holds a map keyed by an
+    /// enum.
+    const TAG_KEYED: &str = "Marvel/Content/Marvel/Data/DataTable/MarvelGameMatchModeTable.uasset";
     const INSTANCED: &str =
         "Marvel/Content/Marvel/Data/DataTable/GameMode/2206/AIAutoAbilityTable_Zombie.uasset";
 
@@ -5593,6 +5596,7 @@ mod game_data_tests {
         ("GROUND_MOTION_ANIM_BP", GROUND_MOTION_ANIM_BP),
         ("CURVE_ANIM_BP", CURVE_ANIM_BP),
         ("INSTANCED", INSTANCED),
+        ("TAG_KEYED", TAG_KEYED),
         ("LEVEL", LEVEL),
         ("CONSTRAINT_EMITTER", CONSTRAINT_EMITTER),
         ("PLAYER_CONTROLLER", PLAYER_CONTROLLER),
@@ -11604,6 +11608,33 @@ mod game_data_tests {
             pairs[0]["value"]["value"] = serde_json::json!(was + 7);
         });
         assert!(moved, "{MAPS} holds no map of two int pairs keyed by text");
+        apply_dump(&fixture, &before, &dump);
+    }
+
+    /// A map keyed by gameplay tags, given a pair under another tag in a dump, takes it in one apply:
+    /// the key from the tag's name, and the value, a struct holding a map keyed by an enum, filled
+    /// in by key once the pair is there.
+    #[test]
+    fn a_tag_keyed_map_gains_a_pair_from_a_dump_in_one_apply() {
+        let Some(fixture) = Fixture::open(TAG_KEYED) else {
+            return;
+        };
+        let before = fixture.parse();
+        let mut dump = serde_json::to_value(&before).expect("dump");
+        let tagged = |value: &serde_json::Value| {
+            value["kind"] == "map"
+                && value["entries"][0]["key"]["name"] == "GameplayTag"
+                && value["entries"]
+                    .as_array()
+                    .is_some_and(|pairs| pairs.len() == 1)
+        };
+        let grown = edit_first(&mut dump["exports"], &tagged, &mut |map| {
+            let pairs = map["entries"].as_array_mut().expect("pairs");
+            let mut added = pairs[0].clone();
+            added["key"]["fields"][0]["value"]["value"] = serde_json::json!("Level.Mode.M2201");
+            pairs.push(added);
+        });
+        assert!(grown, "{TAG_KEYED} holds no map keyed by one gameplay tag");
         apply_dump(&fixture, &before, &dump);
     }
 
