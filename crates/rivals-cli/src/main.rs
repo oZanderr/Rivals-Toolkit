@@ -170,10 +170,6 @@ enum AssetCmd {
     /// declares it after its own, and each object of the class there is renumbered to match.
     /// Refused when another package makes an object of the class or a class derived from it.
     AddVariable(AddVariableArgs),
-    /// Add an entry to a Blueprint enum, before its `_MAX`, shown as `--display`. Values other
-    /// packages hold keep their meaning. Refused when a package sends the enum over the network
-    /// and the entry would make a value of it take more bits than the game's server reads.
-    AddEnumEntry(AddEnumEntryArgs),
     /// Add a field to a Blueprint struct, after its own, named as the editor names a member.
     /// Values other packages hold read as before, the new field unset. Refused when another
     /// package lays the struct out by position: a script building it as a constant, a value of it
@@ -389,33 +385,6 @@ struct ScriptAssembleArgs {
     replace: bool,
 
     /// Assemble, patch and verify, report what would change, and write nothing.
-    #[arg(long)]
-    dry_run: bool,
-}
-
-#[derive(Args)]
-struct AddEnumEntryArgs {
-    #[command(flatten)]
-    asset: AssetArgs,
-
-    /// What the entry shows, its display name.
-    #[arg(long, value_name = "TEXT")]
-    display: String,
-
-    /// The enum export, when the package holds more than one Blueprint enum.
-    #[arg(long, value_name = "N")]
-    export: Option<u32>,
-
-    /// Mod pak to write into, created in `~mods` if it does not exist. Defaults to the name the
-    /// desktop app last saved into, then to `AssetEdits`.
-    #[arg(long, value_name = "NAME")]
-    mod_name: Option<String>,
-
-    /// Overwrite an edited copy of this asset that the mod pak already holds.
-    #[arg(long)]
-    replace: bool,
-
-    /// Patch and verify, report what would change, and write nothing.
     #[arg(long)]
     dry_run: bool,
 }
@@ -1571,7 +1540,6 @@ fn run(cli: &Cli) -> Result<(), String> {
         Command::Asset(AssetCmd::ScriptWiden(a)) => asset_script_widen(cli, &app, a),
         Command::Asset(AssetCmd::ScriptAssemble(a)) => asset_script_assemble(cli, &app, a),
         Command::Asset(AssetCmd::AddVariable(a)) => asset_add_variable(cli, &app, a),
-        Command::Asset(AssetCmd::AddEnumEntry(a)) => asset_add_enum_entry(cli, &app, a),
         Command::Asset(AssetCmd::AddField(a)) => asset_add_field(cli, &app, a),
         Command::Asset(AssetCmd::Set(a)) => asset_set(cli, &app, a),
         Command::Asset(AssetCmd::Sweep(a)) => asset_sweep(cli, &app, a),
@@ -2677,29 +2645,6 @@ fn asset_script_assemble(
     }
     let message = asset::save_changes(&request, edit, mod_name, args.replace)?;
     emit(cli, &message, || outln!("{message}"))
-}
-
-fn asset_add_enum_entry(
-    cli: &Cli,
-    app: &settings::AppSettings,
-    args: &AddEnumEntryArgs,
-) -> Result<(), String> {
-    let edit = rivals_uasset::PackageEdits {
-        add_enum_entries: vec![rivals_uasset::AddEnumEntry {
-            export: args.export,
-            display: args.display.clone(),
-        }],
-        ..Default::default()
-    };
-    save_definition_edit(
-        cli,
-        app,
-        &args.asset,
-        args.mod_name.as_deref(),
-        args.replace,
-        args.dry_run,
-        edit,
-    )
 }
 
 fn asset_add_field(

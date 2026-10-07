@@ -42,13 +42,9 @@ pub(crate) struct FieldAddition {
 /// Without them the struct is built, copied and destroyed member by member, which suits any member.
 const DERIVED_FLAGS: u32 = 0x8000 | 0x2000 | 0x4000;
 
-/// The export a save adds to: the one named, or the package's only one of `class`.
-pub(crate) fn definition_of<'a>(
-    parsed: &'a ParsedPackage,
-    export: Option<u32>,
-    class: &str,
-    what: &str,
-) -> Result<&'a ParsedExport, String> {
+/// The Blueprint struct a save adds fields to: the export named, or the package's only one.
+pub fn struct_of(parsed: &ParsedPackage, export: Option<u32>) -> Result<&ParsedExport, String> {
+    const CLASS: &str = "UserDefinedStruct";
     let found = match export {
         Some(index) => parsed
             .exports
@@ -58,27 +54,22 @@ pub(crate) fn definition_of<'a>(
             let held: Vec<&ParsedExport> = parsed
                 .exports
                 .iter()
-                .filter(|export| export.class_name == class)
+                .filter(|export| export.class_name == CLASS)
                 .collect();
             match held.as_slice() {
                 [one] => *one,
-                [] => return Err(format!("this package holds no {what}")),
-                _ => return Err(format!("this package holds several {what}s: name one")),
+                [] => return Err("this package holds no Blueprint struct".into()),
+                _ => return Err("this package holds several Blueprint structs: name one".into()),
             }
         }
     };
-    if found.class_name != class {
+    if found.class_name != CLASS {
         return Err(format!(
-            "{} is a {}, not a {what}",
+            "{} is a {}, not a Blueprint struct",
             found.object_name, found.class_name
         ));
     }
     Ok(found)
-}
-
-/// The Blueprint struct a save adds fields to: the export named, or the package's only one.
-pub fn struct_of(parsed: &ParsedPackage, export: Option<u32>) -> Result<&ParsedExport, String> {
-    definition_of(parsed, export, "UserDefinedStruct", "Blueprint struct")
 }
 
 fn members(export: &ParsedExport) -> Vec<&str> {

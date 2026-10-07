@@ -90,7 +90,7 @@ pub struct ParsedExport {
     /// The field records a script struct export declares, which is the schema for its own values.
     #[serde(skip)]
     pub struct_definition: Option<usmap::Struct>,
-    /// A Blueprint enum's entries, `_MAX` last, where the export is one.
+    /// An enum's entries, `_MAX` last, where the export is one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enum_tail: Option<crate::tails::EnumTail>,
     /// Hex preview of the bytes parsing did not account for. On a failure it starts a little

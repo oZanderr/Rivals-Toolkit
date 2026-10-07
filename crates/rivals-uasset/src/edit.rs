@@ -248,10 +248,6 @@ pub struct PackageEdits {
     /// Variables added to a Blueprint class, its instances in the package renumbered to match. A
     /// save of its own; the caller holds the class to having no instance in another package.
     pub add_variables: Vec<crate::class_variable::AddVariable>,
-    /// Entries added to a Blueprint enum before its `_MAX`. A save of its own; the caller gives
-    /// each its display name in the next, and holds the enum to nothing replicating it at another
-    /// width.
-    pub add_enum_entries: Vec<crate::enum_entry::AddEnumEntry>,
     /// Fields added to a Blueprint struct after its own. A save of its own; the caller holds the
     /// struct to nothing laying it out by position.
     pub add_fields: Vec<crate::struct_field::AddField>,
@@ -871,7 +867,6 @@ impl PackageEdits {
         self.add_exports.extend(other.add_exports);
         self.new_functions.extend(other.new_functions);
         self.add_variables.extend(other.add_variables);
-        self.add_enum_entries.extend(other.add_enum_entries);
         self.add_fields.extend(other.add_fields);
         self.add_components.extend(other.add_components);
         self.remove_components.extend(other.remove_components);
@@ -905,7 +900,6 @@ impl PackageEdits {
             && self.add_exports.is_empty()
             && self.new_functions.is_empty()
             && self.add_variables.is_empty()
-            && self.add_enum_entries.is_empty()
             && self.add_fields.is_empty()
             && self.add_components.is_empty()
             && self.remove_components.is_empty()
@@ -1364,41 +1358,6 @@ pub fn patch_package_with(
             HeaderDraft {
                 names: Some(addition.tables.names),
                 imports: Some(addition.tables.imports),
-                ..Default::default()
-            },
-        )?;
-        return Ok(PatchedBundle {
-            asset: rewritten.asset,
-            exports: rewritten.exports,
-            applied: addition.applied,
-            bulk: None,
-            optional_bulk: None,
-            notes: Vec::new(),
-        });
-    }
-    if !edits.add_enum_entries.is_empty() {
-        let alone = PackageEdits {
-            add_enum_entries: Vec::new(),
-            save_as: None,
-            expect: Expected::default(),
-            allow_drift: false,
-            allow_missing: false,
-            allow_unchecked: false,
-            ..edits.clone()
-        };
-        if !alone.is_empty() {
-            return Err(
-                "adding an enum entry is a save of its own; save or discard the other edits first"
-                    .into(),
-            );
-        }
-        let addition =
-            crate::enum_entry::add_enum_entries(parsed, &package, &edits.add_enum_entries)?;
-        let rewritten = rewrite(
-            bundle,
-            &addition.splices,
-            HeaderDraft {
-                names: Some(addition.names),
                 ..Default::default()
             },
         )?;
@@ -6070,9 +6029,6 @@ pub fn verify_patch(
     if !edits.add_variables.is_empty() {
         return crate::class_variable::verify(before, after, &edits.add_variables);
     }
-    if !edits.add_enum_entries.is_empty() {
-        return crate::enum_entry::verify(before, after, &edits.add_enum_entries);
-    }
     if !edits.add_fields.is_empty() {
         return crate::struct_field::verify(before, after, &edits.add_fields);
     }
@@ -8093,7 +8049,7 @@ fn encode_string(text: &str) -> Vec<u8> {
 
 /// An FName is an index into the package name map and a number suffix. Storing one that is not
 /// there yet appends it, which is what makes the header grow.
-pub(crate) fn encode_name(text: &str, names: &mut FPackageNameMap) -> Vec<u8> {
+fn encode_name(text: &str, names: &mut FPackageNameMap) -> Vec<u8> {
     let stored = names.store(text);
     let mut out = Vec::with_capacity(8);
     out.extend_from_slice(&stored.index.to_le_bytes());

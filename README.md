@@ -208,19 +208,6 @@ describe otherwise than the mappings file does, as after this, is read with its 
 app's script view has New variable, for the class of the function shown. A function can be added to
 a Blueprint class, and an existing one rewritten whole, as text: see below.
 
-`asset add-enum-entry --display "Text"` adds an entry to a Blueprint enum, shown as the text given.
-It goes in before `_MAX`, named `NewEnumerator<n>` as the editor names one and taking the value
-`_MAX` had, and `_MAX` moves up one. The entries before keep their values, so what other packages
-store of the enum reads as before, and the display name goes into the enum's `DisplayNameMap` in
-the same save. An entry shown as text the enum shows already is left out, so a file adding one
-applies again. When the new values take more bits, an enum another package sends over the network,
-as a replicated property or a parameter of a function called across it, is refused, naming the
-package, since the game's server reads it at the old width. Blueprints built against the enum keep
-what they knew of it: a Switch on it sends the new entry to its default, and a loop over its
-entries stops before it. The mappings do not know the entry, so setting a value of the enum to it
-in another package asks for `--allow-unchecked`. `--export N` picks the enum when the package holds
-more than one.
-
 `asset add-field --name X --type T` adds a field to a Blueprint struct after its own, named as the
 editor names a member: `X_<n>_<GUID>`, the guid the same each time the same field is added. Each
 stored value of a struct says which of its fields it holds, so table rows, values and the struct's
@@ -275,7 +262,6 @@ rivals-cli asset add-export --container ... --entry ... --class /Script/Module.C
 rivals-cli asset add-component --container ... --entry ... --node 5 --name StaticMesh2 --mod-name MyMod
 rivals-cli asset remove-component --container ... --entry ... --node 18 --mod-name MyMod
 rivals-cli asset add-component --container ... --entry ... --from-parent StaticMesh --name StaticMeshCopy --mod-name MyMod
-rivals-cli asset add-enum-entry --container ... --entry ... --display "Cone" --mod-name MyMod
 rivals-cli asset add-field --container ... --entry ... --name Rarity --type Int --mod-name MyMod
 rivals-cli asset save-as --container ... --entry ... --to /Game/Mods/MyThing/DA_Copy --mod-name MyMod
 rivals-cli asset rename-package --container ~mods/MyMod_9999999_P.utoc --entry ... --to /Game/Mods/MyThing/DA_New
