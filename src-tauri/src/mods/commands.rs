@@ -6,8 +6,8 @@ use crate::game_status;
 use crate::mods;
 use crate::mods::hero_cache::HeroCacheState;
 use crate::mods::heroes::enrich_status_with_heroes;
-use crate::mods::{BulkOpResult, ConflictReport, InstallResult, ModsStatus};
-use crate::settings::{SettingsState, recursive_mod_scan};
+use crate::mods::{BulkOpResult, ConflictReport, InstallOutcome, ModsStatus};
+use crate::settings::{SettingsState, mod_compression_level, recursive_mod_scan};
 
 #[tauri::command]
 pub(crate) async fn get_mods_status(
@@ -94,8 +94,9 @@ pub(crate) async fn export_mods_archive(
     .map_err(|e| e.to_string())?
 }
 
+/// An IoStore mod is rebuilt under its new name, which takes as long as writing the container.
 #[tauri::command]
-pub(crate) fn rename_mod(
+pub(crate) async fn rename_mod(
     mods_folder: String,
     full_name: String,
     new_base: String,
@@ -103,7 +104,11 @@ pub(crate) fn rename_mod(
     if game_status::should_block_for_game() {
         return Err(game_status::game_running_error());
     }
-    mods::rename_mod(&mods_folder, &full_name, &new_base)
+    tauri::async_runtime::spawn_blocking(move || {
+        mods::rename_mod(&mods_folder, &full_name, &new_base)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -141,28 +146,24 @@ pub(crate) fn delete_mods(
     Ok(mods::delete_mods(&mods_folder, &full_names))
 }
 
+/// Installs the paks, archives and folders at `source_paths`, each mod found in them on its own.
 #[tauri::command]
-pub(crate) fn install_mod(
+pub(crate) async fn install_mods(
+    state: State<'_, SettingsState>,
     mods_folder: String,
-    source_path: String,
-) -> Result<InstallResult, String> {
+    source_paths: Vec<String>,
+) -> Result<Vec<InstallOutcome>, String> {
     if game_status::should_block_for_game() {
         return Err(game_status::game_running_error());
     }
-    mods::install_mod(&mods_folder, &source_path)
-}
-
-#[tauri::command]
-pub(crate) async fn install_from_archive(
-    mods_folder: String,
-    archive_path: String,
-) -> Result<Vec<InstallResult>, String> {
-    if game_status::should_block_for_game() {
-        return Err(game_status::game_running_error());
-    }
+    let io = rivals_core::pak::iostore_out::IoStoreOptions {
+        oodle_level: Some(mod_compression_level(&state).to_oodle()),
+        ..Default::default()
+    };
+    let game_root = state.lock().ok().and_then(|s| s.game_path.clone());
     tauri::async_runtime::spawn_blocking(move || {
-        mods::install_from_archive(&mods_folder, &archive_path)
+        mods::install_mods(&mods_folder, &source_paths, io, game_root.as_deref())
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())
 }

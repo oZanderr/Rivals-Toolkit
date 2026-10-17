@@ -6,7 +6,9 @@ import {
   FileCode2,
   Package,
   Play,
+  Plug,
   Puzzle,
+  ScrollText,
   Settings as SettingsIcon,
   SlidersHorizontal,
   Volume2,
@@ -14,8 +16,10 @@ import {
 
 import { AssetManager } from "./components/AssetManager";
 import { ConfigTweaks } from "./components/ConfigTweaks";
+import { IniEditor } from "./components/IniEditor";
+import { Logs } from "./components/Logs";
 import { Mods } from "./components/Mods";
-import { PakIniEditor } from "./components/PakIniEditor";
+import { Plugins } from "./components/Plugins";
 import { Settings } from "./components/Settings";
 import { Sounds } from "./components/Sounds";
 import { Titlebar } from "./components/Titlebar";
@@ -28,7 +32,15 @@ import { useUpdateCheck, type UpdateInfo } from "@/hooks/useUpdateCheck";
 import { useWebviewDefaults } from "@/hooks/useWebviewDefaults";
 import { cn } from "@/lib/utils";
 
-type Tab = "mod-tools" | "pak-manager" | "ini-editor" | "config-tweaks" | "sounds" | "settings";
+type Tab =
+  | "mod-tools"
+  | "plugins"
+  | "pak-manager"
+  | "ini-editor"
+  | "config-tweaks"
+  | "sounds"
+  | "logs"
+  | "settings";
 
 interface InstallInfo {
   path: string;
@@ -38,10 +50,12 @@ interface InstallInfo {
 
 const TABS: { id: Tab; label: string; icon: ReactNode }[] = [
   { id: "mod-tools", label: "Mods", icon: <Puzzle size={15} /> },
+  { id: "plugins", label: "Plugins", icon: <Plug size={15} /> },
   { id: "sounds", label: "Sounds", icon: <Volume2 size={15} /> },
   { id: "config-tweaks", label: "Config Tweaks", icon: <SlidersHorizontal size={15} /> },
-  { id: "ini-editor", label: "Pak INI Editor", icon: <FileCode2 size={15} /> },
+  { id: "ini-editor", label: "INI Editor", icon: <FileCode2 size={15} /> },
   { id: "pak-manager", label: "Asset Manager", icon: <Package size={15} /> },
+  { id: "logs", label: "Logs", icon: <ScrollText size={15} /> },
   { id: "settings", label: "Settings", icon: <SettingsIcon size={15} /> },
 ];
 
@@ -67,11 +81,16 @@ function App() {
     [manualUpdateInfo, autoUpdateInfo]
   );
 
-  useEffect(() => {
-    if (!autoUpdateInfo?.update_available) return;
-    if (installInfo === undefined) return;
+  // The automatic check offers each update it finds once, as soon as the install is known.
+  const [offeredUpdate, setOfferedUpdate] = useState<UpdateInfo | null>(null);
+  if (
+    autoUpdateInfo?.update_available &&
+    installInfo !== undefined &&
+    offeredUpdate !== autoUpdateInfo
+  ) {
+    setOfferedUpdate(autoUpdateInfo);
     setUpdateDialogOpen(true);
-  }, [autoUpdateInfo, installInfo]);
+  }
 
   const handleManualUpdateFound = useCallback((info: UpdateInfo) => {
     setManualUpdateInfo(info);
@@ -155,12 +174,17 @@ function App() {
     setActiveTab("pak-manager");
   }, []);
 
-  useEffect(() => {
-    setMountedTabs((prev) => {
-      if (prev.has(activeTab)) return prev;
-      return new Set(prev).add(activeTab);
-    });
-  }, [activeTab]);
+  const [pendingIniFile, setPendingIniFile] = useState<string | null>(null);
+
+  const navigateToIniEditor = useCallback((path: string) => {
+    setPendingIniFile(path);
+    setActiveTab("ini-editor");
+  }, []);
+
+  // A tab stays mounted once shown, so switching back keeps its state.
+  if (!mountedTabs.has(activeTab)) {
+    setMountedTabs((prev) => new Set(prev).add(activeTab));
+  }
 
   useEffect(() => {
     getVersion()
@@ -259,6 +283,23 @@ function App() {
                 />
               </div>
             )}
+            {mountedTabs.has("plugins") && (
+              <div
+                className={cn(
+                  "flex flex-1 min-h-0 flex-col overflow-hidden p-5",
+                  activeTab !== "plugins" && "hidden"
+                )}
+              >
+                <Plugins
+                  key={gamePath}
+                  gamePath={gamePath}
+                  isActive={activeTab === "plugins"}
+                  gameRunning={gameBlocking}
+                  pathLoading={installInfo === undefined}
+                  onOpenInEditor={navigateToIniEditor}
+                />
+              </div>
+            )}
             {mountedTabs.has("pak-manager") && (
               <div
                 className={cn(
@@ -268,8 +309,11 @@ function App() {
               >
                 <AssetManager
                   gamePath={gamePath}
+                  gameRunning={gameBlocking}
+                  isActive={activeTab === "pak-manager"}
                   pendingPak={pendingAssetPak}
                   onPendingPakConsumed={() => setPendingAssetPak(null)}
+                  onOpenSettings={() => setActiveTab("settings")}
                 />
               </div>
             )}
@@ -280,10 +324,15 @@ function App() {
                   activeTab !== "ini-editor" && "hidden"
                 )}
               >
-                <PakIniEditor
+                {/* Keyed by the game, so another install starts it afresh: no paks, entries
+                    or edits carried over from the last one. */}
+                <IniEditor
+                  key={gamePath}
                   gamePath={gamePath}
                   isActive={activeTab === "ini-editor"}
                   gameRunning={gameBlocking}
+                  pendingFile={pendingIniFile}
+                  onPendingFileConsumed={() => setPendingIniFile(null)}
                 />
               </div>
             )}
@@ -305,6 +354,20 @@ function App() {
                 )}
               >
                 <Sounds gamePath={gamePath} isActive={activeTab === "sounds"} />
+              </div>
+            )}
+            {mountedTabs.has("logs") && (
+              <div
+                className={cn(
+                  "flex flex-1 min-h-0 flex-col overflow-hidden p-5",
+                  activeTab !== "logs" && "hidden"
+                )}
+              >
+                <Logs
+                  gamePath={gamePath}
+                  isActive={activeTab === "logs"}
+                  onOpenSettings={() => setActiveTab("settings")}
+                />
               </div>
             )}
             {mountedTabs.has("settings") && (

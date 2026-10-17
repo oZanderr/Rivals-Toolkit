@@ -48,18 +48,25 @@ interface PakIniInfo {
   pak_name: string;
   pak_path: string;
   has_device_profiles: boolean;
+  has_base_device_profiles: boolean;
   has_engine_ini: boolean;
   has_base_engine: boolean;
   has_windows_engine: boolean;
-  device_profiles_entry: string | null;
-  engine_ini_entry: string | null;
-  base_engine_entry: string | null;
-  windows_engine_entry: string | null;
+  device_profiles_entries: string[];
+  base_device_profiles_entries: string[];
+  engine_ini_entries: string[];
+  base_engine_entries: string[];
+  windows_engine_entries: string[];
 }
 
-// One of the four tweakable INI files, used to render presence badges on each pak.
-// Runtime priority for shared keys: device_profiles > windows_engine > engine > base_engine.
-type PakIniTarget = "base_engine" | "engine" | "windows_engine" | "device_profiles";
+// One of the tweakable INI files, used to render presence badges on each pak. Runtime priority
+// for shared keys: device_profiles > base_device_profiles > windows_engine > engine > base_engine.
+type PakIniTarget =
+  | "base_engine"
+  | "engine"
+  | "windows_engine"
+  | "base_device_profiles"
+  | "device_profiles";
 
 interface TweakSetting {
   id: string;
@@ -141,6 +148,11 @@ interface PakCacheEntry {
   tweakStates: TweakState[];
   savedTweakStates: TweakState[];
   pending: TweakSetting[];
+  // Which preset was chosen for this pak. A preset is applied to one pak, so carrying the choice
+  // to the next one left the dropdown naming a preset that pak did not have, and picking it again
+  // changed nothing for the Select to report: the preset could not be applied until a restart.
+  preset: string;
+  appliedPresetAt: number | null;
 }
 
 interface Props {
@@ -154,10 +166,25 @@ function hasAnyEngine(pak: PakIniInfo): boolean {
   return pak.has_engine_ini || pak.has_base_engine || pak.has_windows_engine;
 }
 
+// Engine-section settings are not console variables, so DefaultDeviceProfiles.ini cannot hold
+// them. Without an engine file in the pak they have nowhere to go and the write is a silent no-op.
+function isEngineOnly(tweak: TweakDefinition): boolean {
+  switch (tweak.kind) {
+    case "Toggle":
+    case "Slider":
+      return !!tweak.engine_section;
+    case "BatchToggle":
+      return tweak.entries.some((entry) => !!entry.engine_section);
+    case "RemoveLines":
+      return tweak.lines.some((line) => !!line.engine_section);
+  }
+}
+
 const TARGET_BADGE: Record<PakIniTarget, string> = {
   base_engine: "BaseEngine",
   engine: "Engine",
   windows_engine: "WindowsEngine",
+  base_device_profiles: "BaseDeviceProfiles",
   device_profiles: "DeviceProfiles",
 };
 
@@ -170,9 +197,18 @@ export function PakTweaks({ gamePath, isActive }: Props) {
   const [scanning, setScanning] = useState(false);
   const [loading, setLoading] = useState(false);
   const [applying, setApplying] = useState(false);
-  const [notice, setNotice] = useState<{ msg: string; type: "ok" | "err" | "info" } | null>(null);
-  const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [notice, setNotice] = useState<{
+    msg: string;
+    type: "ok" | "err" | "info";
+    duration: number;
+  } | null>(null);
   const pakCache = useRef<Map<string, PakCacheEntry>>(new Map());
+  // The pak the newest load was started for. Detection reads every config layer, which on a mod
+  // shipping hundreds of megabytes of INI takes over a second, and the pak list stays clickable
+  // throughout. A result that lands after the selection moved on belongs to its own cache entry,
+  // never to the pak now on screen: writing it there wiped that pak's unsaved changes, and the
+  // next switch filed the wrong tweak states under its name.
+  const loadingFor = useRef<string | null>(null);
   const scanRef = useRef(scan);
   // Tweak definitions (for rendering controls)
   const [definitions, setDefinitions] = useState<TweakDefinition[]>([]);
@@ -199,11 +235,15 @@ export function PakTweaks({ gamePath, isActive }: Props) {
     return `${modsPart} (${removedPart})`;
   };
 
-  const showNotice = (msg: string, type: "ok" | "err" | "info", duration = 4000) => {
-    if (noticeTimer.current) clearTimeout(noticeTimer.current);
-    setNotice({ msg, type });
-    noticeTimer.current = setTimeout(() => setNotice(null), duration);
-  };
+  const showNotice = (msg: string, type: "ok" | "err" | "info", duration = 4000) =>
+    setNotice({ msg, type, duration });
+
+  // A notice clears itself after its time; a newer one starts the clock again.
+  useEffect(() => {
+    if (!notice) return;
+    const timer = setTimeout(() => setNotice(null), notice.duration);
+    return () => clearTimeout(timer);
+  }, [notice]);
 
   useEffect(() => {
     scanRef.current = scan;
@@ -299,17 +339,18 @@ export function PakTweaks({ gamePath, isActive }: Props) {
     queueSetting(id, newEnabled, currentState?.current_value ?? null);
   }
 
-  const refreshPresets = async () => {
-    try {
-      const list = await invoke<TweakPreset[]>("list_tweak_profiles");
-      setPresets(list);
-      setSelectedPreset((prev) => (list.some((p) => p.name === prev) ? prev : ""));
-    } catch {
-      setPresets([]);
-      setSelectedPreset("");
-      setAppliedPresetAt(null);
-    }
-  };
+  const refreshPresets = () =>
+    invoke<TweakPreset[]>("list_tweak_profiles").then(
+      (list) => {
+        setPresets(list);
+        setSelectedPreset((prev) => (list.some((p) => p.name === prev) ? prev : ""));
+      },
+      () => {
+        setPresets([]);
+        setSelectedPreset("");
+        setAppliedPresetAt(null);
+      }
+    );
 
   useEffect(() => {
     refreshPresets();
@@ -317,12 +358,10 @@ export function PakTweaks({ gamePath, isActive }: Props) {
   }, []);
 
   // Clear stale selection when current preset disappears from list
-  useEffect(() => {
-    if (selectedPreset && !presets.some((p) => p.name === selectedPreset)) {
-      setSelectedPreset("");
-      setAppliedPresetAt(null);
-    }
-  }, [presets, selectedPreset]);
+  if (selectedPreset && !presets.some((p) => p.name === selectedPreset)) {
+    setSelectedPreset("");
+    setAppliedPresetAt(null);
+  }
 
   function buildCurrentSettings(): TweakSetting[] {
     return definitions.map((def) => {
@@ -342,7 +381,14 @@ export function PakTweaks({ gamePath, isActive }: Props) {
     }
 
     // Only tweaks the preset names are touched; everything else keeps its current state.
-    const presetMap = new Map(preset.settings.map((s) => [s.id, s]));
+    // A preset can name tweaks this pak cannot hold, so those are dropped rather than shown as
+    // applied: the write would be a no-op and the row would lie until the next scan.
+    const skipped = new Set(
+      hasAnyEngine(selectedPak) ? [] : definitions.filter(isEngineOnly).map((def) => def.id)
+    );
+    const presetMap = new Map(
+      preset.settings.filter((s) => !skipped.has(s.id)).map((s) => [s.id, s])
+    );
 
     setTweakStates((prev) =>
       prev.map((s) => {
@@ -352,6 +398,12 @@ export function PakTweaks({ gamePath, isActive }: Props) {
       })
     );
 
+    // Every tweak the preset names is queued, including the ones the pak already reads as having.
+    // Detection answers what the game ends up seeing, which is the merged view across the config
+    // layers, so a key written into one file alone reports the whole pak as set. Skipping those as
+    // unchanged left the files that lacked the key still lacking it, and a preset that had already
+    // been applied elsewhere had nothing to write here at all. Applying rewrites every file, so
+    // queueing them is what makes the pak actually match the preset.
     const next: TweakSetting[] = [...pending];
     for (const def of definitions) {
       const target = presetMap.get(def.id);
@@ -359,23 +411,22 @@ export function PakTweaks({ gamePath, isActive }: Props) {
       // A remove-only tweak cannot be restored, and its row is hidden once saved active.
       if (!target.enabled && def.kind === "RemoveLines" && def.remove_only) continue;
 
-      const saved = savedTweakStates.find((s) => s.id === def.id);
-      const idx = next.findIndex((e) => e.id === def.id);
-      const unchanged =
-        target.enabled === (saved?.active ?? false) &&
-        target.value === (saved?.current_value ?? null);
-
-      if (unchanged) {
-        if (idx >= 0) next.splice(idx, 1);
-        continue;
-      }
       const entry = { id: def.id, enabled: target.enabled, value: target.value };
+      const idx = next.findIndex((e) => e.id === def.id);
       if (idx >= 0) next[idx] = entry;
       else next.push(entry);
     }
 
     setPending(next);
     setAppliedPresetAt(preset.modified_at);
+
+    const dropped = preset.settings.filter((s) => skipped.has(s.id)).length;
+    if (dropped > 0) {
+      showNotice(
+        `Skipped ${dropped} tweak${dropped === 1 ? "" : "s"} that need an Engine.ini this pak mod doesn't have`,
+        "info"
+      );
+    }
   }
 
   async function saveCurrentAsPreset() {
@@ -414,14 +465,16 @@ export function PakTweaks({ gamePath, isActive }: Props) {
     }
   }
 
-  // Auto-reapply when the selected preset is modified on another tab.
-  useEffect(() => {
-    if (!selectedPreset || appliedPresetAt == null || !selectedPak) return;
-    const preset = presets.find((p) => p.name === selectedPreset);
-    if (!preset || preset.modified_at <= appliedPresetAt) return;
-    applyPresetToCurrentPak(preset);
-    showNotice(`Preset "${preset.name}" was updated, reapplied`, "info", 5000);
-  }, [presets, selectedPreset, appliedPresetAt, selectedPak]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Auto-reapply when the selected preset is modified on another tab. Applying it records the
+  // time it was applied, so this runs once for each change.
+  const changedPreset =
+    selectedPreset && appliedPresetAt != null && selectedPak
+      ? presets.find((p) => p.name === selectedPreset && p.modified_at > appliedPresetAt)
+      : undefined;
+  if (changedPreset) {
+    applyPresetToCurrentPak(changedPreset);
+    showNotice(`Preset "${changedPreset.name}" was updated, reapplied`, "info", 5000);
+  }
 
   async function deleteSelectedPreset() {
     if (!selectedPreset) return;
@@ -563,8 +616,12 @@ export function PakTweaks({ gamePath, isActive }: Props) {
         tweakStates,
         savedTweakStates,
         pending,
+        preset: selectedPreset,
+        appliedPresetAt,
       });
     }
+
+    loadingFor.current = pak.pak_path;
 
     const cached = pakCache.current.get(pak.pak_path);
     if (cached) {
@@ -572,27 +629,36 @@ export function PakTweaks({ gamePath, isActive }: Props) {
       setTweakStates(cached.tweakStates);
       setSavedTweakStates(cached.savedTweakStates);
       setPending(cached.pending);
+      setSelectedPreset(cached.preset);
+      setAppliedPresetAt(cached.appliedPresetAt);
       return;
     }
 
     // Cache miss — fetch from backend, keep showing previous state during load
     setSelectedPak(pak);
+    setSelectedPreset("");
+    setAppliedPresetAt(null);
     setLoading(true);
     try {
       const states = await invoke<TweakState[]>("detect_pak_tweaks", { pakPath: pak.pak_path });
-      setTweakStates(states);
-      setSavedTweakStates(states);
-      setPending([]);
       pakCache.current.set(pak.pak_path, {
         tweakStates: states,
         savedTweakStates: states,
         pending: [],
+        preset: "",
+        appliedPresetAt: null,
       });
+      if (loadingFor.current !== pak.pak_path) return;
+      setTweakStates(states);
+      setSavedTweakStates(states);
+      setPending([]);
     } catch (e: unknown) {
       // Clear on failure so stale state doesn't linger
-      setTweakStates([]);
-      setSavedTweakStates([]);
-      setPending([]);
+      if (loadingFor.current === pak.pak_path) {
+        setTweakStates([]);
+        setSavedTweakStates([]);
+        setPending([]);
+      }
       if (isPakMissingError(e)) {
         removePak(pak.pak_path);
         showNotice("That pak file is missing now. Removed it from the list.", "info");
@@ -606,18 +672,32 @@ export function PakTweaks({ gamePath, isActive }: Props) {
   }
 
   /** Force a fresh reload from disk, bypassing and updating the cache */
-  async function forceReloadPak(pak: PakIniInfo) {
+  async function forceReloadPak(
+    pak: PakIniInfo,
+    preset = selectedPreset,
+    appliedAt = appliedPresetAt
+  ) {
+    loadingFor.current = pak.pak_path;
     pakCache.current.delete(pak.pak_path);
+    // Re-reading takes as long as the first read did, and the save bar reads `loading`, so without
+    // this a discard left the pending badges and the button that made them sitting there as though
+    // the click had not registered.
+    setLoading(true);
     try {
       const states = await invoke<TweakState[]>("detect_pak_tweaks", { pakPath: pak.pak_path });
-      setTweakStates(states);
-      setSavedTweakStates(states);
-      setPending([]);
       pakCache.current.set(pak.pak_path, {
         tweakStates: states,
         savedTweakStates: states,
         pending: [],
+        preset,
+        appliedPresetAt: appliedAt,
       });
+      if (loadingFor.current !== pak.pak_path) return;
+      setTweakStates(states);
+      setSavedTweakStates(states);
+      setPending([]);
+      setSelectedPreset(preset);
+      setAppliedPresetAt(appliedAt);
     } catch (e: unknown) {
       if (isPakMissingError(e)) {
         removePak(pak.pak_path);
@@ -626,6 +706,8 @@ export function PakTweaks({ gamePath, isActive }: Props) {
         showNotice(String(e), "err");
       }
       console.error("Reload failed:", e);
+    } finally {
+      setLoading(false);
     }
   }
 
@@ -681,9 +763,7 @@ export function PakTweaks({ gamePath, isActive }: Props) {
   const { atBottom, scrollRef, sentinelRef } = useScrollAtBottom();
   const discardEdits = () => {
     if (!selectedPak) return;
-    setSelectedPreset("");
-    setAppliedPresetAt(null);
-    forceReloadPak(selectedPak);
+    forceReloadPak(selectedPak, "", null);
   };
   useSaveHotkeys({
     dirty,
@@ -817,6 +897,7 @@ export function PakTweaks({ gamePath, isActive }: Props) {
                         {(
                           [
                             "device_profiles",
+                            "base_device_profiles",
                             "windows_engine",
                             "engine",
                             "base_engine",
@@ -826,6 +907,8 @@ export function PakTweaks({ gamePath, isActive }: Props) {
                             switch (t) {
                               case "device_profiles":
                                 return pak.has_device_profiles;
+                              case "base_device_profiles":
+                                return pak.has_base_device_profiles;
                               case "windows_engine":
                                 return pak.has_windows_engine;
                               case "engine":
@@ -1020,13 +1103,7 @@ export function PakTweaks({ gamePath, isActive }: Props) {
                       </div>
                       <div className="flex flex-col divide-y divide-border/50">
                         {defs.map((tweak) => {
-                          const engineOnly =
-                            (tweak.kind === "Toggle" && !!tweak.engine_section) ||
-                            (tweak.kind === "Slider" && !!tweak.engine_section) ||
-                            (tweak.kind === "BatchToggle" &&
-                              tweak.entries.some((entry) => !!entry.engine_section)) ||
-                            (tweak.kind === "RemoveLines" &&
-                              tweak.lines.some((line) => !!line.engine_section));
+                          const engineOnly = isEngineOnly(tweak);
                           const isEnabled =
                             tweakStates.find((s) => s.id === tweak.id)?.active ?? false;
                           const removeOnly = tweak.kind === "RemoveLines" && tweak.remove_only;

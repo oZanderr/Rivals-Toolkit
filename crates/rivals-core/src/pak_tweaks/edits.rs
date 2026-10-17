@@ -123,27 +123,52 @@ pub fn edits_for_tweak(
     }
 }
 
+/// Whether a tweak can only be written into an engine section.
+///
+/// Engine-section settings are not console variables, so a device profiles file cannot hold them.
+/// A pak shipping no engine INI has nowhere to put one, and the write is a silent no-op, so a
+/// caller applying a whole preset drops these rather than reporting them as applied.
+pub fn needs_engine_ini(def: &TweakDefinition) -> bool {
+    match &def.kind {
+        TweakKind::Toggle { engine_section, .. } | TweakKind::Slider { engine_section, .. } => {
+            engine_section.is_some()
+        }
+        TweakKind::BatchToggle { entries, .. } => {
+            entries.iter().any(|e| e.engine_section.is_some())
+        }
+        TweakKind::RemoveLines { lines, .. } => lines.iter().any(|l| l.engine_section.is_some()),
+    }
+}
+
 /// Edits realizing every requested tweak state, resolved against the pak tweak catalogue.
 ///
 /// Both front ends go through here, so the desktop app and the CLI cannot disagree about what a
 /// tweak writes. Unknown and repeated ids are rejected rather than resolved to a winner, so a
 /// caller never believes it applied a tweak it did not.
+///
+/// A whole preset fails together, and the error names every entry that is wrong rather than the
+/// first: a preset saved off one pak can carry several values another pak will not take, and
+/// fixing them one apply at a time is miserable.
 pub fn edits_for_settings(settings: &[TweakSetting]) -> Result<Vec<PakTweakEdit>, String> {
     let catalogue = tweak_catalogue();
     let mut edits = Vec::new();
+    let mut problems = Vec::new();
     for (index, setting) in settings.iter().enumerate() {
         if settings[..index].iter().any(|prior| prior.id == setting.id) {
-            return Err(format!("'{}' was requested more than once", setting.id));
+            problems.push(format!("'{}' was requested more than once", setting.id));
+            continue;
         }
-        let def = catalogue
-            .iter()
-            .find(|d| d.id == setting.id)
-            .ok_or_else(|| format!("no tweak with id '{}'", setting.id))?;
-        edits.extend(edits_for_tweak(
-            def,
-            setting.enabled,
-            setting.value.as_deref(),
-        )?);
+        let Some(def) = catalogue.iter().find(|d| d.id == setting.id) else {
+            problems.push(format!("no tweak with id '{}'", setting.id));
+            continue;
+        };
+        match edits_for_tweak(def, setting.enabled, setting.value.as_deref()) {
+            Ok(tweak_edits) => edits.extend(tweak_edits),
+            Err(e) => problems.push(format!("{}: {e}", def.label)),
+        }
+    }
+    if !problems.is_empty() {
+        return Err(format!("Nothing was applied. {}", problems.join("; ")));
     }
     Ok(edits)
 }
@@ -341,6 +366,30 @@ mod tests {
     fn an_unknown_id_is_rejected() {
         let err = edits_for_settings(&[setting("nope", true, None)]).unwrap_err();
         assert!(err.contains("nope"), "{err}");
+    }
+
+    /// A preset saved off one pak can carry several values another pak will not take. Reporting
+    /// only the first would mean one failed apply per bad entry.
+    #[test]
+    fn every_bad_entry_in_a_preset_is_reported_at_once() {
+        let err = edits_for_settings(&[
+            setting("cas_sharpening", true, None),
+            setting("team_outline_line_mode", true, Some("5")),
+            setting("brightness", true, Some("not a number")),
+            setting("nope", true, None),
+        ])
+        .unwrap_err();
+
+        assert!(err.starts_with("Nothing was applied."), "{err}");
+        assert!(err.contains("Team Outline Line Mode"), "{err}");
+        assert!(err.contains("outside"), "{err}");
+        assert!(err.contains("Brightness"), "{err}");
+        assert!(err.contains("not a number"), "{err}");
+        assert!(err.contains("nope"), "{err}");
+        assert!(
+            !err.contains("CAS Sharpening"),
+            "the entry that was fine should not be named: {err}"
+        );
     }
 
     #[test]

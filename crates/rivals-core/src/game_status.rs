@@ -46,6 +46,23 @@ pub fn is_game_running() -> bool {
     })
 }
 
+/// The ids of every running game process, which name the logs still being written.
+pub fn game_pids() -> Vec<u32> {
+    let Ok(mut sys) = SYSTEM.lock() else {
+        return Vec::new();
+    };
+    sys.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
+    sys.processes()
+        .iter()
+        .filter(|(_, p)| {
+            p.name()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(GAME_PROCESS)
+        })
+        .map(|(pid, _)| pid.as_u32())
+        .collect()
+}
+
 /// Short English error for mutating ops attempted while the game is running.
 pub fn game_running_error() -> String {
     "Marvel Rivals is running! Close the game before modifying mods.".to_string()

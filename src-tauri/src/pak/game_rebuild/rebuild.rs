@@ -82,10 +82,8 @@ fn zen_package_stem(path: &Path) -> Option<PathBuf> {
         rest
     } else if let Some(rest) = file.strip_suffix(".ubulk") {
         rest
-    } else if let Some(rest) = file.strip_suffix(".uptnl") {
-        rest
     } else {
-        return None;
+        file.strip_suffix(".uptnl")?
     };
     Some(dir.join(stem))
 }
@@ -589,10 +587,14 @@ pub(crate) fn rebuild_vanilla_container(
     let mut completed = 0usize;
 
     // Bounded so slow chunk writes back-pressure the build phase instead of queuing into memory growth.
-    let channel_cap = std::cmp::max(2, crate::concurrency::POOL.current_num_threads() / 2);
+    let threads = crate::concurrency::POOL.current_num_threads();
+    let channel_cap = std::cmp::max(2, threads / 2);
     let (tx, rx) = std::sync::mpsc::sync_channel::<Result<ZenJob, String>>(channel_cap);
+    // The builders wait on this thread to take their jobs while it compresses on the pool it is on,
+    // so they get a pool of their own.
+    let builders = rivals_core::parallel::own_pool(threads)?;
 
-    rayon::in_place_scope(|scope| -> Result<(), String> {
+    std::thread::scope(|scope| -> Result<(), String> {
         let shader_maps_ref = &shader_maps;
         let script_objects_ref = &script_objects;
         let legacy_path_ref = legacy_path;
@@ -602,10 +604,12 @@ pub(crate) fn rebuild_vanilla_container(
         let own_store_ref: &dyn IoStoreTrait = &*own_store;
         let base_chunks_ref = &base_chunks;
 
-        scope.spawn(move |_| {
-            let pool = &*crate::concurrency::POOL;
+        let builders = &builders;
+
+        // Entered from a thread of its own, which waits without running anything else.
+        scope.spawn(move || {
             let log = retoc::logging::Log::no_log();
-            let _ = pool.install(|| {
+            let _ = builders.install(|| {
                 zen_paths_ref
                     .par_iter()
                     .try_for_each(|stem| -> Result<(), ()> {
@@ -644,6 +648,8 @@ pub(crate) fn rebuild_vanilla_container(
             });
         });
 
+        // Owned here, so returning early lets the builders' sends fail rather than wait.
+        let rx = rx;
         while let Ok(item) = rx.recv() {
             match item? {
                 ZenJob::Convert {

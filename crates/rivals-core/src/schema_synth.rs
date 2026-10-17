@@ -1,0 +1,702 @@
+//! Recovers a struct's layout from the package that defines it when the mappings file has no entry.
+
+use std::cell::{OnceCell, RefCell};
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
+use std::sync::{Arc, LazyLock, Mutex};
+
+use retoc::iostore::IoStoreTrait;
+use retoc::legacy_asset::FSerializedAssetBundle;
+use rivals_uasset::{
+    AssetBundle, ExportStatus, Mappings, MissingSchema, ParseOptions, ParsedPackage, TraceEntry,
+};
+
+use crate::asset::{self, AssetSource, PackageConverter};
+use crate::pak::containers::open_store_for;
+
+type Cache = Mutex<HashMap<String, Arc<Mappings>>>;
+static CACHE: LazyLock<Cache> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Reads a package by its name, such as `/Game/Marvel/X`.
+type Load<'a> = Box<dyn Fn(&str) -> Result<FSerializedAssetBundle, String> + 'a>;
+
+/// Reads the packages a layout is recovered from through a converter the caller already holds,
+/// rather than opening the game again for each one, and keeps what it recovers for as long as it
+/// lives. A walk over many packages makes one for each run it converts together, so what it keeps
+/// stays bounded, and none of it reaches the layouts kept for the rest of the app.
+pub struct LayoutReader<'a> {
+    load: Load<'a>,
+    recovered: RefCell<HashMap<String, Arc<Mappings>>>,
+}
+
+impl<'a> LayoutReader<'a> {
+    /// Reads through `converter`, finding each package by name in `store`, the store it converts
+    /// from.
+    pub fn through(store: &'a dyn IoStoreTrait, converter: &'a PackageConverter<'_>) -> Self {
+        Self {
+            load: Box::new(move |name: &str| {
+                let path = asset::package_path(store, name)
+                    .ok_or_else(|| format!("{name} is not in the store being read"))?;
+                converter.convert(asset::package_id(name), &path)
+            }),
+            recovered: RefCell::new(HashMap::new()),
+        }
+    }
+}
+
+/// Where the package being read came from, so the packages it references can be found too.
+pub struct PackageSource<'a> {
+    pub game_root: &'a str,
+    pub container: &'a str,
+    pub entry: &'a str,
+    pub kind: AssetSource,
+    /// The container of the mod a save writes into, when it has one already. The packages this
+    /// one references are read through it, its copies over the game's, and every Blueprint struct
+    /// this one imports is read from its own package rather than taken from the mappings, as the
+    /// mod may have given one a field.
+    pub mod_container: Option<String>,
+}
+
+/// Parses, and when the mappings file lacks a struct that another package defines, reads the
+/// definition from there and parses again.
+///
+/// Blueprint structs are only in a `.usmap` if that asset happened to be loaded when the mappings
+/// were dumped, so a seasonal event can make its own DataTables unreadable until the next dump.
+/// Reading the definition out of the game's own files removes that dependency.
+pub fn parse_package(
+    bundle: &AssetBundle<'_>,
+    mappings: Option<&Mappings>,
+    source: &PackageSource<'_>,
+) -> Result<ParsedPackage, String> {
+    parse_package_opts(bundle, mappings, source, ParseOptions::default())
+}
+
+/// [`parse_package`] with the caller choosing what the parse records, such as the declared slots
+/// an export does not store.
+pub fn parse_package_opts(
+    bundle: &AssetBundle<'_>,
+    mappings: Option<&Mappings>,
+    source: &PackageSource<'_>,
+    options: ParseOptions,
+) -> Result<ParsedPackage, String> {
+    parse_with(bundle, mappings, source, None, options)
+}
+
+/// [`parse_package_opts`] reading the packages that define a layout through `layouts`.
+pub fn parse_package_through(
+    bundle: &AssetBundle<'_>,
+    mappings: Option<&Mappings>,
+    source: &PackageSource<'_>,
+    layouts: &LayoutReader<'_>,
+    options: ParseOptions,
+) -> Result<ParsedPackage, String> {
+    parse_with(bundle, mappings, source, Some(layouts), options)
+}
+
+fn parse_with(
+    bundle: &AssetBundle<'_>,
+    mappings: Option<&Mappings>,
+    source: &PackageSource<'_>,
+    layouts: Option<&LayoutReader<'_>>,
+    options: ParseOptions,
+) -> Result<ParsedPackage, String> {
+    // Repairs in order: the package's own definitions first (a class recovered from its package
+    // is the class that was cooked), then the mappings file's other entries for a name it holds
+    // twice, which the reader tries on its own once synthesis has had its turn.
+    let first = rivals_uasset::parse_package_opts(
+        bundle,
+        mappings,
+        None,
+        ParseOptions {
+            skip_twins: true,
+            ..options
+        },
+    )?;
+    let synth = synth_for(&first, mappings, source, layouts);
+    if synth.is_none() && !has_failures(&first) {
+        return Ok(first);
+    }
+    rivals_uasset::parse_package_opts(bundle, mappings, synth.as_deref(), options)
+}
+
+fn has_failures(parsed: &ParsedPackage) -> bool {
+    parsed
+        .exports
+        .iter()
+        .any(|export| matches!(export.status, ExportStatus::Failed { .. }))
+        || tagged_and_undecoded(parsed)
+}
+
+/// A tagged package reads a value it cannot place as undecoded rather than failing its export.
+/// What it most often lacks is the owner's schema, which names a container's struct elements.
+fn tagged_and_undecoded(parsed: &ParsedPackage) -> bool {
+    !parsed.info.unversioned_properties
+        && parsed
+            .exports
+            .iter()
+            .any(|export| !export.undecoded.is_empty())
+}
+
+/// The mappings a second parse should carry, or `None` when the first parse needs nothing.
+fn synth_for(
+    parsed: &ParsedPackage,
+    mappings: Option<&Mappings>,
+    source: &PackageSource<'_>,
+    layouts: Option<&LayoutReader<'_>>,
+) -> Option<Arc<Mappings>> {
+    let (wanted, local) = wanted_definitions(parsed, mappings, source.mod_container.is_some());
+    if wanted.is_empty() && !local {
+        return None;
+    }
+    let own = if local {
+        rivals_uasset::definitions_of(parsed)
+    } else {
+        Vec::new()
+    };
+    synthesise(&wanted, own, mappings, source, layouts)
+}
+
+/// What a second parse needs the game's own packages for: the structs the mappings file lacks,
+/// and the Blueprint classes whose instances did not read to their end, which is what a class
+/// revised after the mappings were dumped looks like. The flag says whether such a class is
+/// defined in this very package, whose own definitions then join the second parse.
+/// `every_struct` wants each Blueprint struct the package imports, failed on or not.
+fn wanted_definitions(
+    parsed: &ParsedPackage,
+    mappings: Option<&Mappings>,
+    every_struct: bool,
+) -> (Vec<MissingSchema>, bool) {
+    let mut wanted: Vec<MissingSchema> = parsed
+        .missing_schemas
+        .iter()
+        .map(|missing| MissingSchema {
+            name: missing.name.clone(),
+            object_path: missing.object_path.clone(),
+        })
+        .collect();
+    // A class the package's own records describe otherwise than the mappings file does, as one
+    // given a variable since the file was dumped or revised by a patch, lays out its objects as
+    // the records say, which a read with the file's entry can get wrong without failing. A class
+    // the file has no entry for at all, as one a mod adds, has only its records to say what its
+    // objects hold, including what they inherit and do not store.
+    let mut local = mappings.is_some_and(|mappings| {
+        parsed.exports.iter().any(|export| {
+            let Some(definition) = &export.struct_definition else {
+                return false;
+            };
+            if !export.class_name.ends_with("Class") {
+                return false;
+            }
+            let ours: Vec<&str> = definition
+                .properties
+                .iter()
+                .map(|property| property.name.as_str())
+                .collect();
+            mappings
+                .chain_entries(&definition.name)
+                .first()
+                .is_none_or(|entry| {
+                    let mut theirs: Vec<_> = entry.properties.iter().collect();
+                    theirs.sort_by_key(|property| property.index);
+                    theirs
+                        .iter()
+                        .map(|property| property.name.as_str())
+                        .ne(ours.iter().copied())
+                })
+        })
+    });
+    let tagged_gaps = tagged_and_undecoded(parsed);
+    // A tagged package's own classes and the Blueprint ones it imports name what its containers
+    // hold, so all of them join a second read.
+    local |= tagged_gaps && parsed.exports.iter().any(|e| e.struct_definition.is_some());
+    for export in &parsed.exports {
+        if matches!(
+            export.status,
+            ExportStatus::Complete | ExportStatus::Payload { .. }
+        ) && !tagged_gaps
+        {
+            continue;
+        }
+        if export.class_index > 0 {
+            local |= parsed
+                .exports
+                .iter()
+                .find(|candidate| candidate.index as i32 + 1 == export.class_index)
+                .is_some_and(|class| class.struct_definition.is_some());
+            continue;
+        }
+        // Widget, animation and control rig Blueprints each have a generated class of their own.
+        let Some(class) = parsed.imports.iter().find(|import| {
+            import.index == export.class_index
+                && import.class_name.ends_with("BlueprintGeneratedClass")
+        }) else {
+            continue;
+        };
+        if wanted
+            .iter()
+            .any(|missing| missing.object_path == class.path)
+        {
+            continue;
+        }
+        wanted.push(MissingSchema {
+            name: class.object_name.clone(),
+            object_path: class.path.clone(),
+        });
+    }
+    // A Blueprint struct is defined by the package the import of it points into: one a property
+    // failed on, as one the mappings lack or one given a field since they were dumped, and, where
+    // the package's own classes are recovered, any it imports, since the first read stopped at the
+    // class before reaching them.
+    for import in parsed
+        .imports
+        .iter()
+        .filter(|import| import.class_name == "UserDefinedStruct")
+    {
+        let failed_on = parsed.unresolved_structs.contains(&import.object_name)
+            || parsed.outgrown_structs.contains(&import.object_name);
+        if (local || failed_on || every_struct || tagged_gaps)
+            && !wanted
+                .iter()
+                .any(|missing| missing.object_path == import.path)
+        {
+            wanted.push(MissingSchema {
+                name: import.object_name.clone(),
+                object_path: import.path.clone(),
+            });
+        }
+    }
+    (wanted, local)
+}
+
+/// [`parse_package`] that also re-encodes every unversioned header and compares it with the
+/// bytes it came from, which is the precondition for writing into the package.
+pub fn parse_package_checked(
+    bundle: &AssetBundle<'_>,
+    mappings: Option<&Mappings>,
+    source: &PackageSource<'_>,
+) -> Result<ParsedPackage, String> {
+    parse_package_opts(
+        bundle,
+        mappings,
+        source,
+        ParseOptions {
+            check_headers: true,
+            ..Default::default()
+        },
+    )
+}
+
+/// [`parse_package`] with the byte range each property consumed, for the byte viewer.
+pub fn parse_package_traced(
+    bundle: &AssetBundle<'_>,
+    mappings: Option<&Mappings>,
+    source: &PackageSource<'_>,
+) -> Result<(ParsedPackage, Vec<TraceEntry>), String> {
+    let synth = synthesised(bundle, mappings, source)?;
+    rivals_uasset::parse_package_traced_with(bundle, mappings, synth.as_deref())
+}
+
+/// The layouts recovered from the game's packages that a parse of this package would carry, for
+/// a caller that parses it many times and should read it the way every other command does.
+pub fn synthesised(
+    bundle: &AssetBundle<'_>,
+    mappings: Option<&Mappings>,
+    source: &PackageSource<'_>,
+) -> Result<Option<Arc<Mappings>>, String> {
+    let first = rivals_uasset::parse_package_opts(
+        bundle,
+        mappings,
+        None,
+        ParseOptions {
+            skip_twins: true,
+            ..Default::default()
+        },
+    )?;
+    Ok(synth_for(&first, mappings, source, None))
+}
+
+/// Definitions for the Blueprint class at `object_path`, recovered from its package and its
+/// parents', for laying out an object of it.
+pub fn class_synth(
+    object_path: &str,
+    mappings: Option<&Mappings>,
+    source: &PackageSource<'_>,
+) -> Option<Arc<Mappings>> {
+    let name = object_path.rsplit('.').next().unwrap_or(object_path);
+    synthesise(
+        &[MissingSchema {
+            name: name.to_string(),
+            object_path: object_path.to_string(),
+        }],
+        Vec::new(),
+        mappings,
+        source,
+        None,
+    )
+}
+
+/// `own` are definitions the package being parsed carries itself, which need no loading but do
+/// make the result specific to that package. `layouts` reads the packages that define the rest;
+/// without one they are read from `source`'s container.
+fn synthesise(
+    missing: &[MissingSchema],
+    own: Vec<rivals_uasset::StructDefinition>,
+    mappings: Option<&Mappings>,
+    source: &PackageSource<'_>,
+    layouts: Option<&LayoutReader<'_>>,
+) -> Option<Arc<Mappings>> {
+    let mut entries: Vec<String> = missing
+        .iter()
+        .filter_map(|m| defining_entry(&m.object_path, source))
+        .collect();
+    entries.sort();
+    entries.dedup();
+    if entries.is_empty() && own.is_empty() {
+        return None;
+    }
+
+    // The package's own definitions are named by its package name, which an edit can change while
+    // the entry it was read from stays the same, and so can what they hold: a variable added to a
+    // class leaves every name as it was, so the fields are part of what the layout is kept under.
+    let scope = if own.is_empty() {
+        String::new()
+    } else {
+        use std::hash::{Hash, Hasher};
+        let names: Vec<&str> = own.iter().map(|definition| definition.name()).collect();
+        let mut fields = std::collections::hash_map::DefaultHasher::new();
+        for definition in &own {
+            format!("{:?}", definition.properties()).hash(&mut fields);
+        }
+        format!(
+            "{}\u{2}{}\u{2}{:016x}",
+            source.entry,
+            names.join("\u{2}"),
+            fields.finish()
+        )
+    };
+    // A save's mod is read through, and its container is rewritten in place by each save into
+    // it, so what it holds is told apart by its size and time as well as its path.
+    let container = source.mod_container.as_deref().unwrap_or(source.container);
+    let stamp = std::fs::metadata(container)
+        .ok()
+        .map(|meta| (meta.len(), meta.modified().ok()));
+    let joined = entries.join("\u{1}");
+    let key = format!("{container}\u{1}{stamp:?}\u{1}{scope}\u{1}{joined}");
+    // A reader keeps only what another package can use: a layout that needs none of this
+    // package's own definitions.
+    let cached = match layouts {
+        Some(reader) if scope.is_empty() => reader.recovered.borrow().get(&joined).cloned(),
+        Some(_) => None,
+        None => CACHE.lock().ok().and_then(|cache| cache.get(&key).cloned()),
+    };
+    if cached.is_some() {
+        return cached;
+    }
+
+    // A Blueprint class names a Blueprint parent by path, and that parent's package has to join
+    // too, up the chain until a native class the mappings know, or the chain never roots at Object.
+    // A Blueprint struct a loaded definition's properties use joins the same way.
+    let mut definitions = own;
+    let mut loaded: HashSet<String> = HashSet::new();
+    // A container's packages convert through one context for the whole recovery: making one loads
+    // the game's script objects, which costs far more than converting a package.
+    let paks_dir = crate::paths::paks_dir(source.game_root);
+    let store: OnceCell<Result<Arc<dyn IoStoreTrait>, String>> = OnceCell::new();
+    let converter = OnceCell::new();
+    let load = |entry: &str| match layouts {
+        Some(reader) => (reader.load)(entry),
+        None if source.kind == AssetSource::Utoc => {
+            let store = store
+                .get_or_init(|| open_store_for(&paks_dir, container).map(|(store, _)| store))
+                .as_ref()
+                .map_err(String::clone)?;
+            let path = asset::package_path(&**store, entry)
+                .ok_or_else(|| format!("{entry} is not in the store being read"))?;
+            converter
+                .get_or_init(|| PackageConverter::new(&**store))
+                .convert(asset::package_id(entry), &path)
+        }
+        None => asset::load_bundle(source.game_root, container, entry, source.kind),
+    };
+    let mut queue = entries.clone();
+    let mut structs: Vec<String> = Vec::new();
+    for _ in 0..=MAX_PARENT_DEPTH {
+        queue.retain(|entry| !loaded.contains(entry));
+        queue.sort();
+        queue.dedup();
+        for entry in queue.drain(..) {
+            loaded.insert(entry.clone());
+            let Ok(bundle) = load(&entry) else {
+                continue;
+            };
+            let bundle = AssetBundle {
+                asset: &bundle.asset_file_buffer,
+                exports: &bundle.exports_file_buffer,
+            };
+            if let Ok(found) = rivals_uasset::read_struct_definitions_pathed(&bundle, mappings) {
+                definitions.extend(found);
+            }
+            structs.extend(struct_imports(&bundle));
+        }
+        let known: HashSet<&str> = definitions.iter().map(|d| d.name()).collect();
+        let used = std::mem::take(&mut structs);
+        queue = definitions
+            .iter()
+            .filter_map(|d| d.super_struct())
+            .filter(|parent| parent.starts_with('/') && !known.contains(parent))
+            .chain(used.iter().map(String::as_str))
+            .filter_map(|path| defining_entry(path, source))
+            .filter(|entry| !loaded.contains(entry))
+            .collect();
+        if queue.is_empty() {
+            break;
+        }
+    }
+    if definitions.is_empty() {
+        return None;
+    }
+
+    let synth = Arc::new(rivals_uasset::mappings_from_definitions_with(
+        definitions,
+        mappings,
+    ));
+    match layouts {
+        Some(reader) if scope.is_empty() => {
+            reader
+                .recovered
+                .borrow_mut()
+                .insert(joined, Arc::clone(&synth));
+        }
+        Some(_) => {}
+        None => {
+            if let Ok(mut cache) = CACHE.lock() {
+                cache.insert(key, Arc::clone(&synth));
+            }
+        }
+    }
+    Some(synth)
+}
+
+/// How many Blueprint parents deep a class chain is followed before giving up on rooting it.
+const MAX_PARENT_DEPTH: usize = 8;
+
+/// The Blueprint structs a package imports, by object path.
+pub(crate) fn struct_imports(bundle: &AssetBundle<'_>) -> Vec<String> {
+    let Ok(header) = rivals_uasset::read_header(bundle) else {
+        return Vec::new();
+    };
+    header
+        .imports
+        .iter()
+        .enumerate()
+        .filter(|(_, import)| {
+            header
+                .name_map
+                .get(import.class_name)
+                .is_ok_and(|name| name == "UserDefinedStruct")
+        })
+        .filter_map(|(at, _)| {
+            rivals_uasset::dotted_path(&header, retoc::zen::FPackageIndex::create_import(at as u32))
+        })
+        .collect()
+}
+
+/// Turns an object path into the package that holds it. UE's dotted form names the package before
+/// the dot; a slash-joined path is the package plus one object segment, since a row struct is always
+/// the top-level object of its own package. Native types live under `/Script` and have no defining
+/// asset. A container is asked by package name, which resolves any mount point, plugins included;
+/// a pak or a loose tree only knows the two mount points it can spell.
+fn defining_entry(object_path: &str, source: &PackageSource<'_>) -> Option<String> {
+    let package = match object_path.split_once('.') {
+        Some((package, _)) => package,
+        None => object_path.rsplit_once('/').map(|(p, _)| p)?,
+    };
+    if package.starts_with("/Script/") {
+        return None;
+    }
+    match source.kind {
+        AssetSource::Utoc => Some(package.to_string()),
+        AssetSource::Loose => {
+            sibling_on_disk(source.entry, &crate::asset::mount_relative(package)?)
+        }
+        AssetSource::Pak => Some(format!("{}.uasset", crate::asset::mount_relative(package)?)),
+    }
+}
+
+/// For an extracted tree the caller holds a real path, so rebuild the sibling from the content root
+/// inside it rather than from a container entry.
+fn sibling_on_disk(entry: &str, relative: &str) -> Option<String> {
+    let normalised = entry.replace('\\', "/");
+    let root = normalised.rfind("Marvel/Content/")?;
+    let base = Path::new(&normalised[..root]);
+    Some(
+        base.join(format!("{relative}.uasset"))
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn source(kind: AssetSource, entry: &str) -> PackageSource<'_> {
+        PackageSource {
+            game_root: "",
+            container: "c.utoc",
+            entry,
+            kind,
+            mod_container: None,
+        }
+    }
+
+    /// A class the mappings file has no entry for, as one a mod adds, lays its default object out
+    /// from its own records and its native parent's entry: the editor's reading lists what the
+    /// object inherits and does not store, so an edit can set it.
+    #[test]
+    fn a_class_the_mappings_lack_lists_what_its_default_object_inherits() {
+        let built = rivals_uasset::script_fixture::class_on_native_parent();
+        let mappings = rivals_uasset::script_fixture::native_parent_mappings();
+        let parsed = parse_package_opts(
+            &built.bundle(),
+            Some(&mappings),
+            &source(AssetSource::Loose, "BP_Test.uasset"),
+            ParseOptions {
+                declared_slots: true,
+                ..Default::default()
+            },
+        )
+        .expect("parses");
+        let defaults = parsed
+            .exports
+            .iter()
+            .find(|export| export.object_name == "Default__BP_Test_C")
+            .expect("the default object");
+        let held: Vec<(&str, bool)> = defaults
+            .properties
+            .iter()
+            .map(|entry| {
+                (
+                    entry.name.as_str(),
+                    matches!(entry.value, rivals_uasset::PropertyValue::Unset { .. }),
+                )
+            })
+            .collect();
+        assert!(held.contains(&("Health", false)), "{held:?}");
+        assert!(held.contains(&("bHidden", true)), "{held:?}");
+    }
+
+    #[test]
+    fn a_game_object_path_maps_onto_a_pak_entry() {
+        let entry = "Marvel/Content/Marvel/Data/DataTable/GameMode/2206/Row.uasset";
+        for path in [
+            "/Game/Marvel/Data/DataTable/GameMode/2206/Row.Row",
+            "/Game/Marvel/Data/DataTable/GameMode/2206/Row/Row",
+        ] {
+            assert_eq!(
+                defining_entry(path, &source(AssetSource::Pak, "x.uasset")),
+                Some(entry.to_string()),
+                "{path}"
+            );
+        }
+    }
+
+    /// A container resolves the package by name, so a plugin's mount point needs no table.
+    #[test]
+    fn a_container_is_asked_by_package_name_whatever_the_mount() {
+        assert_eq!(
+            defining_entry(
+                "/MovieRenderPipeline/Blueprints/UI_Row.UI_Row_C",
+                &source(AssetSource::Utoc, "x.uasset")
+            ),
+            Some("/MovieRenderPipeline/Blueprints/UI_Row".to_string())
+        );
+    }
+
+    /// Engine types have no defining asset to read, so they must not send the loader looking.
+    #[test]
+    fn a_script_path_has_no_defining_package() {
+        let path = "/Script/Marvel.HeroAttributeRow";
+        assert_eq!(
+            defining_entry(path, &source(AssetSource::Utoc, "x.uasset")),
+            None
+        );
+    }
+
+    #[test]
+    fn a_loose_asset_resolves_its_sibling_from_the_content_root() {
+        let entry = r"D:\exports\Marvel\Content\Marvel\Data\Table.uasset";
+        let path = "/Game/Marvel/Data/Struct/Row.Row";
+        assert_eq!(
+            defining_entry(path, &source(AssetSource::Loose, entry)),
+            Some("D:/exports/Marvel/Content/Marvel/Data/Struct/Row.uasset".to_string())
+        );
+    }
+}
+
+/// Set `RIVALS_GAME_ROOT` and `RIVALS_USMAP` to a real install to run these. Skipped otherwise,
+/// because reading a struct definition out of a package needs the packages.
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod game_data_tests {
+    use super::*;
+    use crate::mappings;
+
+    const TABLE: &str =
+        "Marvel/Content/Marvel/Data/DataTable/GameMode/2206/2206_UIHeroInfoTable.uasset";
+
+    fn install() -> Option<(String, String)> {
+        let root = std::env::var("RIVALS_GAME_ROOT").ok()?;
+        let usmap = std::env::var("RIVALS_USMAP").ok()?;
+        Some((root, usmap))
+    }
+
+    /// `MarvelM2206UIHeroAsset` is a Blueprint struct that this game's mappings dumps have never
+    /// contained, so the row layout has to come from the package that defines it. Reading it wrong
+    /// would not merely mislabel fields: the rows would stop landing on the export's declared size.
+    #[test]
+    fn a_row_struct_absent_from_the_mappings_is_read_from_its_own_package() {
+        let Some((root, usmap)) = install() else {
+            return;
+        };
+        let container = format!(
+            "{}/MarvelGame/Marvel/Content/Paks/pakchunk0-Windows.utoc",
+            root.replace('\\', "/")
+        );
+        let schema = mappings::load(std::path::Path::new(&usmap)).expect("mappings");
+        let bundle =
+            asset::load_bundle(&root, &container, TABLE, AssetSource::Utoc).expect("load table");
+        let parsed = parse_package(
+            &AssetBundle {
+                asset: &bundle.asset_file_buffer,
+                exports: &bundle.exports_file_buffer,
+            },
+            Some(&schema),
+            &PackageSource {
+                game_root: &root,
+                container: &container,
+                entry: TABLE,
+                kind: AssetSource::Utoc,
+                mod_container: None,
+            },
+        )
+        .expect("parse");
+
+        let export = parsed.exports.first().expect("one export");
+        assert!(
+            matches!(export.status, rivals_uasset::ExportStatus::Complete),
+            "expected an exact parse, got {:?}",
+            export.status
+        );
+        let table = export.data_table.as_ref().expect("data table");
+        assert_eq!(table.row_struct, "MarvelM2206UIHeroAsset");
+        // The shipped row and column counts move with the game; that the synthesised struct
+        // supplies a cell for every column of every row is what the test is for.
+        assert!(!table.rows.is_empty());
+        assert!(!table.columns.is_empty());
+        for row in &table.rows {
+            assert_eq!(row.fields.len(), table.columns.len(), "{}", row.name);
+        }
+    }
+}

@@ -19,20 +19,26 @@ import {
   FolderOpen,
   Hammer,
   Layers,
+  ListTree,
   Loader2,
   Lock,
   MinusSquare,
   Package,
   PackageOpen,
   PackagePlus,
+  Pencil,
   RefreshCw,
+  RotateCcw,
   Search,
   Square,
   Users,
   XCircle,
 } from "lucide-react";
 
+import AssetInspector from "@/components/AssetInspector";
+import { GameSearch } from "@/components/GameSearchDialog";
 import { HeroIcon } from "@/components/HeroIcon";
+import { ModReportDialog, type SearchHit } from "@/components/ModReportDialog";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -44,6 +50,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Button, buttonVariants } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -86,6 +93,9 @@ type RepackPrompt = {
   label: string;
   toIoStore: boolean;
   obfuscate: boolean;
+  // Compress what an IoStore mod holds again at the level in settings, rather than keeping its
+  // blocks as they are stored. Only an in-place repack to IoStore has any to keep.
+  recompress: boolean;
 };
 
 type PackCompression = "oodle" | "zlib";
@@ -95,6 +105,9 @@ type PackCompression = "oodle" | "zlib";
 // this ecosystem bundles the DLL. The commands still take the parameter, so re-exposing it later is
 // a matter of adding the control back.
 const REPACK_COMPRESSION: PackCompression = "oodle";
+
+// Only packages carry properties; every other extension is opaque payload.
+const INSPECTABLE = /[.](uasset|umap)$/i;
 type StatusType = "ok" | "err" | "info";
 
 // One long-running job, owned by the handler that started it. Progress events only update the
@@ -180,11 +193,47 @@ interface CharacterSummary {
 
 interface Props {
   gamePath: string;
+  gameRunning: boolean;
   pendingPak?: string | null;
+  /** Whether this tab is the one on screen; hidden tabs stay mounted. */
+  isActive?: boolean;
   onPendingPakConsumed?: () => void;
+  onOpenSettings?: () => void;
 }
 
-export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Props) {
+/** The package name a container entry is the package of: the project's content is `/Game/`, and a
+ *  plugin's is mounted under the plugin's name. */
+function packageOfEntry(entry: string): string {
+  const stem = entry.replace(/\.[^./]+$/, "");
+  if (stem.startsWith("Marvel/Content/")) return `/Game/${stem.slice("Marvel/Content/".length)}`;
+  if (stem.startsWith("Engine/Content/")) return `/Engine/${stem.slice("Engine/Content/".length)}`;
+  const plugin = /(?:^|\/)([^/]+)\/Content\/(.*)$/.exec(stem);
+  return plugin ? `/${plugin[1]}/${plugin[2]}` : `/${stem}`;
+}
+
+export function AssetManager({
+  gamePath,
+  gameRunning,
+  pendingPak,
+  isActive = true,
+  onPendingPakConsumed,
+  onOpenSettings,
+}: Props) {
+  const [inspecting, setInspecting] = useState<ContentEntry | null>(null);
+  /// Where in the inspected package to land, when it was opened from a mod search hit.
+  const [inspectTarget, setInspectTarget] = useState<{
+    exportIndex: number;
+    offset?: number;
+  } | null>(null);
+  const [overviewOpen, setOverviewOpen] = useState(false);
+  /// A package the user asked to take back out of the selected mod, awaiting confirmation.
+  const [revertPrompt, setRevertPrompt] = useState<string | null>(null);
+  const [renamePrompt, setRenamePrompt] = useState<{ path: string; to: string } | null>(null);
+  /// A container to read the inspected entry from instead of the selected one: the copy a save
+  /// just wrote, or the container a game-wide search found it in.
+  const [inspectFrom, setInspectFrom] = useState<string | null>(null);
+  // A loose asset is addressed by path alone, so it carries no container.
+  const [looseAsset, setLooseAsset] = useState<string | null>(null);
   const [pakList, setPakList] = useState<PakFileInfo[]>([]);
   const [selectedPak, setSelectedPak] = useState<string>("");
   const [pakContents, setPakContents] = useState<ContentEntry[]>([]);
@@ -429,6 +478,7 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
   }, [pakList, selectedPak, selectedIsVanilla]);
 
   // Virtualizer for the contents list
+  // eslint-disable-next-line react-hooks/incompatible-library
   const contentsVirtualizer = useVirtualizer({
     count: visible.length,
     getScrollElement: () => contentsScrollRef.current,
@@ -437,6 +487,56 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
   });
 
   listPaksRef.current = listPaks;
+
+  /** Takes a package back out of the selected mod, so the game's own copy loads again. */
+  async function revertEntry(path: string) {
+    if (!selectedPak) return;
+    try {
+      const outcome = await invoke<"reverted" | "removed_mod" | "not_held">("revert_mod_asset", {
+        container: selectedPak,
+        entry: path,
+      });
+      const mod = selectedPak.split(/[\\/]/).pop() ?? selectedPak;
+      showNotice(
+        outcome === "removed_mod"
+          ? `${path} was all ${mod} carried, so the mod is deleted`
+          : outcome === "reverted"
+            ? `${mod} no longer carries ${path}`
+            : `${mod} does not carry ${path}`,
+        outcome === "not_held" ? "err" : "ok"
+      );
+      pakContentsCacheRef.current.delete(selectedPak);
+      emitModsChanged({
+        modsFolder: selectedPak.replace(/[\\/][^\\/]+$/, ""),
+        source: "AssetManager",
+      });
+      await listPaks();
+    } catch (e: unknown) {
+      showNotice(String(e), "err");
+    }
+  }
+
+  /** Moves a package the selected mod added to another path inside the same mod. */
+  async function renameEntry(path: string, to: string) {
+    if (!selectedPak) return;
+    try {
+      const message = await invoke<string>("rename_mod_package", {
+        gameRoot: gamePath,
+        container: selectedPak,
+        entry: path,
+        to,
+      });
+      showNotice(message, "ok");
+      pakContentsCacheRef.current.delete(selectedPak);
+      emitModsChanged({
+        modsFolder: selectedPak.replace(/[\\/][^\\/]+$/, ""),
+        source: "AssetManager",
+      });
+      await listPaks();
+    } catch (e: unknown) {
+      showNotice(String(e), "err");
+    }
+  }
 
   async function listPaks(silent = false) {
     if (!silent) {
@@ -618,6 +718,17 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
       showNotice(String(e), "err");
     } finally {
       if (gen === loadGenRef.current) setBusy(false);
+    }
+  }
+
+  // Extracted assets live outside any container, so they are inspected straight from disk.
+  async function openLooseAsset() {
+    const picked = await open({
+      multiple: false,
+      filters: [{ name: "Unreal asset", extensions: ["uasset", "umap"] }],
+    });
+    if (typeof picked === "string") {
+      setLooseAsset(picked);
     }
   }
 
@@ -1154,6 +1265,7 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
       label: folderName,
       toIoStore: folderToIoStore,
       obfuscate: false,
+      recompress: false,
     });
   }
 
@@ -1166,6 +1278,7 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
       label: pak.split(/[/\\]/).pop() ?? pak,
       toIoStore: isIoStore,
       obfuscate: !!info?.obfuscated,
+      recompress: false,
     });
   }
 
@@ -1182,6 +1295,7 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
       // A mixed library has no single current format, so the batch states its own intent.
       toIoStore: true,
       obfuscate: false,
+      recompress: false,
     });
   }
 
@@ -1196,6 +1310,7 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
       modPak,
       toIostore: prompt.toIoStore,
       obfuscate: prompt.obfuscate,
+      recompress: prompt.toIoStore && prompt.recompress,
       compression: REPACK_COMPRESSION,
     });
   }
@@ -1437,7 +1552,7 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
       : `${visible.length} file(s)${visible.length !== pakContents.length ? ` of ${pakContents.length}` : ""} inside ${pakName} \u2014 click to select, double-click to extract`;
 
   return (
-    <div ref={rootRef} className="flex flex-1 min-h-0 flex-col gap-4">
+    <div ref={rootRef} className="relative flex flex-1 min-h-0 flex-col gap-4">
       <div className="flex min-h-8 shrink-0 items-center gap-3">
         <h2 className="shrink-0 text-xl font-bold">Asset Manager</h2>
         {notice && !operation && (
@@ -1493,6 +1608,15 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
           </div>
         )}
         <div className="ml-auto flex shrink-0 items-center gap-2">
+          <GameSearch
+            gamePath={gamePath}
+            disabled={!gamePath}
+            onOpenHit={(hit: SearchHit) => {
+              setInspectFrom(hit.container ?? null);
+              setInspectTarget({ exportIndex: hit.export_index, offset: hit.offset });
+              setInspecting({ path: hit.package, source: "utoc" });
+            }}
+          />
           <Tip content="Repack every installed mod in place, with one set of options">
             <Button variant="outline" size="sm" onClick={promptRepackAll} disabled={busy}>
               <Layers size={15} />
@@ -1515,6 +1639,11 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
                 <Tip content="Browse for a pak file">
                   <Button variant="ghost" size="icon-sm" onClick={openPak} disabled={busy}>
                     <FolderOpen size={15} />
+                  </Button>
+                </Tip>
+                <Tip content="Inspect an already-extracted .uasset from disk">
+                  <Button variant="ghost" size="icon-sm" onClick={openLooseAsset} disabled={busy}>
+                    <Search size={15} />
                   </Button>
                 </Tip>
                 <Tip content="Refresh game paks">
@@ -1764,6 +1893,18 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
                 ) : (
                   <>
                     {selectedIsIoStore && !selectedIsVanilla && (
+                      <Tip content="Mod overview: what it replaces and adds, what it calls, and a search of its scripts">
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          onClick={() => setOverviewOpen(true)}
+                          disabled={busy || !selectedPak || !gamePath}
+                        >
+                          <ListTree size={15} />
+                        </Button>
+                      </Tip>
+                    )}
+                    {selectedIsIoStore && !selectedIsVanilla && (
                       <Tip content="Convert this mod's IoStore assets to editable .uasset/.uexp/.ubulk legacy">
                         <Button
                           variant="ghost"
@@ -1967,6 +2108,39 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
                         </div>
                       </ContextMenuTrigger>
                       <ContextMenuContent>
+                        {INSPECTABLE.test(entry.path) && (
+                          <ContextMenuItem
+                            onSelect={() => {
+                              setInspectFrom(null);
+                              setInspectTarget(null);
+                              setInspecting(entry);
+                            }}
+                          >
+                            <Search />
+                            Inspect Contents
+                          </ContextMenuItem>
+                        )}
+                        {!selectedIsVanilla &&
+                          /\.utoc$/i.test(selectedPak) &&
+                          /\.uasset$/i.test(entry.path) && (
+                            <ContextMenuItem
+                              onSelect={() =>
+                                setRenamePrompt({
+                                  path: entry.path,
+                                  to: packageOfEntry(entry.path),
+                                })
+                              }
+                            >
+                              <Pencil />
+                              Rename in This Mod…
+                            </ContextMenuItem>
+                          )}
+                        {!selectedIsVanilla && /\.(uasset|umap)$/i.test(entry.path) && (
+                          <ContextMenuItem destructive onSelect={() => setRevertPrompt(entry.path)}>
+                            <RotateCcw />
+                            Revert to the Game's Copy
+                          </ContextMenuItem>
+                        )}
                         <ContextMenuItem
                           onSelect={() => {
                             if (showExtractSelected) {
@@ -2197,6 +2371,22 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
             })}
           </div>
 
+          {repackPrompt && repackPrompt.kind !== "folder" && repackPrompt.toIoStore && (
+            <label className="flex items-start gap-2 text-xs">
+              <Checkbox
+                className="mt-0.5"
+                checked={repackPrompt.recompress}
+                onCheckedChange={(checked) =>
+                  setRepackPrompt((p) => p && { ...p, recompress: checked === true })
+                }
+              />
+              <span>
+                Recompress at the compression level in settings. Off, an IoStore mod keeps its
+                blocks as they are stored, its compression and size, and is only re-encrypted.
+              </span>
+            </label>
+          )}
+
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
@@ -2248,6 +2438,137 @@ export function AssetManager({ gamePath, pendingPak, onPendingPakConsumed }: Pro
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {looseAsset && (
+        <AssetInspector
+          key={looseAsset}
+          gamePath={gamePath}
+          gameRunning={gameRunning}
+          isActive={isActive}
+          container=""
+          entry={looseAsset}
+          onClose={() => setLooseAsset(null)}
+          onOpenSettings={() => {
+            setLooseAsset(null);
+            onOpenSettings?.();
+          }}
+        />
+      )}
+
+      <AlertDialog
+        open={revertPrompt !== null}
+        onOpenChange={(open) => !open && setRevertPrompt(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Revert to the game's copy?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Takes <span className="font-mono">{revertPrompt}</span> out of{" "}
+              {selectedPak.split(/[\\/]/).pop()}, so the game loads its own copy again. The mod
+              keeps everything else it carries; if this is all it carries, the mod is deleted.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className={buttonVariants({ variant: "destructive" })}
+              onClick={() => {
+                const path = revertPrompt;
+                setRevertPrompt(null);
+                if (path) void revertEntry(path);
+              }}
+            >
+              Revert
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={renamePrompt !== null}
+        onOpenChange={(open) => !open && setRenamePrompt(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Rename in this mod</AlertDialogTitle>
+            <AlertDialogDescription>
+              Moves <span className="font-mono">{renamePrompt?.path}</span> to another package name
+              inside {selectedPak.split(/[\\/]/).pop()}. Only a package the mod added can move;
+              anything still pointing at the old name finds nothing there.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <Input
+            value={renamePrompt?.to ?? ""}
+            onChange={(e) =>
+              setRenamePrompt((held) => (held ? { ...held, to: e.target.value } : held))
+            }
+            className="h-8 font-mono text-xs"
+          />
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={
+                !renamePrompt ||
+                !/^\/[^/.:\s]+(\/[^/.:\s]+)+$/.test(renamePrompt.to.trim()) ||
+                renamePrompt.to.trim() === packageOfEntry(renamePrompt.path)
+              }
+              onClick={() => {
+                const held = renamePrompt;
+                setRenamePrompt(null);
+                if (held) void renameEntry(held.path, held.to.trim());
+              }}
+            >
+              Rename
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {overviewOpen && selectedPak && (
+        <ModReportDialog
+          key={selectedPak}
+          gamePath={gamePath}
+          container={selectedPak}
+          onClose={() => setOverviewOpen(false)}
+          onRevert={(path) => {
+            setOverviewOpen(false);
+            setRevertPrompt(path);
+          }}
+          onOpenHit={(hit: SearchHit) => {
+            setOverviewOpen(false);
+            setInspectFrom(null);
+            setInspectTarget({ exportIndex: hit.export_index, offset: hit.offset });
+            setInspecting({ path: hit.package, source: "utoc" });
+          }}
+        />
+      )}
+
+      {inspecting && (
+        <AssetInspector
+          key={`${inspectFrom ?? selectedPak}\u0000${inspecting.path}\u0000${inspectTarget?.exportIndex ?? ""}:${inspectTarget?.offset ?? ""}`}
+          initialTarget={inspectTarget ?? undefined}
+          gamePath={gamePath}
+          gameRunning={gameRunning}
+          isActive={isActive}
+          container={
+            inspectFrom ??
+            (inspecting.source === "utoc" ? selectedPak.replace(/[.]pak$/i, ".utoc") : selectedPak)
+          }
+          entry={inspecting.path}
+          onClose={() => {
+            setInspectFrom(null);
+            setInspectTarget(null);
+            setInspecting(null);
+          }}
+          onOpenSettings={() => {
+            setInspectFrom(null);
+            setInspectTarget(null);
+            setInspecting(null);
+            onOpenSettings?.();
+          }}
+          onOpenCopy={setInspectFrom}
+        />
+      )}
     </div>
   );
 }

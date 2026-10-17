@@ -1,4 +1,11 @@
-export type ModsEventSource = "Mods" | "Sounds" | "AssetManager" | "Settings" | "PakIniEditor";
+export type ModsEventSource =
+  | "Mods"
+  | "Sounds"
+  | "AssetManager"
+  | "AssetInspector"
+  | "Settings"
+  | "IniEditor"
+  | "Plugins";
 
 export interface ModsChangedEvent {
   modsFolder: string;

@@ -77,11 +77,7 @@ pub(crate) fn validate_audio(input: &Path) -> Result<WavValidation> {
 
     let bytes_per_sample = info.bits_per_sample as u32 / 8;
     let bytes_per_frame = bytes_per_sample * info.channels as u32;
-    let total_frames = if bytes_per_frame > 0 {
-        info.data_size / bytes_per_frame
-    } else {
-        0
-    };
+    let total_frames = info.data_size.checked_div(bytes_per_frame).unwrap_or(0);
     let duration = if info.sample_rate > 0 {
         total_frames as f64 / info.sample_rate as f64
     } else {

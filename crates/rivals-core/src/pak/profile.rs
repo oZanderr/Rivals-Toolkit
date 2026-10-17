@@ -49,6 +49,65 @@ impl PackCompression {
     }
 }
 
+/// How hard Oodle works on what is written. The names are the ones the desktop app's settings
+/// store, so a level saved there reads here.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OodleLevel {
+    None,
+    Fast,
+    #[default]
+    Normal,
+    Optimal1,
+    Optimal2,
+    Optimal3,
+}
+
+impl OodleLevel {
+    pub const ALL: [Self; 6] = [
+        Self::None,
+        Self::Fast,
+        Self::Normal,
+        Self::Optimal1,
+        Self::Optimal2,
+        Self::Optimal3,
+    ];
+
+    pub fn to_oodle(self) -> retoc::OodleCompressionLevel {
+        use retoc::OodleCompressionLevel as L;
+        match self {
+            Self::None => L::None,
+            Self::Fast => L::Fast,
+            Self::Normal => L::Normal,
+            Self::Optimal1 => L::Optimal1,
+            Self::Optimal2 => L::Optimal2,
+            Self::Optimal3 => L::Optimal3,
+        }
+    }
+
+    /// The level as a command line names it: `none`, `fast`, `normal`, `optimal1` to `optimal3`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Fast => "fast",
+            Self::Normal => "normal",
+            Self::Optimal1 => "optimal1",
+            Self::Optimal2 => "optimal2",
+            Self::Optimal3 => "optimal3",
+        }
+    }
+
+    /// A level by its name, without regard to case.
+    pub fn parse(text: &str) -> Result<Self, String> {
+        Self::ALL
+            .into_iter()
+            .find(|level| level.name().eq_ignore_ascii_case(text))
+            .ok_or_else(|| {
+                let names: Vec<&str> = Self::ALL.iter().map(|level| level.name()).collect();
+                format!("{text} is not an Oodle level: {}", names.join(", "))
+            })
+    }
+}
+
 /// IoStore compression block size Marvel Rivals expects.
 pub const RIVALS_BLOCK_SIZE: u32 = 0x10000;
 

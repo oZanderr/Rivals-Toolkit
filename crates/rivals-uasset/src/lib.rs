@@ -1,0 +1,181 @@
+//! Decodes Unreal Engine 5 package export data into readable property trees using a .usmap schema.
+#![deny(clippy::unwrap_used, clippy::expect_used)]
+
+mod call_shape;
+mod class_variable;
+mod component;
+mod copy;
+mod datatable;
+mod dependency;
+mod duplicate;
+mod edit;
+mod export_edit;
+mod field_record;
+mod graph_trim;
+mod header_edit;
+mod hex;
+mod identity;
+mod import_remove;
+mod kismet;
+mod mappings;
+mod member_edit;
+mod members;
+mod moviescene;
+mod named_edit;
+mod names;
+mod new_function;
+mod niagara;
+mod niagara_vm;
+mod niagara_vm_edit;
+mod package;
+mod path_edit;
+mod props;
+mod reader;
+mod relocate;
+mod remove;
+mod renumber;
+mod script_edit;
+mod script_encode;
+#[cfg(any(test, feature = "test-support"))]
+pub mod script_fixture;
+mod script_text;
+mod script_text_edit;
+pub use call_shape::{
+    CallShape, CallSite, Fit, compare as compare_calls, compare_written as compare_written_call,
+    render as render_call_shape, shape_of_signature, site_at, stores_in,
+};
+pub use script_edit::{narrowing_edits, widening_edits};
+pub use script_encode::{
+    AssembleOptions, Assembled, NewImport, RoundTripFailure, RoundTrips, imports_text_adds,
+    script_round_trips, text_diagnostics,
+};
+pub use script_text::{
+    Diagnostic, ScriptPrinter, ScriptText, TextLabel, TextLine, print_expr, print_script,
+};
+mod stringtable;
+mod struct_field;
+mod structs;
+mod tagged;
+#[cfg(test)]
+mod tagged_edit_tests;
+#[cfg(any(test, feature = "test-support"))]
+pub mod tagged_fixture;
+mod tails;
+pub mod text_literal;
+mod texture;
+mod unversioned;
+#[cfg(test)]
+mod unversioned_edit_tests;
+#[cfg(test)]
+mod unversioned_fixture;
+mod ustruct;
+mod value;
+mod write;
+
+pub use class_variable::AddVariable;
+pub use component::derived_guid;
+pub use component::{
+    AddComponent, ChangedList, ComponentPlan, ComponentRemoval, InheritedComponent, ListContext,
+    ListEntry, ListScope, NodeParent, RemoveComponent, component_removal_wiring, component_wiring,
+    inherited_component_wiring, plan_component, plan_component_removal, plan_inherited_component,
+    verify_component, verify_component_removal, verify_inherited_component,
+};
+pub use copy::{CopiedExport, CopyExport, CopyPlan, CopySource, plan_copy};
+pub use datatable::{DataTable, DataTableLayout, DataTableRow, RowSpan};
+pub use dependency::{
+    DependencyEdit, DependencyPlan, EdgeFinding, Runs, edge_findings, edges_left_unnamed,
+    introduced_edge_findings, plan_dependency_edits, runs_of, zen_keeps, zen_losses, zen_readback,
+};
+pub use duplicate::{
+    AddExport, ClassLayout, DuplicatePlan, LevelSlot, class_layout, plan_duplication,
+};
+pub use edit::{
+    AppliedEdit, BulkEdit, DRIFT, DuplicateExport, EditOp, Expected, FieldSet, KeyEdit, KeyOp,
+    NOT_STORED, PackageEdits, PatchedBundle, PayloadEdit, RowEdit, RowOp, ScriptConstEdit,
+    ScriptTextEdit, Sidecars, StringEdit, StringOp, ValueEdit, check_expectations, entry_named_at,
+    expectations, kind_of, patch_identity, patch_package, patch_package_copy, patch_package_with,
+    patch_values, payload_holds, payload_lock, same_enumerator, verify_copy, verify_identity,
+    verify_patch, verify_references,
+};
+pub use export_edit::{
+    EDITABLE_FLAGS, ExportEdit, ExportEditPlan, flag_names, plan_export_edits,
+    plan_export_edits_with,
+};
+pub use field_record::{FieldType, NewField, encode_field_record, parse_field_type};
+pub use graph_trim::{DroppedLine, GraphTrim, Trims, drop_assignments, trim_event_graphs};
+pub use header_edit::{ImportEdit, ObjectPath, parse_object_path};
+pub use hex::{HexRow, ROW_BYTES, render as render_hex, rows as hex_rows};
+pub use identity::{
+    PathRename, SaveAs, identity_leftovers, identity_script_edits, identity_value_edits,
+    level_notes, names_renamed_paths, rename_references,
+};
+pub use import_remove::{
+    ImportRemovalPlan, ImportUsage, RemovedImport, UnusedImport, import_usage, plan_import_removal,
+    unused_imports,
+};
+pub use kismet::{
+    CallInfo, CallTexts, CallUse, Expr, ExpressionSlot, LiteralSlot, ObjectRef, PropertyRef,
+    ResizeLock, Script, ScriptCensus, ScriptLine, ScriptStop, SlotKind, Statement, SwitchCase,
+    Term, TermKind, TextLiteral, call_at, call_expr_at, call_sites, call_target_at, callee_name,
+    census as script_census, children as expression_children, event_graphs, expression_at,
+    expression_starting, literals, render_script, script_lines, shape as expression_shape,
+    statement_terms, token_name, ubergraph_entries, visit_spans,
+};
+pub use mappings::{Mappings, Schema, SchemaFixups, SchemaSlot, kind_name};
+pub use member_edit::{
+    MemberRename, PossibleUses, RemoveRecords, RenamePlan, plan_member_rename, verify_member_rename,
+};
+pub use members::{
+    Member, MemberKind, MemberTarget, MemberUse, MemberUses, UseRole, UseSite, ancestors_of,
+    element_holding, locals_of, member_uses, members_of,
+};
+pub use named_edit::{names_any, place_named};
+pub use names::unused_names;
+pub use new_function::{NewFunctionEdit, new_function_export};
+pub use niagara_vm::{
+    VmAttribute, VmCensus, VmComponentKind, VmConst, VmConstLayout, VmDataSet, VmFunction,
+    VmInstruction, VmLeaf, VmLine, VmLoc, VmOperand, VmParam, VmProgram, VmRole, VmScript, VmShape,
+    VmStop, VmTable, VmTrace, VmType, const_layout, decode_vm, encode_vm, read_vm_script,
+    show_bits, trace_outputs, vm_census, vm_lines, vm_op_name, vm_shape,
+};
+pub use niagara_vm_edit::{
+    LoweredVm, VmConstEdit, VmEditPlan, lower_vm_consts, parse_vm_value, verify_vm_edits,
+    vm_edit_refusal,
+};
+pub use package::{
+    AppliedFixup, AssetBundle, ExportRow, ExportStatus, ImportInfo, PackageInfo, ParseOptions,
+    ParsedExport, ParsedPackage, TwinChoice, dotted_path, export_bytes, export_rows, header_size,
+    is_unresolved_import_name, lost_import_warning, package_info, package_names, parse_exports_at,
+    parse_package, parse_package_checked, parse_package_opts, parse_package_probed,
+    parse_package_traced, parse_package_traced_with, parse_package_with, read_header,
+    unresolved_import_note, unresolved_imports,
+};
+pub use path_edit::{
+    Lowered, PathEdit, PathOp, Place, Segment, below_package, element_segment, elements_of,
+    export_of, export_row_of, format_path, lower_paths, parse_path, place_of, was_of,
+};
+pub use props::{
+    ContainerLayout, Diagnostics, IndexRef, InstancedLayout, MapKeys, MissingSchema, OddHeader,
+    PREVIEW_DEPTH, TYPE_FIELD, TraceEntry, UNDECODED_FIELD, UndecodedPayload, UnsetSlot,
+};
+pub use remove::{ClearedReference, Importers, RemovalPlan, RemovedExport, plan_removal};
+pub use stringtable::{StringEntrySpan, StringTable, StringTableEntry, StringTableLayout};
+pub use struct_field::{AddField, fields_held, member_shown_as, new_field_names, struct_of};
+pub use structs::stored_whole;
+pub use texture::{
+    NewMip, TextureEdit, TextureImage, TextureLayout, TextureMip, TexturePlatform, encode_texture,
+    is_texture_class, patch_textures_alone, read_texture, read_texture_export, texture_lock,
+    texture_save_lock, verify_texture_save,
+};
+pub use ustruct::type_text as property_type_text;
+pub use ustruct::{
+    FieldRecord, FieldRole, FunctionField, FunctionSignature, RecordTail, StructDefinition,
+    StructLayout, definitions_of, mappings_from_definitions, mappings_from_definitions_with,
+    read_struct_definitions, read_struct_definitions_pathed,
+};
+pub use value::{MapEntry, PropertyEntry, PropertyValue};
+pub use write::{
+    HeaderDraft, IN_SEPARATE_FILE, InlinePayload, MEMORY_MAPPED, OPTIONAL_PAYLOAD, ResourceInfo,
+    RewrittenPackage, SEPARATE_PAYLOAD_FLAGS, Splice, bulk_lock, header_round_trips,
+    inline_payloads, locate_inline_payload, placement, resource_infos, rewrite,
+};

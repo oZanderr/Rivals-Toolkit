@@ -2,16 +2,23 @@
 
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 
+mod asset_view;
 mod audio;
 mod concurrency;
 mod detect;
+mod game_logs;
+mod game_search;
 mod game_status;
 mod game_user_settings;
+mod import_index;
+mod ini_files;
 mod launch_record;
+mod mappings_remote;
 mod mods;
 mod pak;
 mod pak_tweaks;
 mod paths;
+mod plugins;
 mod settings;
 mod sounds;
 mod tweaks;
@@ -23,12 +30,14 @@ mod updater;
 pub fn run() {
     concurrency::init_global_pool();
     updater::cleanup_stale_update_files();
+    pak_tweaks::commands::clear_ini_staging();
     let loaded_settings = settings::Settings::load();
     game_status::set_check_enabled(loaded_settings.game_running_check_enabled);
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage::<settings::SettingsState>(std::sync::Mutex::new(loaded_settings))
+        .manage(game_logs::GameLogCache::default())
         .manage::<mods::hero_cache::HeroCacheState>(std::sync::Mutex::new(
             mods::hero_cache::HeroCache::load(),
         ))
@@ -105,6 +114,7 @@ pub fn run() {
             pak_tweaks::commands::extract_game_default_ini,
             pak_tweaks::commands::create_new_mod_pak,
             pak_tweaks::commands::save_pak_ini,
+            pak_tweaks::commands::stage_pak_ini_chunk,
             pak_tweaks::commands::inspect_pak_path_any_ini,
             pak_tweaks::commands::scan_mod_paks_any_ini,
             pak_tweaks::commands::get_tweak_definitions,
@@ -140,8 +150,18 @@ pub fn run() {
             mods::commands::rename_mod,
             mods::commands::delete_mod,
             mods::commands::delete_mods,
-            mods::commands::install_mod,
-            mods::commands::install_from_archive,
+            mods::commands::install_mods,
+            // plugins
+            plugins::get_plugins_status,
+            plugins::set_plugin_enabled,
+            plugins::set_plugins_enabled,
+            plugins::delete_plugins,
+            plugins::install_plugins,
+            plugins::install_asi_loader,
+            // ini_files
+            ini_files::list_plugin_inis,
+            ini_files::read_ini_file,
+            ini_files::write_ini_file,
             // mods/heroes
             mods::heroes::list_known_heroes,
             mods::heroes::rescan_mod_heroes,
@@ -159,6 +179,63 @@ pub fn run() {
             mods::profiles::overwrite_mod_profile,
             mods::profiles::preview_mod_profile,
             mods::profiles::apply_mod_profile,
+            // asset_view
+            asset_view::inspect_asset,
+            asset_view::get_mod_report,
+            asset_view::parent_components,
+            asset_view::mod_copy_of,
+            asset_view::revert_mod_asset,
+            asset_view::search_mod,
+            asset_view::get_mappings_status,
+            asset_view::set_mappings_path,
+            mappings_remote::list_remote_mappings,
+            mappings_remote::download_remote_mapping,
+            asset_view::get_asset_mod_name,
+            asset_view::set_asset_mod_name,
+            asset_view::get_asset_save_target,
+            asset_view::set_asset_save_target,
+            asset_view::export_bytes_view,
+            asset_view::value_bytes,
+            asset_view::export_script_view,
+            asset_view::export_vm_view,
+            asset_view::script_call_preview,
+            asset_view::assemble_preview,
+            asset_view::new_function_preview,
+            asset_view::export_payload,
+            asset_view::export_bulk,
+            asset_view::enum_options,
+            asset_view::text_cultures,
+            asset_view::inherited_values,
+            asset_view::get_text_culture,
+            asset_view::set_text_culture,
+            asset_view::save_asset_edits,
+            asset_view::plan_export_removal,
+            asset_view::plan_import_removal,
+            asset_view::unused_names,
+            asset_view::rename_mod_package,
+            asset_view::plan_export_edits,
+            asset_view::plan_dependency_edits,
+            asset_view::plan_export_copy,
+            asset_view::save_export_copy,
+            game_search::search_game,
+            game_search::cancel_game_search,
+            import_index::import_index_status,
+            import_index::build_import_index,
+            import_index::importers_of,
+            import_index::check_object_path,
+            // game_logs
+            game_logs::list_game_sessions,
+            game_logs::open_game_log,
+            game_logs::filter_game_log,
+            game_logs::game_log_rows,
+            game_logs::game_log_row_of,
+            game_logs::game_log_seek,
+            game_logs::game_log_text,
+            game_logs::export_game_log,
+            game_logs::get_log_key_override,
+            game_logs::set_log_key_override,
+            game_logs::get_log_key_status,
+            game_logs::get_game_logs_dir,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

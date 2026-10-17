@@ -2,8 +2,9 @@
 
 ## dsound.dll
 
-Oxide ASI Loader (`oxiloader`) by oZanderr, redistributed unmodified.
-Source: https://github.com/oZanderr/oxiloader
+Minimal ASI Loader by oZanderr, formerly Oxide ASI Loader (`oxiloader`), redistributed
+unmodified.
+Source: https://github.com/oZanderr/minimal-asi-loader
 Build: v0.3.0 release asset `dsound.dll`.
 SHA-512: ca72085ed583f86b096c10e691781e08d46273b7e55fae9531a9d321ce406a86d16f61a21163474b041fd63c1c1c86975e42c2844ca3d71fbd24d06d22713f42
 
@@ -11,7 +12,7 @@ v0.2.1 crashed the game and is treated as superseded by `mods::bypass`, which re
 Install. Its SHA-256 is listed there; add this build's hash to that list when it is next replaced.
 
 Licensed under the MIT License, Copyright (c) 2026 oZanderr. The full license
-text is in `oxiloader-LICENSE.txt` alongside this file.
+text is in `minimal-asi-loader-LICENSE.txt` alongside this file.
 
 Installed next to the game executable as `dsound.dll`; it loads `.asi`
 plugins from the `plugins` subfolder. The same release builds the loader under

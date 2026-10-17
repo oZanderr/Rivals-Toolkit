@@ -1,30 +1,14 @@
 //! File system helpers for listing and managing the ~mods folder.
 
-use std::io;
 use std::path::Path;
 
+use rivals_core::mod_library::{self, InstallOptions};
+use rivals_core::pak::iostore_out::IoStoreOptions;
 use serde::Serialize;
 
 use crate::paths::mods_dir;
 
-#[derive(Serialize)]
-pub(crate) struct InstallResult {
-    pub file_name: String,
-    pub replaced_disabled: bool,
-    pub replaced_enabled: bool,
-}
-
-#[derive(Serialize)]
-pub(crate) struct BulkFailure {
-    pub full_name: String,
-    pub error: String,
-}
-
-#[derive(Serialize)]
-pub(crate) struct BulkOpResult {
-    pub successes: u32,
-    pub failures: Vec<BulkFailure>,
-}
+pub(crate) use rivals_core::mod_library::{BulkOpResult, InstallResult};
 
 pub(crate) fn open_mods_folder(game_root: &str) -> Result<(), String> {
     let mods = mods_dir(game_root);
@@ -41,50 +25,14 @@ pub(crate) fn open_mods_folder(game_root: &str) -> Result<(), String> {
 
 const COMPANION_EXTS: &[&str] = &["ucas", "utoc"];
 
-/// Enable or disable a mod and its companion `.ucas`/`.utoc` files.
+/// Enable or disable a mod and its companion `.ucas`/`.utoc` files, as one step that never writes
+/// over a file already at a name it takes.
 pub(crate) fn toggle_mod_enabled(
     mods_folder: &str,
     full_name: &str,
     enabled: bool,
 ) -> Result<(), String> {
-    let dir = Path::new(mods_folder);
-    let from = dir.join(full_name);
-    let to = if enabled {
-        let base = full_name
-            .strip_suffix(".disabled")
-            .ok_or_else(|| format!("expected .disabled suffix on: {full_name}"))?;
-        dir.join(base)
-    } else {
-        dir.join(format!("{full_name}.disabled"))
-    };
-    std::fs::rename(&from, &to).map_err(|e| e.to_string())?;
-
-    let stem = if enabled {
-        full_name
-            .strip_suffix(".pak.disabled")
-            .ok_or_else(|| format!("expected .pak.disabled: {full_name}"))?
-    } else {
-        full_name
-            .strip_suffix(".pak")
-            .ok_or_else(|| format!("expected .pak: {full_name}"))?
-    };
-    for ext in COMPANION_EXTS {
-        let (c_from, c_to) = if enabled {
-            (
-                dir.join(format!("{stem}.{ext}.disabled")),
-                dir.join(format!("{stem}.{ext}")),
-            )
-        } else {
-            (
-                dir.join(format!("{stem}.{ext}")),
-                dir.join(format!("{stem}.{ext}.disabled")),
-            )
-        };
-        if c_from.exists() {
-            std::fs::rename(&c_from, &c_to).map_err(|e| e.to_string())?;
-        }
-    }
-    Ok(())
+    mod_library::toggle(Path::new(mods_folder), full_name, enabled).map(|_| ())
 }
 
 /// Toggle multiple mods in sequence, collecting per-item failures.
@@ -93,70 +41,17 @@ pub(crate) fn toggle_mods_enabled(
     names: &[String],
     enabled: bool,
 ) -> BulkOpResult {
-    let mut successes = 0u32;
-    let mut failures = Vec::new();
-    for name in names {
-        match toggle_mod_enabled(mods_folder, name, enabled) {
-            Ok(()) => successes += 1,
-            Err(e) => failures.push(BulkFailure {
-                full_name: name.clone(),
-                error: e,
-            }),
-        }
-    }
-    BulkOpResult {
-        successes,
-        failures,
-    }
+    mod_library::toggle_many(Path::new(mods_folder), names, enabled)
 }
 
 /// Delete multiple mods in sequence, collecting per-item failures.
 pub(crate) fn delete_mods(mods_folder: &str, names: &[String]) -> BulkOpResult {
-    let mut successes = 0u32;
-    let mut failures = Vec::new();
-    for name in names {
-        match delete_mod(mods_folder, name) {
-            Ok(()) => successes += 1,
-            Err(e) => failures.push(BulkFailure {
-                full_name: name.clone(),
-                error: e,
-            }),
-        }
-    }
-    BulkOpResult {
-        successes,
-        failures,
-    }
+    mod_library::delete_many(Path::new(mods_folder), names)
 }
 
 /// Delete a mod and its companion `.ucas`/`.utoc` files.
 pub(crate) fn delete_mod(mods_folder: &str, full_name: &str) -> Result<(), String> {
-    let dir = Path::new(mods_folder);
-
-    let stem = if let Some(s) = full_name.strip_suffix(".pak.disabled") {
-        s
-    } else if let Some(s) = full_name.strip_suffix(".pak") {
-        s
-    } else {
-        return Err(format!("Unexpected mod filename: {full_name}"));
-    };
-
-    let candidates = [
-        full_name.to_string(),
-        format!("{stem}.ucas"),
-        format!("{stem}.utoc"),
-        format!("{stem}.ucas.disabled"),
-        format!("{stem}.utoc.disabled"),
-    ];
-
-    for name in &candidates {
-        let path = dir.join(name);
-        if path.exists() {
-            std::fs::remove_file(&path).map_err(|e| format!("Failed to delete {name}: {e}"))?;
-        }
-    }
-
-    Ok(())
+    rivals_core::mods::delete_mod(Path::new(mods_folder), full_name)
 }
 
 /// Rename a mod and its companion `.ucas`/`.utoc` files.
@@ -218,255 +113,104 @@ pub(crate) fn rename_mod(
         }
     }
 
-    std::fs::rename(dir.join(full_name), dir.join(&new_full_name))
-        .map_err(|e| format!("Failed to rename pak: {e}"))?;
+    // A container's id comes from its file name, so a container renamed on disk alone still mounts
+    // under its old id: it is rebuilt under the new one. A change of case keeps the id.
+    let old_base = Path::new(old_rel_stem)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if !old_base.eq_ignore_ascii_case(new_base)
+        && let Ok(files) = rivals_core::mod_ops::ModFiles::of(&dir.join(full_name))
+        && files.is_iostore()
+    {
+        rivals_core::mod_ops::rename_mod(&files, new_base, &Default::default())?;
+        return Ok(new_full_name);
+    }
 
+    let mut moves = vec![(dir.join(full_name), dir.join(&new_full_name))];
     for ext in COMPANION_EXTS {
         for suffix in ["", ".disabled"] {
-            let old_companion = format!("{old_rel_stem}.{ext}{suffix}");
-            let new_companion = join_rel(&format!("{new_base}.{ext}{suffix}"));
-            let old_path = dir.join(&old_companion);
+            let old_path = dir.join(format!("{old_rel_stem}.{ext}{suffix}"));
             if old_path.exists() {
-                std::fs::rename(&old_path, dir.join(&new_companion))
-                    .map_err(|e| format!("Failed to rename {old_companion}: {e}"))?;
+                let renamed = join_rel(&format!("{new_base}.{ext}{suffix}"));
+                moves.push((old_path, dir.join(renamed)));
             }
         }
     }
-
+    // A pak renamed without its container leaves the old container still mounted under the old
+    // name, so the set moves together or not at all.
+    rivals_core::mods::rename_all(&moves)?;
     Ok(new_full_name)
 }
 
-/// Install a mod pak from an external path into the mods folder.
-/// Also copies any adjacent companion files (.ucas/.utoc) with the same stem.
-/// If a `.disabled` version with the same name already exists it is removed first.
-pub(crate) fn install_mod(mods_folder: &str, source_path: &str) -> Result<InstallResult, String> {
-    let src = Path::new(source_path);
-    let file_name = src
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or_else(|| format!("Invalid source path: {source_path}"))?
-        .to_string();
-
-    if !file_name.ends_with(".pak") {
-        return Err(format!("Not a pak file: {file_name}"));
-    }
-
-    let dir = Path::new(mods_folder);
-    let stem = &file_name[..file_name.len() - 4];
-
-    if !dir.exists() {
-        std::fs::create_dir_all(dir)
-            .map_err(|e| format!("Failed to create mods folder {}: {e}", dir.display()))?;
-    }
-
-    // Remove stale disabled version if present.
-    let disabled_name = format!("{file_name}.disabled");
-    let replaced_disabled = dir.join(&disabled_name).exists();
-    if replaced_disabled {
-        delete_mod(mods_folder, &disabled_name)?;
-    }
-
-    let replaced_enabled = dir.join(&file_name).exists();
-    std::fs::copy(src, dir.join(&file_name))
-        .map_err(|e| format!("Failed to copy {file_name}: {e}"))?;
-
-    // Sync companion files: remove old ones, copy new ones from the source directory.
-    if let Some(src_dir) = src.parent() {
-        for ext in COMPANION_EXTS {
-            let dest_companion = dir.join(format!("{stem}.{ext}"));
-            let src_companion = src_dir.join(format!("{stem}.{ext}"));
-            if src_companion.exists() {
-                let _ = std::fs::copy(&src_companion, &dest_companion);
-            } else if dest_companion.exists() {
-                let _ = std::fs::remove_file(&dest_companion);
-            }
-        }
-    }
-
-    Ok(InstallResult {
-        file_name,
-        replaced_disabled,
-        replaced_enabled,
-    })
+/// One mod an install found, and what installing it did.
+#[derive(Debug, Serialize)]
+pub(crate) struct InstallOutcome {
+    /// The paths given that named what it was found in.
+    pub(crate) sources: Vec<String>,
+    /// Where it was: the path given, or its path in the folder or archive given.
+    pub(crate) at: String,
+    pub(crate) installed: Option<InstallResult>,
+    pub(crate) error: Option<String>,
 }
 
-fn is_mod_ext(name: &str) -> bool {
-    matches!(
-        Path::new(name).extension().and_then(|x| x.to_str()),
-        Some("pak" | "ucas" | "utoc")
-    )
-}
-
-fn archive_format(path: &str) -> Result<ArchiveFormat, String> {
-    match Path::new(path)
-        .extension()
-        .and_then(|x| x.to_str())
-        .map(|s| s.to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("zip") => Ok(ArchiveFormat::Zip),
-        Some("7z") => Ok(ArchiveFormat::SevenZ),
-        Some("rar") => Ok(ArchiveFormat::Rar),
-        _ => Err(format!("Unsupported archive format: {path}")),
-    }
-}
-
-enum ArchiveFormat {
-    Zip,
-    SevenZ,
-    Rar,
-}
-
-pub(crate) fn install_from_archive(
+/// Installs the mods at `sources` into the mods folder, over whatever copy of each was there: a
+/// pak with the container beside it, an archive, or a folder holding any mix of mods. A folder of
+/// a mod's loose files, and a plain pak holding packages, are packed into a container as `io`
+/// says, a shader archive in one checked against the libraries of the game at `game_root`.
+pub(crate) fn install_mods(
     mods_folder: &str,
-    archive_path: &str,
-) -> Result<Vec<InstallResult>, String> {
-    let format = archive_format(archive_path)?;
-
-    let temp_dir = std::env::temp_dir().join(format!("rivals_archive_{}", std::process::id()));
-    if temp_dir.exists() {
-        let _ = std::fs::remove_dir_all(&temp_dir);
-    }
-    std::fs::create_dir_all(&temp_dir).map_err(|e| format!("Failed to create temp dir: {e}"))?;
-
-    let extract_result = match format {
-        ArchiveFormat::Zip => extract_zip(archive_path, &temp_dir),
-        ArchiveFormat::SevenZ => extract_7z(archive_path, &temp_dir),
-        ArchiveFormat::Rar => extract_rar(archive_path, &temp_dir),
+    sources: &[String],
+    io: IoStoreOptions,
+    game_root: Option<&str>,
+) -> Vec<InstallOutcome> {
+    let game_libraries = || {
+        let root = game_root.ok_or(
+            "Set the game folder first: a shader archive is checked against the game's own \
+             libraries",
+        )?;
+        rivals_core::pak::shader_library::game_library_names(&rivals_core::paths::paks_dir(root))
     };
-    if let Err(e) = extract_result {
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        return Err(e);
-    }
-
-    let mut results = Vec::new();
-    for entry in std::fs::read_dir(&temp_dir)
-        .map_err(|e| e.to_string())?
-        .flatten()
-    {
-        let path = entry.path();
-        if path.extension().and_then(|x| x.to_str()) == Some("pak") {
-            results.push(install_mod(mods_folder, &path.to_string_lossy())?);
-        }
-    }
-
-    let _ = std::fs::remove_dir_all(&temp_dir);
-
-    if results.is_empty() {
-        return Err("No .pak files found in the archive".to_string());
-    }
-    Ok(results)
-}
-
-fn extract_zip(archive_path: &str, temp_dir: &Path) -> Result<(), String> {
-    let file = std::fs::File::open(archive_path).map_err(|e| format!("Failed to open zip: {e}"))?;
-    let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("Invalid zip file: {e}"))?;
-
-    for i in 0..archive.len() {
-        let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
-        let Some(name) = entry
-            .enclosed_name()
-            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-        else {
-            continue;
-        };
-        if !is_mod_ext(&name) {
-            continue;
-        }
-        let dest = temp_dir.join(&name);
-        let mut out =
-            std::fs::File::create(&dest).map_err(|e| format!("Failed to create {name}: {e}"))?;
-        io::copy(&mut entry, &mut out).map_err(|e| format!("Failed to extract {name}: {e}"))?;
-    }
-    Ok(())
-}
-
-/// Like the other two, entries are flattened to their file name and filtered to mod files, so a
-/// crafted path cannot escape the temp dir.
-///
-/// UnRAR source code may be used in any software to handle RAR archives without limitations free of
-/// charge, but cannot be used to develop RAR (WinRAR) compatible archiver and to re-create RAR
-/// compression algorithm, which is proprietary. Distribution of modified UnRAR source code in
-/// separate form or as a part of other software is permitted, provided that full text of this
-/// paragraph, starting from "UnRAR source code" words, is included in license, or in documentation
-/// if license is not available, and in source code comments of resulting package.
-fn extract_rar(archive_path: &str, temp_dir: &Path) -> Result<(), String> {
-    let mut archive = unrar::Archive::new(archive_path)
-        .open_for_processing()
-        .map_err(|e| format!("Invalid rar file: {e}"))?;
-
-    while let Some(header) = archive
-        .read_header()
-        .map_err(|e| format!("Failed to read rar entry: {e}"))?
-    {
-        let entry = header.entry();
-        let name = entry
-            .filename
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(str::to_string);
-        archive = match name {
-            Some(name) if entry.is_file() && is_mod_ext(&name) => header
-                .extract_to(temp_dir.join(&name))
-                .map_err(|e| format!("Failed to extract {name}: {e}"))?,
-            _ => header
-                .skip()
-                .map_err(|e| format!("Failed to skip rar entry: {e}"))?,
-        };
-    }
-    Ok(())
-}
-
-fn extract_7z(archive_path: &str, temp_dir: &Path) -> Result<(), String> {
-    let file = std::fs::File::open(archive_path).map_err(|e| format!("Failed to open 7z: {e}"))?;
-
-    sevenz_rust2::decompress_with_extract_fn(file, temp_dir, |entry, reader, _dest| {
-        if entry.is_directory() {
-            return Ok(true);
-        }
-        let file_name = Path::new(entry.name())
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(|s| s.to_string());
-        let Some(file_name) = file_name else {
-            return Ok(true);
-        };
-        if !is_mod_ext(&file_name) {
-            return Ok(true);
-        }
-        let out_path = temp_dir.join(&file_name);
-        let mut out = std::fs::File::create(&out_path).map_err(|e| {
-            sevenz_rust2::Error::Other(format!("Failed to create {file_name}: {e}").into())
-        })?;
-        io::copy(reader, &mut out).map_err(|e| {
-            sevenz_rust2::Error::Other(format!("Failed to extract {file_name}: {e}").into())
-        })?;
-        Ok(true)
-    })
-    .map_err(|e| format!("Failed to read 7z archive: {e}"))?;
-
-    Ok(())
-}
-
-fn collect_export_files(dir: &Path, recursive: bool) -> (Vec<(std::path::PathBuf, String)>, u32) {
-    let mut files = Vec::new();
-    let mut pak_count = 0u32;
-    for rel_path in super::walk_mod_files(dir, recursive) {
-        let rel_str = rel_path.to_string_lossy().replace('\\', "/");
-        if rel_str.ends_with(".disabled") {
-            continue;
-        }
-        let ext = rel_path.extension().and_then(|x| x.to_str()).unwrap_or("");
-        if !matches!(ext, "pak" | "ucas" | "utoc") {
-            continue;
-        }
-        if ext == "pak" {
-            pak_count += 1;
-        }
-        let full_path = dir.join(&rel_path);
-        files.push((full_path, rel_str));
-    }
-    (files, pak_count)
+    let options = InstallOptions {
+        replace: true,
+        dry_run: false,
+        io,
+        game_libraries: &game_libraries,
+    };
+    let paths: Vec<std::path::PathBuf> = sources.iter().map(Into::into).collect();
+    mod_library::install_each(Path::new(mods_folder), &paths, &options)
+        .into_iter()
+        .flat_map(|each| {
+            let named: Vec<String> = each
+                .named
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect();
+            match each.result {
+                Ok(found) => found
+                    .into_iter()
+                    .map(|found| {
+                        let (installed, error) = match found.result {
+                            Ok(installed) => (Some(installed), None),
+                            Err(error) => (None, Some(error)),
+                        };
+                        InstallOutcome {
+                            sources: named.clone(),
+                            at: found.at,
+                            installed,
+                            error,
+                        }
+                    })
+                    .collect(),
+                Err(error) => vec![InstallOutcome {
+                    at: named[0].clone(),
+                    sources: named,
+                    installed: None,
+                    error: Some(error),
+                }],
+            }
+        })
+        .collect()
 }
 
 pub(crate) fn export_mods_archive(
@@ -474,65 +218,89 @@ pub(crate) fn export_mods_archive(
     dest_path: &str,
     recursive: bool,
 ) -> Result<String, String> {
-    let format = archive_format(dest_path)?;
-    let dir = Path::new(mods_folder);
-    let (files, pak_count) = collect_export_files(dir, recursive);
-
-    match format {
-        ArchiveFormat::Zip => export_zip(dest_path, &files)?,
-        ArchiveFormat::SevenZ => export_7z(dest_path, &files)?,
-        // unrar extracts only, and its licence forbids building a RAR-compatible archiver.
-        ArchiveFormat::Rar => {
-            return Err("Exporting to .rar is not supported. Use .zip or .7z.".to_string());
-        }
-    }
-
+    let count =
+        mod_library::export_archive(Path::new(mods_folder), Path::new(dest_path), recursive)?;
     Ok(format!(
-        "Exported {pak_count} mod{}",
-        if pak_count == 1 { "" } else { "s" }
+        "Exported {count} mod{}",
+        if count == 1 { "" } else { "s" }
     ))
 }
 
-fn export_zip(dest_path: &str, files: &[(std::path::PathBuf, String)]) -> Result<(), String> {
-    let file = std::fs::File::create(dest_path).map_err(|e| e.to_string())?;
-    let mut zip = zip::ZipWriter::new(file);
-    // Level 3: pak/ucas payloads are largely pre-compressed, so diminishing returns above this.
-    let options = zip::write::SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated)
-        .compression_level(Some(3));
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
 
-    for (full_path, rel_str) in files {
-        zip.start_file(rel_str, options)
-            .map_err(|e| e.to_string())?;
-        let mut src = std::fs::File::open(full_path).map_err(|e| e.to_string())?;
-        io::copy(&mut src, &mut zip).map_err(|e| e.to_string())?;
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("rivals-folder-{tag}-{stamp}"));
+        std::fs::create_dir_all(&dir).expect("scratch");
+        dir
     }
-    zip.finish().map_err(|e| e.to_string())?;
-    Ok(())
-}
 
-fn export_7z(dest_path: &str, files: &[(std::path::PathBuf, String)]) -> Result<(), String> {
-    let mut writer = sevenz_rust2::ArchiveWriter::create(dest_path)
-        .map_err(|e| format!("Failed to create 7z: {e}"))?;
-    // Level 3: pak/ucas payloads are largely pre-compressed, so diminishing returns above this.
-    // Half the cores to keep hyperthreaded / weaker hardware responsive.
-    let threads = std::thread::available_parallelism()
-        .map(|n| (n.get() / 2).max(1))
-        .unwrap_or(2) as u32;
-    writer.set_content_methods(vec![
-        sevenz_rust2::encoder_options::Lzma2Options::from_level_mt(3, threads, 4 * 1024 * 1024)
-            .into(),
-    ]);
-
-    for (full_path, rel_str) in files {
-        let entry = sevenz_rust2::ArchiveEntry::from_path(full_path, rel_str.clone());
-        let src = std::fs::File::open(full_path).map_err(|e| e.to_string())?;
-        writer
-            .push_archive_entry(entry, Some(src))
-            .map_err(|e| format!("Failed to add {rel_str}: {e}"))?;
+    fn trio(dir: &Path, suffix: &str) {
+        for ext in ["pak", "ucas", "utoc"] {
+            std::fs::write(dir.join(format!("Mod.{ext}{suffix}")), ext).expect("write");
+        }
     }
-    writer
-        .finish()
-        .map_err(|e| format!("Failed to finalize 7z: {e}"))?;
-    Ok(())
+
+    /// Renaming a pak without its container leaves the container mounted under the old name. A
+    /// mod whose container is switched off apart from its pak is renamed file by file, so the set
+    /// still moves together or not at all.
+    #[test]
+    fn a_rename_that_cannot_move_a_companion_leaves_the_name_alone() {
+        let dir = scratch("rename");
+        std::fs::write(dir.join("Mod.pak"), "pak").expect("write");
+        trio(&dir, ".disabled");
+        std::fs::remove_file(dir.join("Mod.pak.disabled")).expect("only the pak is on");
+        std::fs::create_dir_all(dir.join("New.ucas.disabled")).expect("blocker");
+
+        let error =
+            rename_mod(&dir.to_string_lossy(), "Mod.pak", "New").expect_err("the ucas cannot move");
+        assert!(error.contains("Mod.ucas"), "{error}");
+        assert!(dir.join("Mod.pak").is_file(), "Mod.pak keeps its name");
+        for ext in ["ucas", "utoc"] {
+            assert!(
+                dir.join(format!("Mod.{ext}.disabled")).is_file(),
+                "Mod.{ext} keeps its name"
+            );
+        }
+        assert!(
+            !dir.join("New.pak").exists(),
+            "the pak was not left renamed"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An IoStore mod is rebuilt under its new name, so a container that cannot be read is not
+    /// renamed at all, rather than renamed on disk to mount under its old id.
+    #[test]
+    fn an_iostore_rename_that_cannot_rebuild_leaves_the_mod_alone() {
+        let dir = scratch("rename-rebuild");
+        trio(&dir, "");
+        rename_mod(&dir.to_string_lossy(), "Mod.pak", "New").expect_err("not a real container");
+        for ext in ["pak", "ucas", "utoc"] {
+            assert!(
+                dir.join(format!("Mod.{ext}")).is_file(),
+                "Mod.{ext} is left"
+            );
+            assert!(!dir.join(format!("New.{ext}")).exists(), "no New.{ext}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A pak-only mod has no container id to rebuild, so its file is renamed as it was.
+    #[test]
+    fn a_pak_only_rename_moves_the_file() {
+        let dir = scratch("rename-pak");
+        std::fs::write(dir.join("Mod.pak.disabled"), b"pak").expect("write");
+        let renamed =
+            rename_mod(&dir.to_string_lossy(), "Mod.pak.disabled", "New").expect("rename");
+        assert_eq!(renamed, "New.pak.disabled");
+        assert!(dir.join("New.pak.disabled").is_file());
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

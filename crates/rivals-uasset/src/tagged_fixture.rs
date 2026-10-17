@@ -1,0 +1,506 @@
+//! A package cooked with tagged properties, built byte by byte, and a schema for it, for tests
+//! here and in the crates that edit packages.
+
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
+use retoc::legacy_asset::{
+    EPackageFlags, FLegacyPackageFileSummary, FLegacyPackageHeader, FMinimalName, FObjectExport,
+    FObjectImport, FPackageNameMap,
+};
+use retoc::zen::FPackageIndex;
+
+use crate::mappings::Mappings;
+use crate::package::FALLBACK_ENGINE_VERSION;
+
+pub const HEADER_SIZE: usize = 1024;
+/// The package's name map, which the builders index into.
+pub const NAMES: &[&str] = &[
+    "None",
+    "TestPackage",
+    "TestObject",
+    "IntProperty",
+    "StrProperty",
+    "BoolProperty",
+    "NameProperty",
+    "TextProperty",
+    "StructProperty",
+    "ArrayProperty",
+    "EnumProperty",
+    "Damage",
+    "Label",
+    "Enabled",
+    "Tag",
+    "Title",
+    "Pos",
+    "MyStruct",
+    "X",
+    "Values",
+    "Points",
+    "Mode",
+    "EMode",
+    "EMode::A",
+    "EMode::B",
+    "Foo",
+    "Id",
+    "Guid",
+    "Asset",
+    "TopLevelAssetPath",
+    "Path",
+    "MarvelSoftObjectPath",
+    "/Game/A",
+    "B",
+    "Words",
+    "Names",
+    "SetProperty",
+    "Scores",
+    "MapProperty",
+    "Flags",
+    "Modes",
+    "Holder",
+    "MyHolder",
+    "Pairs",
+    "Structs",
+    "Count",
+    "Inner",
+    "Flag",
+    "Kind",
+    "ClassProperty",
+    "Soft",
+    "SoftClassProperty",
+    "Sparse",
+    "MulticastSparseDelegateProperty",
+    "Mystery",
+    "SomeFutureProperty",
+    "ObjectProperty",
+    "Ref",
+    "Object",
+    "/Script/CoreUObject",
+    "Package",
+    "Class",
+    "Child",
+    "Sibling",
+    "Refs",
+];
+
+pub fn index_of(value: &str) -> i32 {
+    NAMES
+        .iter()
+        .position(|n| *n == value)
+        .expect("name is in the test name map") as i32
+}
+
+pub fn name(out: &mut Vec<u8>, value: &str) {
+    out.extend_from_slice(&index_of(value).to_le_bytes());
+    out.extend_from_slice(&0i32.to_le_bytes());
+}
+
+pub fn string(out: &mut Vec<u8>, value: &str) {
+    out.extend_from_slice(&(value.len() as i32 + 1).to_le_bytes());
+    out.extend_from_slice(value.as_bytes());
+    out.push(0);
+}
+
+/// A tag's common head: the property's name, its type, its value's size and an array index of 0.
+pub fn head(out: &mut Vec<u8>, property: &str, kind: &str, size: usize) {
+    name(out, property);
+    name(out, kind);
+    out.extend_from_slice(&(size as i32).to_le_bytes());
+    out.extend_from_slice(&0i32.to_le_bytes());
+}
+
+pub fn int(out: &mut Vec<u8>, property: &str, value: i32) {
+    head(out, property, "IntProperty", 4);
+    out.push(0);
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+/// `MyStruct { X }` as a tagged block of its own.
+pub fn my_struct(x: i32) -> Vec<u8> {
+    let mut out = Vec::new();
+    int(&mut out, "X", x);
+    name(&mut out, "None");
+    out
+}
+
+/// A package whose one export holds the tagged properties in `e`.
+pub fn package_of(e: Vec<u8>) -> (Vec<u8>, Vec<u8>) {
+    let mut summary = FLegacyPackageFileSummary {
+        package_name: "/Game/TestPackage".to_string(),
+        ..Default::default()
+    };
+    summary.versioning_info.package_file_version = FALLBACK_ENGINE_VERSION.package_file_version();
+    summary.versioning_info.total_header_size = HEADER_SIZE as i32;
+    // Filtered, as every cooked package is.
+    summary.package_flags = EPackageFlags::Cooked as u32 | EPackageFlags::FilterEditorOnly as u32;
+    let header = FLegacyPackageHeader {
+        summary,
+        name_map: FPackageNameMap::create_from_names(
+            NAMES.iter().map(|n| (*n).to_string()).collect(),
+        ),
+        exports: vec![FObjectExport {
+            object_name: retoc::legacy_asset::FMinimalName {
+                index: index_of("TestObject"),
+                number: 0,
+            },
+            serial_offset: 0,
+            serial_size: e.len() as i64,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let mut asset = std::io::Cursor::new(Vec::new());
+    header
+        .serialize(
+            &mut asset,
+            Some(HEADER_SIZE),
+            &retoc::logging::Log::no_log(),
+        )
+        .expect("serialize the test package header");
+    (asset.into_inner(), e)
+}
+
+/// An object reference tag pointing at `index`.
+pub fn object(out: &mut Vec<u8>, property: &str, index: i32) {
+    head(out, property, "ObjectProperty", 4);
+    out.push(0);
+    out.extend_from_slice(&index.to_le_bytes());
+}
+
+/// Three objects of class `/Script/CoreUObject.Object` naming each other and two imports:
+///
+/// - `[0] Holder`: `Ref` at Child, `Refs` at import B and at Sibling, `Damage` 99, `Label` "hi".
+/// - `[1] Child`, under Holder: `Damage` 5.
+/// - `[2] Sibling`: `Ref` at import B.
+///
+/// Imports: `[0] /Script/CoreUObject`, `[1] Object` (the class), `[2] /Game/A`, `[3] Foo` in
+/// `/Game/A`, which nothing names, and `[4] B` in `/Game/A`.
+pub fn objects_package() -> (Vec<u8>, Vec<u8>) {
+    let close = |out: &mut Vec<u8>| {
+        name(out, "None");
+        out.extend_from_slice(&0i32.to_le_bytes());
+    };
+    let mut holder = Vec::new();
+    object(&mut holder, "Ref", 2);
+    head(&mut holder, "Refs", "ArrayProperty", 4 + 8);
+    name(&mut holder, "ObjectProperty");
+    holder.push(0);
+    holder.extend_from_slice(&2i32.to_le_bytes());
+    holder.extend_from_slice(&(-5i32).to_le_bytes());
+    holder.extend_from_slice(&3i32.to_le_bytes());
+    int(&mut holder, "Damage", 99);
+    let mut label = Vec::new();
+    string(&mut label, "hi");
+    head(&mut holder, "Label", "StrProperty", label.len());
+    holder.push(0);
+    holder.extend_from_slice(&label);
+    close(&mut holder);
+    let mut child = Vec::new();
+    int(&mut child, "Damage", 5);
+    close(&mut child);
+    let mut sibling = Vec::new();
+    object(&mut sibling, "Ref", -5);
+    close(&mut sibling);
+
+    let minimal = |value: &str| FMinimalName {
+        index: index_of(value),
+        number: 0,
+    };
+    let import = |class_package: &str, class_name: &str, outer: i32, object: &str| FObjectImport {
+        class_package: minimal(class_package),
+        class_name: minimal(class_name),
+        outer_index: FPackageIndex { index: outer },
+        object_name: minimal(object),
+        is_optional: false,
+    };
+    let mut at = 0i64;
+    let mut row = |object: &str, outer: i32, bytes: &[u8]| {
+        let row = FObjectExport {
+            object_name: minimal(object),
+            class_index: FPackageIndex::create_import(1),
+            outer_index: FPackageIndex { index: outer },
+            serial_offset: at,
+            serial_size: bytes.len() as i64,
+            first_export_dependency_index: -1,
+            ..Default::default()
+        };
+        at += bytes.len() as i64;
+        row
+    };
+    let exports = vec![
+        row("Holder", 0, &holder),
+        row("Child", 1, &child),
+        row("Sibling", 0, &sibling),
+    ];
+    let mut summary = FLegacyPackageFileSummary {
+        package_name: "/Game/TestPackage".to_string(),
+        ..Default::default()
+    };
+    summary.versioning_info.package_file_version = FALLBACK_ENGINE_VERSION.package_file_version();
+    summary.versioning_info.total_header_size = HEADER_SIZE as i32;
+    summary.package_flags = EPackageFlags::Cooked as u32 | EPackageFlags::FilterEditorOnly as u32;
+    let header = FLegacyPackageHeader {
+        summary,
+        name_map: FPackageNameMap::create_from_names(
+            NAMES.iter().map(|n| (*n).to_string()).collect(),
+        ),
+        imports: vec![
+            import("/Script/CoreUObject", "Package", 0, "/Script/CoreUObject"),
+            import("/Script/CoreUObject", "Class", -1, "Object"),
+            import("/Script/CoreUObject", "Package", 0, "/Game/A"),
+            import("/Script/CoreUObject", "Object", -3, "Foo"),
+            import("/Script/CoreUObject", "Object", -3, "B"),
+        ],
+        exports,
+        ..Default::default()
+    };
+    let mut asset = std::io::Cursor::new(Vec::new());
+    header
+        .serialize(
+            &mut asset,
+            Some(HEADER_SIZE),
+            &retoc::logging::Log::no_log(),
+        )
+        .expect("serialize the test package header");
+    (asset.into_inner(), [holder, child, sibling].concat())
+}
+
+/// One export holding one property of every shape an edit treats differently.
+pub fn tagged_package() -> (Vec<u8>, Vec<u8>) {
+    let mut e = Vec::new();
+    int(&mut e, "Damage", 99);
+
+    let mut label = Vec::new();
+    string(&mut label, "hi");
+    head(&mut e, "Label", "StrProperty", label.len());
+    e.push(0);
+    e.extend_from_slice(&label);
+
+    head(&mut e, "Enabled", "BoolProperty", 0);
+    e.push(1);
+    e.push(0);
+
+    head(&mut e, "Tag", "NameProperty", 8);
+    e.push(0);
+    name(&mut e, "Foo");
+
+    // A culture-invariant text: flags, history `None`, then the string it holds.
+    let mut title = Vec::new();
+    title.extend_from_slice(&0u32.to_le_bytes());
+    title.push(0xFF);
+    title.extend_from_slice(&1i32.to_le_bytes());
+    string(&mut title, "Hello");
+    head(&mut e, "Title", "TextProperty", title.len());
+    e.push(0);
+    e.extend_from_slice(&title);
+
+    let pos = my_struct(1);
+    head(&mut e, "Pos", "StructProperty", pos.len());
+    name(&mut e, "MyStruct");
+    e.extend_from_slice(&[0; 16]);
+    e.push(0);
+    e.extend_from_slice(&pos);
+
+    head(&mut e, "Values", "ArrayProperty", 4 + 8);
+    name(&mut e, "IntProperty");
+    e.push(0);
+    e.extend_from_slice(&2i32.to_le_bytes()); // count
+    for value in [1i32, 7] {
+        e.extend_from_slice(&value.to_le_bytes());
+    }
+
+    // An array of structs writes one inner tag, covering every element, before the elements.
+    let point = my_struct(5);
+    let mut points = 1i32.to_le_bytes().to_vec();
+    head(&mut points, "Points", "StructProperty", point.len());
+    name(&mut points, "MyStruct");
+    points.extend_from_slice(&[0; 16]);
+    points.push(0);
+    points.extend_from_slice(&point);
+    head(&mut e, "Points", "ArrayProperty", points.len());
+    name(&mut e, "StructProperty");
+    e.push(0);
+    e.extend_from_slice(&points);
+
+    head(&mut e, "Mode", "EnumProperty", 8);
+    name(&mut e, "EMode");
+    e.push(0);
+    name(&mut e, "EMode::A");
+
+    let mut words = 2i32.to_le_bytes().to_vec();
+    string(&mut words, "a");
+    string(&mut words, "bb");
+    head(&mut e, "Words", "ArrayProperty", words.len());
+    name(&mut e, "StrProperty");
+    e.push(0);
+    e.extend_from_slice(&words);
+
+    // A set of names, a map from name to int, and arrays of bools and of enums: each element is
+    // written the way the property writes it inside a container.
+    let mut names = 0i32.to_le_bytes().to_vec();
+    names.extend_from_slice(&2i32.to_le_bytes());
+    name(&mut names, "Foo");
+    name(&mut names, "Label");
+    head(&mut e, "Names", "SetProperty", names.len());
+    name(&mut e, "NameProperty");
+    e.push(0);
+    e.extend_from_slice(&names);
+
+    let mut scores = 0i32.to_le_bytes().to_vec();
+    scores.extend_from_slice(&1i32.to_le_bytes());
+    name(&mut scores, "Foo");
+    scores.extend_from_slice(&5i32.to_le_bytes());
+    head(&mut e, "Scores", "MapProperty", scores.len());
+    name(&mut e, "NameProperty");
+    name(&mut e, "IntProperty");
+    e.push(0);
+    e.extend_from_slice(&scores);
+
+    let flags = [2, 0, 0, 0, 1, 0];
+    head(&mut e, "Flags", "ArrayProperty", flags.len());
+    name(&mut e, "BoolProperty");
+    e.push(0);
+    e.extend_from_slice(&flags);
+
+    let mut modes = 1i32.to_le_bytes().to_vec();
+    name(&mut modes, "EMode::A");
+    head(&mut e, "Modes", "ArrayProperty", modes.len());
+    name(&mut e, "EnumProperty");
+    e.push(0);
+    e.extend_from_slice(&modes);
+
+    // Three native structs whose one value is not written the way it reads.
+    let native = |e: &mut Vec<u8>, property: &str, kind: &str, value: &[u8]| {
+        head(e, property, "StructProperty", value.len());
+        name(e, kind);
+        e.extend_from_slice(&[0; 16]);
+        e.push(0);
+        e.extend_from_slice(value);
+    };
+    let id: Vec<u8> = (1u32..=4).flat_map(u32::to_le_bytes).collect();
+    native(&mut e, "Id", "Guid", &id);
+    let mut asset_path = Vec::new();
+    name(&mut asset_path, "/Game/A");
+    name(&mut asset_path, "B");
+    native(&mut e, "Asset", "TopLevelAssetPath", &asset_path);
+    let mut path = Vec::new();
+    string(&mut path, "/Game/A.B");
+    native(&mut e, "Path", "MarvelSoftObjectPath", &path);
+
+    name(&mut e, "None");
+    e.extend_from_slice(&0i32.to_le_bytes());
+    package_of(e)
+}
+
+/// `MyHolder` storing `Count`, `Flag` and `Inner` (a `MyStruct` with `X` only), where its schema
+/// also declares properties it does not hold.
+pub fn sparse_package() -> (Vec<u8>, Vec<u8>) {
+    let mut holder = Vec::new();
+    int(&mut holder, "Count", 3);
+    head(&mut holder, "Flag", "BoolProperty", 0);
+    holder.push(1);
+    holder.push(0);
+    let inner = my_struct(1);
+    head(&mut holder, "Inner", "StructProperty", inner.len());
+    name(&mut holder, "MyStruct");
+    holder.extend_from_slice(&[0; 16]);
+    holder.push(0);
+    holder.extend_from_slice(&inner);
+    name(&mut holder, "None");
+
+    let mut e = Vec::new();
+    head(&mut e, "Holder", "StructProperty", holder.len());
+    name(&mut e, "MyHolder");
+    e.extend_from_slice(&[0; 16]);
+    e.push(0);
+    e.extend_from_slice(&holder);
+    name(&mut e, "None");
+    e.extend_from_slice(&0i32.to_le_bytes());
+    package_of(e)
+}
+
+/// The schema [`sparse_package`] was cooked against.
+pub fn sparse_mappings() -> Mappings {
+    use usmap::{Property, PropertyInner, Struct};
+    let struct_named = |name: &str| PropertyInner::Struct { name: name.into() };
+    let my_struct = || struct_named("MyStruct");
+    let property = |name: &str, index: u16, inner: PropertyInner| Property {
+        name: name.into(),
+        array_dim: 1,
+        index,
+        inner,
+    };
+    Mappings::from_structs(vec![
+        Struct {
+            name: "MyHolder".into(),
+            super_struct: None,
+            properties: vec![
+                property("Count", 0, PropertyInner::Int),
+                property("Flag", 1, PropertyInner::Bool),
+                property("Inner", 2, my_struct()),
+                property("Extra", 3, PropertyInner::Int),
+                property("Label", 4, PropertyInner::Str),
+                property("On", 5, PropertyInner::Bool),
+                property(
+                    "Mode",
+                    6,
+                    PropertyInner::Enum {
+                        inner: Box::new(PropertyInner::Byte),
+                        name: "EMode".into(),
+                    },
+                ),
+                property("Nested", 7, my_struct()),
+                property(
+                    "Items",
+                    8,
+                    PropertyInner::Array {
+                        inner: Box::new(my_struct()),
+                    },
+                ),
+                property(
+                    "Scores",
+                    9,
+                    PropertyInner::Map {
+                        key: Box::new(PropertyInner::Name),
+                        value: Box::new(PropertyInner::Int),
+                    },
+                ),
+                property(
+                    "Counts",
+                    10,
+                    PropertyInner::Array {
+                        inner: Box::new(PropertyInner::Int),
+                    },
+                ),
+                property("Chain", 11, struct_named("Level1")),
+                property("Caption", 12, PropertyInner::Text),
+                property("OnFired", 13, PropertyInner::Delegate),
+                property("OnChanged", 14, PropertyInner::MulticastDelegate),
+                property("Watched", 15, PropertyInner::FieldPath),
+            ],
+        },
+        // Structs three deep, for previews and field sets that reach past two.
+        Struct {
+            name: "Level1".into(),
+            super_struct: None,
+            properties: vec![property("Level2", 0, struct_named("Level2"))],
+        },
+        Struct {
+            name: "Level2".into(),
+            super_struct: None,
+            properties: vec![property("Level3", 0, struct_named("Level3"))],
+        },
+        Struct {
+            name: "Level3".into(),
+            super_struct: None,
+            properties: vec![property("Leaf", 0, PropertyInner::Int)],
+        },
+        Struct {
+            name: "MyStruct".into(),
+            super_struct: None,
+            properties: vec![
+                property("X", 0, PropertyInner::Int),
+                property("Y", 1, PropertyInner::Int),
+            ],
+        },
+    ])
+}

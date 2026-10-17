@@ -44,7 +44,7 @@ pub(crate) struct WavValidation {
 /// `f32::NEG_INFINITY` for silent input).
 pub(crate) fn peak_dbfs_i16_le(pcm: &[u8]) -> f32 {
     let mut peak: i32 = 0;
-    for chunk in pcm.chunks_exact(2) {
+    for chunk in pcm.as_chunks::<2>().0 {
         let s = i16::from_le_bytes([chunk[0], chunk[1]]);
         let abs = (s as i32).unsigned_abs() as i32;
         if abs > peak {
@@ -74,7 +74,7 @@ pub(crate) fn apply_gain_in_place(pcm: &mut [u8], gain_linear: f32) {
     if !needs_scaling(gain_linear) {
         return;
     }
-    for chunk in pcm.chunks_exact_mut(2) {
+    for chunk in pcm.as_chunks_mut::<2>().0 {
         let s = i16::from_le_bytes([chunk[0], chunk[1]]) as f32;
         let scaled = (s * gain_linear)
             .round()

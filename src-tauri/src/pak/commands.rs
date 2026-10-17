@@ -116,20 +116,31 @@ pub(crate) async fn repack_iostore(
         return Err(crate::game_status::game_running_error());
     }
     let level = Some(mod_compression_level(&state).to_oodle());
+    let game_root = state.lock().ok().and_then(|s| s.game_path.clone());
     tauri::async_runtime::spawn_blocking(move || {
-        pak::repack_iostore(&input_dir, &output_utoc, level, obfuscate, compression, app)
+        pak::repack_iostore(
+            &input_dir,
+            &output_utoc,
+            level,
+            obfuscate,
+            compression,
+            game_root.as_deref(),
+            app,
+        )
     })
     .await
     .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn repack_mod_in_place(
     state: State<'_, SettingsState>,
     game_root: String,
     mod_pak: String,
     to_iostore: bool,
     obfuscate: bool,
+    recompress: bool,
     compression: PackCompression,
     app: AppHandle,
 ) -> Result<InPlaceReport, String> {
@@ -143,6 +154,7 @@ pub(crate) async fn repack_mod_in_place(
             &mod_pak,
             to_iostore,
             obfuscate,
+            recompress,
             level,
             compression,
             app,

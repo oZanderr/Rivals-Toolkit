@@ -1,0 +1,548 @@
+//! Decides which IoStore containers under a Paks folder can be opened, and opens them.
+
+use std::collections::HashSet;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::SystemTime;
+
+use retoc::iostore::IoStoreTrait;
+use walkdir::WalkDir;
+
+pub const MOUNT_POINT: &str = "../../../";
+const TOC_MAGIC: &[u8; 16] = b"-==--==--==--==-";
+const TOC_ENCRYPTED_FLAG: u8 = 0b0010;
+
+/// The app holds the default (all-zero) GUID key plus the named keys in
+/// [`super::profile::NAMED_AES_KEYS`]. A container encrypted under any other key GUID cannot be
+/// decrypted; probing the TOC header for it lets callers skip such a container instead of
+/// aborting a whole merged open with "missing encryption key" (a future game patch could ship a
+/// container keyed to a GUID we do not have).
+pub fn utoc_is_decryptable(utoc_path: &Path) -> bool {
+    let Some(header) = read_toc_header_probe(utoc_path) else {
+        return false;
+    };
+    if header[80] & TOC_ENCRYPTED_FLAG == 0 {
+        return true;
+    }
+    let guid = &header[64..80];
+    guid.iter().all(|&b| b == 0)
+        || super::profile::NAMED_AES_KEYS
+            .iter()
+            .any(|(known, _)| known == guid)
+}
+
+/// Whether a container is obfuscated, meaning it carries the Encrypted flag. Mods use it with the
+/// game's own default-GUID key, so this is a presentation detail rather than a barrier: it seeds
+/// the repack option so an obfuscated mod does not come back out plain.
+pub fn utoc_is_obfuscated(utoc_path: &Path) -> bool {
+    read_toc_header_probe(utoc_path).is_some_and(|header| header[80] & TOC_ENCRYPTED_FLAG != 0)
+}
+
+/// The leading 81 bytes of a TOC header, covering the magic, the encryption-key GUID (offset 64)
+/// and the container flags (offset 80). `None` when the file is unreadable or is not a TOC.
+fn read_toc_header_probe(utoc_path: &Path) -> Option<[u8; 81]> {
+    let mut file = std::fs::File::open(utoc_path).ok()?;
+    let mut header = [0u8; 81];
+    if file.read_exact(&mut header).is_err() || &header[0..16] != TOC_MAGIC {
+        return None;
+    }
+    Some(header)
+}
+
+/// Container stems under `paks_dir` encrypted with a key GUID the app does not hold. These
+/// poison a merged `open_filtered` with "missing encryption key", so callers exclude them
+/// from the container filter.
+pub fn undecryptable_container_stems(paks_dir: &Path) -> HashSet<String> {
+    utoc_stems(paks_dir, |p| !utoc_is_decryptable(p))
+}
+
+/// Container stems that live under `~mods`. Identifying mods by folder rather than by the
+/// `_9999999_` naming convention matters because a plainly named mod follows no convention, and
+/// letting one into the base-game store makes it resolve as vanilla content.
+pub fn mod_container_stems(paks_dir: &Path) -> HashSet<String> {
+    utoc_stems(&paks_dir.join("~mods"), |_| true)
+}
+
+/// The containers of every switched-on IoStore mod under `~mods`, the one whose copy wins first.
+pub fn mod_utocs(paks_dir: &Path) -> Vec<PathBuf> {
+    let mut utocs: Vec<PathBuf> = utoc_paths(&paks_dir.join("~mods")).collect();
+    utocs.sort_by(|a, b| {
+        let name = |path: &Path| {
+            path.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+        };
+        crate::mods::winner_order(&name(a), &name(b))
+    });
+    utocs
+}
+
+/// The containers of the base game: every readable one under `paks_dir` that is not a mod.
+pub fn base_game_utocs(paks_dir: &Path) -> Vec<PathBuf> {
+    let undecryptable = undecryptable_container_stems(paks_dir);
+    let mods = mod_container_stems(paks_dir);
+    utoc_paths(paks_dir)
+        .filter(|p| {
+            p.file_stem()
+                .and_then(|s| s.to_str())
+                .is_some_and(|stem| admits_container(stem, "", &undecryptable, &mods))
+        })
+        .collect()
+}
+
+fn utoc_stems(root: &Path, keep: impl Fn(&Path) -> bool) -> HashSet<String> {
+    utoc_paths(root)
+        .filter(|p| keep(p))
+        .filter_map(|p| p.file_stem().and_then(|s| s.to_str()).map(str::to_string))
+        .collect()
+}
+
+/// Every `.utoc` under `root`, `~mods` included, which is the set the merged open considers.
+fn utoc_paths(root: &Path) -> impl Iterator<Item = PathBuf> {
+    WalkDir::new(root)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .map(walkdir::DirEntry::into_path)
+        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("utoc"))
+}
+
+/// The admitted TOC files with their size and modification time: what the open store is made of,
+/// so a game update, a saved mod or a container arriving or leaving shows as a different key.
+type StoreKey = Vec<(PathBuf, u64, Option<SystemTime>)>;
+
+static BASE_STORE: Mutex<Option<(StoreKey, Arc<dyn IoStoreTrait>)>> = Mutex::new(None);
+
+/// Open the base game: every chunk and every patch, minus mods and any container this app cannot
+/// decrypt. Patches sort above the chunks they supersede, so the latest revision of a package wins.
+/// Opening parses every TOC, so the store is kept for the next call over the same files.
+pub fn open_base_game_paks(
+    paks_dir: &Path,
+    target_container: &str,
+) -> Result<Arc<dyn IoStoreTrait>, String> {
+    open_store(paks_dir, target_container, None)
+}
+
+/// The base store opened around `container`, and the name its target goes by in it. A bare name,
+/// or a path under `paks_dir`, is found by name there; a container file anywhere else is opened as
+/// that file, and a container of the same name under `paks_dir` is kept out so it cannot stand in.
+pub fn open_store_for(
+    paks_dir: &Path,
+    container: &str,
+) -> Result<(Arc<dyn IoStoreTrait>, String), String> {
+    let stem = container_stem(Path::new(container)).ok_or("invalid .utoc path")?;
+    let store = match external_container(paks_dir, container)? {
+        Some(file) => open_store(paks_dir, &stem, Some(&file))?,
+        None => open_store(paks_dir, &stem, None)?,
+    };
+    Ok((store, stem))
+}
+
+/// The name a container goes by: `X` for `X.utoc` and for a switched-off `X.utoc.disabled` alike,
+/// which is the name a store lists it under.
+pub fn container_stem(utoc: &Path) -> Option<String> {
+    let name = utoc.file_name()?.to_str()?;
+    let name = name.strip_suffix(".disabled").unwrap_or(name);
+    Some(Path::new(name).file_stem()?.to_str()?.to_string())
+}
+
+fn is_switched_off(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".utoc.disabled"))
+}
+
+/// Where a container given as a path lives, when no lookup by name under `paks_dir` would reach it:
+/// a file outside `paks_dir`, or a switched-off one anywhere, since only `.utoc` files are looked
+/// up by name. `None` for any other bare name or path under `paks_dir`; an error for a path that
+/// names no file.
+pub fn external_container(paks_dir: &Path, container: &str) -> Result<Option<PathBuf>, String> {
+    let path = Path::new(container);
+    if is_switched_off(path) {
+        let file = if path.components().count() <= 1 && !path.is_file() {
+            find_by_name(paks_dir, container).ok_or_else(|| {
+                format!("no container named {container} in {}", paks_dir.display())
+            })?
+        } else if path.is_file() {
+            path.to_path_buf()
+        } else {
+            return Err(format!("{container} does not exist"));
+        };
+        return file
+            .canonicalize()
+            .map(Some)
+            .map_err(|e| format!("{container}: {e}"));
+    }
+    if path.components().count() <= 1 {
+        return Ok(None);
+    }
+    if !path.is_file() {
+        return Err(format!("{container} does not exist"));
+    }
+    let file = path
+        .canonicalize()
+        .map_err(|e| format!("{container}: {e}"))?;
+    let under = paks_dir
+        .canonicalize()
+        .is_ok_and(|dir| file.starts_with(&dir));
+    Ok((!under).then_some(file))
+}
+
+/// The file named `name` anywhere under `root`, ignoring case as Windows does.
+fn find_by_name(root: &Path, name: &str) -> Option<PathBuf> {
+    WalkDir::new(root)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .find(|e| {
+            e.file_type().is_file()
+                && e.file_name()
+                    .to_str()
+                    .is_some_and(|n| n.eq_ignore_ascii_case(name))
+        })
+        .map(walkdir::DirEntry::into_path)
+}
+
+/// The store: `target` and the base game from `paks_dir`, or with `external`, the base game from
+/// there and that one file in place of anything named like it.
+fn open_store(
+    paks_dir: &Path,
+    target: &str,
+    external: Option<&Path>,
+) -> Result<Arc<dyn IoStoreTrait>, String> {
+    let target = target.to_string();
+    let undecryptable = undecryptable_container_stems(paks_dir);
+    let mods = mod_container_stems(paks_dir);
+    let outside = external.is_some();
+    let admits = move |name: &str| {
+        if outside {
+            name != target && admits_container(name, "", &undecryptable, &mods)
+        } else {
+            admits_container(name, &target, &undecryptable, &mods)
+        }
+    };
+    let mut key = store_key(paks_dir, &admits);
+    let extra: Vec<PathBuf> = external.map(Path::to_path_buf).into_iter().collect();
+    for file in &extra {
+        let meta = std::fs::metadata(file).map_err(|e| format!("{}: {e}", file.display()))?;
+        key.push((file.clone(), meta.len(), meta.modified().ok()));
+    }
+    // Held while opening, so callers asking at once wait for the one store rather than each
+    // opening the whole game for themselves. The containers open in parallel, isolated so this
+    // thread runs none of the waiting callers' work while it holds the lock they wait on.
+    let mut cached = BASE_STORE.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some((held, store)) = cached.as_ref()
+        && *held == key
+    {
+        return Ok(Arc::clone(store));
+    }
+    let config = super::profile::make_config()?;
+    let store: Arc<dyn IoStoreTrait> = Arc::from(
+        crate::parallel::isolated(|| {
+            retoc::iostore::open_filtered_with(paks_dir, config, admits, &extra)
+        })?
+        .map_err(|e| e.to_string())?,
+    );
+    *cached = Some((key, Arc::clone(&store)));
+    Ok(store)
+}
+
+fn store_key(paks_dir: &Path, admits: &dyn Fn(&str) -> bool) -> StoreKey {
+    let mut key: StoreKey = utoc_paths(paks_dir)
+        .filter(|p| p.file_stem().and_then(|s| s.to_str()).is_some_and(admits))
+        .filter_map(|p| {
+            let meta = std::fs::metadata(&p).ok()?;
+            Some((p, meta.len(), meta.modified().ok()))
+        })
+        .collect();
+    key.sort();
+    key
+}
+
+/// Whether the base-game store takes `name`: the target always, otherwise anything readable that
+/// is not a mod. Mods are known by folder first, then by the naming convention as a fallback for
+/// ones dropped straight into Paks rather than `~mods`.
+fn admits_container(
+    name: &str,
+    target: &str,
+    undecryptable: &HashSet<String>,
+    mods: &HashSet<String>,
+) -> bool {
+    if undecryptable.contains(name) {
+        return false;
+    }
+    name == target || !(mods.contains(name) || name.contains("_9999999_"))
+}
+
+/// Open the target container in isolation (no base game, no other mods). `utoc_path` is where
+/// the container actually lives, which is rarely `paks_dir` itself since mods sit under `~mods`,
+/// and it is opened as that file, switched off or outside the game alike.
+pub fn open_target_only(
+    paks_dir: &Path,
+    utoc_path: &Path,
+    target_container: &str,
+) -> Result<Box<dyn IoStoreTrait>, String> {
+    // Only a readable container under an unknown key GUID is an encryption failure. A missing or
+    // unreadable file fails the same check, so let it reach the honest error further down.
+    if utoc_path.is_file() && !utoc_is_decryptable(utoc_path) {
+        return Err(format!(
+            "{target_container} is encrypted with a key this app does not have and cannot be extracted."
+        ));
+    }
+    // A store of that one file, so the caller still finds it among the store's containers.
+    let beside = utoc_path
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or(paks_dir);
+    retoc::iostore::open_filtered_with(
+        beside,
+        super::profile::make_config()?,
+        |_| false,
+        &[utoc_path.to_path_buf()],
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// Forgets the merged base store. Its key is the admitted containers' size and time, so it would
+/// notice a rewrite on its own; this drops any file handle it holds first, which is what lets a
+/// container be replaced underneath it.
+pub fn drop_cached_store() {
+    *BASE_STORE.lock().unwrap_or_else(PoisonError::into_inner) = None;
+}
+
+/// The paths a container's directory index lists, mount prefix stripped and sorted. Only the
+/// index is read, not the chunks or the `.ucas` beside it, so a switched-off mod or a container
+/// whose later metadata does not read still lists.
+pub fn list_utoc_paths(utoc: &Path) -> Result<Vec<String>, String> {
+    let file = std::fs::File::open(utoc).map_err(|e| format!("{}: {e}", utoc.display()))?;
+    let mut reader = std::io::BufReader::new(file);
+    let raw = retoc::read_toc_paths(&mut reader, super::profile::make_config()?)
+        .map_err(|e| e.to_string())?;
+    let mut paths: Vec<String> = raw
+        .into_iter()
+        .map(|path| path.strip_prefix(MOUNT_POINT).unwrap_or(&path).to_string())
+        .collect();
+    paths.sort();
+    Ok(paths)
+}
+
+/// Open a single container file by path, with no sibling containers merged in.
+pub fn open_utoc(utoc_path: &str) -> Result<Box<dyn IoStoreTrait>, String> {
+    retoc::iostore::open(utoc_path, super::profile::make_config()?).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    /// Minimal TOC header: valid magic, encryption flag clear, so the decryptability probe
+    /// passes and only the container's location is under test.
+    fn write_stub_utoc(path: &Path) {
+        let mut header = vec![0u8; 0x90];
+        header[0..16].copy_from_slice(b"-==--==--==--==-");
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("create dir");
+        std::fs::write(path, &header).expect("write stub utoc");
+    }
+
+    /// A container named by a path outside the game's Paks folder is that file, however many
+    /// containers of its name the folder holds; one under the folder, or a bare name, is looked up
+    /// by name; and a path to nothing is an error rather than a lookup that finds something else.
+    #[test]
+    fn a_container_path_outside_the_game_names_that_file() {
+        let base = std::env::temp_dir().join(format!("rivals-external-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let paks_dir = base.join("root").join("Paks");
+        let inside = paks_dir.join("~mods").join("Galacta_9999999_P.utoc");
+        let outside = base.join("elsewhere").join("Galacta_9999999_P.utoc");
+        write_stub_utoc(&inside);
+        write_stub_utoc(&outside);
+
+        let found = external_container(&paks_dir, &outside.to_string_lossy()).expect("a file");
+        assert_eq!(found, Some(outside.canonicalize().expect("canonical")));
+        assert_eq!(
+            external_container(&paks_dir, &inside.to_string_lossy()).expect("a file"),
+            None
+        );
+        assert_eq!(
+            external_container(&paks_dir, "Galacta_9999999_P.utoc").expect("a name"),
+            None
+        );
+        let missing = base.join("elsewhere").join("Missing_9999999_P.utoc");
+        let error = external_container(&paks_dir, &missing.to_string_lossy()).expect_err("nothing");
+        assert!(error.contains("does not exist"), "{error}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A switched-off container goes by the name it has switched on, and is always opened as its
+    /// file, since a lookup by name only scans `.utoc` files: under `paks_dir` too, and found there
+    /// from its bare name.
+    #[test]
+    fn a_switched_off_container_is_opened_as_its_file() {
+        assert_eq!(
+            container_stem(Path::new("mods/Off_9999999_P.utoc.disabled")).as_deref(),
+            Some("Off_9999999_P")
+        );
+        assert_eq!(
+            container_stem(Path::new("Off_9999999_P.utoc")).as_deref(),
+            Some("Off_9999999_P")
+        );
+        let base = std::env::temp_dir().join(format!("rivals-off-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let paks_dir = base.join("Paks");
+        let off = paks_dir
+            .join("~mods")
+            .join("Deep")
+            .join("Off_9999999_P.utoc.disabled");
+        write_stub_utoc(&off);
+        let canonical = Some(off.canonicalize().expect("canonical"));
+        assert_eq!(
+            external_container(&paks_dir, &off.to_string_lossy()).expect("a file"),
+            canonical
+        );
+        assert_eq!(
+            external_container(&paks_dir, "off_9999999_p.utoc.disabled").expect("found by name"),
+            canonical
+        );
+        assert!(external_container(&paks_dir, "Gone_9999999_P.utoc.disabled").is_err());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Patches carry the game's revisions and sort above the chunks they supersede, so they belong
+    /// in the store; mods do not, whichever way they are recognised.
+    #[test]
+    fn the_base_store_admits_patches_and_refuses_mods() {
+        let undecryptable: HashSet<String> = ["Locked".to_string()].into();
+        let mods: HashSet<String> = ["PlainName".to_string()].into();
+        let admits =
+            |name: &str, target: &str| admits_container(name, target, &undecryptable, &mods);
+        assert!(admits("Patch_-Windows_1.1.3825464_P", "pakchunk0-Windows"));
+        assert!(admits("pakchunkEnv-Windows", "pakchunk0-Windows"));
+        assert!(!admits("PlainName", "pakchunk0-Windows"));
+        assert!(!admits("Deep_9999999_P", "pakchunk0-Windows"));
+        assert!(!admits("Locked", "pakchunk0-Windows"));
+        assert!(
+            admits("PlainName", "PlainName"),
+            "the target is admitted even when it is a mod"
+        );
+        assert!(
+            !admits("Locked", "Locked"),
+            "an undecryptable target still fails"
+        );
+    }
+
+    /// The kept store answers for the files it was opened from, so only those files may retire it:
+    /// a mod changing under `~mods` must not, a base container changing size must.
+    #[test]
+    fn the_store_key_follows_the_admitted_files_only() {
+        let paks_dir = std::env::temp_dir().join(format!("rivals-storekey-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&paks_dir);
+        let base = paks_dir.join("pakchunk0-Windows.utoc");
+        let cosmetic = paks_dir.join("~mods").join("Cosmetic_9999999_P.utoc");
+        write_stub_utoc(&base);
+        write_stub_utoc(&cosmetic);
+        let admits = |name: &str| !name.contains("_9999999_");
+
+        let before = store_key(&paks_dir, &admits);
+        assert_eq!(before.len(), 1);
+        std::fs::write(&cosmetic, b"rewritten").expect("rewrite the mod");
+        assert_eq!(store_key(&paks_dir, &admits), before);
+        std::fs::write(&base, vec![0u8; 0x91]).expect("grow the base container");
+        assert_ne!(store_key(&paks_dir, &admits), before);
+        let _ = std::fs::remove_dir_all(&paks_dir);
+    }
+
+    #[test]
+    fn mod_containers_are_identified_by_folder_not_by_name() {
+        let paks_dir = std::env::temp_dir().join(format!("rivals-modstems-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&paks_dir);
+        write_stub_utoc(&paks_dir.join("~mods").join("PlainName.utoc"));
+        write_stub_utoc(
+            &paks_dir
+                .join("~mods")
+                .join("Nested")
+                .join("Deep_9999999_P.utoc"),
+        );
+        write_stub_utoc(&paks_dir.join("pakchunk0-Windows.utoc"));
+
+        let stems = mod_container_stems(&paks_dir);
+
+        assert!(
+            stems.contains("PlainName"),
+            "a mod that skips the _9999999_P convention still has to be excluded from the base store"
+        );
+        assert!(stems.contains("Deep_9999999_P"));
+        assert!(!stems.contains("pakchunk0-Windows"));
+        let _ = std::fs::remove_dir_all(&paks_dir);
+    }
+
+    #[test]
+    fn detects_the_obfuscation_flag() {
+        let dir = std::env::temp_dir().join(format!("rivals-obfuscation-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create dir");
+
+        let plain = dir.join("plain.utoc");
+        let obfuscated = dir.join("obfuscated.utoc");
+        write_stub_utoc(&plain);
+        let mut header = vec![0u8; 0x90];
+        header[0..16].copy_from_slice(TOC_MAGIC);
+        header[80] = TOC_ENCRYPTED_FLAG;
+        std::fs::write(&obfuscated, &header).expect("write stub");
+
+        assert!(!utoc_is_obfuscated(&plain));
+        assert!(utoc_is_obfuscated(&obfuscated));
+        assert!(!utoc_is_obfuscated(&dir.join("missing.utoc")));
+        // The flag alone is not a barrier: the payload is under the default-GUID key we hold.
+        assert!(utoc_is_decryptable(&obfuscated));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn obfuscation_key_parses() {
+        assert!(super::super::profile::obfuscation_key().is_ok());
+    }
+
+    /// Mods live under `~mods`, so a guard that rebuilt the path from `paks_dir` and the
+    /// container name found nothing and reported every mod as encrypted.
+    #[test]
+    fn container_in_a_subfolder_is_not_reported_as_encrypted() {
+        let paks_dir =
+            std::env::temp_dir().join(format!("rivals-iostore-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&paks_dir);
+        let utoc_path = paks_dir.join("~mods").join("SomeMod_9999999_P.utoc");
+        write_stub_utoc(&utoc_path);
+
+        let err = open_target_only(&paks_dir, &utoc_path, "SomeMod_9999999_P")
+            .err()
+            .unwrap_or_default();
+
+        assert!(
+            !err.contains("encrypted with a key"),
+            "guard rejected a container it should have found: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&paks_dir);
+    }
+
+    #[test]
+    fn a_file_that_is_not_a_toc_is_never_treated_as_decryptable() {
+        let root = std::env::temp_dir().join(format!("rivals-containers-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create dir");
+        let path = root.join("NotAToc.utoc");
+        std::fs::write(&path, b"definitely not a toc header at all right").expect("write");
+
+        assert!(!utoc_is_decryptable(&path));
+        assert!(!utoc_is_obfuscated(&path));
+        assert!(undecryptable_container_stems(&root).contains("NotAToc"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_missing_folder_yields_no_stems_rather_than_an_error() {
+        let missing = std::env::temp_dir().join("rivals-containers-does-not-exist");
+        assert!(mod_container_stems(&missing).is_empty());
+    }
+}

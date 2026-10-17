@@ -1,5 +1,8 @@
 //! Tauri commands for pak INI inspection, tweak detection, and editing.
 
+use std::io::Write;
+use std::path::PathBuf;
+
 use tauri::State;
 
 use crate::pak_tweaks;
@@ -8,6 +11,79 @@ use crate::pak_tweaks::{
 };
 use crate::settings::{SettingsState, recursive_mod_scan};
 use crate::tweaks::{TweakDefinition, TweakSetting, TweakState};
+
+/// Where INI text too large to hand over in one piece is assembled.
+fn staging_dir() -> PathBuf {
+    std::env::temp_dir().join("rivals-toolkit-ini-staging")
+}
+
+/// `path`, once it is known to be one of the staging files: the caller names it, so it has to be
+/// one of ours before anything appends to it, reads it or deletes it.
+pub(crate) fn staged_file(path: &str) -> Result<PathBuf, String> {
+    let candidate = PathBuf::from(path);
+    if candidate.parent() != Some(staging_dir().as_path()) {
+        return Err(format!("{path} is not a staging file"));
+    }
+    Ok(candidate)
+}
+
+/// Appends one piece of an INI to a staging file and answers where it is.
+///
+/// A save crosses the IPC boundary as a single JSON string, and this editor opens config files
+/// that run to hundreds of megabytes each; several of them at once exceeds what the webview can
+/// represent as one string, which surfaced as `RangeError: Invalid string length`. Sending the
+/// text in pieces keeps every message small and means the whole file never exists in the
+/// webview either.
+///
+/// Pass `path` back from the previous call to continue a file, or `None` to start one.
+#[tauri::command]
+pub(crate) async fn stage_pak_ini_chunk(
+    path: Option<String>,
+    chunk: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = staging_dir();
+        let target = match path {
+            Some(existing) => staged_file(&existing)?,
+            None => {
+                std::fs::create_dir_all(&dir)
+                    .map_err(|e| format!("Could not create {}: {e}", dir.display()))?;
+                let stamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_err(|e| e.to_string())?
+                    .as_nanos();
+                dir.join(format!("{stamp}-{}.ini", std::process::id()))
+            }
+        };
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&target)
+            .map_err(|e| format!("Could not open {}: {e}", target.display()))?;
+        file.write_all(chunk.as_bytes())
+            .map_err(|e| format!("Could not write {}: {e}", target.display()))?;
+        Ok(target.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Removes anything a previous session left in the staging directory. A save consumes the files
+/// it uses, so whatever is left is from a run that did not finish.
+pub(crate) fn clear_ini_staging() {
+    let dir = staging_dir();
+    if !dir.is_dir() {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.path().extension().is_some_and(|e| e == "ini") {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
 
 #[tauri::command]
 pub(crate) fn get_tweak_definitions() -> Vec<TweakDefinition> {
