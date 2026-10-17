@@ -1,6 +1,6 @@
 {
   "source": "https://raw.githubusercontent.com/donutman07/MarvelRivalsCharacterIDs/main/MarvelRivalsCharacterIDs.md",
-  "generated_at": "2026-08-27T17:30:56.092Z",
+  "generated_at": "2026-10-15T11:11:21.949Z",
   "characters": {
     "1011": {
       "name": "Hulk",
@@ -20,6 +20,7 @@
       "skins": {
         "1014001": "Default",
         "1014100": "Camo",
+        "1014102": "VENGEFUL VIGILANTE",
         "1014300": "Dangan Ronin",
         "1014301": "MARAUDER MARKSMAN",
         "1014302": "SANDSTORM SOLDIER",
@@ -65,6 +66,7 @@
         "1016504": "SEASIDE SIREN",
         "1016505": "SUNLIT SOVEREIGN",
         "1016506": "SAPPHIRE SORCERESS",
+        "1016507": "THE CHRONICLER",
         "1016800": "Loki Season 2",
         "1016801": "THE AVENGERS",
         "1016802": "TWILIGHT AURORA"
@@ -98,11 +100,13 @@
         "1018303": "PHANTOM SORCERER",
         "1018304": "STEPHEN SANDERS: THE DOCTOR",
         "1018305": "NAUTICAL MYSTIC",
+        "1018306": "AVENGERS: INFINITY WAR",
         "1018307": "CRIMSON CONJURER",
         "1018308": "MAGICAL MINT",
         "1018500": "God Of Magic",
         "1018501": "Sorcerer Supreme of the Galaxy",
-        "1018800": "Doctor Strange In the Multiverse of Madness"
+        "1018800": "Doctor Strange In the Multiverse of Madness",
+        "1018801": "ASTRAL ARCANA"
       }
     },
     "1020": {
@@ -120,6 +124,9 @@
         "1020305": "Galactic Gladiator",
         "1020306": "AKKABAN ACOLYTE",
         "1020307": "MANDY CELESTINE: THE GREETER",
+        "1020308": "MORNING DEW",
+        "1020309": "DREAMY DEN",
+        "1020310": "SUNNY SNOOZE",
         "1020500": "Flora Maiden",
         "1020501": "STARLIT MADONNA",
         "1020800": "Guardians of the Galaxy Vol. 3"
@@ -137,6 +144,7 @@
         "1021302": "BED-STUY'S BEST",
         "1021303": "TEAL TREND",
         "1021304": "DAZZLING DRIP",
+        "1021305": "THUNDERBOLTS",
         "1021500": "Ronin",
         "1021501": "Freefall",
         "1021502": "Binary Arrow"
@@ -158,6 +166,7 @@
         "1022503": "Golden Age",
         "1022504": "Capwolf",
         "1022505": "PRIMAL PATRIOT",
+        "1022506": "ASTRAL AEGIS",
         "1022801": "Avengers: Infinity War"
       }
     },
@@ -176,6 +185,7 @@
         "1023306": "GIANT PANDA",
         "1023307": "ROCKY: THE TRANSFER",
         "1023308": "GOLDEN ARTIFICIER",
+        "1023309": "TRASH KING",
         "1023500": "Symbiote Rocket",
         "1023801": "Guardians of the Galaxy Vol. 3"
       }
@@ -199,6 +209,7 @@
         "1024500": "Goddess of Death",
         "1024501": "MIDNIGHT MOON",
         "1024502": "SAPPHIRE SHADOW",
+        "1024503": "THE REDEEMED",
         "1024800": "MERCIFUL QUEEN"
       }
     },
@@ -218,7 +229,10 @@
         "1025308": "SAPPHIRE SPLASH",
         "1025309": "SUNSET SHORES",
         "1025500": "Growth & Decay",
-        "1025501": "STORIED SURVIVORS"
+        "1025501": "STORIED SURVIVORS",
+        "1025502": "DREAMY DUO",
+        "1025503": "PASTEL PEACE",
+        "1025504": "DREAMY DAZE"
       }
     },
     "1026": {
@@ -232,7 +246,8 @@
         "1026302": "Phoenix Panther",
         "1026500": "Bast's Chosen",
         "1026501": "Damisa-Sarki",
-        "1026502": "King of Wakanda"
+        "1026502": "King of Wakanda",
+        "1026800": "AVENGERS: INFINITY WAR"
       }
     },
     "1027": {
@@ -244,6 +259,7 @@
         "1027302": "Holiday Happiness",
         "1027303": "MECHA-FLORA",
         "1027304": "IRONWOOD SERPENT",
+        "1027305": "GROOTLACTUS",
         "1027500": "Carved Traveler",
         "1027501": "Symbiote Flora",
         "1027502": "BIG BUDDY",
@@ -258,7 +274,10 @@
         "1028101": "Golden Ultron",
         "1028102": "WILL OF GALACTA",
         "1028300": "Wasteland Robot",
+        "1028301": "B-BOY PRIME",
         "1028302": "CYBERNETIC DRIP",
+        "1028303": "MUSTARD BEAT",
+        "1028304": "CARAMEL CREW",
         "1028500": "X-Tron",
         "1028502": "ODINFORCE ULTRON",
         "1028503": "ULTRON-15",
@@ -304,6 +323,7 @@
         "1030501": "Phoenix Knight",
         "1030502": "SUAVE SPECTOR",
         "1030503": "FIST OF KHONSHU",
+        "1030504": "ETERNITY KNIGHT",
         "1030800": "Fist Of Vengeance",
         "1030801": "Moon Knight Mech"
       }
@@ -331,7 +351,10 @@
         "1031315": "NIGHT NEBULA",
         "1031316": "CARMINE CASSETTE",
         "1031317": "PURPLE PULSE",
-        "1031318": "CITRUS SPARK"
+        "1031318": "CITRUS SPARK",
+        "1031500": "LUNAR LUNA",
+        "1031501": "PINK PLANETS",
+        "1031502": "DARK NEBULA"
       }
     },
     "1032": {
@@ -339,6 +362,7 @@
       "skins": {
         "1032001": "Default",
         "1032100": "ARCTIC LEMMUS",
+        "1032101": "WILL OF GALACTA",
         "1032300": "Nut Rocker",
         "1032301": "Cheerful Dragoness",
         "1032302": "Sunshine Squirrel",
@@ -346,6 +370,7 @@
         "1032304": "TINSEL TAIL",
         "1032305": "RED PANDA",
         "1032306": "MAUREEN ALLENE: THE PROGRAMMER",
+        "1032307": "SAVAGE SQUIRREL",
         "1032308": "ACORN DIVINITY",
         "1032500": "Urban Hunter",
         "1032501": "Symbiote Squirrel"
@@ -403,6 +428,7 @@
         "1035501": "Space Knight",
         "1035502": "WAR OF THE REALMS",
         "1035503": "Venom Bloom",
+        "1035504": "PRESIDENT OZZY",
         "1035800": "MARVEL COSMIC INVASION"
       }
     },
@@ -441,6 +467,9 @@
         "1037301": "TEMPORAL TYRANT",
         "1037302": "The Trial of Magneto",
         "1037303": "MAGNETIC VINTAGE",
+        "1037304": "MASTER OF SLUMBER",
+        "1037305": "CLOUDED COMFORT",
+        "1037306": "JADE JAMMIES",
         "1037500": "Master of Magnetism",
         "1037501": "King Magnus",
         "1037502": "SEAT OF AUTUMN",
@@ -469,7 +498,10 @@
         "1038505": "PURPLE PETAL",
         "1038800": "Doctor Strange in the Multiverse of Madness",
         "1038801": "The Queen Of The Dead",
-        "1038803": "AVENGERS: AGE OF ULTRON"
+        "1038803": "AVENGERS: AGE OF ULTRON",
+        "1038804": "CHAOS WEAVER",
+        "1038806": "AZURE AUGURY",
+        "1038807": "SCARLET SPINNER"
       }
     },
     "1039": {
@@ -490,6 +522,8 @@
         "1039506": "UNWORTHY THOR",
         "1039507": "SHADOW SHOCK",
         "1039508": "PURPLE PULSE",
+        "1039509": "THE AVENGERS",
+        "1039510": "KING THOR",
         "1039800": "Thor: Love and Thunder"
       }
     },
@@ -504,6 +538,7 @@
         "1040301": "Dad-tastic Reed",
         "1040302": "DANUM KET: THE PROFESSOR",
         "1040303": "FANTASTIC BEACH DAD",
+        "1040304": "MR. MALIGNANCE",
         "1040500": "The Maker",
         "1040501": "Future Foundation",
         "1040502": "Future Foundation",
@@ -578,9 +613,11 @@
         "1044100": "Daybreak",
         "1044101": "WILL OF GALACTA",
         "1044102": "Emerald Blade",
+        "1044103": "SILVERED SLAYER",
         "1044300": "Polarity Edge",
         "1044301": "Vampire Slayer",
         "1044302": "STARLIT SHADOW",
+        "1044303": "VAMPIRE KING",
         "1044500": "Restful Recovery",
         "1044800": "BLADE KNIGHT"
       }
@@ -622,6 +659,7 @@
       "skins": {
         "1047001": "Default",
         "1047100": "ADOPTED AVENGER",
+        "1047101": "RAZOR-TOOTH",
         "1047300": "Cuddly Fuzzlefin",
         "1047301": "Sunshine Land Shark",
         "1047302": "JEFF O'LANTERN",
@@ -640,6 +678,9 @@
         "1047501": "Devouring Duo",
         "1047502": "Business Shark",
         "1047505": "JEFF-POOL",
+        "1047506": "INCOGNITO BLUE",
+        "1047508": "SHARK IN SHEEP'S CLOTHING",
+        "1047509": "GWENPOOL",
         "1047800": "8-BIT BASH"
       }
     },
@@ -668,7 +709,8 @@
         "1048503": "Phantom Purple",
         "1048504": "Violet Veil",
         "1048505": "Moonlit Mirage",
-        "1048506": "PINNED BUTTERFLY"
+        "1048506": "PINNED BUTTERFLY",
+        "1048507": "BUSINESS ELITE"
       }
     },
     "1049": {
@@ -716,6 +758,9 @@
         "1050505": "Dune Daisy",
         "1050506": "Lush Luminance",
         "1050507": "Tangerine Tint",
+        "1050508": "UNSEEN WEAVER",
+        "1050509": "RUBY RITE",
+        "1050510": "GILDED GAZE",
         "1050800": "The Fantastic Four: First Steps"
       }
     },
@@ -769,9 +814,12 @@
         "1053300": "Hellfire Protocol",
         "1053301": "QUEEN OF DIAMONDS",
         "1053302": "WHITE WAVE QUEEN",
+        "1053303": "GLITTERING GODDESS",
         "1053304": "GALA GLAM",
         "1053305": "CAVIAR BLACK",
         "1053306": "RAVISHING RED",
+        "1053307": "DARK DIAMOND",
+        "1053308": "GOLDEN GRACE",
         "1053500": "X-Revolution",
         "1053501": "Phoenix Diamond",
         "1053502": "BLACK QUEEN OF THE MARAUDERS"
@@ -790,7 +838,8 @@
         "1054501": "SEAT OF SPRING",
         "1054502": "VERDANT VOGUE",
         "1054503": "WHITE CROWN PHOENIX",
-        "1054504": "VIRIDIAN VOGUE"
+        "1054504": "VIRIDIAN VOGUE",
+        "1054505": "COSMIC SPARK"
       }
     },
     "1055": {
@@ -807,6 +856,7 @@
         "1055501": "NOT DAREDEVIL",
         "1055502": "SHADOWED START",
         "1055503": "ATTORNEY AT LAW",
+        "1055504": "DARE-DRAGON",
         "1055800": "DAREDEVIL: BORN AGAIN SEASON 2"
       }
     },
@@ -816,6 +866,7 @@
         "1056001": "Default",
         "1056100": "Cerulean Lightbringer",
         "1056101": "Siriana's Silver",
+        "1056102": "WILL OF GALACTA",
         "1056300": "ACE OF SPADES",
         "1056500": "Skuld 2099",
         "1056501": "ODIN'S BEAUTIFUL DAUGHTER",
@@ -847,7 +898,8 @@
         "1057500": "MAID-POOL",
         "1057501": "YAPPING YOLK",
         "1057502": "POPPIN' PEACH",
-        "1057800": "WADE WILSON: SPIRIT SQUAD"
+        "1057800": "WADE WILSON: SPIRIT SQUAD",
+        "1057801": "NURSE-POOL"
       }
     },
     "1058": {
@@ -861,7 +913,8 @@
         "1058302": "MR. X",
         "1058303": "ALLURING ACE",
         "1058304": "DEAD MAN'S HAND",
-        "1058500": "BARRIER BUSTER"
+        "1058500": "BARRIER BUSTER",
+        "1058800": "X-MEN '97 SEASON 2"
       }
     },
     "1059": {
@@ -888,6 +941,7 @@
         "1060101": "SECRET AGENT",
         "1060300": "MAGICAL MINT",
         "1060301": "PINK PAWS",
+        "1060302": "COSMIC KUMIHO",
         "1060500": "YOON JI-WOO: THE LEADER",
         "1060501": "COASTAL KUMIHO"
       }
@@ -915,6 +969,7 @@
         "1062101": "CORPORATE CRUNCHER",
         "1062300": "PLAYFUL PINK",
         "1062301": "VIBRANT VIOLET",
+        "1062302": "SKELE-SAURUS",
         "1062500": "CHRONO-ARMOR",
         "1062501": "JEFF THE DINOSAUR"
       }
@@ -925,16 +980,21 @@
         "1063001": "Default",
         "1063100": "SHADOWED NEMESIS",
         "1063101": "FUTURISTIC FOCUS",
+        "1063102": "WILL OF GALACTA",
         "1063300": "ELEGANT EYE",
+        "1063301": "PHOENIX CYCLOPS",
         "1063500": "WEAPON M"
       }
     },
     "1064": {
       "name": "Jubilee",
       "skins": {
+        "1054302": "BLUE BREEZES",
         "1064001": "Default",
         "1064100": "COOL COMBUSTION",
         "1064101": "CRIMSON CROWN",
+        "1064300": "VAMPY JAMMIES",
+        "1064301": "VIRIDIAN VIBES",
         "1064500": "MIDNIGHT MUTANT"
       }
     },
@@ -950,7 +1010,9 @@
         "1065500": "STARLIT REBEL",
         "1065501": "RAIDER PRIME",
         "1065502": "MIDNIGHT MIRAGE",
-        "1065503": "HIGH NOON"
+        "1065503": "HIGH NOON",
+        "1065800": "X-MEN '97 SEASON 2",
+        "1065801": "SLUMBER SUGAH"
       }
     },
     "1066": {
@@ -960,6 +1022,15 @@
         "1066100": "OBLIVION'S WHISPER",
         "1066101": "SAPPHIRE SANDS",
         "1066500": "SINFUL BLACKOUT"
+      }
+    },
+    "1067": {
+      "name": "Gorr",
+      "skins": {
+        "1067001": "Default",
+        "1067100": "BLUE REQUIEM",
+        "1067101": "GODS' GRAVEYARD",
+        "1067300": "DIVINE DESTROYER"
       }
     }
   }
