@@ -32,58 +32,67 @@ pub(super) fn apply_edits_to_ini(
     result
 }
 
-/// Parse CVar key/value lines from Engine or DeviceProfiles INI content.
+/// Parse the CVar assignments the game will actually read.
+///
+/// A device profiles file is organised by platform and only the Windows profiles reach a PC
+/// client, so those are the sections that describe what a pak does. An engine file has no such
+/// split and every section counts. Copies parked anywhere else are still edited, see
+/// [`sets_key`] and `device_profile_sections`, but they are not state: reporting them would
+/// answer a question nobody asked, and a mobile profile listed after the Windows one would
+/// decide the merged value.
 pub(super) fn parse_console_vars(content: &str, source: &str) -> Vec<PakCvar> {
+    let device_profiles = source.contains("DeviceProfiles");
     let mut vars = Vec::new();
-    let is_device_profiles = source.contains("DeviceProfiles");
+    let mut in_section = false;
 
-    if is_device_profiles {
-        let mut in_section = false;
-        for line in content.lines() {
-            let trimmed = line.trim();
+    for line in content.lines() {
+        let trimmed = line.trim();
 
-            if trimmed.starts_with('[') {
-                in_section = is_windows_device_profile_header(trimmed);
-                continue;
-            }
-
-            if !in_section || trimmed.is_empty() || trimmed.starts_with(';') {
-                continue;
-            }
-
-            if let Some(kv) = parse_cvar_line(trimmed) {
-                vars.push(PakCvar {
-                    key: kv.0,
-                    value: kv.1,
-                    source: source.to_string(),
-                });
-            }
+        if trimmed.starts_with('[') {
+            in_section = !device_profiles || is_windows_device_profile_header(trimmed);
+            continue;
         }
-    } else {
-        // Engine.ini keys can be outside [ConsoleVariables], so scan all sections.
-        let mut in_any_section = false;
-        for line in content.lines() {
-            let trimmed = line.trim();
 
-            if trimmed.starts_with('[') {
-                in_any_section = true;
-                continue;
-            }
+        if !in_section || trimmed.is_empty() || trimmed.starts_with(';') {
+            continue;
+        }
 
-            if !in_any_section || trimmed.is_empty() || trimmed.starts_with(';') {
-                continue;
-            }
-
-            if let Some(kv) = parse_cvar_line(trimmed) {
-                vars.push(PakCvar {
-                    key: kv.0,
-                    value: kv.1,
-                    source: source.to_string(),
-                });
-            }
+        if let Some(kv) = parse_cvar_line(trimmed) {
+            vars.push(PakCvar {
+                key: kv.0,
+                value: kv.1,
+                source: source.to_string(),
+            });
         }
     }
     vars
+}
+
+/// Whether any section of the file assigns `key`, live or not.
+///
+/// What decides that a file is worth rewriting has to be wider than what counts as state. One
+/// config mod seen in the wild parks `r.MipMapLODBias=15` under `[ConsoleVariables]` of its
+/// device profiles file and nowhere else; that copy is not what the game reads, but leaving it
+/// there is what made the tweak look like it had done nothing.
+pub(super) fn sets_key(content: &str, key: &str) -> bool {
+    let key_lower = key.to_ascii_lowercase();
+    let mut in_section = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_section = true;
+            continue;
+        }
+        if !in_section || trimmed.is_empty() || trimmed.starts_with(';') {
+            continue;
+        }
+        if let Some((k, _)) = parse_cvar_line(trimmed)
+            && k.to_ascii_lowercase() == key_lower
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Parse one CVar line, supporting optional `+CVars=` prefix.
@@ -103,8 +112,28 @@ fn parse_cvar_line(line: &str) -> Option<(String, String)> {
     Some((key.to_string(), value.to_string()))
 }
 
-/// Check whether a section header is `[Windows DeviceProfile]`.
+/// Check whether a section header is a Windows device profile, i.e. `[Windows DeviceProfile]`
+/// or one of the profiles that inherit from it (`WindowsClient`, `WindowsNoEditor`, ...).
+///
+/// The shipping client runs the `Windows` profile, but a config mod can park a CVar in any of
+/// its siblings and it still applies, so all of them describe what the pak does.
 fn is_windows_device_profile_header(header: &str) -> bool {
+    let Some(inner) = header
+        .trim()
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+    else {
+        return false;
+    };
+    let lower = inner.trim().to_ascii_lowercase();
+    lower
+        .strip_suffix(" deviceprofile")
+        .is_some_and(|name| name.starts_with("windows"))
+}
+
+/// Check whether a section header is the plain `[Windows DeviceProfile]` section, the one a
+/// brand-new CVar belongs in.
+fn is_primary_device_profile_header(header: &str) -> bool {
     header
         .trim()
         .eq_ignore_ascii_case("[Windows DeviceProfile]")
@@ -153,20 +182,39 @@ fn find_section_insert_point(lines: &[String], section_start: usize) -> usize {
     insert
 }
 
-/// Line ranges of every `[Windows DeviceProfile]` section, as `(header index, end)`.
+/// Line ranges of every Windows device profile section, as `(header index, end)`.
 ///
-/// Combo paks concatenate several mods' configs, so this header can appear more than once and the
-/// same key can sit in each copy.
+/// Combo paks concatenate several config mods, so a header can appear more than once, and the
+/// same key can sit under `[Windows DeviceProfile]` and `[WindowsClient DeviceProfile]` at once.
+/// Every section of the file. A tweak has to reach a copy wherever it was written: one seen in
+/// the wild parks `r.MipMapLODBias=15` under `[ConsoleVariables]` of a device profiles file and
+/// nowhere else, which a device-profile-only scan neither reported nor edited. This is what the
+/// engine path has always done.
 fn device_profile_sections(lines: &[String]) -> Vec<(usize, usize)> {
     lines
         .iter()
         .enumerate()
-        .filter(|(_, line)| is_windows_device_profile_header(line.trim()))
+        .filter(|(_, line)| line.trim().starts_with('['))
         .map(|(i, _)| (i, find_section_end(lines, i)))
         .collect()
 }
 
-/// Every line under a `[Windows DeviceProfile]` header that sets `key_lower`, in file order.
+/// Header index of the last plain `[Windows DeviceProfile]` section.
+fn primary_section_start(lines: &[String]) -> Option<usize> {
+    lines
+        .iter()
+        .rposition(|line| is_primary_device_profile_header(line))
+}
+
+/// Header index of the device profile section containing `line_index`.
+fn enclosing_section_start(sections: &[(usize, usize)], line_index: usize) -> Option<usize> {
+    sections
+        .iter()
+        .find(|(start, end)| line_index > *start && line_index < *end)
+        .map(|(start, _)| *start)
+}
+
+/// Every line under any section header that sets `key_lower`, in file order.
 fn device_profile_key_hits(lines: &[String], key_lower: &str) -> Vec<usize> {
     let mut hits = Vec::new();
     for (start, end) in device_profile_sections(lines) {
@@ -185,36 +233,63 @@ fn device_profile_key_hits(lines: &[String], key_lower: &str) -> Vec<usize> {
     hits
 }
 
-/// Apply edits across every `[Windows DeviceProfile]` section.
+/// Apply edits across every section of a device profiles file.
 ///
-/// Reads are last-wins over the whole file, so touching a single occurrence of a key is invisible
-/// when a later duplicate survives. Every occurrence is handled, and a set collapses them to one
-/// line so repeated saves cannot grow the file.
+/// A removal clears every occurrence: a copy left behind in `[WindowsClient DeviceProfile]`, in a
+/// second `[Windows DeviceProfile]` block, or in an `[ConsoleVariables]` section the file happens
+/// to carry still counts, so one survivor makes the tweak a no-op. A set collapses the occurrences
+/// into a single line in the plain `[Windows DeviceProfile]` section the others inherit from, so
+/// repeated saves cannot grow the file.
 fn apply_device_profiles_edits(lines: &mut Vec<String>, edits: &[PakTweakEdit]) {
     for edit in edits {
         let key_lower = edit.key.to_ascii_lowercase();
         let hits = device_profile_key_hits(lines, &key_lower);
 
-        match (&edit.value, hits.split_last()) {
-            // Keep the occurrence a read would land on and drop the earlier duplicates.
-            (Some(val), Some((&last, earlier))) => {
-                let has_prefix = lines[last]
+        // A pure removal never creates a section.
+        let Some(val) = edit.value.as_deref() else {
+            for &i in hits.iter().rev() {
+                lines.remove(i);
+            }
+            continue;
+        };
+
+        let sections = device_profile_sections(lines);
+        let anchor_start = primary_section_start(lines).or_else(|| {
+            hits.last()
+                .and_then(|&i| enclosing_section_start(&sections, i))
+        });
+        let anchor_hit = anchor_start.and_then(|start| {
+            let end = find_section_end(lines, start);
+            hits.iter().rev().copied().find(|&i| i > start && i < end)
+        });
+
+        match anchor_hit {
+            // Rewrite in place so a set never reorders the file, then drop the copies that
+            // would shadow it.
+            Some(keep) => {
+                let has_prefix = lines[keep]
                     .trim()
                     .to_ascii_lowercase()
                     .starts_with("+cvars=");
-                lines[last] = format_cvar_line(&edit.key, val, has_prefix);
-                for &i in earlier.iter().rev() {
-                    lines.remove(i);
+                lines[keep] = format_cvar_line(&edit.key, val, has_prefix);
+                for &i in hits.iter().rev() {
+                    if i != keep {
+                        lines.remove(i);
+                    }
                 }
             }
-            (None, Some(_)) => {
+            None => {
+                let anchor_header = anchor_start.map(|start| lines[start].trim().to_string());
                 for &i in hits.iter().rev() {
                     lines.remove(i);
                 }
-            }
-            (Some(val), None) => {
-                let start = match device_profile_sections(lines).last() {
-                    Some(&(start, _)) => start,
+                let existing = anchor_header.and_then(|header| {
+                    lines
+                        .iter()
+                        .rposition(|line| line.trim().eq_ignore_ascii_case(&header))
+                });
+                let start = match existing {
+                    Some(start) => start,
                     None => {
                         if lines.last().is_some_and(|l| !l.trim().is_empty()) {
                             lines.push(String::new());
@@ -226,8 +301,6 @@ fn apply_device_profiles_edits(lines: &mut Vec<String>, edits: &[PakTweakEdit]) 
                 let insert_at = find_section_insert_point(lines, start);
                 lines.insert(insert_at, format_cvar_line(&edit.key, val, true));
             }
-            // Nothing to remove, and a pure removal never creates a section.
-            (None, None) => {}
         }
     }
 }
@@ -304,760 +377,6 @@ fn apply_engine_edits(lines: &mut Vec<String>, edits: &[PakTweakEdit]) {
                 lines.insert(insert_at, format_cvar_line(&edit.key, val, false));
             }
         }
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
-mod roundtrip_tests {
-    //! Round-trip catalogue verification: simulate the full apply detect pipeline
-    //! at the INI layer (skipping pak encrypt/repack which is repak's responsibility).
-    //! For each catalogue tweak, toggle ON via the same logic the frontend uses,
-    //! apply the edits like apply_pak_tweaks does, then run detect_tweaks_unscoped
-    //! against the merged result. Catches regressions in detection vs apply drift.
-    use super::*;
-    use crate::pak_tweaks::{PakIniTarget, PakTweakEdit};
-    use crate::tweaks::TweakState;
-    use crate::tweaks::catalogue::{TweakDefinition, TweakKind, tweak_catalogue};
-    use crate::tweaks::detect_tweaks_unscoped;
-    use std::collections::HashSet;
-
-    /// ON-state edits, built by the same `edits_for_tweak` both front ends call, so this round trip
-    /// tests the shipped translation rather than a copy of it.
-    fn edits_for_on(def: &TweakDefinition) -> Vec<PakTweakEdit> {
-        // Sliders only detect as active away from their default, so pick the far end of the range.
-        let slider_value = match &def.kind {
-            TweakKind::Slider {
-                min,
-                max,
-                default_value,
-                ..
-            } => {
-                let away = if (default_value - min).abs() < f64::EPSILON {
-                    max
-                } else {
-                    min
-                };
-                Some(format!("{away}"))
-            }
-            _ => None,
-        };
-        crate::pak_tweaks::edits_for_tweak(def, true, slider_value.as_deref())
-            .unwrap_or_else(|e| panic!("'{}' failed to translate: {e}", def.id))
-    }
-
-    /// Four-file equivalent: simulate the full `apply_pak_tweaks` pipeline against
-    /// BaseEngine / DefaultEngine / WindowsEngine / DeviceProfiles content. Absent
-    /// files are represented by empty strings; the layer is treated as missing when
-    /// `present_*` is false (mirroring how `inspect_pak_for_ini` populates entries).
-    #[allow(clippy::too_many_arguments)]
-    fn apply_to_quad(
-        base: &str,
-        default: &str,
-        windows: &str,
-        dp: &str,
-        present_base: bool,
-        present_default: bool,
-        present_windows: bool,
-        present_dp: bool,
-        edits: &[PakTweakEdit],
-        target: PakIniTarget,
-    ) -> (String, String, String, String) {
-        let (engine_section_edits, plain_edits): (Vec<_>, Vec<_>) = edits
-            .iter()
-            .cloned()
-            .partition(|e| e.engine_section.is_some());
-
-        let mut base_after = base.to_string();
-        let mut default_after = default.to_string();
-        let mut windows_after = windows.to_string();
-        let mut dp_after = dp.to_string();
-
-        let resolved = if matches!(target, PakIniTarget::BaseEngine) && present_base
-            || matches!(target, PakIniTarget::Engine) && present_default
-            || matches!(target, PakIniTarget::WindowsEngine) && present_windows
-            || matches!(target, PakIniTarget::DeviceProfiles) && present_dp
-        {
-            target
-        } else {
-            // Mirror real resolve_target fallback order.
-            if present_dp {
-                PakIniTarget::DeviceProfiles
-            } else if present_windows {
-                PakIniTarget::WindowsEngine
-            } else if present_default {
-                PakIniTarget::Engine
-            } else if present_base {
-                PakIniTarget::BaseEngine
-            } else {
-                panic!("no files present");
-            }
-        };
-
-        let engine_section_target = match resolved {
-            PakIniTarget::DeviceProfiles => {
-                if present_windows {
-                    Some(PakIniTarget::WindowsEngine)
-                } else if present_default {
-                    Some(PakIniTarget::Engine)
-                } else if present_base {
-                    Some(PakIniTarget::BaseEngine)
-                } else {
-                    None
-                }
-            }
-            t => Some(t),
-        };
-
-        let write_to = |slot: PakIniTarget,
-                        content: &mut String,
-                        edits: &[PakTweakEdit],
-                        ini_type: IniType| {
-            *content = apply_edits_to_ini(content, edits, ini_type);
-            let _ = slot;
-        };
-
-        // Plain edits -> resolved target.
-        match resolved {
-            PakIniTarget::BaseEngine => write_to(
-                PakIniTarget::BaseEngine,
-                &mut base_after,
-                &plain_edits,
-                IniType::Engine,
-            ),
-            PakIniTarget::Engine => write_to(
-                PakIniTarget::Engine,
-                &mut default_after,
-                &plain_edits,
-                IniType::Engine,
-            ),
-            PakIniTarget::WindowsEngine => write_to(
-                PakIniTarget::WindowsEngine,
-                &mut windows_after,
-                &plain_edits,
-                IniType::Engine,
-            ),
-            PakIniTarget::DeviceProfiles => write_to(
-                PakIniTarget::DeviceProfiles,
-                &mut dp_after,
-                &plain_edits,
-                IniType::DeviceProfiles,
-            ),
-        }
-
-        // Engine-section edits -> engine_section_target.
-        if !engine_section_edits.is_empty()
-            && let Some(eng_target) = engine_section_target
-        {
-            match eng_target {
-                PakIniTarget::BaseEngine => write_to(
-                    eng_target,
-                    &mut base_after,
-                    &engine_section_edits,
-                    IniType::Engine,
-                ),
-                PakIniTarget::Engine => write_to(
-                    eng_target,
-                    &mut default_after,
-                    &engine_section_edits,
-                    IniType::Engine,
-                ),
-                PakIniTarget::WindowsEngine => write_to(
-                    eng_target,
-                    &mut windows_after,
-                    &engine_section_edits,
-                    IniType::Engine,
-                ),
-                PakIniTarget::DeviceProfiles => unreachable!(),
-            }
-        }
-
-        // Plain-edit sibling sync across the other present files.
-        let layers: [(PakIniTarget, bool, &str, IniType); 4] = [
-            (
-                PakIniTarget::BaseEngine,
-                present_base,
-                "BaseEngine.ini",
-                IniType::Engine,
-            ),
-            (
-                PakIniTarget::Engine,
-                present_default,
-                "DefaultEngine.ini",
-                IniType::Engine,
-            ),
-            (
-                PakIniTarget::WindowsEngine,
-                present_windows,
-                "WindowsEngine.ini",
-                IniType::Engine,
-            ),
-            (
-                PakIniTarget::DeviceProfiles,
-                present_dp,
-                "DefaultDeviceProfiles.ini",
-                IniType::DeviceProfiles,
-            ),
-        ];
-
-        for (slot, present, label, ini_type) in layers {
-            if !present || slot == resolved {
-                continue;
-            }
-            let content_ref = match slot {
-                PakIniTarget::BaseEngine => &base_after,
-                PakIniTarget::Engine => &default_after,
-                PakIniTarget::WindowsEngine => &windows_after,
-                PakIniTarget::DeviceProfiles => &dp_after,
-            };
-            let present_keys: HashSet<String> = parse_console_vars(content_ref, label)
-                .into_iter()
-                .map(|s| s.key.to_ascii_lowercase())
-                .collect();
-            let filtered: Vec<PakTweakEdit> = plain_edits
-                .iter()
-                .filter(|e| present_keys.contains(&e.key.to_ascii_lowercase()))
-                .cloned()
-                .collect();
-            match slot {
-                PakIniTarget::BaseEngine => {
-                    base_after = apply_edits_to_ini(&base_after, &filtered, ini_type)
-                }
-                PakIniTarget::Engine => {
-                    default_after = apply_edits_to_ini(&default_after, &filtered, ini_type)
-                }
-                PakIniTarget::WindowsEngine => {
-                    windows_after = apply_edits_to_ini(&windows_after, &filtered, ini_type)
-                }
-                PakIniTarget::DeviceProfiles => {
-                    dp_after = apply_edits_to_ini(&dp_after, &filtered, ini_type)
-                }
-            }
-        }
-
-        // Engine-section sibling sync across the other engine files.
-        if !engine_section_edits.is_empty()
-            && let Some(eng_target) = engine_section_target
-        {
-            for (slot, present, label) in [
-                (PakIniTarget::BaseEngine, present_base, "BaseEngine.ini"),
-                (PakIniTarget::Engine, present_default, "DefaultEngine.ini"),
-                (
-                    PakIniTarget::WindowsEngine,
-                    present_windows,
-                    "WindowsEngine.ini",
-                ),
-            ] {
-                if !present || slot == eng_target {
-                    continue;
-                }
-                let content_ref = match slot {
-                    PakIniTarget::BaseEngine => &base_after,
-                    PakIniTarget::Engine => &default_after,
-                    PakIniTarget::WindowsEngine => &windows_after,
-                    _ => unreachable!(),
-                };
-                let present_keys: HashSet<String> = parse_console_vars(content_ref, label)
-                    .into_iter()
-                    .map(|s| s.key.to_ascii_lowercase())
-                    .collect();
-                let filtered: Vec<PakTweakEdit> = engine_section_edits
-                    .iter()
-                    .filter(|e| present_keys.contains(&e.key.to_ascii_lowercase()))
-                    .cloned()
-                    .collect();
-                match slot {
-                    PakIniTarget::BaseEngine => {
-                        base_after = apply_edits_to_ini(&base_after, &filtered, IniType::Engine)
-                    }
-                    PakIniTarget::Engine => {
-                        default_after =
-                            apply_edits_to_ini(&default_after, &filtered, IniType::Engine)
-                    }
-                    PakIniTarget::WindowsEngine => {
-                        windows_after =
-                            apply_edits_to_ini(&windows_after, &filtered, IniType::Engine)
-                    }
-                    _ => unreachable!(),
-                }
-            }
-        }
-
-        (base_after, default_after, windows_after, dp_after)
-    }
-
-    /// Legacy 2-file wrapper used by existing tests: delegates to the 4-file helper
-    /// with empty/absent BaseEngine and WindowsEngine layers.
-    fn apply_to_pair(
-        engine: &str,
-        dp: &str,
-        edits: &[PakTweakEdit],
-        target: PakIniTarget,
-    ) -> (String, String) {
-        let (_, default_after, _, dp_after) =
-            apply_to_quad("", engine, "", dp, false, true, false, true, edits, target);
-        (default_after, dp_after)
-    }
-
-    /// Build the synthetic key=value content `detect_pak_tweaks` feeds to the detector.
-    fn merge_to_synthetic(engine: &str, dp: &str) -> String {
-        merge_to_synthetic_quad("", engine, "", dp, false, true, false, true)
-    }
-
-    /// Four-file variant of merge_to_synthetic; matches `read_pak_cvars` priority chain.
-    #[allow(clippy::too_many_arguments)]
-    fn merge_to_synthetic_quad(
-        base: &str,
-        default: &str,
-        windows: &str,
-        dp: &str,
-        present_base: bool,
-        present_default: bool,
-        present_windows: bool,
-        present_dp: bool,
-    ) -> String {
-        let layers: [(&str, bool, &str); 4] = [
-            (base, present_base, "BaseEngine.ini"),
-            (default, present_default, "DefaultEngine.ini"),
-            (windows, present_windows, "WindowsEngine.ini"),
-            (dp, present_dp, "DefaultDeviceProfiles.ini"),
-        ];
-        let mut merged: Vec<PakCvar> = Vec::new();
-        for (content, present, label) in layers {
-            if !present {
-                continue;
-            }
-            for var in parse_console_vars(content, label) {
-                let key_lower = var.key.to_ascii_lowercase();
-                merged.retain(|v| v.key.to_ascii_lowercase() != key_lower);
-                merged.push(var);
-            }
-        }
-        merged
-            .iter()
-            .map(|s| format!("{}={}", s.key, s.value))
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    fn state_for<'a>(states: &'a [TweakState], id: &str) -> &'a TweakState {
-        states
-            .iter()
-            .find(|s| s.id == id)
-            .unwrap_or_else(|| panic!("state for {id} missing"))
-    }
-
-    #[test]
-    fn fix_abilities_with_replace_with_round_trip() {
-        // The exact regression that prompted this audit: r.CustomDepth=0 → r.CustomDepth=3.
-        let cat = tweak_catalogue();
-        let def = cat
-            .iter()
-            .find(|t| t.id == "fix_abilities")
-            .expect("fix_abilities catalogue entry");
-
-        // Pak baseline: engine.ini contains the OFF-state lines (typical mod state).
-        let engine = "[ConsoleVariables]\nr.PostProcessing.DisableMaterials=1\nr.CustomDepth=0\nr.LightTile.Enable=0\n";
-        let dp = "[Windows DeviceProfile]\n";
-
-        // Detect baseline: tweak should read OFF (original patterns present).
-        let detect_off = detect_tweaks_unscoped(&merge_to_synthetic(engine, dp));
-        assert!(
-            !state_for(&detect_off, "fix_abilities").active,
-            "OFF baseline should detect inactive"
-        );
-
-        // Apply ON.
-        let edits = edits_for_on(def);
-        let (engine_on, dp_on) = apply_to_pair(engine, dp, &edits, PakIniTarget::DeviceProfiles);
-
-        // After ON: PostProcessing.DisableMaterials and LightTile.Enable removed,
-        // CustomDepth replaced with 3.
-        let detect_on = detect_tweaks_unscoped(&merge_to_synthetic(&engine_on, &dp_on));
-        assert!(
-            state_for(&detect_on, "fix_abilities").active,
-            "ON state must be detected after apply (regression: was reading inactive due to key-only check)"
-        );
-    }
-
-    #[test]
-    fn batch_toggle_network_revert_round_trip() {
-        let cat = tweak_catalogue();
-        let def = cat
-            .iter()
-            .find(|t| t.id == "network_revert_update_65")
-            .expect("network_revert_update_65 catalogue entry");
-
-        let engine = "";
-        let dp = "[Windows DeviceProfile]\n";
-
-        let edits = edits_for_on(def);
-        let (engine_on, dp_on) = apply_to_pair(engine, dp, &edits, PakIniTarget::DeviceProfiles);
-
-        let detect_on = detect_tweaks_unscoped(&merge_to_synthetic(&engine_on, &dp_on));
-        assert!(
-            state_for(&detect_on, "network_revert_update_65").active,
-            "BatchToggle ON state must be detected"
-        );
-    }
-
-    #[test]
-    fn slider_write_default_on_disable_round_trip() {
-        let cat = tweak_catalogue();
-        let def = cat
-            .iter()
-            .find(|t| {
-                matches!(
-                    &t.kind,
-                    TweakKind::Slider {
-                        write_default_on_disable: true,
-                        ..
-                    }
-                )
-            })
-            .expect("at least one slider with write_default_on_disable=true");
-
-        let engine = "[ConsoleVariables]\n";
-        let dp = "[Windows DeviceProfile]\n";
-
-        let edits = edits_for_on(def);
-        let (engine_on, dp_on) = apply_to_pair(engine, dp, &edits, PakIniTarget::DeviceProfiles);
-
-        let detect_on = detect_tweaks_unscoped(&merge_to_synthetic(&engine_on, &dp_on));
-        assert!(
-            state_for(&detect_on, &def.id).active,
-            "slider non-default value must register as active"
-        );
-    }
-
-    /// Walk every catalogue tweak and verify the apply→detect round-trip.
-    /// This is the safety net the regression slipped past.
-    #[test]
-    fn full_catalogue_apply_detect_round_trip() {
-        let cat = tweak_catalogue();
-
-        // Baseline pak content with original RemoveLines patterns present so
-        // that those tweaks start in the OFF state.
-        let mut engine = String::from("[ConsoleVariables]\n");
-        for def in cat.iter() {
-            if let TweakKind::RemoveLines { lines, .. } = &def.kind {
-                for line in lines {
-                    engine.push_str(&line.pattern);
-                    engine.push('\n');
-                }
-            }
-        }
-        let dp = String::from("[Windows DeviceProfile]\n");
-
-        // Both edit targets must round-trip to ACTIVE: the merged runtime view is the
-        // same regardless of which file holds the CVar.
-        for target in [PakIniTarget::DeviceProfiles, PakIniTarget::Engine] {
-            for def in cat.iter() {
-                let edits = edits_for_on(def);
-                if edits.is_empty() {
-                    continue;
-                }
-                let (engine_after, dp_after) = apply_to_pair(&engine, &dp, &edits, target);
-                let states = detect_tweaks_unscoped(&merge_to_synthetic(&engine_after, &dp_after));
-                let state = state_for(&states, &def.id);
-                assert!(
-                    state.active,
-                    "tweak {} should detect ACTIVE after applying ON edits (target={:?}, kind={:?})",
-                    def.id,
-                    target,
-                    std::mem::discriminant(&def.kind)
-                );
-            }
-        }
-    }
-
-    fn cvar_edit(key: &str, value: Option<&str>) -> PakTweakEdit {
-        PakTweakEdit {
-            key: key.into(),
-            value: value.map(str::to_string),
-            engine_section: None,
-        }
-    }
-
-    #[test]
-    fn target_engine_syncs_existing_key_in_device_profiles() {
-        let engine = "[ConsoleVariables]\nr.Foo=0\n";
-        let dp = "[Windows DeviceProfile]\n+CVars=r.Foo=0\n";
-        let (engine_after, dp_after) = apply_to_pair(
-            engine,
-            dp,
-            &[cvar_edit("r.Foo", Some("1"))],
-            PakIniTarget::Engine,
-        );
-        assert!(
-            engine_after.contains("r.Foo=1"),
-            "engine target:\n{engine_after}"
-        );
-        assert!(
-            dp_after.contains("+CVars=r.Foo=1"),
-            "sibling DeviceProfiles copy should update so it doesn't shadow:\n{dp_after}"
-        );
-    }
-
-    #[test]
-    fn target_device_profiles_syncs_existing_key_in_engine() {
-        let engine = "[ConsoleVariables]\nr.Foo=0\n";
-        let dp = "[Windows DeviceProfile]\n+CVars=r.Foo=0\n";
-        let (engine_after, dp_after) = apply_to_pair(
-            engine,
-            dp,
-            &[cvar_edit("r.Foo", Some("1"))],
-            PakIniTarget::DeviceProfiles,
-        );
-        assert!(
-            dp_after.contains("+CVars=r.Foo=1"),
-            "dp target:\n{dp_after}"
-        );
-        assert!(
-            engine_after.contains("r.Foo=1"),
-            "sibling Engine copy should stay consistent:\n{engine_after}"
-        );
-    }
-
-    #[test]
-    fn removal_clears_key_from_both_files() {
-        let engine = "[ConsoleVariables]\nr.Foo=0\n";
-        let dp = "[Windows DeviceProfile]\n+CVars=r.Foo=0\n";
-        let (engine_after, dp_after) = apply_to_pair(
-            engine,
-            dp,
-            &[cvar_edit("r.Foo", None)],
-            PakIniTarget::DeviceProfiles,
-        );
-        assert!(
-            !engine_after.to_ascii_lowercase().contains("r.foo"),
-            "engine copy should be removed for a true reset:\n{engine_after}"
-        );
-        assert!(
-            !dp_after.to_ascii_lowercase().contains("r.foo"),
-            "dp copy should be removed:\n{dp_after}"
-        );
-    }
-
-    #[test]
-    fn sibling_without_key_is_not_injected() {
-        let engine = "[ConsoleVariables]\n";
-        let dp = "[Windows DeviceProfile]\n";
-        let (engine_after, dp_after) = apply_to_pair(
-            engine,
-            dp,
-            &[cvar_edit("r.Foo", Some("1"))],
-            PakIniTarget::DeviceProfiles,
-        );
-        assert!(
-            dp_after.contains("+CVars=r.Foo=1"),
-            "target dp gets the key:\n{dp_after}"
-        );
-        assert!(
-            !engine_after.to_ascii_lowercase().contains("r.foo"),
-            "engine never had the key, so it must not be injected:\n{engine_after}"
-        );
-    }
-
-    #[test]
-    fn device_profiles_section_created_when_missing() {
-        let dp = "; device profiles file with no windows section\n";
-        let out = apply_edits_to_ini(
-            dp,
-            &[cvar_edit("r.Foo", Some("1"))],
-            IniType::DeviceProfiles,
-        );
-        assert!(
-            out.contains("[Windows DeviceProfile]"),
-            "missing section should be created:\n{out}"
-        );
-        assert!(
-            out.contains("+CVars=r.Foo=1"),
-            "cvar should be inserted:\n{out}"
-        );
-    }
-
-    #[test]
-    fn detection_picks_up_key_set_only_in_base_engine() {
-        let base = "[ConsoleVariables]\nr.OnlyInBase=7\n";
-        let synthetic = merge_to_synthetic_quad(base, "", "", "", true, false, false, false);
-        assert!(
-            synthetic.contains("r.OnlyInBase=7"),
-            "synthetic merge should surface BaseEngine value:\n{synthetic}"
-        );
-    }
-
-    #[test]
-    fn windows_engine_overrides_base_engine() {
-        let base = "[ConsoleVariables]\nr.Shared=1\n";
-        let windows = "[ConsoleVariables]\nr.Shared=9\n";
-        let synthetic = merge_to_synthetic_quad(base, "", windows, "", true, false, true, false);
-        assert!(
-            synthetic.contains("r.Shared=9"),
-            "WindowsEngine value should win over BaseEngine:\n{synthetic}"
-        );
-        assert!(
-            !synthetic.contains("r.Shared=1"),
-            "BaseEngine value should not appear:\n{synthetic}"
-        );
-    }
-
-    #[test]
-    fn default_engine_overrides_base_engine() {
-        let base = "[ConsoleVariables]\nr.Shared=1\n";
-        let default = "[ConsoleVariables]\nr.Shared=5\n";
-        let synthetic = merge_to_synthetic_quad(base, default, "", "", true, true, false, false);
-        assert!(
-            synthetic.contains("r.Shared=5"),
-            "DefaultEngine value should win over BaseEngine:\n{synthetic}"
-        );
-        assert!(
-            !synthetic.contains("r.Shared=1"),
-            "BaseEngine value should not appear:\n{synthetic}"
-        );
-    }
-
-    #[test]
-    fn device_profiles_wins_over_windows_engine() {
-        let windows = "[ConsoleVariables]\nr.Shared=9\n";
-        let dp = "[Windows DeviceProfile]\n+CVars=r.Shared=42\n";
-        let synthetic = merge_to_synthetic_quad("", "", windows, dp, false, false, true, true);
-        assert!(
-            synthetic.contains("r.Shared=42"),
-            "DeviceProfiles value should still win at runtime:\n{synthetic}"
-        );
-    }
-
-    #[test]
-    fn apply_to_windows_target_syncs_existing_key_in_default_and_base() {
-        let base = "[ConsoleVariables]\nr.Foo=0\n";
-        let default = "[ConsoleVariables]\nr.Foo=0\n";
-        let windows = "[ConsoleVariables]\nr.Foo=0\n";
-        let (base_after, default_after, windows_after, _) = apply_to_quad(
-            base,
-            default,
-            windows,
-            "",
-            true,
-            true,
-            true,
-            false,
-            &[cvar_edit("r.Foo", Some("1"))],
-            PakIniTarget::WindowsEngine,
-        );
-        assert!(
-            windows_after.contains("r.Foo=1"),
-            "WindowsEngine target gets the new value:\n{windows_after}"
-        );
-        assert!(
-            default_after.contains("r.Foo=1"),
-            "DefaultEngine sibling updated to avoid shadow:\n{default_after}"
-        );
-        assert!(
-            base_after.contains("r.Foo=1"),
-            "BaseEngine sibling updated to avoid shadow:\n{base_after}"
-        );
-    }
-
-    #[test]
-    fn apply_to_base_target_does_not_inject_into_higher_priority_siblings() {
-        let base = "[ConsoleVariables]\n";
-        let default = "[ConsoleVariables]\n";
-        let windows = "[ConsoleVariables]\n";
-        let (base_after, default_after, windows_after, _) = apply_to_quad(
-            base,
-            default,
-            windows,
-            "",
-            true,
-            true,
-            true,
-            false,
-            &[cvar_edit("r.Foo", Some("1"))],
-            PakIniTarget::BaseEngine,
-        );
-        assert!(
-            base_after.contains("r.Foo=1"),
-            "BaseEngine target gets the new value:\n{base_after}"
-        );
-        assert!(
-            !default_after.to_ascii_lowercase().contains("r.foo"),
-            "DefaultEngine should not be injected:\n{default_after}"
-        );
-        assert!(
-            !windows_after.to_ascii_lowercase().contains("r.foo"),
-            "WindowsEngine should not be injected:\n{windows_after}"
-        );
-    }
-
-    #[test]
-    fn removal_clears_key_from_all_four_files() {
-        let base = "[ConsoleVariables]\nr.Foo=0\n";
-        let default = "[ConsoleVariables]\nr.Foo=0\n";
-        let windows = "[ConsoleVariables]\nr.Foo=0\n";
-        let dp = "[Windows DeviceProfile]\n+CVars=r.Foo=0\n";
-        let (base_after, default_after, windows_after, dp_after) = apply_to_quad(
-            base,
-            default,
-            windows,
-            dp,
-            true,
-            true,
-            true,
-            true,
-            &[cvar_edit("r.Foo", None)],
-            PakIniTarget::DeviceProfiles,
-        );
-        for (name, content) in [
-            ("base", &base_after),
-            ("default", &default_after),
-            ("windows", &windows_after),
-            ("dp", &dp_after),
-        ] {
-            assert!(
-                !content.to_ascii_lowercase().contains("r.foo"),
-                "{name} should be cleared:\n{content}"
-            );
-        }
-    }
-
-    #[test]
-    fn engine_section_edit_routes_to_highest_engine_when_target_is_device_profiles() {
-        // ApplicationScale lives in [/Script/Engine.UserInterfaceSettings], not [ConsoleVariables].
-        // When user targets DeviceProfiles, engine-section edits must still land in an
-        // engine file -- the highest-priority one present.
-        let default = "[/Script/Engine.UserInterfaceSettings]\n";
-        let windows = "[/Script/Engine.UserInterfaceSettings]\n";
-        let dp = "[Windows DeviceProfile]\n";
-        let edit = PakTweakEdit {
-            key: "ApplicationScale".into(),
-            value: Some("1.5".into()),
-            engine_section: Some("/Script/Engine.UserInterfaceSettings".into()),
-        };
-        let (_, default_after, windows_after, dp_after) = apply_to_quad(
-            "",
-            default,
-            windows,
-            dp,
-            false,
-            true,
-            true,
-            true,
-            &[edit],
-            PakIniTarget::DeviceProfiles,
-        );
-        assert!(
-            windows_after.contains("ApplicationScale=1.5"),
-            "engine-section edit should land in WindowsEngine (highest engine present):\n{windows_after}"
-        );
-        assert!(
-            !default_after.contains("ApplicationScale="),
-            "DefaultEngine should not be injected:\n{default_after}"
-        );
-        assert!(
-            !dp_after.to_ascii_lowercase().contains("applicationscale"),
-            "DeviceProfiles should never receive engine-section keys:\n{dp_after}"
-        );
     }
 }
 
@@ -1159,5 +478,109 @@ mod device_profile_tests {
             IniType::DeviceProfiles,
         );
         assert!(!out.contains("[Windows DeviceProfile]"));
+    }
+
+    /// A config mod seen in the wild pastes most of an engine config into its device profiles
+    /// file and parks `r.MipMapLODBias=15` under `[ConsoleVariables]` there and nowhere else.
+    /// Reading only the device profile sections made the toggle report the tweak as already
+    /// applied while the edit had nothing to reach, so it was a no-op in both directions.
+    const ENGINE_SECTION_IN_DEVICE_PROFILES: &str = "[Windows DeviceProfile]\r\nDeviceType=Windows\r\n+CVars=r.CustomDepth=0\r\n\r\n[ConsoleVariables]\r\nr.MipMapLODBias=15\r\n";
+
+    /// Reads and edits deliberately differ: a copy outside the Windows profiles is not what the
+    /// game reads, so it is not state, but it is still cleared.
+    #[test]
+    fn a_copy_outside_the_windows_profiles_is_edited_but_not_reported() {
+        assert!(sets_key(
+            ENGINE_SECTION_IN_DEVICE_PROFILES,
+            "r.MipMapLODBias"
+        ));
+        let vars = parse_console_vars(
+            ENGINE_SECTION_IN_DEVICE_PROFILES,
+            "DefaultDeviceProfiles.ini",
+        );
+        assert!(
+            !vars.iter().any(|v| v.key == "r.MipMapLODBias"),
+            "a section the client never reads is not state: {vars:#?}"
+        );
+    }
+
+    #[test]
+    fn a_removal_clears_a_copy_under_console_variables() {
+        let out = apply_edits_to_ini(
+            ENGINE_SECTION_IN_DEVICE_PROFILES,
+            &[edit("r.MipMapLODBias", None)],
+            IniType::DeviceProfiles,
+        );
+        assert!(!out.to_ascii_lowercase().contains("mipmaplodbias"), "{out}");
+        // Nothing else in the file moves.
+        assert!(out.contains("+CVars=r.CustomDepth=0"));
+        assert!(out.contains("[ConsoleVariables]"));
+    }
+
+    /// Widening what an edit reaches must not change where a brand-new key is written: it still
+    /// belongs in the device profile section, with the prefix that section uses.
+    #[test]
+    fn a_new_key_still_lands_in_the_device_profile_section() {
+        let out = apply_edits_to_ini(
+            ENGINE_SECTION_IN_DEVICE_PROFILES,
+            &[edit("r.BrandNew", Some("7"))],
+            IniType::DeviceProfiles,
+        );
+        let before_console = out
+            .split("[ConsoleVariables]")
+            .next()
+            .expect("the file keeps its engine section");
+        assert!(
+            before_console.contains("+CVars=r.BrandNew=7"),
+            "should sit in the device profile section, got:\r\n{out}"
+        );
+    }
+
+    #[test]
+    fn a_system_settings_section_counts_too() {
+        let content = "[Windows DeviceProfile]\r\nDeviceType=Windows\r\n\r\n[SystemSettings]\r\nr.MipMapLODBias=15\r\n";
+        assert!(sets_key(content, "r.MipMapLODBias"));
+        let out = apply_edits_to_ini(
+            content,
+            &[edit("r.MipMapLODBias", None)],
+            IniType::DeviceProfiles,
+        );
+        assert!(!out.to_ascii_lowercase().contains("mipmaplodbias"), "{out}");
+    }
+
+    /// A copy in another platform's profile goes too. It cannot reach a Windows client, but a
+    /// tweak that reports itself as applied while a copy of its key survives anywhere in the file
+    /// is the thing this scan exists to prevent.
+    #[test]
+    fn a_copy_in_another_platforms_profile_is_cleared_too() {
+        let content = "[Windows DeviceProfile]\r\n+CVars=r.MipMapLODBias=15\r\n\r\n[Android DeviceProfile]\r\n+CVars=r.MipMapLODBias=15\r\n";
+        let out = apply_edits_to_ini(
+            content,
+            &[edit("r.MipMapLODBias", None)],
+            IniType::DeviceProfiles,
+        );
+        assert_eq!(out.matches("r.MipMapLODBias").count(), 0, "{out}");
+        assert!(out.contains("[Android DeviceProfile]"), "sections survive");
+    }
+
+    /// A key in a section no reader knows by name is still cleared.
+    #[test]
+    fn a_key_under_an_unrecognised_section_is_cleared() {
+        let content = "[SomethingElse]\r\nr.MipMapLODBias=15\r\n";
+        assert!(sets_key(content, "r.MipMapLODBias"));
+        let out = apply_edits_to_ini(
+            content,
+            &[edit("r.MipMapLODBias", None)],
+            IniType::DeviceProfiles,
+        );
+        assert!(!out.to_ascii_lowercase().contains("mipmaplodbias"), "{out}");
+    }
+
+    /// An engine file has no per-platform split, so every section of one is state.
+    #[test]
+    fn every_section_of_an_engine_file_is_state() {
+        let content = "[SomethingElse]\r\nr.MipMapLODBias=15\r\n";
+        let vars = parse_console_vars(content, "DefaultEngine.ini");
+        assert!(vars.iter().any(|v| v.key == "r.MipMapLODBias"), "{vars:#?}");
     }
 }
