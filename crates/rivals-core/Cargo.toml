@@ -6,13 +6,37 @@ edition.workspace = true
 authors.workspace = true
 
 [dependencies]
+anyhow.workspace = true
+rivals-uasset = { path = "../rivals-uasset" }
 repak.workspace = true
 retoc.workspace = true
+rayon.workspace = true
+block_compression.workspace = true
+png.workspace = true
+exr.workspace = true
+half.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 aes.workspace = true
 hex.workspace = true
 walkdir.workspace = true
 dirs.workspace = true
+cityhasher.workspace = true
 blake3.workspace = true
+similar.workspace = true
 sysinfo.workspace = true
+pelite.workspace = true
+flate2.workspace = true
+regex.workspace = true
+zip = { workspace = true, optional = true }
+sevenz-rust2 = { workspace = true, optional = true }
+unrar = { workspace = true, optional = true }
+
+[features]
+# Installing mods from zip and 7z archives.
+archives = ["dep:zip", "dep:sevenz-rust2"]
+# And from rar archives, through UnRAR's C++ sources.
+rar = ["archives", "dep:unrar"]
+
+[dev-dependencies]
+rivals-uasset = { path = "../rivals-uasset", features = ["test-support"] }

@@ -32,29 +32,8 @@ pub(crate) struct ModProfile {
     pub modified_at: u64,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) enum CompressionLevelSetting {
-    None,
-    Fast,
-    Normal,
-    Optimal1,
-    Optimal2,
-    Optimal3,
-}
-
-impl CompressionLevelSetting {
-    pub(crate) fn to_oodle(self) -> retoc::OodleCompressionLevel {
-        use retoc::OodleCompressionLevel as L;
-        match self {
-            Self::None => L::None,
-            Self::Fast => L::Fast,
-            Self::Normal => L::Normal,
-            Self::Optimal1 => L::Optimal1,
-            Self::Optimal2 => L::Optimal2,
-            Self::Optimal3 => L::Optimal3,
-        }
-    }
-}
+/// Stored under the same names the command line reads, so both front ends agree on a level.
+pub(crate) type CompressionLevelSetting = rivals_core::pak::profile::OodleLevel;
 
 fn default_mod_compression_level() -> CompressionLevelSetting {
     CompressionLevelSetting::Normal
@@ -94,6 +73,29 @@ pub(crate) struct Settings {
     pub(crate) game_running_check_enabled: bool,
     #[serde(default = "default_true")]
     pub(crate) mod_conflict_check_enabled: bool,
+    /// Path to a .usmap mappings file, or a folder holding one. Reading asset properties needs it.
+    #[serde(default)]
+    pub(crate) usmap_path: Option<String>,
+    /// The mod pak asset edits were last saved into, so the inspector can offer it again.
+    #[serde(default)]
+    pub(crate) asset_mod_name: Option<String>,
+    /// What an asset edit is saved as. The game reads packages only from IoStore, so an unset
+    /// setting means IoStore; a plain pak is for tooling that converts it onward itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) asset_save_target: Option<rivals_core::asset_edit::SaveTarget>,
+    /// The language the inspector shows texts in, as the game names it (`en`, `ja`, ...). Unset
+    /// means English.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) text_culture: Option<String>,
+    /// A game log key and IV in hex, set by hand when a patch changes the bundled ones.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) log_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) log_iv: Option<String>,
+    /// Settings this build does not know, written back as they were read: another build of the
+    /// app, newer or older, may share this file, and saving here must not lose what it stored.
+    #[serde(flatten)]
+    pub(crate) others: serde_json::Map<String, serde_json::Value>,
 }
 
 fn default_true() -> bool {
@@ -115,6 +117,13 @@ impl Default for Settings {
             vanilla_compression_level: default_vanilla_compression_level(),
             game_running_check_enabled: true,
             mod_conflict_check_enabled: true,
+            usmap_path: None,
+            asset_mod_name: None,
+            asset_save_target: None,
+            text_culture: None,
+            log_key: None,
+            log_iv: None,
+            others: serde_json::Map::new(),
         }
     }
 }
@@ -307,4 +316,31 @@ pub(crate) fn set_mod_conflict_check_enabled(
     let mut guard = state.lock().map_err(|e| e.to_string())?;
     guard.mod_conflict_check_enabled = enabled;
     guard.save()
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    /// A key this build does not know survives a load and a save, so two builds sharing the file
+    /// cannot drop each other's settings.
+    #[test]
+    fn a_setting_this_build_does_not_know_is_kept() {
+        let stored = r#"{
+            "game_path": "C:/Games/MarvelRivals",
+            "usmap_path": "C:/maps/a.usmap",
+            "some_later_setting": { "nested": [1, 2] }
+        }"#;
+        let settings: Settings = serde_json::from_str(stored).expect("read");
+        assert_eq!(settings.usmap_path.as_deref(), Some("C:/maps/a.usmap"));
+        assert!(settings.auto_check_updates);
+        let saved: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&settings).expect("write")).expect("json");
+        assert_eq!(
+            saved["some_later_setting"],
+            serde_json::json!({ "nested": [1, 2] })
+        );
+        assert_eq!(saved["game_path"], "C:/Games/MarvelRivals");
+    }
 }

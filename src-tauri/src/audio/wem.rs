@@ -61,7 +61,7 @@ pub(super) fn pcm_to_wem(pcm: &[u8], channels: u16, sample_rate: u32) -> Result<
         let stereo_size = pcm.len() as u32 * 2;
         let mut out = build_wem_header(stereo_size, sample_rate);
         out.reserve(stereo_size as usize);
-        for sample in pcm.chunks_exact(2) {
+        for sample in pcm.as_chunks::<2>().0 {
             out.extend_from_slice(sample); // left
             out.extend_from_slice(sample); // right
         }

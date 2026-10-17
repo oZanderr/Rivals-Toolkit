@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
@@ -22,6 +22,15 @@ import {
   XCircle,
 } from "lucide-react";
 
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -36,7 +45,8 @@ import { Tip } from "@/components/ui/tooltip";
 import { useSaveHotkeys } from "@/hooks/useSaveHotkeys";
 import { useScrollAtBottom } from "@/hooks/useScrollAtBottom";
 import type { UpdateInfo } from "@/hooks/useUpdateCheck";
-import { emitModsChanged } from "@/lib/modsEvents";
+import type { KeyCheck } from "@/lib/gameLogs";
+import { emitModsChanged, normalizeFolderPath, onModsChanged } from "@/lib/modsEvents";
 import { setShowHeroIcons } from "@/lib/showHeroIcons";
 import { emitTweakProfilesChanged, onTweakProfilesChanged } from "@/lib/tweakProfileEvents";
 import { cn } from "@/lib/utils";
@@ -54,10 +64,42 @@ interface TweakProfile {
   modified_at: number;
 }
 
+/// A preset stores an entry for every tweak in the catalogue, so the count that says anything is
+/// how many of them it turns on.
+function describeProfile(profile: TweakProfile): string {
+  const on = profile.settings.filter((s) => s.enabled).length;
+  const count = `${on} tweak${on === 1 ? "" : "s"} on`;
+  // Timestamps arrived after the first presets did and read as 0 when the file predates them.
+  if (!profile.modified_at) return count;
+  return `${count} · updated ${new Date(profile.modified_at * 1000).toLocaleDateString()}`;
+}
+
+interface RemoteMapping {
+  name: string;
+  size: number;
+  changelist: number;
+  label: string;
+}
+
 interface InstallInfo {
   path: string;
   source: string;
   launch_url: string;
+}
+
+interface MappingsStatus {
+  path: string | null;
+  loaded: boolean;
+  struct_count: number;
+  enum_count: number;
+  error: string | null;
+  /** The mappings predate the game's newest patch. */
+  warning?: string | null;
+}
+
+/** Windows paths arrive with backslashes; the settings row only shows the file name. */
+function fileNameOf(path: string | null): string {
+  return (path ?? "").split("\\").join("/").split("/").pop() ?? "";
 }
 
 type CompressionLevel = "None" | "Fast" | "Normal" | "Optimal1" | "Optimal2" | "Optimal3";
@@ -81,6 +123,11 @@ const COMPRESSION_LEVEL_DESC: Record<CompressionLevel, string> = {
 };
 
 type BypassKind = "none" | "outdated" | "installed";
+
+interface LogKeyOverride {
+  key: string;
+  iv: string;
+}
 
 interface CharacterDataInfo {
   character_count: number;
@@ -141,6 +188,7 @@ export function Settings({
   const [savedAutoSyncHeroes, setSavedAutoSyncHeroes] = useState<boolean | null>(null);
   const [draftShowHeroIcons, setDraftShowHeroIcons] = useState<boolean | null>(null);
   const [savedShowHeroIcons, setSavedShowHeroIcons] = useState<boolean | null>(null);
+  const [mappings, setMappings] = useState<MappingsStatus | null>(null);
   const [draftModLevel, setDraftModLevel] = useState<CompressionLevel | null>(null);
   const [savedModLevel, setSavedModLevel] = useState<CompressionLevel | null>(null);
   const [draftVanillaLevel, setDraftVanillaLevel] = useState<CompressionLevel | null>(null);
@@ -149,6 +197,10 @@ export function Settings({
   const [savedGameRunningCheck, setSavedGameRunningCheck] = useState<boolean | null>(null);
   const [draftConflictCheck, setDraftConflictCheck] = useState<boolean | null>(null);
   const [savedConflictCheck, setSavedConflictCheck] = useState<boolean | null>(null);
+  const [draftLogKey, setDraftLogKey] = useState<LogKeyOverride | null>(null);
+  const [savedLogKey, setSavedLogKey] = useState<LogKeyOverride | null>(null);
+  const [logKeyError, setLogKeyError] = useState<string | null>(null);
+  const [logKeyStatus, setLogKeyStatus] = useState<KeyCheck | null>(null);
 
   const [saving, setSaving] = useState(false);
   const [pathError, setPathError] = useState<string | null>(null);
@@ -177,6 +229,10 @@ export function Settings({
   } | null>(null);
   const profileNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [renamingProfile, setRenamingProfile] = useState<string | null>(null);
+  const [fetchOpen, setFetchOpen] = useState(false);
+  const [remoteMappings, setRemoteMappings] = useState<RemoteMapping[] | null>(null);
+  const [remoteError, setRemoteError] = useState<string | null>(null);
+  const [downloading, setDownloading] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
 
   const [characterDataInfo, setCharacterDataInfo] = useState<CharacterDataInfo | null>(null);
@@ -188,19 +244,26 @@ export function Settings({
   const syncHeroNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Sync draft when parent gamePath changes externally (e.g. detect, initial load)
-  useEffect(() => {
+  const [syncedGamePath, setSyncedGamePath] = useState(gamePath);
+  if (gamePath !== syncedGamePath) {
+    setSyncedGamePath(gamePath);
     setDraftGamePath(gamePath);
     setPathError(null);
-  }, [gamePath]);
+  }
+
+  // With no path there is no launcher setting to show, and nothing to read the next one from.
+  if (
+    !draftGamePath &&
+    (draftSkipLauncher !== null || savedSkipLauncher !== null || skipLauncherError !== null)
+  ) {
+    setDraftSkipLauncher(null);
+    setSavedSkipLauncher(null);
+    setSkipLauncherError(null);
+  }
 
   // Load skip-launcher whenever the draft path changes
   useEffect(() => {
-    if (!draftGamePath) {
-      setDraftSkipLauncher(null);
-      setSavedSkipLauncher(null);
-      setSkipLauncherError(null);
-      return;
-    }
+    if (!draftGamePath) return;
     let cancelled = false;
     invoke<boolean>("get_skip_launcher", { gameRoot: draftGamePath })
       .then((v) => {
@@ -221,11 +284,10 @@ export function Settings({
     };
   }, [draftGamePath]);
 
+  if (!draftGamePath && bypassKind !== null) setBypassKind(null);
+
   useEffect(() => {
-    if (!draftGamePath) {
-      setBypassKind(null);
-      return;
-    }
+    if (!draftGamePath) return;
     let cancelled = false;
     invoke<BypassKind>("get_signature_bypass_kind", { gameRoot: draftGamePath })
       .then((v) => {
@@ -237,6 +299,20 @@ export function Settings({
     return () => {
       cancelled = true;
     };
+  }, [draftGamePath]);
+
+  // The Plugins tab can switch off or delete the bypass's files.
+  useEffect(() => {
+    if (!draftGamePath) return;
+    const folder = normalizeFolderPath(
+      `${draftGamePath}\\MarvelGame\\Marvel\\Content\\Paks\\~mods`
+    );
+    return onModsChanged((event) => {
+      if (event.source === "Settings" || normalizeFolderPath(event.modsFolder) !== folder) return;
+      invoke<BypassKind>("get_signature_bypass_kind", { gameRoot: draftGamePath })
+        .then(setBypassKind)
+        .catch(() => setBypassKind(null));
+    });
   }, [draftGamePath]);
 
   async function refreshBypassStatus() {
@@ -358,20 +434,66 @@ export function Settings({
       });
   }, []);
 
+  const refreshLogKeyStatus = useCallback(() => {
+    invoke<KeyCheck>("get_log_key_status")
+      .then(setLogKeyStatus)
+      .catch(() => setLogKeyStatus(null));
+  }, []);
+
+  useEffect(() => {
+    invoke<LogKeyOverride>("get_log_key_override")
+      .then((v) => {
+        setDraftLogKey(v);
+        setSavedLogKey(v);
+      })
+      .catch(console.error);
+    refreshLogKeyStatus();
+  }, [refreshLogKeyStatus]);
+
+  const refreshMappings = useCallback(() => {
+    invoke<MappingsStatus>("get_mappings_status")
+      .then(setMappings)
+      .catch(() => setMappings(null));
+  }, []);
+
+  useEffect(refreshMappings, [refreshMappings]);
+
+  // The listing is the same for the life of the window, so it is fetched once and kept.
+  async function openFetch() {
+    setFetchOpen(true);
+    setRemoteError(null);
+    if (remoteMappings !== null) return;
+    try {
+      setRemoteMappings(await invoke<RemoteMapping[]>("list_remote_mappings"));
+    } catch (e) {
+      setRemoteError(String(e));
+    }
+  }
+
+  async function downloadMapping(name: string) {
+    setDownloading(name);
+    setRemoteError(null);
+    try {
+      await invoke<string>("download_remote_mapping", { name });
+      refreshMappings();
+      setFetchOpen(false);
+    } catch (e) {
+      setRemoteError(String(e));
+    } finally {
+      setDownloading(null);
+    }
+  }
+
   useEffect(() => {
     invoke<CharacterDataInfo>("get_character_data_info")
       .then(setCharacterDataInfo)
       .catch(() => setCharacterDataInfo(null));
   }, []);
 
-  const refreshTweakProfiles = async () => {
-    try {
-      const list = await invoke<TweakProfile[]>("list_tweak_profiles");
-      setTweakProfiles(list);
-    } catch {
-      setTweakProfiles([]);
-    }
-  };
+  const refreshTweakProfiles = () =>
+    invoke<TweakProfile[]>("list_tweak_profiles").then(setTweakProfiles, () =>
+      setTweakProfiles([])
+    );
 
   useEffect(() => {
     refreshTweakProfiles();
@@ -596,7 +718,12 @@ export function Settings({
     draftConflictCheck !== null &&
     savedConflictCheck !== null &&
     draftConflictCheck !== savedConflictCheck;
+  const logKeyDirty =
+    draftLogKey !== null &&
+    savedLogKey !== null &&
+    (draftLogKey.key !== savedLogKey.key || draftLogKey.iv !== savedLogKey.iv);
   const dirty =
+    logKeyDirty ||
     pathDirty ||
     skipDirty ||
     autoCheckDirty ||
@@ -706,6 +833,16 @@ export function Settings({
           console.error(e);
         }
       }
+      if (logKeyDirty && draftLogKey !== null) {
+        try {
+          await invoke("set_log_key_override", { key: draftLogKey.key, iv: draftLogKey.iv });
+          setSavedLogKey(draftLogKey);
+          setLogKeyError(null);
+          refreshLogKeyStatus();
+        } catch (e) {
+          setLogKeyError(String(e));
+        }
+      }
       if (savedBadgeTimer.current) clearTimeout(savedBadgeTimer.current);
       setSavedBadge(true);
       savedBadgeTimer.current = setTimeout(() => setSavedBadge(false), 2500);
@@ -725,6 +862,8 @@ export function Settings({
     setDraftVanillaLevel(savedVanillaLevel);
     setDraftGameRunningCheck(savedGameRunningCheck);
     setDraftConflictCheck(savedConflictCheck);
+    setDraftLogKey(savedLogKey);
+    setLogKeyError(null);
     setPathError(null);
   }
 
@@ -740,11 +879,11 @@ export function Settings({
             <h2 className="text-xl font-bold">Settings</h2>
           </div>
 
-          {/* ── Game Root ── */}
+          {/* ── Game ── */}
           <div className="flex flex-col overflow-hidden rounded-md border border-border">
             <div className="border-b border-border bg-card px-3 py-2">
               <div className="flex items-center gap-2">
-                <h3 className="text-sm font-semibold">Game Root</h3>
+                <h3 className="text-sm font-semibold">Game</h3>
                 {pathError && (
                   <span className="flex items-center gap-1.5 text-[11px] font-medium text-err">
                     <XCircle size={13} strokeWidth={2.5} />
@@ -795,15 +934,8 @@ export function Settings({
                 </Tip>
               </div>
             </div>
-          </div>
-
-          {/* ── Launch Options ── */}
-          <div className="flex flex-col overflow-hidden rounded-md border border-border">
-            <div className="border-b border-border bg-card px-3 py-2">
-              <h3 className="text-sm font-semibold">Launch Options</h3>
-            </div>
             <Tip content={skipLauncherError} disabled={!skipLauncherError}>
-              <label className="flex items-center gap-3 rounded-sm px-3 py-3 hover:bg-secondary/50">
+              <label className="flex items-center gap-3 border-t border-border px-3 py-3 hover:bg-secondary/50">
                 <div className="flex flex-1 flex-col gap-0.5">
                   <span className={cn("text-[13px] font-medium", skipLauncherError && "text-err")}>
                     Skip Launcher
@@ -903,6 +1035,93 @@ export function Settings({
             </div>
           </div>
 
+          {/* ── Signature Bypass ── */}
+          <div className="flex flex-col overflow-hidden rounded-md border border-border">
+            <div className="flex items-center gap-3 border-b border-border bg-card px-3 py-2">
+              <h3 className="text-sm font-semibold">Signature Bypass</h3>
+              {bypassNotice && (
+                <span
+                  className={cn(
+                    "flex items-center gap-1.5 text-[11px] font-medium",
+                    bypassNotice.type === "ok" ? "text-ok" : "text-err"
+                  )}
+                >
+                  {bypassNotice.type === "ok" ? (
+                    <CheckCircle2 size={13} strokeWidth={2.5} />
+                  ) : (
+                    <XCircle size={13} strokeWidth={2.5} />
+                  )}
+                  {bypassNotice.msg}
+                </span>
+              )}
+            </div>
+            <div className="flex items-center gap-3 rounded-sm px-3 py-3 hover:bg-secondary/50">
+              <div className="flex flex-1 flex-col gap-0.5">
+                <span className="text-[13px] font-medium">
+                  {bypassKind === "installed"
+                    ? "Bypass installed"
+                    : bypassKind === "outdated"
+                      ? "Bypass out of date"
+                      : "Install bypass"}
+                </span>
+                <span className="text-[11px] text-muted-foreground">
+                  {bypassKind === "installed" ? (
+                    "Removes the bypass from the game directory."
+                  ) : bypassKind === "outdated" ? (
+                    "An older bypass is installed. Update to swap in the current loader and payload."
+                  ) : (
+                    <>
+                      Installs{" "}
+                      <button
+                        type="button"
+                        onClick={() =>
+                          openUrl("https://github.com/oZanderr/minimal-asi-loader").catch(
+                            console.error
+                          )
+                        }
+                        className="text-foreground underline underline-offset-2 hover:text-primary"
+                      >
+                        Minimal ASI Loader
+                      </button>{" "}
+                      as <span className="text-foreground">dsound.dll</span> plus the{" "}
+                      <span className="text-foreground">MarvelRivalsUTOCSignatureBypass.asi</span>{" "}
+                      payload into the game directory. Required to load modified containers.
+                    </>
+                  )}
+                </span>
+              </div>
+              {bypassKind === "installed" ? (
+                <Button variant="red" size="sm" onClick={removeBypass} disabled={!draftGamePath}>
+                  <ShieldOff size={13} />
+                  Remove
+                </Button>
+              ) : (
+                <>
+                  {bypassKind === "outdated" && (
+                    <Button
+                      variant="red"
+                      size="sm"
+                      onClick={removeBypass}
+                      disabled={!draftGamePath}
+                    >
+                      <ShieldOff size={13} />
+                      Remove
+                    </Button>
+                  )}
+                  <Button
+                    variant="green"
+                    size="sm"
+                    onClick={installBypass}
+                    disabled={!draftGamePath || bypassKind === null}
+                  >
+                    <Shield size={13} />
+                    {bypassKind === "outdated" ? "Update" : "Install"}
+                  </Button>
+                </>
+              )}
+            </div>
+          </div>
+
           {/* ── Advanced ── */}
           <div className="flex flex-col overflow-hidden rounded-md border border-border">
             <div className="border-b border-border bg-card px-3 py-2">
@@ -938,6 +1157,127 @@ export function Settings({
                 disabled={draftConflictCheck === null}
               />
             </label>
+          </div>
+
+          {/* ── Asset Mappings ── */}
+          <div className="flex flex-col overflow-hidden rounded-md border border-border">
+            <div className="border-b border-border bg-card px-3 py-2">
+              <h3 className="text-sm font-semibold">Asset Mappings</h3>
+            </div>
+            <div className="flex items-center gap-3 rounded-sm px-3 py-3 hover:bg-secondary/50">
+              <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                <span className="text-[13px] font-medium">Mappings file (.usmap)</span>
+                <span className="text-[11px] text-muted-foreground">
+                  Marvel Rivals ships packages without property names or types, so reading asset
+                  contents needs a mappings file that supplies the schema. Regenerate it after a
+                  game patch.
+                </span>
+                {mappings?.loaded ? (
+                  <span
+                    className="truncate text-[11px] text-emerald-400"
+                    title={mappings.path ?? ""}
+                  >
+                    {mappings.struct_count.toLocaleString()} structs,{" "}
+                    {mappings.enum_count.toLocaleString()} enums loaded from{" "}
+                    {fileNameOf(mappings.path)}
+                  </span>
+                ) : (
+                  <span className="text-[11px] text-amber-400">
+                    {mappings?.error ?? "Not set. Asset contents cannot be read."}
+                  </span>
+                )}
+                {mappings?.warning && (
+                  <span className="text-[11px] text-amber-400">
+                    Out of date: {mappings.warning}.
+                  </span>
+                )}
+              </div>
+              <Button size="sm" variant="outline" className="h-8" onClick={openFetch}>
+                <Download size={13} />
+                Fetch…
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-8"
+                onClick={async () => {
+                  const picked = await open({
+                    multiple: false,
+                    filters: [{ name: "Unreal mappings", extensions: ["usmap"] }],
+                  });
+                  if (typeof picked !== "string") return;
+                  await invoke("set_mappings_path", { path: picked });
+                  refreshMappings();
+                }}
+              >
+                Choose…
+              </Button>
+              {mappings?.path && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-8"
+                  onClick={async () => {
+                    await invoke("set_mappings_path", { path: null });
+                    refreshMappings();
+                  }}
+                >
+                  Clear
+                </Button>
+              )}
+            </div>
+          </div>
+
+          {/* ── Game Logs ── */}
+          <div className="flex flex-col overflow-hidden rounded-md border border-border">
+            <div className="border-b border-border bg-card px-3 py-2">
+              <h3 className="text-sm font-semibold">Game Logs</h3>
+            </div>
+            <div className="flex flex-col gap-2 px-3 py-3">
+              <div className="flex flex-col gap-0.5">
+                <span className="text-[13px] font-medium">Log decoding key</span>
+                <span className="text-[11px] text-muted-foreground">
+                  The game encrypts its logs with a key built into the game. The toolkit ships the
+                  current one; if a patch changes it, enter the new key and IV here, 32 hex
+                  characters each. Leave both empty to use the bundled key.
+                </span>
+                {logKeyStatus &&
+                  (logKeyStatus.opens === false ? (
+                    <span className="text-[11px] text-amber-400">
+                      The {logKeyStatus.source} key does not open the newest log,{" "}
+                      {logKeyStatus.session}.
+                    </span>
+                  ) : (
+                    <span className="text-[11px] text-emerald-400">
+                      Using the {logKeyStatus.source} key
+                      {logKeyStatus.opens ? `, which opens the newest log` : ""}.
+                    </span>
+                  ))}
+              </div>
+              <div className="flex gap-2">
+                <Input
+                  value={draftLogKey?.key ?? ""}
+                  onChange={(e) =>
+                    setDraftLogKey((prev) => (prev ? { ...prev, key: e.target.value } : prev))
+                  }
+                  disabled={draftLogKey === null}
+                  placeholder="Key"
+                  spellCheck={false}
+                  className="h-8 font-mono text-[12px]"
+                />
+                <Input
+                  value={draftLogKey?.iv ?? ""}
+                  onChange={(e) =>
+                    setDraftLogKey((prev) => (prev ? { ...prev, iv: e.target.value } : prev))
+                  }
+                  disabled={draftLogKey === null}
+                  placeholder="IV"
+                  spellCheck={false}
+                  className="h-8 font-mono text-[12px]"
+                />
+              </div>
+              {logKeyError && <span className="text-[11px] text-err">{logKeyError}</span>}
+            </div>
           </div>
 
           {/* ── Compression ── */}
@@ -1035,7 +1375,7 @@ export function Settings({
             </div>
             {tweakProfiles.length === 0 ? (
               <p className="px-3 py-4 text-center text-[12px] text-muted-foreground">
-                No presets yet. Save tweaks as a preset from the Pak Config or Config Tweaks tab.
+                No presets yet. Save tweaks as a preset from Config Tweaks → Pak Config.
               </p>
             ) : (
               <ul className="divide-y divide-border/50">
@@ -1048,24 +1388,29 @@ export function Settings({
                         key={p.name}
                         className="flex items-center gap-1 px-3 py-2 hover:bg-secondary/40"
                       >
-                        {isRenaming ? (
-                          <input
-                            autoFocus
-                            value={renameDraft}
-                            onChange={(e) => setRenameDraft(e.target.value)}
-                            onKeyDown={(e) => {
-                              if (e.key === "Enter") commitRename(p.name);
-                              if (e.key === "Escape") {
-                                setRenamingProfile(null);
-                                setRenameDraft("");
-                              }
-                            }}
-                            placeholder="New preset name…"
-                            className="h-7 min-w-0 flex-1 rounded-md border border-border bg-background px-3 text-[12px] outline-none placeholder:text-muted-foreground/50 focus:border-primary"
-                          />
-                        ) : (
-                          <span className="min-w-0 flex-1 truncate text-[13px]">{p.name}</span>
-                        )}
+                        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                          {isRenaming ? (
+                            <input
+                              autoFocus
+                              value={renameDraft}
+                              onChange={(e) => setRenameDraft(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") commitRename(p.name);
+                                if (e.key === "Escape") {
+                                  setRenamingProfile(null);
+                                  setRenameDraft("");
+                                }
+                              }}
+                              placeholder="New preset name…"
+                              className="h-7 w-full rounded-md border border-border bg-background px-3 text-[12px] outline-none placeholder:text-muted-foreground/50 focus:border-primary"
+                            />
+                          ) : (
+                            <span className="truncate text-[13px]">{p.name}</span>
+                          )}
+                          <span className="text-[11px] text-muted-foreground">
+                            {describeProfile(p)}
+                          </span>
+                        </div>
                         {isRenaming ? (
                           <>
                             <Tip content="Save (Enter)">
@@ -1131,91 +1476,6 @@ export function Settings({
                   })}
               </ul>
             )}
-          </div>
-
-          {/* ── Signature Bypass ── */}
-          <div className="flex flex-col overflow-hidden rounded-md border border-border">
-            <div className="flex items-center gap-3 border-b border-border bg-card px-3 py-2">
-              <h3 className="text-sm font-semibold">Signature Bypass</h3>
-              {bypassNotice && (
-                <span
-                  className={cn(
-                    "flex items-center gap-1.5 text-[11px] font-medium",
-                    bypassNotice.type === "ok" ? "text-ok" : "text-err"
-                  )}
-                >
-                  {bypassNotice.type === "ok" ? (
-                    <CheckCircle2 size={13} strokeWidth={2.5} />
-                  ) : (
-                    <XCircle size={13} strokeWidth={2.5} />
-                  )}
-                  {bypassNotice.msg}
-                </span>
-              )}
-            </div>
-            <div className="flex items-center gap-3 rounded-sm px-3 py-3 hover:bg-secondary/50">
-              <div className="flex flex-1 flex-col gap-0.5">
-                <span className="text-[13px] font-medium">
-                  {bypassKind === "installed"
-                    ? "Bypass installed"
-                    : bypassKind === "outdated"
-                      ? "Bypass out of date"
-                      : "Install bypass"}
-                </span>
-                <span className="text-[11px] text-muted-foreground">
-                  {bypassKind === "installed" ? (
-                    "Removes the bypass from the game directory."
-                  ) : bypassKind === "outdated" ? (
-                    "An older bypass is installed. Update to swap in the current loader and payload."
-                  ) : (
-                    <>
-                      Installs{" "}
-                      <button
-                        type="button"
-                        onClick={() =>
-                          openUrl("https://github.com/oZanderr/oxiloader").catch(console.error)
-                        }
-                        className="text-foreground underline underline-offset-2 hover:text-primary"
-                      >
-                        oxiloader
-                      </button>{" "}
-                      as <span className="text-foreground">dsound.dll</span> plus the{" "}
-                      <span className="text-foreground">MarvelRivalsUTOCSignatureBypass.asi</span>{" "}
-                      payload into the game directory. Required to load modified containers.
-                    </>
-                  )}
-                </span>
-              </div>
-              {bypassKind === "installed" ? (
-                <Button variant="red" size="sm" onClick={removeBypass} disabled={!draftGamePath}>
-                  <ShieldOff size={13} />
-                  Remove
-                </Button>
-              ) : (
-                <>
-                  {bypassKind === "outdated" && (
-                    <Button
-                      variant="red"
-                      size="sm"
-                      onClick={removeBypass}
-                      disabled={!draftGamePath}
-                    >
-                      <ShieldOff size={13} />
-                      Remove
-                    </Button>
-                  )}
-                  <Button
-                    variant="green"
-                    size="sm"
-                    onClick={installBypass}
-                    disabled={!draftGamePath || bypassKind === null}
-                  >
-                    <Shield size={13} />
-                    {bypassKind === "outdated" ? "Update" : "Install"}
-                  </Button>
-                </>
-              )}
-            </div>
           </div>
 
           {/* ── Updates ── */}
@@ -1313,6 +1573,54 @@ export function Settings({
           </div>
         </div>
       </div>
+
+      {/* ── Fetch mappings ── */}
+      <AlertDialog open={fetchOpen} onOpenChange={setFetchOpen}>
+        <AlertDialogContent className="max-w-xl">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Fetch mappings</AlertDialogTitle>
+            <AlertDialogDescription>
+              Published by the rivals-depot repository, newest first. Pick the one matching the game
+              build you are reading; a file from another build will misread properties.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          {remoteError && <p className="text-[12px] text-err">{remoteError}</p>}
+          {remoteMappings === null && !remoteError ? (
+            <p className="py-6 text-center text-[12px] text-muted-foreground">Loading…</p>
+          ) : (
+            <ul className="max-h-80 divide-y divide-border/50 overflow-y-auto rounded-md border border-border">
+              {(remoteMappings ?? []).map((m) => (
+                <li
+                  key={m.name}
+                  className="flex items-center gap-2 px-3 py-2 hover:bg-secondary/40"
+                >
+                  <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                    <span className="truncate text-[12px]" title={m.name}>
+                      {m.label} · {m.changelist.toLocaleString()}
+                    </span>
+                    <span className="truncate text-[11px] text-muted-foreground">{m.name}</span>
+                  </div>
+                  <span className="shrink-0 text-[11px] text-muted-foreground">
+                    {Math.round(m.size / 1024).toLocaleString()} KB
+                  </span>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7 shrink-0"
+                    disabled={downloading !== null}
+                    onClick={() => downloadMapping(m.name)}
+                  >
+                    {downloading === m.name ? "Downloading…" : "Use"}
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )}
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={downloading !== null}>Close</AlertDialogCancel>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

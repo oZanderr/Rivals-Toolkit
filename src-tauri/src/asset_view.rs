@@ -1,0 +1,1443 @@
+//! Tauri commands for reading the decoded contents of a .uasset from a pak or IoStore container.
+
+use serde::Serialize;
+use tauri::State;
+
+use rivals_core::asset::{self, AssetSource};
+use rivals_core::asset_edit::{self, AssetEditRequest};
+use rivals_core::inherit;
+use rivals_core::localization;
+use rivals_core::mappings;
+use rivals_core::schema_synth::{self, PackageSource};
+use rivals_uasset::{AssetBundle, HexRow, PackageEdits, ParsedPackage, RemovalPlan};
+
+use crate::settings::SettingsState;
+
+#[derive(Serialize)]
+pub(crate) struct MappingsStatus {
+    pub path: Option<String>,
+    pub loaded: bool,
+    pub struct_count: usize,
+    pub enum_count: usize,
+    /// Why no mappings could be used, so the UI can explain rather than just disable itself.
+    pub error: Option<String>,
+    /// The mappings predate the game's newest patch.
+    pub warning: Option<String>,
+}
+
+fn configured_usmap(state: &State<'_, SettingsState>) -> Option<String> {
+    state.lock().ok().and_then(|s| s.usmap_path.clone())
+}
+
+fn text_culture(state: &State<'_, SettingsState>) -> String {
+    state
+        .lock()
+        .ok()
+        .and_then(|s| s.text_culture.clone())
+        .unwrap_or_else(|| "en".to_string())
+}
+
+/// Fills in what the game shows for each text, in `culture`. Translations that cannot be read
+/// leave the texts as the package stores them.
+fn show_game_text(
+    parsed: &mut ParsedPackage,
+    game_root: &str,
+    container: &str,
+    usmap: Option<&str>,
+    culture: &str,
+) {
+    let Ok(localizer) = localization::Localizer::for_culture(game_root, culture) else {
+        return;
+    };
+    let schema = mappings::resolve(None, usmap)
+        .and_then(|path| mappings::load(&path))
+        .ok();
+    localization::localize(
+        parsed,
+        &localizer,
+        &localization::TableSource {
+            game_root,
+            container,
+            mappings: schema.as_deref(),
+        },
+    );
+}
+
+/// The package the inspector last asked inherited values for, parsed once for every export the
+/// user opens in it. `generation` changes whenever the inspector reads the package again.
+fn viewed_package(
+    game_root: &str,
+    container: &str,
+    entry: &str,
+    generation: u32,
+    usmap: Option<String>,
+) -> Result<std::sync::Arc<ParsedPackage>, String> {
+    type Viewed = Option<(String, std::sync::Arc<ParsedPackage>)>;
+    static VIEWED: std::sync::Mutex<Viewed> = std::sync::Mutex::new(None);
+    let key = format!("{game_root}\u{1}{container}\u{1}{entry}\u{1}{generation}");
+    if let Some((held, parsed)) = &*VIEWED.lock().map_err(|e| e.to_string())?
+        && *held == key
+    {
+        return Ok(parsed.clone());
+    }
+    let parsed = std::sync::Arc::new(parse(game_root, container, entry, usmap)?);
+    *VIEWED.lock().map_err(|e| e.to_string())? = Some((key, parsed.clone()));
+    Ok(parsed)
+}
+
+/// The values export `export` does not store, as its archetypes hold them, for the inspector to
+/// show in place of "not stored" when it is opened.
+#[tauri::command]
+pub(crate) async fn inherited_values(
+    state: State<'_, SettingsState>,
+    game_root: String,
+    container: String,
+    entry: String,
+    export: u32,
+    generation: u32,
+) -> Result<inherit::InheritReport, String> {
+    let usmap = configured_usmap(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let parsed = viewed_package(&game_root, &container, &entry, generation, usmap.clone())?;
+        let schema = mappings::resolve(None, usmap.as_deref())
+            .and_then(|path| mappings::load(&path))
+            .ok();
+        inherit::inherited_for(
+            &parsed,
+            export,
+            &inherit::ArchetypeSource {
+                game_root: &game_root,
+                container: &container,
+                mappings: schema.as_deref(),
+            },
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// The languages the game ships translations for, for the inspector's language picker.
+#[tauri::command]
+pub(crate) async fn text_cultures(game_root: String) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || localization::cultures(&game_root))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub(crate) fn get_text_culture(state: State<'_, SettingsState>) -> String {
+    text_culture(&state)
+}
+
+#[tauri::command]
+pub(crate) fn set_text_culture(
+    state: State<'_, SettingsState>,
+    culture: String,
+) -> Result<(), String> {
+    let mut guard = state.lock().map_err(|e| e.to_string())?;
+    guard.text_culture = Some(culture).filter(|c| !c.is_empty());
+    guard.save()
+}
+
+#[derive(Serialize)]
+pub(crate) struct EnumOption {
+    pub value: i64,
+    pub name: String,
+}
+
+/// The enumerators of one enum in value order, for a picker; empty when the mappings do not know
+/// the enum, in which case the cell stays free text.
+#[tauri::command]
+pub(crate) fn enum_options(
+    state: State<'_, SettingsState>,
+    enum_type: String,
+) -> Result<Vec<EnumOption>, String> {
+    let path = mappings::resolve(None, configured_usmap(&state).as_deref())?;
+    let schema = mappings::load(&path)?;
+    Ok(schema
+        .enumerators(&enum_type)
+        .into_iter()
+        .map(|(value, name)| EnumOption { value, name })
+        .collect())
+}
+
+/// An empty container means the entry is a path to a file on disk.
+fn source_of(container: &str) -> AssetSource {
+    if container.is_empty() {
+        return AssetSource::Loose;
+    }
+    match std::path::Path::new(container)
+        .extension()
+        .and_then(|e| e.to_str())
+    {
+        Some("utoc") => AssetSource::Utoc,
+        _ => AssetSource::Pak,
+    }
+}
+
+/// Mappings are looked up but not required: a tagged package carries its own type information,
+/// so an asset saved out of the editor opens with nothing configured.
+fn parse(
+    game_root: &str,
+    container: &str,
+    entry: &str,
+    usmap: Option<String>,
+) -> Result<ParsedPackage, String> {
+    let schema = mappings::resolve(None, usmap.as_deref())
+        .and_then(|path| mappings::load(&path))
+        .ok();
+    let kind = source_of(container);
+    let bundle = asset::load_bundle(game_root, container, entry, kind)?;
+    schema_synth::parse_package_opts(
+        &AssetBundle {
+            asset: &bundle.asset_file_buffer,
+            exports: &bundle.exports_file_buffer,
+        },
+        schema.as_deref(),
+        &PackageSource {
+            game_root,
+            container,
+            entry,
+            kind,
+            mod_container: None,
+        },
+        // Inherited values are shown so they can be given one of their own.
+        rivals_uasset::ParseOptions {
+            declared_slots: true,
+            ..Default::default()
+        },
+    )
+}
+
+/// One export's raw bytes, with what the reader made of them.
+#[derive(Serialize)]
+pub(crate) struct BytesView {
+    rows: Vec<HexRow>,
+    base: u64,
+    size: u64,
+    /// Where parsing stopped, when it did not reach the end.
+    stopped_at: Option<u64>,
+    /// The byte run each property consumed, so the viewer can show which is which.
+    ranges: Vec<ByteRange>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct ByteRange {
+    name: String,
+    kind: String,
+    depth: u32,
+    start: u64,
+    end: u64,
+}
+
+/// Mappings are only needed for the property ranges, so the bytes still show without a .usmap.
+fn bytes_view(
+    game_root: &str,
+    container: &str,
+    entry: &str,
+    export: u32,
+    usmap: Option<String>,
+) -> Result<BytesView, String> {
+    let bundle = asset::load_bundle(game_root, container, entry, source_of(container))?;
+    let bundle = AssetBundle {
+        asset: &bundle.asset_file_buffer,
+        exports: &bundle.exports_file_buffer,
+    };
+    let header = rivals_uasset::read_header(&bundle)?;
+    let (bytes, offset) = rivals_uasset::export_bytes(&bundle, &header, export)?;
+    let base = u64::try_from(offset).map_err(|_| "export has a negative offset")?;
+    let end = base + bytes.len() as u64;
+
+    let schema = mappings::resolve(None, usmap.as_deref())
+        .and_then(|path| mappings::load(&path))
+        .ok();
+    let source = PackageSource {
+        game_root,
+        container,
+        entry,
+        kind: source_of(container),
+        mod_container: None,
+    };
+    let (stopped_at, ranges) =
+        match schema_synth::parse_package_traced(&bundle, schema.as_deref(), &source) {
+            Ok((parsed, trace)) => {
+                let stopped = parsed
+                    .exports
+                    .iter()
+                    .find(|e| e.index == export)
+                    .and_then(|e| stop_offset(e, base));
+                let ranges = trace
+                    .into_iter()
+                    .filter(|e| e.start >= base && e.start < end)
+                    .map(|e| ByteRange {
+                        name: e.name,
+                        kind: e.kind.to_string(),
+                        depth: e.depth,
+                        start: e.start,
+                        end: e.end,
+                    })
+                    .collect();
+                (stopped, ranges)
+            }
+            Err(_) => (None, Vec::new()),
+        };
+
+    Ok(BytesView {
+        rows: rivals_uasset::hex_rows(bytes, base),
+        base,
+        size: bytes.len() as u64,
+        stopped_at,
+        ranges,
+    })
+}
+
+fn stop_offset(export: &rivals_uasset::ParsedExport, base: u64) -> Option<u64> {
+    match &export.status {
+        rivals_uasset::ExportStatus::Complete => None,
+        rivals_uasset::ExportStatus::Payload { consumed, .. }
+        | rivals_uasset::ExportStatus::Partial { consumed, .. } => Some(base + consumed),
+        rivals_uasset::ExportStatus::Failed { .. } => None,
+    }
+}
+
+#[tauri::command]
+pub(crate) async fn inspect_asset(
+    state: State<'_, SettingsState>,
+    game_root: String,
+    container: String,
+    entry: String,
+) -> Result<ParsedPackage, String> {
+    let usmap = configured_usmap(&state);
+    let culture = text_culture(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut parsed = parse(&game_root, &container, &entry, usmap.clone())?;
+        show_game_text(
+            &mut parsed,
+            &game_root,
+            &container,
+            usmap.as_deref(),
+            &culture,
+        );
+        Ok(parsed)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub(crate) async fn export_bytes_view(
+    state: State<'_, SettingsState>,
+    game_root: String,
+    container: String,
+    entry: String,
+    export: u32,
+) -> Result<BytesView, String> {
+    let usmap = configured_usmap(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        bytes_view(&game_root, &container, &entry, export, usmap)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// The most bytes a value's own bytes are fetched for editing by hand: past this, hex is no way to
+/// write a value.
+const VALUE_BYTES_CAP: u64 = 64 * 1024;
+
+/// The bytes a value spans, by the absolute offsets the reader recorded: in the header below
+/// `base`, its length, and in the export data from there.
+fn value_slice(
+    asset: &[u8],
+    exports: &[u8],
+    base: u64,
+    start: u64,
+    end: u64,
+) -> Result<Vec<u8>, String> {
+    let length = end
+        .checked_sub(start)
+        .ok_or("a value cannot end before it starts")?;
+    if length > VALUE_BYTES_CAP {
+        return Err(format!(
+            "this value holds {length} bytes, more than the {VALUE_BYTES_CAP} that are edited by hand"
+        ));
+    }
+    let (data, from) = match start.checked_sub(base) {
+        Some(from) => (exports, from),
+        None => (asset, start),
+    };
+    let from = usize::try_from(from).map_err(|_| "implausible offset")?;
+    data.get(from..from + length as usize)
+        .map(<[u8]>::to_vec)
+        .ok_or_else(|| "this value lies outside the package".to_string())
+}
+
+/// A value's bytes as the package holds them, for typing new ones over them.
+#[tauri::command]
+pub(crate) async fn value_bytes(
+    game_root: String,
+    container: String,
+    entry: String,
+    start: u64,
+    end: u64,
+) -> Result<Vec<u8>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let loaded = asset::load_bundle(&game_root, &container, &entry, source_of(&container))?;
+        let bundle = AssetBundle {
+            asset: &loaded.asset_file_buffer,
+            exports: &loaded.exports_file_buffer,
+        };
+        let header = rivals_uasset::read_header(&bundle)?;
+        let base = u64::try_from(header.summary.versioning_info.total_header_size)
+            .map_err(|_| "this package reports an implausible header size")?;
+        value_slice(bundle.asset, bundle.exports, base, start, end)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// One export's bytecode, disassembled for reading.
+#[derive(Serialize)]
+pub(crate) struct ScriptView {
+    lines: Vec<rivals_uasset::ScriptLine>,
+    /// Labels at the very end of the script, where a jump past its last statement lands.
+    end_labels: Vec<rivals_uasset::TextLabel>,
+    /// The whole script as assembler text, when it decoded whole.
+    text: Option<String>,
+    /// The events that enter this function, when it is a Blueprint's Ubergraph, by the offset
+    /// each one starts at.
+    entries: Vec<(u32, String)>,
+    /// The function's parameters and locals, when the export is a function.
+    signature: Option<rivals_uasset::FunctionSignature>,
+    /// The signature written out, `Name(In: T) -> Out: T`.
+    signature_text: Option<String>,
+    /// The functions in this package that call this one, with each call's offset.
+    callers: Vec<(String, u32)>,
+    /// Whether the walk reached the end. A script that stopped is shown as far as it got.
+    complete: bool,
+    stopped: Option<String>,
+    /// Why the script has to keep its size, when it does: an edit that changes the length of
+    /// anything in it is refused, and one that keeps every byte where it was is not.
+    resize_lock: Option<String>,
+    buffer_size: u32,
+    storage_size: u32,
+    statements: usize,
+}
+
+/// A Niagara script's VM program as the inspector shows it: the script read, its listing, what
+/// each output is computed from, and why a constant edit would be refused, where it would be.
+#[derive(Serialize)]
+pub(crate) struct VmView {
+    #[serde(flatten)]
+    script: rivals_uasset::VmScript,
+    lines: Vec<rivals_uasset::VmLine>,
+    traces: Vec<rivals_uasset::VmTrace>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    edit_refusal: Option<String>,
+}
+
+#[tauri::command]
+pub(crate) async fn export_vm_view(
+    state: State<'_, SettingsState>,
+    game_root: String,
+    container: String,
+    entry: String,
+    export: u32,
+) -> Result<VmView, String> {
+    let usmap = configured_usmap(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let schema = mappings::resolve(None, usmap.as_deref())
+            .and_then(|path| mappings::load(&path))
+            .ok();
+        let parsed = parse(&game_root, &container, &entry, usmap)?;
+        let found = parsed
+            .exports
+            .iter()
+            .find(|e| e.index == export)
+            .ok_or_else(|| format!("no export {export}"))?;
+        if found.class_name != "NiagaraScript" {
+            return Err(format!("{} is not a Niagara script", found.object_name));
+        }
+        let script = rivals_uasset::read_vm_script(found, schema.as_deref());
+        Ok(VmView {
+            lines: rivals_uasset::vm_lines(&script),
+            traces: rivals_uasset::trace_outputs(&script),
+            edit_refusal: rivals_uasset::vm_edit_refusal(&script),
+            script,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub(crate) async fn export_script_view(
+    state: State<'_, SettingsState>,
+    game_root: String,
+    container: String,
+    entry: String,
+    export: u32,
+) -> Result<ScriptView, String> {
+    let usmap = configured_usmap(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let parsed = parse(&game_root, &container, &entry, usmap)?;
+        let found = parsed
+            .exports
+            .iter()
+            .find(|e| e.index == export)
+            .ok_or_else(|| format!("no export {export}"))?;
+        let script = found
+            .script
+            .as_ref()
+            .ok_or_else(|| format!("{} carries no bytecode", found.object_name))?;
+        let scripts = || {
+            parsed
+                .exports
+                .iter()
+                .filter_map(|e| Some((e.object_name.as_str(), e.script.as_ref()?)))
+        };
+        let entries = rivals_uasset::ubergraph_entries(
+            scripts(),
+            &rivals_uasset::event_graphs(&parsed.exports),
+        )
+        .remove(&found.object_name)
+        .unwrap_or_default();
+        let callers = rivals_uasset::call_sites(scripts())
+            .remove(&found.object_name)
+            .unwrap_or_default();
+        let text = rivals_uasset::print_script(&parsed, export);
+        Ok(ScriptView {
+            lines: rivals_uasset::script_lines(&parsed, export),
+            end_labels: text
+                .as_ref()
+                .map(|text| text.end_labels.clone())
+                .unwrap_or_default(),
+            text: text.filter(|_| script.complete()).map(|text| text.text()),
+            entries,
+            signature_text: found
+                .signature
+                .as_ref()
+                .map(|s| s.render(&found.object_name)),
+            signature: found.signature.clone(),
+            callers,
+            complete: script.stopped.is_none(),
+            stopped: script.stopped.as_ref().map(|stop| stop.reason.clone()),
+            resize_lock: script
+                .stopped
+                .is_none()
+                .then(|| script.resize_lock())
+                .flatten(),
+            buffer_size: script.buffer_size,
+            storage_size: script.storage_size,
+            statements: script.statements.len(),
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// What writing the function at `export` anew from `text` would do: the problems the text has,
+/// line by line, or the changes a save would make and what it would need leave for. See
+/// `rivals_core::asset_edit::preview_script_text`.
+#[tauri::command]
+pub(crate) async fn assemble_preview(
+    state: State<'_, SettingsState>,
+    game_root: String,
+    container: String,
+    entry: String,
+    export: u32,
+    text: String,
+) -> Result<asset_edit::TextPreview, String> {
+    let usmap = configured_usmap(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let schema = mappings::resolve(None, usmap.as_deref())
+            .and_then(|path| mappings::load(&path))
+            .ok();
+        asset_edit::preview_script_text(
+            &AssetEditRequest {
+                game_root: &game_root,
+                container: &container,
+                entry: &entry,
+                kind: source_of(&container),
+                mod_name: "",
+                changes: Default::default(),
+            },
+            schema.as_deref(),
+            export,
+            &text,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// What adding a function to the class would do, its script written from `text`: the text's
+/// problems line by line, or the changes a save would make. See
+/// `rivals_core::asset_edit::preview_new_function`.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn new_function_preview(
+    state: State<'_, SettingsState>,
+    game_root: String,
+    container: String,
+    entry: String,
+    class: Option<u32>,
+    name: String,
+    signature: String,
+    text: String,
+) -> Result<asset_edit::TextPreview, String> {
+    let usmap = configured_usmap(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let schema = mappings::resolve(None, usmap.as_deref())
+            .and_then(|path| mappings::load(&path))
+            .ok();
+        asset_edit::preview_new_function(
+            &AssetEditRequest {
+                game_root: &game_root,
+                container: &container,
+                entry: &entry,
+                kind: source_of(&container),
+                mod_name: "",
+                changes: Default::default(),
+            },
+            schema.as_deref(),
+            &rivals_uasset::NewFunctionEdit {
+                class,
+                name,
+                signature,
+                text,
+            },
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// How the call starting at `at` would fare pointed at `value`: both functions' shapes and the
+/// verdict a save would reach. See `rivals_core::asset_edit::preview_call`.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn script_call_preview(
+    state: State<'_, SettingsState>,
+    game_root: String,
+    container: String,
+    entry: String,
+    export: u32,
+    statement: u32,
+    at: u32,
+    value: String,
+) -> Result<asset_edit::CallPreview, String> {
+    let usmap = configured_usmap(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let schema = mappings::resolve(None, usmap.as_deref())
+            .and_then(|path| mappings::load(&path))
+            .ok();
+        asset_edit::preview_call(
+            &AssetEditRequest {
+                game_root: &game_root,
+                container: &container,
+                entry: &entry,
+                kind: source_of(&container),
+                mod_name: "",
+                changes: Default::default(),
+            },
+            schema.as_deref(),
+            export,
+            statement,
+            at,
+            &value,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// The `.utoc` behind a container the Asset Manager has selected, which is named by its `.pak`.
+fn mod_utoc(container: &str) -> Result<std::path::PathBuf, String> {
+    let utoc = std::path::Path::new(container).with_extension("utoc");
+    if utoc.is_file() {
+        Ok(utoc)
+    } else {
+        Err(format!(
+            "{} has no .utoc, so there is no IoStore content to read",
+            utoc.display()
+        ))
+    }
+}
+
+/// What an IoStore mod ships and reaches for: see `rivals_core::mod_report`.
+#[tauri::command]
+pub(crate) async fn get_mod_report(
+    state: State<'_, SettingsState>,
+    game_root: String,
+    container: String,
+) -> Result<rivals_core::mod_report::ModReport, String> {
+    let usmap = configured_usmap(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let utoc = mod_utoc(&container)?;
+        let schema = mappings::resolve(None, usmap.as_deref())
+            .and_then(|path| mappings::load(&path))
+            .ok();
+        rivals_core::mod_report::mod_report(&game_root, &utoc, schema.as_deref())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Where an IoStore mod's scripts and values name `query`: see `rivals_core::mod_search`.
+#[tauri::command]
+pub(crate) async fn search_mod(
+    state: State<'_, SettingsState>,
+    game_root: String,
+    container: String,
+    query: String,
+) -> Result<rivals_core::mod_search::SearchResult, String> {
+    let usmap = configured_usmap(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let utoc = mod_utoc(&container)?;
+        let schema = mappings::resolve(None, usmap.as_deref())
+            .and_then(|path| mappings::load(&path))
+            .ok();
+        rivals_core::mod_search::mod_search(&game_root, &utoc, schema.as_deref(), &query)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// A request that reads the package without changing it.
+fn read_request<'a>(
+    game_root: &'a str,
+    container: &'a str,
+    entry: &'a str,
+) -> AssetEditRequest<'a> {
+    AssetEditRequest {
+        game_root,
+        container,
+        entry,
+        kind: source_of(container),
+        mod_name: "",
+        changes: PackageEdits::default(),
+    }
+}
+
+/// Writes the payload an export carries after its properties to `path`; the byte count comes back.
+#[tauri::command]
+pub(crate) async fn export_payload(
+    state: State<'_, SettingsState>,
+    game_root: String,
+    container: String,
+    entry: String,
+    export: u32,
+    path: String,
+) -> Result<u64, String> {
+    let usmap = configured_usmap(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let schema = mappings::resolve(None, usmap.as_deref())
+            .and_then(|path| mappings::load(&path))
+            .ok();
+        let bytes = asset_edit::read_payload(
+            &read_request(&game_root, &container, &entry),
+            schema.as_deref(),
+            export,
+        )?;
+        std::fs::write(&path, &bytes).map_err(|e| format!("Could not write {path}: {e}"))?;
+        Ok(bytes.len() as u64)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Writes one bulk data resource's bytes to `path`; the byte count comes back.
+#[tauri::command]
+pub(crate) async fn export_bulk(
+    game_root: String,
+    container: String,
+    entry: String,
+    resource: u32,
+    path: String,
+) -> Result<u64, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let bytes = asset_edit::read_bulk(&read_request(&game_root, &container, &entry), resource)?;
+        std::fs::write(&path, &bytes).map_err(|e| format!("Could not write {path}: {e}"))?;
+        Ok(bytes.len() as u64)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// What a save did, so the UI can ask before an edited copy already in the mod is replaced.
+#[derive(Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub(crate) enum SaveResult {
+    /// `pak` is the mod pak's full path, so the edited copy can be opened from it.
+    Written {
+        message: String,
+        pak: String,
+        warnings: Vec<String>,
+    },
+    HoldsCopy {
+        pak: String,
+    },
+}
+
+fn save_result(outcome: asset_edit::SaveOutcome) -> SaveResult {
+    match outcome {
+        asset_edit::SaveOutcome::Written {
+            message,
+            pak,
+            warnings,
+        } => SaveResult::Written {
+            message,
+            pak: pak.to_string_lossy().into_owned(),
+            warnings,
+        },
+        asset_edit::SaveOutcome::HoldsCopy { pak } => SaveResult::HoldsCopy { pak },
+    }
+}
+
+/// Takes one package back out of the mod `container` names, by its `.pak` or its `.utoc`, so the
+/// game's own copy loads again. A mod left holding nothing is deleted.
+#[tauri::command]
+pub(crate) async fn revert_mod_asset(
+    container: String,
+    entry: String,
+) -> Result<asset_edit::RevertOutcome, String> {
+    if crate::game_status::should_block_for_game() {
+        return Err(crate::game_status::game_running_error());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let pak = std::path::Path::new(&container).with_extension("pak");
+        let utoc = pak.with_extension("utoc");
+        let outcome = asset_edit::revert_asset(&pak, &entry, &Default::default())?;
+        crate::pak::invalidate_list_caches(&[&pak, &utoc]);
+        Ok(outcome)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Moves a package a mod added to another path inside that mod, in one container rewrite. The
+/// message carries the save's warnings after it.
+#[tauri::command]
+pub(crate) async fn rename_mod_package(
+    state: State<'_, SettingsState>,
+    game_root: String,
+    container: String,
+    entry: String,
+    to: String,
+    rename_objects: Option<bool>,
+) -> Result<String, String> {
+    if crate::game_status::should_block_for_game() {
+        return Err(crate::game_status::game_running_error());
+    }
+    let usmap = configured_usmap(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let schema = mappings::resolve(None, usmap.as_deref())
+            .and_then(|path| mappings::load(&path))
+            .ok();
+        let mod_name = asset_edit::mod_name_of(std::path::Path::new(&container))?;
+        let outcome = asset_edit::rename_mod_package(
+            &AssetEditRequest {
+                game_root: &game_root,
+                container: &container,
+                entry: &entry,
+                kind: source_of(&container),
+                mod_name: &mod_name,
+                changes: PackageEdits {
+                    save_as: Some(rivals_uasset::SaveAs {
+                        package: to,
+                        rename_objects: rename_objects.unwrap_or(true),
+                    }),
+                    ..Default::default()
+                },
+            },
+            schema.as_deref(),
+            &asset_edit::SaveOptions::default(),
+        )?;
+        let pak = std::path::Path::new(&container).with_extension("pak");
+        crate::pak::invalidate_list_caches(&[&pak, &pak.with_extension("utoc")]);
+        match outcome {
+            asset_edit::SaveOutcome::Written {
+                message, warnings, ..
+            } => Ok(std::iter::once(message)
+                .chain(warnings)
+                .collect::<Vec<_>>()
+                .join(". ")),
+            asset_edit::SaveOutcome::HoldsCopy { pak } => Err(format!("{pak} already holds it")),
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// The mod's own edited copy of the inspected asset, when the mod already carries one, so the
+/// inspector can offer to open it and have edits build on it.
+#[tauri::command]
+pub(crate) async fn mod_copy_of(
+    state: State<'_, SettingsState>,
+    game_root: String,
+    container: String,
+    entry: String,
+    mod_name: String,
+    target: Option<asset_edit::SaveTarget>,
+) -> Result<Option<String>, String> {
+    let target = target.or_else(|| state.lock().ok().and_then(|s| s.asset_save_target));
+    tauri::async_runtime::spawn_blocking(move || {
+        if mod_name.trim().is_empty() {
+            return Ok(None);
+        }
+        let copy = asset_edit::mod_copy_of(
+            &AssetEditRequest {
+                game_root: &game_root,
+                container: &container,
+                entry: &entry,
+                kind: source_of(&container),
+                mod_name: &mod_name,
+                changes: Default::default(),
+            },
+            target.unwrap_or_default(),
+        )?;
+        Ok(copy.map(|path| path.to_string_lossy().into_owned()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Writes changed values into a mod pak that overrides the asset. Nothing is written unless the
+/// patched package reads back exactly as it was, bar the edited values.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn save_asset_edits(
+    state: State<'_, SettingsState>,
+    game_root: String,
+    container: String,
+    entry: String,
+    mod_name: String,
+    replace: Option<bool>,
+    layer: Option<bool>,
+    allow_drift: Option<bool>,
+    allow_missing: Option<bool>,
+    allow_unchecked: Option<bool>,
+    target: Option<asset_edit::SaveTarget>,
+    mut edits: asset_edit::json::EditList,
+) -> Result<SaveResult, String> {
+    edits.allow_drift = allow_drift.unwrap_or(false);
+    edits.allow_missing = allow_missing.unwrap_or(false);
+    edits.allow_unchecked = allow_unchecked.unwrap_or(false);
+    if crate::game_status::should_block_for_game() {
+        return Err(crate::game_status::game_running_error());
+    }
+    let usmap = configured_usmap(&state);
+    let target = target.or_else(|| state.lock().ok().and_then(|s| s.asset_save_target));
+    tauri::async_runtime::spawn_blocking(move || {
+        let schema = mappings::resolve(None, usmap.as_deref())
+            .and_then(|path| mappings::load(&path))
+            .ok();
+        // Payload and bulk files come from the picker as absolute paths, so nothing resolves
+        // against a base directory here.
+        let changes = edits.resolve(std::path::Path::new(""))?;
+        let outcome = asset_edit::save_edits(
+            &AssetEditRequest {
+                game_root: &game_root,
+                container: &container,
+                entry: &entry,
+                kind: source_of(&container),
+                mod_name: &mod_name,
+                changes,
+            },
+            schema.as_deref(),
+            &asset_edit::SaveOptions {
+                replace: replace.unwrap_or(false),
+                layer: layer.unwrap_or(false),
+                target: target.unwrap_or_default(),
+                ..Default::default()
+            },
+        )?;
+        Ok(save_result(outcome))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// What removing `exports` from the asset would do: the subobjects that go with them, the
+/// references set to None, and what cannot be made safe. Nothing is written.
+#[tauri::command]
+pub(crate) async fn plan_export_removal(
+    state: State<'_, SettingsState>,
+    game_root: String,
+    container: String,
+    entry: String,
+    exports: Vec<u32>,
+) -> Result<RemovalPlan, String> {
+    let usmap = configured_usmap(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let schema = mappings::resolve(None, usmap.as_deref())
+            .and_then(|path| mappings::load(&path))
+            .ok();
+        asset_edit::plan_export_removal(
+            &AssetEditRequest {
+                game_root: &game_root,
+                container: &container,
+                entry: &entry,
+                kind: source_of(&container),
+                mod_name: "",
+                changes: PackageEdits {
+                    remove_exports: exports,
+                    ..Default::default()
+                },
+            },
+            schema.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// What dropping `imports` would do: the rows that go, the references cleared, and what blocks it.
+/// Nothing is written.
+#[tauri::command]
+pub(crate) async fn plan_import_removal(
+    state: State<'_, SettingsState>,
+    game_root: String,
+    container: String,
+    entry: String,
+    imports: Vec<u32>,
+) -> Result<rivals_uasset::ImportRemovalPlan, String> {
+    let usmap = configured_usmap(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let schema = mappings::resolve(None, usmap.as_deref())
+            .and_then(|path| mappings::load(&path))
+            .ok();
+        asset_edit::plan_import_removal(
+            &AssetEditRequest {
+                game_root: &game_root,
+                container: &container,
+                entry: &entry,
+                kind: source_of(&container),
+                mod_name: "",
+                changes: PackageEdits {
+                    imports: imports
+                        .into_iter()
+                        .map(|import| rivals_uasset::ImportEdit::Remove { import, from: None })
+                        .collect(),
+                    ..Default::default()
+                },
+            },
+            schema.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// The components the parent Blueprint adds, by variable name, which one of this Blueprint's own can
+/// be copied from. Nothing is written.
+#[tauri::command]
+pub(crate) async fn parent_components(
+    state: State<'_, SettingsState>,
+    game_root: String,
+    container: String,
+    entry: String,
+) -> Result<Vec<String>, String> {
+    let usmap = configured_usmap(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let schema = mappings::resolve(None, usmap.as_deref())
+            .and_then(|path| mappings::load(&path))
+            .ok();
+        asset_edit::parent_components(
+            &AssetEditRequest {
+                game_root: &game_root,
+                container: &container,
+                entry: &entry,
+                kind: source_of(&container),
+                mod_name: "",
+                changes: PackageEdits::default(),
+            },
+            schema.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// The names nothing in the package uses, which a save dropping unused names takes out. Refused
+/// with the reason where unread bytes may hold names nothing tracks. Nothing is written.
+#[tauri::command]
+pub(crate) async fn unused_names(
+    state: State<'_, SettingsState>,
+    game_root: String,
+    container: String,
+    entry: String,
+) -> Result<Vec<String>, String> {
+    let usmap = configured_usmap(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let schema = mappings::resolve(None, usmap.as_deref())
+            .and_then(|path| mappings::load(&path))
+            .ok();
+        asset_edit::unused_names(
+            &AssetEditRequest {
+                game_root: &game_root,
+                container: &container,
+                entry: &entry,
+                kind: source_of(&container),
+                mod_name: "",
+                changes: PackageEdits::default(),
+            },
+            schema.as_deref(),
+            &asset_edit::SaveOptions::default(),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// What those export table edits would do: the paths that move, the packages that import them by a
+/// hash the move changes, and what blocks them. `resets` names the exports the same save would
+/// empty, which is what a retype needs. Nothing is written.
+#[tauri::command]
+pub(crate) async fn plan_export_edits(
+    state: State<'_, SettingsState>,
+    game_root: String,
+    container: String,
+    entry: String,
+    edits: Vec<rivals_uasset::ExportEdit>,
+    resets: Option<Vec<u32>>,
+) -> Result<rivals_uasset::ExportEditPlan, String> {
+    let usmap = configured_usmap(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let schema = mappings::resolve(None, usmap.as_deref())
+            .and_then(|path| mappings::load(&path))
+            .ok();
+        asset_edit::plan_export_edits(
+            &AssetEditRequest {
+                game_root: &game_root,
+                container: &container,
+                entry: &entry,
+                kind: source_of(&container),
+                mod_name: "",
+                changes: PackageEdits {
+                    exports: edits,
+                    reset_exports: resets.unwrap_or_default(),
+                    ..Default::default()
+                },
+            },
+            schema.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// What replacing those preload dependency runs would do. Nothing is written.
+#[tauri::command]
+pub(crate) async fn plan_dependency_edits(
+    state: State<'_, SettingsState>,
+    game_root: String,
+    container: String,
+    entry: String,
+    edits: Vec<rivals_uasset::DependencyEdit>,
+) -> Result<rivals_uasset::DependencyPlan, String> {
+    let usmap = configured_usmap(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let schema = mappings::resolve(None, usmap.as_deref())
+            .and_then(|path| mappings::load(&path))
+            .ok();
+        asset_edit::plan_dependency_edits(
+            &AssetEditRequest {
+                game_root: &game_root,
+                container: &container,
+                entry: &entry,
+                kind: source_of(&container),
+                mod_name: "",
+                changes: PackageEdits {
+                    dependencies: edits,
+                    ..Default::default()
+                },
+            },
+            schema.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// What copying an export in from another package would bring across, and what blocks it. Nothing
+/// is written.
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub(crate) async fn plan_export_copy(
+    state: State<'_, SettingsState>,
+    game_root: String,
+    container: String,
+    entry: String,
+    from_container: String,
+    from_entry: String,
+    export: u32,
+    into_outer: Option<u32>,
+    name: String,
+    into_level: Option<u32>,
+) -> Result<rivals_uasset::CopyPlan, String> {
+    let usmap = configured_usmap(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let schema = mappings::resolve(None, usmap.as_deref())
+            .and_then(|path| mappings::load(&path))
+            .ok();
+        let from = asset_edit::CopyFrom {
+            container: from_container,
+            entry: from_entry,
+        };
+        asset_edit::plan_copy(
+            &asset_edit::CopyRequest {
+                game_root: &game_root,
+                container: &container,
+                entry: &entry,
+                kind: source_of(&container),
+                mod_name: "",
+                sources: vec![from.clone()],
+                copies: vec![rivals_uasset::CopyExport {
+                    from: from.key(),
+                    export,
+                    into_outer,
+                    name,
+                    into_level,
+                }],
+                allow_unchecked: false,
+            },
+            schema.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Copies an export in from another package and writes the result, which is a save of its own.
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub(crate) async fn save_export_copy(
+    state: State<'_, SettingsState>,
+    game_root: String,
+    container: String,
+    entry: String,
+    from_container: String,
+    from_entry: String,
+    export: u32,
+    into_outer: Option<u32>,
+    name: String,
+    into_level: Option<u32>,
+    mod_name: String,
+    replace: Option<bool>,
+    layer: Option<bool>,
+    target: Option<asset_edit::SaveTarget>,
+) -> Result<SaveResult, String> {
+    if crate::game_status::should_block_for_game() {
+        return Err(crate::game_status::game_running_error());
+    }
+    let usmap = configured_usmap(&state);
+    let target = target.or_else(|| state.lock().ok().and_then(|s| s.asset_save_target));
+    tauri::async_runtime::spawn_blocking(move || {
+        let schema = mappings::resolve(None, usmap.as_deref())
+            .and_then(|path| mappings::load(&path))
+            .ok();
+        let from = asset_edit::CopyFrom {
+            container: from_container,
+            entry: from_entry,
+        };
+        let outcome = asset_edit::save_copy(
+            &asset_edit::CopyRequest {
+                game_root: &game_root,
+                container: &container,
+                entry: &entry,
+                kind: source_of(&container),
+                mod_name: &mod_name,
+                sources: vec![from.clone()],
+                copies: vec![rivals_uasset::CopyExport {
+                    from: from.key(),
+                    export,
+                    into_outer,
+                    name,
+                    into_level,
+                }],
+                allow_unchecked: false,
+            },
+            schema.as_deref(),
+            &asset_edit::SaveOptions {
+                replace: replace.unwrap_or(false),
+                layer: layer.unwrap_or(false),
+                target: target.unwrap_or_default(),
+                ..Default::default()
+            },
+        )?;
+        Ok(save_result(outcome))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub(crate) async fn get_mappings_status(
+    state: State<'_, SettingsState>,
+) -> Result<MappingsStatus, String> {
+    let configured = configured_usmap(&state);
+    let game_root = state.lock().ok().and_then(|s| s.game_path.clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        match mappings::resolve(None, configured.as_deref()) {
+            Ok(path) => {
+                let status = mappings::status(Some(&path));
+                MappingsStatus {
+                    path: Some(path.display().to_string()),
+                    loaded: status.struct_count > 0,
+                    struct_count: status.struct_count,
+                    enum_count: status.enum_count,
+                    error: (status.struct_count == 0)
+                        .then(|| "the mappings file could not be parsed".to_string()),
+                    warning: game_root
+                        .as_deref()
+                        .and_then(|root| mappings::drift_warning(root, &path)),
+                }
+            }
+            Err(error) => MappingsStatus {
+                path: None,
+                loaded: false,
+                struct_count: 0,
+                enum_count: 0,
+                error: Some(error),
+                warning: None,
+            },
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Where asset edits go until the user picks a mod of their own.
+const DEFAULT_MOD_NAME: &str = "AssetEdits";
+
+#[tauri::command]
+pub(crate) fn get_asset_mod_name(state: State<'_, SettingsState>) -> String {
+    state
+        .lock()
+        .ok()
+        .and_then(|s| s.asset_mod_name.clone())
+        .unwrap_or_else(|| DEFAULT_MOD_NAME.to_string())
+}
+
+#[tauri::command]
+pub(crate) fn set_asset_mod_name(
+    state: State<'_, SettingsState>,
+    name: String,
+) -> Result<(), String> {
+    let mut guard = state.lock().map_err(|e| e.to_string())?;
+    let name = name.trim();
+    guard.asset_mod_name = (!name.is_empty()).then(|| name.to_string());
+    guard.save()
+}
+
+/// What an asset edit is saved as, for the picker beside the mod name.
+#[tauri::command]
+pub(crate) fn get_asset_save_target(state: State<'_, SettingsState>) -> asset_edit::SaveTarget {
+    state
+        .lock()
+        .ok()
+        .and_then(|s| s.asset_save_target)
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+pub(crate) fn set_asset_save_target(
+    state: State<'_, SettingsState>,
+    target: asset_edit::SaveTarget,
+) -> Result<(), String> {
+    let mut guard = state.lock().map_err(|e| e.to_string())?;
+    guard.asset_save_target = Some(target);
+    guard.save()
+}
+
+#[tauri::command]
+pub(crate) fn set_mappings_path(
+    state: State<'_, SettingsState>,
+    path: Option<String>,
+) -> Result<(), String> {
+    let mut guard = state.lock().map_err(|e| e.to_string())?;
+    guard.usmap_path = path.filter(|p| !p.is_empty());
+    guard.save()
+}
+
+/// Set `RIVALS_GAME_ROOT` and `RIVALS_USMAP` to a real install to run this. Skipped otherwise.
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn value_slice_reads_the_header_or_the_export_data_by_offset() {
+        let asset = [1u8, 2, 3, 4];
+        let exports = [5u8, 6, 7, 8];
+        assert_eq!(
+            value_slice(&asset, &exports, 4, 1, 3).expect("header"),
+            [2, 3]
+        );
+        assert_eq!(
+            value_slice(&asset, &exports, 4, 5, 8).expect("exports"),
+            [6, 7, 8]
+        );
+        assert_eq!(
+            value_slice(&asset, &exports, 4, 6, 6).expect("empty"),
+            Vec::<u8>::new()
+        );
+    }
+
+    #[test]
+    fn value_slice_refuses_what_is_not_a_value() {
+        let exports = vec![0u8; (VALUE_BYTES_CAP + 8) as usize];
+        assert!(value_slice(&[], &exports, 0, 4, 2).is_err());
+        assert!(value_slice(&[], &exports, 0, 9, 9 + exports.len() as u64).is_err());
+        let error = value_slice(&[], &exports, 0, 0, VALUE_BYTES_CAP + 1).expect_err("too long");
+        assert!(error.contains("by hand"), "{error}");
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod game_data_tests {
+    use super::*;
+
+    /// The viewer is only worth having if its offsets line up with the ones traces and failure
+    /// messages quote, so the rows must start on file-offset boundaries and the property ranges
+    /// must fall inside the export.
+    #[test]
+    fn a_bytes_view_labels_rows_with_file_offsets_and_ranges_inside_the_export() {
+        let (Ok(root), Ok(usmap)) = (
+            std::env::var("RIVALS_GAME_ROOT"),
+            std::env::var("RIVALS_USMAP"),
+        ) else {
+            return;
+        };
+        let container = format!(
+            "{}/MarvelGame/Marvel/Content/Paks/pakchunk0-Windows.utoc",
+            root.replace('\\', "/")
+        );
+        // Mirrored as SYNTH_ROW_TABLE in rivals-core's fixture audit, which is what notices a game
+        // patch removing it. A rivals-core test cannot scan this crate, so change both together.
+        let entry =
+            "Marvel/Content/Marvel/Data/DataTable/GameMode/2206/2206_UIHeroInfoTable.uasset";
+        let view = bytes_view(&root, &container, entry, 0, Some(usmap)).expect("bytes view");
+
+        assert!(view.size > 0);
+        let first = view.rows.first().expect("a row");
+        // The export's own offset need not be aligned, but the row it lands in must be.
+        assert!(first.offset <= view.base);
+        assert_eq!(first.offset % rivals_uasset::ROW_BYTES as u64, 0);
+        assert_eq!(first.hex.split(' ').count(), rivals_uasset::ROW_BYTES);
+        assert!(view.rows.len() >= view.size as usize / rivals_uasset::ROW_BYTES);
+
+        // This table decodes cleanly now that its row struct is synthesised, so nothing stopped.
+        assert_eq!(view.stopped_at, None);
+        assert!(!view.ranges.is_empty(), "expected property ranges");
+        let end = view.base + view.size;
+        assert!(
+            view.ranges
+                .iter()
+                .all(|r| r.start >= view.base && r.end <= end),
+            "a range fell outside the export"
+        );
+    }
+}

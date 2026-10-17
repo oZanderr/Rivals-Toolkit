@@ -1,0 +1,515 @@
+//! The decoded property representation shared by the desktop UI and the CLI.
+
+use serde::Serialize;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PropertyEntry {
+    pub name: String,
+    /// Set only for static array properties, where one name covers several slots.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub element: Option<u32>,
+    pub value: PropertyValue,
+    /// Where the value sits in the package. An empty range means the unversioned header flagged it
+    /// as holding its default, so it is written nowhere and that offset is where it would go.
+    /// `None` only where the reader does not track offsets.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span: Option<(u64, u64)>,
+    /// Which flag in the enclosing block's header governs this value, for edits that store a
+    /// defaulted value or send a stored one back to its default.
+    #[serde(skip)]
+    pub slot: Option<SlotRef>,
+}
+
+/// Addresses one property's flag in the unversioned header of the block that holds it.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct SlotRef {
+    /// File offset of the block header, which is where an edit re-emits it.
+    pub header_at: u64,
+    /// The property's slot in the flattened schema, which is how the header names it whether or
+    /// not it currently holds a value.
+    pub schema_index: u32,
+    /// The type the property is stored as, which is the only thing that says how wide a value
+    /// should be when it holds its default and so has no bytes to measure.
+    pub declared: &'static str,
+}
+
+impl PropertyEntry {
+    /// Display name. A static array declares one property across several slots, so the element
+    /// index has to be part of the label or the columns collide.
+    pub fn label(&self) -> String {
+        match self.element {
+            Some(index) => format!("{}[{index}]", self.name),
+            None => self.name.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MapEntry {
+    pub key: PropertyValue,
+    pub value: PropertyValue,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PropertyValue {
+    Bool {
+        value: bool,
+    },
+    Int {
+        value: i64,
+    },
+    /// Named as one word, the way every edit and the app spell it, rather than as `u_int`.
+    #[serde(rename = "uint")]
+    UInt {
+        value: u64,
+    },
+    Float {
+        value: f64,
+    },
+    Byte {
+        value: u8,
+    },
+    Str {
+        value: String,
+    },
+    Name {
+        value: String,
+    },
+    Text {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        value: Option<String>,
+        /// The pieces a transformed or string table text is built from, each editable on its own
+        /// where the text as a whole is not.
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        parts: Vec<PropertyEntry>,
+        /// For a localized text, the namespace and key its translations are filed under.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        key: Option<String>,
+        /// What the game shows for it in the language looked up, where that differs from `value`.
+        /// Filled by a lookup after parsing, never by the reader, and never written back.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display: Option<String>,
+    },
+    Enum {
+        value: i64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        /// The enum's type, for offering its enumerators and for writing one back by name.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        enum_type: Option<String>,
+    },
+    Object {
+        index: i32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
+    SoftObject {
+        path: String,
+    },
+    /// A bound UFunction. Kept distinct from a plain string so a delegate cannot be mistaken for
+    /// text in the property tree, in CSV output or in the JSON. Typed as `Object::Function`, with
+    /// `None` for the object of one bound to nothing, or `None` alone for one with no function.
+    Delegate {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        object: Option<String>,
+        function: String,
+    },
+    /// A property reached by name, typed as `A.B`, or `A.B in Object` to name the struct that
+    /// owns it as well.
+    FieldPath {
+        path: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        owner: Option<String>,
+    },
+    LazyObject {
+        guid: String,
+    },
+    Array {
+        items: Vec<PropertyValue>,
+    },
+    Set {
+        items: Vec<PropertyValue>,
+    },
+    Map {
+        entries: Vec<MapEntry>,
+    },
+    Struct {
+        name: String,
+        fields: Vec<PropertyEntry>,
+    },
+    /// An instanced struct payload the reader could not decode. Its bytes are kept exactly as
+    /// they are; it is a value of its own so nothing can mistake the reason for a stored string.
+    Undecoded {
+        reason: String,
+        /// The payload's length, which is what still identifies it once an edit has moved the
+        /// offsets its reason names.
+        bytes: u64,
+        /// A hash of the payload's bytes, so a save that disturbs them is caught by its check
+        /// rather than passing on an unchanged length.
+        #[serde(skip)]
+        digest: u64,
+    },
+    /// The property was covered by the header zero mask, so it holds its default value and
+    /// occupies no bytes. Kept distinct from a real zero so the UI never implies a stored value.
+    Default {
+        /// The type an edit writes it as, where the schema says: the stored kind, or the struct's
+        /// name for a native struct that holds one value, such as a soft object path.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        declared: Option<&'static str>,
+        /// For a zero struct, the fields it holds, each zero, with no bytes of their own. They are
+        /// addressed through the struct: see [`crate::FieldSet`].
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        fields: Vec<PropertyEntry>,
+    },
+    /// The header skips this slot: the export stores nothing for it and the object keeps the value
+    /// it inherits from its archetype, which the reader cannot see. `declared` is the type it is
+    /// stored as, which is all an edit has to size a value by.
+    Unset {
+        declared: &'static str,
+        /// The enum type behind an enum slot's declared integer, so a value can be typed by name.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        enum_type: Option<String>,
+        /// For an unset struct, the fields its schema declares, unset in turn. They have no bytes
+        /// yet, so they are shown and addressed through the struct: see [`crate::FieldSet`].
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        fields: Vec<PropertyEntry>,
+    },
+}
+
+impl PropertyValue {
+    /// A short one-line rendering for tables and CLI output.
+    pub fn summary(&self) -> String {
+        match self {
+            Self::Bool { value } => value.to_string(),
+            Self::Int { value } => value.to_string(),
+            Self::UInt { value } => value.to_string(),
+            Self::Float { value } => format_float(*value),
+            Self::Byte { value } => value.to_string(),
+            Self::Str { value } => value.clone(),
+            Self::Name { value } => value.clone(),
+            Self::Text { value, .. } => value.clone().unwrap_or_default(),
+            Self::Enum { value, name, .. } => name.clone().unwrap_or_else(|| value.to_string()),
+            Self::Object { index, path } => path.clone().unwrap_or_else(|| {
+                if *index == 0 {
+                    "None".into()
+                } else {
+                    index.to_string()
+                }
+            }),
+            Self::SoftObject { path } => path.clone(),
+            Self::Delegate { object, function } => match object {
+                Some(object) => format!("{object}::{function}"),
+                None if function == "None" => "None".into(),
+                None => format!("None::{function}"),
+            },
+            Self::FieldPath { path, owner } => match owner {
+                Some(owner) => format!("{path} in {owner}"),
+                None => path.clone(),
+            },
+            Self::LazyObject { guid } => guid.clone(),
+            Self::Array { items } => format!("[{} items]", items.len()),
+            Self::Set { items } => format!("{{{} items}}", items.len()),
+            Self::Map { entries } => format!("{{{} entries}}", entries.len()),
+            Self::Struct { name, fields } => {
+                if let Some(inline) = inline_struct(fields) {
+                    format!("{name}({inline})")
+                } else {
+                    format!("{name} {{{} fields}}", fields.len())
+                }
+            }
+            Self::Undecoded { reason, bytes, .. } => {
+                format!("({bytes} bytes not decoded: {reason})")
+            }
+            Self::Default { .. } => "(default)".into(),
+            Self::Unset { .. } => "(not stored)".into(),
+        }
+    }
+}
+
+/// The FNV-1a hash an undecoded payload is told apart by.
+pub(crate) fn digest_of(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+/// Vectors and colours read far better on one line than as a nested tree. Values go by position
+/// only where the position names them, as a vector's or a colour's does. A tagged struct stores
+/// just the fields that differ from its default, so a margin holding only `Top` reads
+/// `Margin(Top 8.0)`, not `Margin(8.0)`.
+fn inline_struct(fields: &[PropertyEntry]) -> Option<String> {
+    if fields.is_empty() || fields.len() > 4 {
+        return None;
+    }
+    let by_position = POSITIONAL_FIELDS.iter().any(|order| {
+        fields.len() <= order.len()
+            && fields
+                .iter()
+                .zip(*order)
+                .all(|(field, name)| field.name == *name)
+    });
+    let mut parts = Vec::with_capacity(fields.len());
+    for field in fields {
+        let value = match &field.value {
+            PropertyValue::Float { value } => format_float(*value),
+            PropertyValue::Int { value } => value.to_string(),
+            PropertyValue::UInt { value } => value.to_string(),
+            PropertyValue::Byte { value } => value.to_string(),
+            PropertyValue::Unset { .. } => "-".into(),
+            _ => return None,
+        };
+        parts.push(if by_position {
+            value
+        } else {
+            format!("{} {value}", field.name)
+        });
+    }
+    Some(parts.join(", "))
+}
+
+/// The field orders a reader knows without being told: a vector's, a colour's and a rotator's.
+const POSITIONAL_FIELDS: [&[&str]; 3] = [
+    &["X", "Y", "Z", "W"],
+    &["R", "G", "B", "A"],
+    &["Pitch", "Yaw", "Roll"],
+];
+
+fn format_float(value: f64) -> String {
+    if value == value.trunc() && value.abs() < 1e15 {
+        format!("{value:.1}")
+    } else {
+        format!("{value}")
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn float_field(name: &str, value: f64) -> PropertyEntry {
+        PropertyEntry {
+            name: name.into(),
+            element: None,
+            span: None,
+            slot: None,
+            value: PropertyValue::Float { value },
+        }
+    }
+
+    #[test]
+    fn a_small_numeric_struct_summarises_on_one_line() {
+        let value = PropertyValue::Struct {
+            name: "Vector".into(),
+            fields: vec![
+                float_field("X", 1.0),
+                float_field("Y", 2.5),
+                float_field("Z", 0.0),
+            ],
+        };
+        assert_eq!(value.summary(), "Vector(1.0, 2.5, 0.0)");
+    }
+
+    #[test]
+    fn a_struct_holding_some_of_its_fields_names_them() {
+        // A tagged margin stores only what differs from its default, in the order it was written.
+        let value = PropertyValue::Struct {
+            name: "Margin".into(),
+            fields: vec![float_field("Top", 8.0), float_field("Left", 40.0)],
+        };
+        assert_eq!(value.summary(), "Margin(Top 8.0, Left 40.0)");
+        let value = PropertyValue::Struct {
+            name: "Vector2D".into(),
+            fields: vec![float_field("Y", 1.0)],
+        };
+        assert_eq!(value.summary(), "Vector2D(Y 1.0)");
+    }
+
+    #[test]
+    fn a_struct_with_non_numeric_fields_falls_back_to_a_field_count() {
+        let value = PropertyValue::Struct {
+            name: "Row".into(),
+            fields: vec![PropertyEntry {
+                name: "Label".into(),
+                element: None,
+                span: None,
+                slot: None,
+                value: PropertyValue::Str {
+                    value: "hello".into(),
+                },
+            }],
+        };
+        assert_eq!(value.summary(), "Row {1 fields}");
+    }
+
+    #[test]
+    fn a_static_array_element_carries_its_index_in_the_label() {
+        let entry = PropertyEntry {
+            name: "LensFlareTints".into(),
+            element: Some(3),
+            span: None,
+            slot: None,
+            value: PropertyValue::Default {
+                declared: None,
+                fields: Vec::new(),
+            },
+        };
+        assert_eq!(entry.label(), "LensFlareTints[3]");
+    }
+
+    #[test]
+    fn a_scalar_property_labels_as_its_bare_name() {
+        assert_eq!(
+            PropertyEntry {
+                name: "Damage".into(),
+                element: None,
+                span: None,
+                slot: None,
+                value: PropertyValue::Default {
+                    declared: None,
+                    fields: Vec::new()
+                },
+            }
+            .label(),
+            "Damage"
+        );
+    }
+
+    #[test]
+    fn a_delegate_summarises_as_object_and_function_not_as_a_bare_string() {
+        let value = PropertyValue::Delegate {
+            object: Some("/Game/BP_Thing.BP_Thing_C".into()),
+            function: "OnFired".into(),
+        };
+        assert_eq!(value.summary(), "/Game/BP_Thing.BP_Thing_C::OnFired");
+    }
+
+    /// A delegate bound to nothing still says so, the way it is typed, and one with no function
+    /// either is `None` alone.
+    #[test]
+    fn an_unbound_delegate_summarises_with_none_for_its_object() {
+        let value = |function: &str| PropertyValue::Delegate {
+            object: None,
+            function: function.into(),
+        };
+        assert_eq!(value("OnFired").summary(), "None::OnFired");
+        assert_eq!(value("None").summary(), "None");
+    }
+
+    #[test]
+    fn a_field_path_summarises_with_its_owner() {
+        let value = PropertyValue::FieldPath {
+            path: "Inner".into(),
+            owner: Some("/Game/A.A_C".into()),
+        };
+        assert_eq!(value.summary(), "Inner in /Game/A.A_C");
+    }
+
+    #[test]
+    fn a_defaulted_property_is_never_summarised_as_a_stored_zero() {
+        assert_eq!(
+            PropertyValue::Default {
+                declared: None,
+                fields: Vec::new()
+            }
+            .summary(),
+            "(default)"
+        );
+    }
+
+    /// One value of every kind.
+    fn every_kind() -> Vec<PropertyValue> {
+        let empty = Vec::new;
+        vec![
+            PropertyValue::Bool { value: true },
+            PropertyValue::Int { value: -1 },
+            PropertyValue::UInt { value: 1 },
+            PropertyValue::Float { value: 1.5 },
+            PropertyValue::Byte { value: 1 },
+            PropertyValue::Str { value: "a".into() },
+            PropertyValue::Name { value: "A".into() },
+            PropertyValue::Text {
+                value: Some("a".into()),
+                parts: empty(),
+                namespace: None,
+                key: None,
+                display: None,
+            },
+            PropertyValue::Enum {
+                value: 0,
+                name: None,
+                enum_type: None,
+            },
+            PropertyValue::Object {
+                index: 0,
+                path: None,
+            },
+            PropertyValue::SoftObject {
+                path: "/A.A".into(),
+            },
+            PropertyValue::Delegate {
+                object: None,
+                function: "F".into(),
+            },
+            PropertyValue::FieldPath {
+                path: "A".into(),
+                owner: None,
+            },
+            PropertyValue::LazyObject { guid: "0".into() },
+            PropertyValue::Array { items: Vec::new() },
+            PropertyValue::Set { items: Vec::new() },
+            PropertyValue::Map {
+                entries: Vec::new(),
+            },
+            PropertyValue::Struct {
+                name: "S".into(),
+                fields: empty(),
+            },
+            PropertyValue::Undecoded {
+                reason: "r".into(),
+                bytes: 0,
+                digest: 0,
+            },
+            PropertyValue::Default {
+                declared: None,
+                fields: empty(),
+            },
+            PropertyValue::Unset {
+                declared: "Int",
+                enum_type: None,
+                fields: empty(),
+            },
+        ]
+    }
+
+    /// The JSON names a value by the kind an edit has to expect of it, so a dump read back or an
+    /// edit from the app always matches the value it came from.
+    #[test]
+    fn every_value_serializes_under_the_kind_an_edit_expects() {
+        for value in every_kind() {
+            let json = serde_json::to_value(&value).unwrap();
+            assert_eq!(
+                json["kind"].as_str(),
+                Some(crate::edit::kind_of(&value).as_str()),
+                "{json}"
+            );
+        }
+    }
+
+    /// An undecoded payload says how much it holds and why, so it can never read as a value.
+    #[test]
+    fn an_undecoded_payload_summarises_as_its_length_and_its_reason() {
+        let value = PropertyValue::Undecoded {
+            reason: "no schema for Broken".into(),
+            bytes: 42,
+            digest: 0,
+        };
+        assert_eq!(
+            value.summary(),
+            "(42 bytes not decoded: no schema for Broken)"
+        );
+    }
+}
