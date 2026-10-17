@@ -1,33 +1,18 @@
 //! IoStore (utoc/ucas) read, extract, and repack operations.
 
-use std::collections::{HashMap, HashSet};
-use std::io::Read;
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use rayon::prelude::*;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
-use walkdir::WalkDir;
 
-use retoc::asset_conversion::{self, FZenPackageContext};
-use retoc::container_header::{EIoContainerHeaderVersion, StoreEntry};
-use retoc::iostore::IoStoreTrait;
-use retoc::iostore::{ChunkInfo, PackageInfo};
-use retoc::iostore_writer::IoStoreWriter;
-use retoc::legacy_asset::FSerializedAssetBundle;
-use retoc::version::EngineVersion;
-use retoc::zen_asset_conversion;
-use retoc::{
-    EIoChunkType, EIoStoreTocVersion, FIoChunkId, FIoChunkIdRaw, FPackageId, FSFileReader,
-    FSFileWriter, FSHAHash, FileReaderTrait, UEPath, UEPathBuf,
-};
+use rivals_core::pak::iostore_out::{HeaderCarry, IoStoreOptions};
 
 use crate::concurrency;
 
 const MOUNT_POINT: &str = "../../../";
-const TOC_MAGIC: &[u8; 16] = b"-==--==--==--==-";
-const TOC_ENCRYPTED_FLAG: u8 = 0b0010;
 
 static LEGACY_CANCEL: AtomicBool = AtomicBool::new(false);
 static REPACK_CANCEL: AtomicBool = AtomicBool::new(false);
@@ -47,343 +32,77 @@ pub(crate) struct RepackProgress {
 
 pub(crate) fn cancel_legacy_extraction() {
     LEGACY_CANCEL.store(true, Ordering::Relaxed);
+    super::in_place::cancel();
 }
 
 pub(crate) fn cancel_repack_iostore() {
     REPACK_CANCEL.store(true, Ordering::Relaxed);
+    super::in_place::cancel();
 }
 
 /// Convert a directory of legacy assets into an IoStore container (.utoc + .ucas + .pak).
+///
+/// Files that are not part of a package bundle ride in the `.pak` beside it. `carry` restores what
+/// the header of a container being rebuilt held, which the loose files cannot say. A shader archive
+/// is checked against the libraries of the game at `game_root`, and refused without one.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn repack_iostore(
     input_dir: &str,
     output_utoc: &str,
     oodle_level: Option<retoc::OodleCompressionLevel>,
     obfuscate: bool,
     compression: super::profile::PackCompression,
+    carry: &HeaderCarry,
+    game_root: Option<&str>,
     app: AppHandle,
 ) -> Result<(), String> {
     REPACK_CANCEL.store(false, Ordering::Relaxed);
-
-    let input = Path::new(input_dir);
-    if !input.is_dir() {
-        return Err(format!("Input is not a directory: {input_dir}"));
-    }
-
-    let output_utoc_path = Path::new(output_utoc);
-    if let Some(parent) = output_utoc_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-
-    let engine_version = EngineVersion::UE5_3;
-    let toc_version = engine_version.toc_version();
-    let container_header_version = engine_version.container_header_version();
-
-    let reader = FSFileReader::new(input);
-    let files = reader.list_files().map_err(|e| e.to_string())?;
-    let files_set: HashSet<&UEPathBuf> = HashSet::from_iter(files.iter());
-
-    let mut asset_paths: Vec<&UEPathBuf> = Vec::new();
-    for path in &files {
-        let ue_path: &UEPath = path.as_ref();
-        let is_asset = matches!(ue_path.extension(), Some("uasset") | Some("umap"));
-        if is_asset && files_set.contains(&ue_path.with_extension("uexp")) {
-            asset_paths.push(path);
-        }
-    }
-
-    if asset_paths.is_empty() {
-        return Err(
-            "No convertible assets found. Directory must contain .uasset/.umap files with matching .uexp files."
-                .to_string(),
+    let progress = |current, total| {
+        let _ = app.emit(
+            "repack-iostore-progress",
+            RepackProgress {
+                phase: "repacking",
+                current,
+                total,
+            },
         );
-    }
-
-    let mut writer = IoStoreWriter::new(
-        output_utoc_path,
-        toc_version,
-        Some(container_header_version),
-        MOUNT_POINT.into(),
-        Some(compression.retoc()),
-    )
-    .map_err(|e| e.to_string())?
-    .with_compression_block_size(crate::pak::profile::RIVALS_BLOCK_SIZE);
-    if let Some(level) = oodle_level {
-        writer = writer.with_compression_level(level);
-    }
-    if obfuscate {
-        writer = writer.with_encryption(super::profile::obfuscation_key()?);
-    }
-
-    let mut guard = IoStoreCleanupGuard {
-        path: output_utoc_path,
-        disarmed: false,
     };
-
-    let shader_maps: HashMap<String, Vec<FSHAHash>> = HashMap::new();
-    let total = asset_paths.len();
-    let mut packed_paths: Vec<String> = Vec::new();
-    for path in &asset_paths {
-        let ue_path: &UEPath = path.as_ref();
-        packed_paths.push(ue_path.to_string());
-        packed_paths.push(ue_path.with_extension("uexp").to_string());
-        for ext in ["ubulk", "uptnl", "m.ubulk"] {
-            let sibling = ue_path.with_extension(ext);
-            if files_set.contains(&sibling) {
-                packed_paths.push(sibling.to_string());
-            }
-        }
-    }
-
-    let channel_cap = std::cmp::max(2, crate::concurrency::POOL.current_num_threads());
-    let (tx, rx) = std::sync::mpsc::sync_channel::<
-        Result<retoc::zen_asset_conversion::ConvertedZenAssetBundle, String>,
-    >(channel_cap);
-
-    rayon::in_place_scope(|scope| -> Result<(), String> {
-        let asset_paths_ref = &asset_paths;
-        let shader_maps_ref = &shader_maps;
-
-        scope.spawn(move |_| {
-            let pool = &*crate::concurrency::POOL;
-            let log = retoc::logging::Log::no_log();
-            let _ = pool.install(|| {
-                asset_paths_ref
-                    .par_iter()
-                    .try_for_each(|path| -> Result<(), ()> {
-                        if REPACK_CANCEL.load(Ordering::Relaxed) {
-                            let _ = tx.send(Err("Repack cancelled".to_string()));
-                            return Err(());
-                        }
-                        let ue_path: &UEPath = path.as_ref();
-                        let bundle_result = (|| -> Result<FSerializedAssetBundle, String> {
-                            Ok(FSerializedAssetBundle {
-                                asset_file_buffer: reader
-                                    .read(ue_path)
-                                    .map_err(|e| e.to_string())?,
-                                exports_file_buffer: reader
-                                    .read(&ue_path.with_extension("uexp"))
-                                    .map_err(|e| e.to_string())?,
-                                bulk_data_buffer: reader
-                                    .read_opt(&ue_path.with_extension("ubulk"))
-                                    .map_err(|e| e.to_string())?,
-                                optional_bulk_data_buffer: reader
-                                    .read_opt(&ue_path.with_extension("uptnl"))
-                                    .map_err(|e| e.to_string())?,
-                                memory_mapped_bulk_data_buffer: reader
-                                    .read_opt(&ue_path.with_extension("m.ubulk"))
-                                    .map_err(|e| e.to_string())?,
-                            })
-                        })();
-                        let bundle = match bundle_result {
-                            Ok(b) => b,
-                            Err(e) => {
-                                let _ = tx.send(Err(e));
-                                return Err(());
-                            }
-                        };
-                        let mounted_path: UEPathBuf = format!("{MOUNT_POINT}{ue_path}").into();
-                        let converted = match zen_asset_conversion::build_zen_asset(
-                            bundle,
-                            shader_maps_ref,
-                            &mounted_path,
-                            Some(engine_version.package_file_version()),
-                            container_header_version,
-                            false,
-                            None,
-                            None,
-                            &log,
-                        ) {
-                            Ok(c) => c,
-                            Err(e) => {
-                                let _ = tx.send(Err(format!("Failed to convert {ue_path}: {e}")));
-                                return Err(());
-                            }
-                        };
-                        if tx.send(Ok(converted)).is_err() {
-                            return Err(());
-                        }
-                        Ok(())
-                    })
-            });
-        });
-
-        let mut completed = 0usize;
-        while let Ok(item) = rx.recv() {
-            let mut converted = item?;
-            converted
-                .write_package_data(&mut writer)
-                .map_err(|e| e.to_string())?;
-            converted
-                .write_and_release_bulk_data(&mut writer)
-                .map_err(|e| e.to_string())?;
-            completed += 1;
-            if completed.is_multiple_of(10) || completed == total {
-                let _ = app.emit(
-                    "repack-iostore-progress",
-                    RepackProgress {
-                        phase: "repacking",
-                        current: completed,
-                        total,
-                    },
-                );
-            }
-        }
-
-        Ok(())
-    })?;
-
-    if REPACK_CANCEL.load(Ordering::Relaxed) {
-        return Err("Repack cancelled".to_string());
-    }
-
-    writer.finalize().map_err(|e| e.to_string())?;
-
-    let pak_path = output_utoc_path.with_extension("pak");
-    write_chunknames_pak(&pak_path, &packed_paths)?;
-
-    guard.disarmed = true;
+    rivals_core::pak::pack::pack_folder(
+        Path::new(input_dir),
+        rivals_core::pak::pack::Take::Everything,
+        Path::new(output_utoc),
+        &IoStoreOptions {
+            compression,
+            oodle_level,
+            obfuscate: Some(obfuscate),
+            reencode: false,
+        },
+        carry,
+        &|| {
+            let root = game_root.ok_or(
+                "Set the game folder first: a shader archive is checked against the game's own \
+                 libraries",
+            )?;
+            rivals_core::pak::shader_library::game_library_names(&rivals_core::paths::paks_dir(
+                root,
+            ))
+        },
+        concurrency::POOL.current_num_threads(),
+        &REPACK_CANCEL,
+        &progress,
+    )?;
     Ok(())
 }
 
-fn write_chunknames_pak(pak_path: &Path, packed_paths: &[String]) -> Result<(), String> {
-    let content = packed_paths.join("\n");
-    super::write_pak_bytes(
-        &pak_path.to_string_lossy(),
-        vec![("chunknames".to_string(), content.into_bytes())],
-    )
-}
+use rivals_core::pak::containers::open_utoc;
 
-fn cleanup_iostore_files(utoc_path: &Path) {
-    for ext in &["utoc", "ucas", "pak"] {
-        let path = utoc_path.with_extension(ext);
-        let _ = std::fs::remove_file(&path);
-    }
-}
-
-/// Deletes partial IoStore output files on drop unless disarmed.
-struct IoStoreCleanupGuard<'a> {
-    path: &'a Path,
-    disarmed: bool,
-}
-
-impl Drop for IoStoreCleanupGuard<'_> {
-    fn drop(&mut self) {
-        if !self.disarmed {
-            cleanup_iostore_files(self.path);
-        }
-    }
-}
-
-fn open_utoc(utoc_path: &str) -> Result<Box<dyn IoStoreTrait>, String> {
-    retoc::iostore::open(utoc_path, super::profile::make_config()?).map_err(|e| e.to_string())
-}
-
-/// The app holds the default (all-zero) GUID key plus the named keys in
-/// [`super::profile::NAMED_AES_KEYS`]. A container encrypted under any other key GUID cannot be
-/// decrypted; probing the TOC header for it lets callers skip such a container instead of
-/// aborting a whole merged open with "missing encryption key" (a future game patch could ship a
-/// container keyed to a GUID we do not have).
-pub(crate) fn utoc_is_decryptable(utoc_path: &Path) -> bool {
-    let Some(header) = read_toc_header_probe(utoc_path) else {
-        return false;
-    };
-    if header[80] & TOC_ENCRYPTED_FLAG == 0 {
-        return true;
-    }
-    let guid = &header[64..80];
-    guid.iter().all(|&b| b == 0)
-        || super::profile::NAMED_AES_KEYS
-            .iter()
-            .any(|(known, _)| known == guid)
-}
-
-/// Whether a container is obfuscated, meaning it carries the Encrypted flag. Mods use it with the
-/// game's own default-GUID key, so this is a presentation detail rather than a barrier: it seeds
-/// the repack option so an obfuscated mod does not come back out plain.
-pub(crate) fn utoc_is_obfuscated(utoc_path: &Path) -> bool {
-    read_toc_header_probe(utoc_path).is_some_and(|header| header[80] & TOC_ENCRYPTED_FLAG != 0)
-}
-
-/// The leading 81 bytes of a TOC header, covering the magic, the encryption-key GUID (offset 64)
-/// and the container flags (offset 80). `None` when the file is unreadable or is not a TOC.
-fn read_toc_header_probe(utoc_path: &Path) -> Option<[u8; 81]> {
-    let mut file = std::fs::File::open(utoc_path).ok()?;
-    let mut header = [0u8; 81];
-    if file.read_exact(&mut header).is_err() || &header[0..16] != TOC_MAGIC {
-        return None;
-    }
-    Some(header)
-}
-
-/// Container stems under `paks_dir` encrypted with a key GUID the app does not hold. These
-/// poison a merged `open_filtered` with "missing encryption key", so callers exclude them
-/// from the container filter.
-pub(crate) fn undecryptable_container_stems(paks_dir: &Path) -> HashSet<String> {
-    WalkDir::new(paks_dir)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .map(walkdir::DirEntry::into_path)
-        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("utoc"))
-        .filter(|p| !utoc_is_decryptable(p))
-        .filter_map(|p| p.file_stem().and_then(|s| s.to_str()).map(str::to_string))
-        .collect()
-}
-
-/// Container stems that live under `~mods`. Identifying mods by folder rather than by the
-/// `_9999999_` naming convention matters because a plainly named mod follows no convention, and
-/// letting one into the base-game store makes it resolve as vanilla content.
-fn mod_container_stems(paks_dir: &Path) -> HashSet<String> {
-    WalkDir::new(paks_dir.join("~mods"))
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .map(walkdir::DirEntry::into_path)
-        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("utoc"))
-        .filter_map(|p| p.file_stem().and_then(|s| s.to_str()).map(str::to_string))
-        .collect()
-}
-
-/// Open base game containers only (excludes mods, patches, and any container we cannot decrypt).
-fn open_base_game_paks(
-    paks_dir: &Path,
-    target_container: &str,
-) -> Result<Box<dyn IoStoreTrait>, String> {
-    let target = target_container.to_string();
-    let undecryptable = undecryptable_container_stems(paks_dir);
-    let mods = mod_container_stems(paks_dir);
-    retoc::iostore::open_filtered(paks_dir, super::profile::make_config()?, move |name| {
-        if undecryptable.contains(name) {
-            return false;
-        }
-        if name == target {
-            return true;
-        }
-        // Folder first, then the naming convention as a fallback for mods dropped straight into
-        // Paks rather than ~mods.
-        if mods.contains(name) || name.contains("_9999999_") {
-            return false;
-        }
-        if name.starts_with("Patch_") {
-            return false;
-        }
-        true
-    })
-    .map_err(|e| e.to_string())
-}
+pub(crate) use rivals_core::pak::containers::{
+    undecryptable_container_stems, utoc_is_decryptable, utoc_is_obfuscated,
+};
 
 /// List asset paths inside a .utoc container, stripped of the mount point prefix.
-/// Directory-index-only: skips chunk metadata and the .ucas sibling, so disabled
-/// mods and containers with malformed post-index metadata still enumerate.
 pub(crate) fn list_utoc_contents(utoc_path: &str) -> Result<Vec<String>, String> {
-    let file = std::fs::File::open(utoc_path).map_err(|e| e.to_string())?;
-    let mut reader = std::io::BufReader::new(file);
-    let config = super::profile::make_config()?;
-    let raw = retoc::read_toc_paths(&mut reader, config).map_err(|e| e.to_string())?;
-    let mut paths: Vec<String> = raw
-        .into_iter()
-        .map(|p| p.strip_prefix(MOUNT_POINT).unwrap_or(&p).to_string())
-        .collect();
-    paths.sort();
-    Ok(paths)
+    rivals_core::pak::containers::list_utoc_paths(Path::new(utoc_path))
 }
 
 /// Extract all raw chunks from a .utoc container to disk.
@@ -507,193 +226,13 @@ pub(crate) fn extract_utoc_file(
     Err(format!("File not found in container: {file_name}"))
 }
 
-/// Collect asset paths from a .utoc container (standalone, no base-game merge).
-/// Directory-index-only; the subsequent extract step opens the full container.
-fn collect_target_paths(utoc_path: &str) -> Result<HashSet<String>, String> {
-    let file = std::fs::File::open(utoc_path).map_err(|e| e.to_string())?;
-    let mut reader = std::io::BufReader::new(file);
-    let config = super::profile::make_config()?;
-    let raw = retoc::read_toc_paths(&mut reader, config).map_err(|e| e.to_string())?;
-    Ok(raw
-        .into_iter()
-        .map(|p| p.strip_prefix(MOUNT_POINT).unwrap_or(&p).to_string())
-        .collect())
-}
-
-type PackageList = Vec<(retoc::FPackageId, String)>;
-
-/// Resolve convertible packages in a container, filtered to target-only paths.
-fn resolve_target_packages(
-    target_paths: &HashSet<String>,
-    game_root: &str,
-    target_container: &str,
-    filter: &[String],
-) -> Result<(Box<dyn IoStoreTrait>, PackageList), String> {
-    let paks_dir = crate::paths::paks_dir(game_root);
-    let store = open_base_game_paks(&paks_dir, target_container)?;
-
-    let target = store
-        .child_containers()
-        .find(|c| c.container_name() == target_container)
-        .ok_or_else(|| format!("Container not found: {target_container}"))?;
-
-    let packages: Vec<_> = target
-        .packages()
-        .filter_map(|pkg| {
-            let chunk_id = FIoChunkId::from_package_id(pkg.id(), 0, EIoChunkType::ExportBundleData);
-            let path = store.chunk_path(chunk_id)?;
-            let stripped = path.strip_prefix(MOUNT_POINT).unwrap_or(&path).to_string();
-            if !target_paths.contains(&stripped) {
-                return None;
-            }
-            if !filter.is_empty() && !filter.iter().any(|f| stripped.contains(f.as_str())) {
-                return None;
-            }
-            Some((pkg.id(), stripped))
-        })
-        .collect();
-
-    Ok((store, packages))
-}
-
-/// Open the target container in isolation (no base game, no other mods). `utoc_path` is where
-/// the container actually lives, which is rarely `paks_dir` itself since mods sit under `~mods`.
-fn open_target_only(
-    paks_dir: &Path,
-    utoc_path: &Path,
-    target_container: &str,
-) -> Result<Box<dyn IoStoreTrait>, String> {
-    // Only a readable container under an unknown key GUID is an encryption failure. A missing or
-    // unreadable file fails the same check, so let it reach the honest error further down.
-    if utoc_path.is_file() && !utoc_is_decryptable(utoc_path) {
-        return Err(format!(
-            "{target_container} is encrypted with a key this app does not have and cannot be extracted."
-        ));
-    }
-    let target = target_container.to_string();
-    retoc::iostore::open_filtered(paks_dir, super::profile::make_config()?, move |name| {
-        name == target
-    })
-    .map_err(|e| e.to_string())
-}
-
 /// Count legacy-convertible packages in a .utoc container.
 pub(crate) fn count_utoc_legacy_packages(
     utoc_path: &str,
     game_root: &str,
     filter: &[String],
 ) -> Result<usize, String> {
-    let target_container = Path::new(utoc_path)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .ok_or("Invalid utoc path")?
-        .to_string();
-
-    let paks_dir = crate::paths::paks_dir(game_root);
-    let store = open_target_only(&paks_dir, Path::new(utoc_path), &target_container)?;
-
-    let target = store
-        .child_containers()
-        .find(|c| c.container_name() == target_container)
-        .ok_or_else(|| format!("Container not found: {target_container}"))?;
-
-    let count = target
-        .packages()
-        .filter(|pkg| {
-            let chunk_id = FIoChunkId::from_package_id(pkg.id(), 0, EIoChunkType::ExportBundleData);
-            let Some(path) = store.chunk_path(chunk_id) else {
-                return false;
-            };
-            let stripped = path.strip_prefix(MOUNT_POINT).unwrap_or(&path);
-            filter.is_empty() || filter.iter().any(|f| stripped.contains(f.as_str()))
-        })
-        .count();
-
-    Ok(count)
-}
-
-/// IoStore wrapper that scopes bulk data reads to the target container,
-/// preventing base-game bulk data from leaking into mod legacy output.
-struct ModScopedStore {
-    full: Box<dyn IoStoreTrait>,
-    target: Box<dyn IoStoreTrait>,
-}
-
-impl ModScopedStore {
-    fn is_bulk_data_type(chunk_id: FIoChunkId) -> bool {
-        matches!(
-            chunk_id.get_chunk_type(),
-            EIoChunkType::BulkData
-                | EIoChunkType::OptionalBulkData
-                | EIoChunkType::MemoryMappedBulkData
-        )
-    }
-}
-
-impl IoStoreTrait for ModScopedStore {
-    fn container_name(&self) -> &str {
-        self.full.container_name()
-    }
-    fn container_file_version(&self) -> Option<EIoStoreTocVersion> {
-        self.full.container_file_version()
-    }
-    fn container_header_version(&self) -> Option<EIoContainerHeaderVersion> {
-        self.full.container_header_version()
-    }
-    fn compression_block_size(&self) -> Option<u32> {
-        self.full.compression_block_size()
-    }
-    fn print_info(&self, depth: usize) {
-        self.full.print_info(depth);
-    }
-    fn read(&self, chunk_id: FIoChunkId) -> retoc::anyhow::Result<Vec<u8>> {
-        if Self::is_bulk_data_type(chunk_id) {
-            if self.target.has_chunk_id(chunk_id) {
-                self.target.read(chunk_id)
-            } else {
-                Ok(Vec::new())
-            }
-        } else {
-            self.full.read(chunk_id)
-        }
-    }
-    fn read_raw(&self, chunk_id_raw: FIoChunkIdRaw) -> retoc::anyhow::Result<Vec<u8>> {
-        self.full.read_raw(chunk_id_raw)
-    }
-    fn has_chunk_id(&self, chunk_id: FIoChunkId) -> bool {
-        if Self::is_bulk_data_type(chunk_id) {
-            self.target.has_chunk_id(chunk_id)
-        } else {
-            self.full.has_chunk_id(chunk_id)
-        }
-    }
-    fn has_chunk_id_raw(&self, chunk_id_raw: FIoChunkIdRaw) -> bool {
-        self.full.has_chunk_id_raw(chunk_id_raw)
-    }
-    fn chunks(&self) -> Box<dyn Iterator<Item = ChunkInfo<'_>> + Send + '_> {
-        self.full.chunks()
-    }
-    fn chunks_all(&self) -> Box<dyn Iterator<Item = ChunkInfo<'_>> + Send + '_> {
-        self.full.chunks_all()
-    }
-    fn packages(&self) -> Box<dyn Iterator<Item = PackageInfo<'_>> + Send + '_> {
-        self.full.packages()
-    }
-    fn packages_all(&self) -> Box<dyn Iterator<Item = PackageInfo<'_>> + Send + '_> {
-        self.full.packages_all()
-    }
-    fn child_containers(&self) -> Box<dyn Iterator<Item = &dyn IoStoreTrait> + '_> {
-        self.full.child_containers()
-    }
-    fn chunk_path(&self, chunk_id: FIoChunkId) -> Option<String> {
-        self.full.chunk_path(chunk_id)
-    }
-    fn package_store_entry(&self, package_id: FPackageId) -> Option<StoreEntry> {
-        self.full.package_store_entry(package_id)
-    }
-    fn lookup_package_redirect(&self, source_package_id: FPackageId) -> Option<FPackageId> {
-        self.full.lookup_package_redirect(source_package_id)
-    }
+    rivals_core::pak::extract::count_legacy_packages(Path::new(utoc_path), game_root, filter)
 }
 
 /// Extract IoStore assets to legacy format (.uasset/.uexp/.ubulk).
@@ -705,200 +244,47 @@ pub(crate) fn extract_utoc_legacy(
     app: AppHandle,
 ) -> Result<Vec<String>, String> {
     LEGACY_CANCEL.store(false, Ordering::Relaxed);
-
-    let target_paths = collect_target_paths(utoc_path)?;
-    let target_container = Path::new(utoc_path)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .ok_or("Invalid utoc path")?
-        .to_string();
-    let (full_store, packages) =
-        resolve_target_packages(&target_paths, game_root, &target_container, filter)?;
-
-    let paks_dir = crate::paths::paks_dir(game_root);
-    let target_store = open_target_only(&paks_dir, Path::new(utoc_path), &target_container)?;
-    let store = ModScopedStore {
-        full: full_store,
-        target: target_store,
+    let progress = |current, total| {
+        let _ = app.emit(
+            "legacy-extraction-progress",
+            LegacyExtractionProgress { current, total },
+        );
     };
+    let result = concurrency::POOL.install(|| {
+        rivals_core::pak::extract::extract_legacy(
+            Path::new(utoc_path),
+            game_root,
+            Path::new(output_dir),
+            filter,
+            &LEGACY_CANCEL,
+            &progress,
+        )
+    })?;
 
-    let engine_version = EngineVersion::UE5_3;
-    let log = retoc::logging::Log::no_log();
-    let package_context = FZenPackageContext::create(
-        &store,
-        Some(engine_version.package_file_version()),
-        &log,
-        None,
-    );
-
-    let writer = FSFileWriter::new(output_dir);
-
-    let total = packages.len();
-    let completed = std::sync::atomic::AtomicUsize::new(0);
-
-    let pool = &*concurrency::POOL;
-    let results: Vec<Option<Result<String, String>>> = pool.install(|| {
-        packages
-            .par_iter()
-            .map(|(pkg_id, stripped)| {
-                if LEGACY_CANCEL.load(Ordering::Relaxed) {
-                    return None;
-                }
-
-                let result = match asset_conversion::build_legacy(
-                    &package_context,
-                    *pkg_id,
-                    UEPath::new(stripped),
-                    &writer,
-                ) {
-                    Ok(()) => Ok(stripped.clone()),
-                    Err(e) => Err(format!("{stripped}: {e}")),
-                };
-
-                let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
-                if done.is_multiple_of(10) || done == total {
-                    let _ = app.emit(
-                        "legacy-extraction-progress",
-                        LegacyExtractionProgress {
-                            current: done,
-                            total,
-                        },
-                    );
-                }
-
-                Some(result)
-            })
-            .collect()
-    });
-
-    let mut extracted: Vec<String> = Vec::new();
-    let mut errors: Vec<String> = Vec::new();
-    for result in results.into_iter().flatten() {
-        match result {
-            Ok(path) => extracted.push(path),
-            Err(err) => errors.push(err),
-        }
-    }
-
-    if LEGACY_CANCEL.load(Ordering::Relaxed) {
-        let _ = std::fs::remove_dir_all(output_dir);
-        return Err(format!(
-            "Cancelled after converting {}/{total} asset(s).",
-            extracted.len()
-        ));
-    }
-
-    if extracted.is_empty() {
-        if let Some(first_err) = errors.first() {
-            return Err(format!("Legacy conversion failed: {first_err}"));
-        }
-        return Err("No matching packages found in container".to_string());
-    }
-
-    extracted.sort();
-
+    let mut extracted = result.extracted;
+    let errors = result.errors;
     if !errors.is_empty() {
         let warnings: Vec<String> = errors.iter().take(5).map(|e| format!("  - {e}")).collect();
         let suffix = if errors.len() > 5 {
-            format!("\n  ...and {} more", errors.len() - 5)
+            format!(
+                "
+  ...and {} more",
+                errors.len() - 5
+            )
         } else {
             String::new()
         };
         extracted.push(format!(
-            "__warnings__: {} asset(s) failed to convert:\n{}{}",
+            "__warnings__: {} asset(s) failed to convert:
+{}{}",
             errors.len(),
-            warnings.join("\n"),
+            warnings.join(
+                "
+"
+            ),
             suffix,
         ));
     }
 
     Ok(extracted)
-}
-
-#[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
-mod tests {
-    use super::*;
-
-    /// Minimal TOC header: valid magic, encryption flag clear, so the decryptability probe
-    /// passes and only the container's location is under test.
-    fn write_stub_utoc(path: &Path) {
-        let mut header = vec![0u8; 0x90];
-        header[0..16].copy_from_slice(b"-==--==--==--==-");
-        std::fs::create_dir_all(path.parent().expect("parent")).expect("create dir");
-        std::fs::write(path, &header).expect("write stub utoc");
-    }
-
-    #[test]
-    fn mod_containers_are_identified_by_folder_not_by_name() {
-        let paks_dir = std::env::temp_dir().join(format!("rivals-modstems-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&paks_dir);
-        write_stub_utoc(&paks_dir.join("~mods").join("PlainName.utoc"));
-        write_stub_utoc(
-            &paks_dir
-                .join("~mods")
-                .join("Nested")
-                .join("Deep_9999999_P.utoc"),
-        );
-        write_stub_utoc(&paks_dir.join("pakchunk0-Windows.utoc"));
-
-        let stems = mod_container_stems(&paks_dir);
-
-        assert!(
-            stems.contains("PlainName"),
-            "a mod that skips the _9999999_P convention still has to be excluded from the base store"
-        );
-        assert!(stems.contains("Deep_9999999_P"));
-        assert!(!stems.contains("pakchunk0-Windows"));
-        let _ = std::fs::remove_dir_all(&paks_dir);
-    }
-
-    #[test]
-    fn detects_the_obfuscation_flag() {
-        let dir = std::env::temp_dir().join(format!("rivals-obfuscation-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("create dir");
-
-        let plain = dir.join("plain.utoc");
-        let obfuscated = dir.join("obfuscated.utoc");
-        write_stub_utoc(&plain);
-        let mut header = vec![0u8; 0x90];
-        header[0..16].copy_from_slice(TOC_MAGIC);
-        header[80] = TOC_ENCRYPTED_FLAG;
-        std::fs::write(&obfuscated, &header).expect("write stub");
-
-        assert!(!utoc_is_obfuscated(&plain));
-        assert!(utoc_is_obfuscated(&obfuscated));
-        assert!(!utoc_is_obfuscated(&dir.join("missing.utoc")));
-        // The flag alone is not a barrier: the payload is under the default-GUID key we hold.
-        assert!(utoc_is_decryptable(&obfuscated));
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn obfuscation_key_parses() {
-        assert!(super::super::profile::obfuscation_key().is_ok());
-    }
-
-    /// Mods live under `~mods`, so a guard that rebuilt the path from `paks_dir` and the
-    /// container name found nothing and reported every mod as encrypted.
-    #[test]
-    fn container_in_a_subfolder_is_not_reported_as_encrypted() {
-        let paks_dir =
-            std::env::temp_dir().join(format!("rivals-iostore-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&paks_dir);
-        let utoc_path = paks_dir.join("~mods").join("SomeMod_9999999_P.utoc");
-        write_stub_utoc(&utoc_path);
-
-        let err = open_target_only(&paks_dir, &utoc_path, "SomeMod_9999999_P")
-            .err()
-            .unwrap_or_default();
-
-        assert!(
-            !err.contains("encrypted with a key"),
-            "guard rejected a container it should have found: {err}"
-        );
-        let _ = std::fs::remove_dir_all(&paks_dir);
-    }
 }

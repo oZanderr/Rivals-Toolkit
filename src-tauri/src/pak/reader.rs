@@ -1,17 +1,12 @@
 //! Pak file listing, inspection, and content extraction.
 
 use std::collections::{HashMap, HashSet};
-use std::{
-    fs,
-    io::BufReader,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
+use rivals_core::pak::plain;
 use serde::Serialize;
 use walkdir::WalkDir;
 
-use super::crypto::open_pak;
-use super::profile::strip_mount_prefix;
 use crate::paths::paks_dir;
 
 #[derive(Serialize, Clone)]
@@ -96,54 +91,24 @@ pub(super) fn list_pak_files(game_root: &str, recursive: bool) -> Result<Vec<Str
 }
 
 pub(super) fn list_pak_contents(pak_path: &str) -> Result<Vec<String>, String> {
-    Ok(open_pak(Path::new(pak_path))?.files())
+    plain::list_files(Path::new(pak_path))
 }
 
 /// Mount-stripped relative paths of entries the source pak stored uncompressed
 /// (`compression_slot == None`). Used to reproduce the original compression layout on rebuild.
 pub(super) fn pak_uncompressed_entries(pak_path: &str) -> Result<Vec<String>, String> {
-    let pak = open_pak(Path::new(pak_path))?;
-    let mut out = Vec::new();
-    for name in pak.files() {
-        let entry = pak.get_file_entry(&name).map_err(|e| e.to_string())?;
-        if entry.compression_slot.is_none() {
-            out.push(strip_mount_prefix(&name));
-        }
-    }
-    Ok(out)
+    plain::uncompressed_entries(Path::new(pak_path))
 }
 
+/// Every entry but those named in `skip`, by their mount-stripped names.
 pub(super) fn unpack_pak(
     pak_path: &str,
     output_dir: &str,
     skip: &[&str],
 ) -> Result<Vec<String>, String> {
-    let output = Path::new(output_dir);
-    fs::create_dir_all(output).map_err(|e| e.to_string())?;
-
-    let pak = open_pak(Path::new(pak_path))?;
-    let files: Vec<String> = pak
-        .files()
-        .into_iter()
-        .filter(|f| !skip.contains(&f.as_str()))
-        .collect();
-
-    let mut reader = BufReader::new(fs::File::open(pak_path).map_err(|e| e.to_string())?);
-    // Extract in file-offset order to read sequentially and avoid backward seeks.
-    for name in pak.files_by_offset() {
-        let stripped = strip_mount_prefix(name);
-        if skip.contains(&stripped.as_str()) {
-            continue;
-        }
-        let dest = output.join(&stripped);
-        if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        let mut out = fs::File::create(&dest).map_err(|e| e.to_string())?;
-        pak.read_file(name, &mut reader, &mut out)
-            .map_err(|e| e.to_string())?;
-    }
-    Ok(files)
+    plain::extract(Path::new(pak_path), Path::new(output_dir), &|name| {
+        !skip.contains(&name)
+    })
 }
 
 pub(super) fn extract_single_file(
@@ -151,46 +116,19 @@ pub(super) fn extract_single_file(
     file_name: &str,
     output_path: &str,
 ) -> Result<(), String> {
-    let pak = open_pak(Path::new(pak_path))?;
-    if let Some(parent) = Path::new(output_path).parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let mut reader = BufReader::new(fs::File::open(pak_path).map_err(|e| e.to_string())?);
-    let mut out = fs::File::create(output_path).map_err(|e| e.to_string())?;
-    pak.read_file(file_name, &mut reader, &mut out)
-        .map_err(|e| e.to_string())
+    plain::extract_one(Path::new(pak_path), file_name, Path::new(output_path))
 }
 
-/// Extract multiple files from a pak into an output directory.
+/// Extract multiple files, by their mount-stripped names, from a pak into an output directory.
 pub(super) fn extract_pak_files(
     pak_path: &str,
     file_names: &[String],
     output_dir: &str,
 ) -> Result<Vec<String>, String> {
-    let output = Path::new(output_dir);
-    fs::create_dir_all(output).map_err(|e| e.to_string())?;
-
-    let pak = open_pak(Path::new(pak_path))?;
     let wanted: HashSet<&str> = file_names.iter().map(|s| s.as_str()).collect();
-    let mut reader = BufReader::new(fs::File::open(pak_path).map_err(|e| e.to_string())?);
-    let mut extracted = Vec::new();
-
-    // Iterate in file-offset order for sequential reads
-    for name in pak.files_by_offset() {
-        let stripped = strip_mount_prefix(name);
-        if !wanted.contains(stripped.as_str()) {
-            continue;
-        }
-        let dest = output.join(&stripped);
-        if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        let mut out = fs::File::create(&dest).map_err(|e| e.to_string())?;
-        pak.read_file(name, &mut reader, &mut out)
-            .map_err(|e| e.to_string())?;
-        extracted.push(stripped);
-    }
-    Ok(extracted)
+    plain::extract(Path::new(pak_path), Path::new(output_dir), &|name| {
+        wanted.contains(name)
+    })
 }
 
 /// List pak files with companion file info (utoc/ucas presence) and any

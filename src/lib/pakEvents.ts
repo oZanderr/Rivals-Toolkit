@@ -1,4 +1,4 @@
-export type PakEventSource = "PakIniEditor" | "PakTweaks";
+export type PakEventSource = "IniEditor" | "PakTweaks";
 
 export interface PakChangedEvent {
   pakPath: string;

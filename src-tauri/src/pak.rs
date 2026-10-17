@@ -111,6 +111,7 @@ pub(crate) fn repack_iostore(
     oodle_level: Option<retoc::OodleCompressionLevel>,
     obfuscate: bool,
     compression: profile::PackCompression,
+    game_root: Option<&str>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
     iostore::repack_iostore(
@@ -119,6 +120,8 @@ pub(crate) fn repack_iostore(
         oodle_level,
         obfuscate,
         compression,
+        &Default::default(),
+        game_root,
         app,
     )
 }
@@ -129,6 +132,7 @@ pub(crate) fn repack_mod_in_place(
     mod_pak: &str,
     to_iostore: bool,
     obfuscate: bool,
+    recompress: bool,
     oodle_level: Option<retoc::OodleCompressionLevel>,
     compression: profile::PackCompression,
     app: tauri::AppHandle,
@@ -138,6 +142,7 @@ pub(crate) fn repack_mod_in_place(
         mod_pak,
         to_iostore,
         obfuscate,
+        recompress,
         oodle_level,
         compression,
         app,
