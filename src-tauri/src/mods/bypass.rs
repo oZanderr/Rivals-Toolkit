@@ -1,11 +1,11 @@
-//! Installs and removes the signature bypass that allows unsigned pak mods to load. Installs oxiloader as dsound.dll plus the bundled UTOC bypass payload as a plugins/*.asi, and clears the version.dll loader and in-house payload left behind by earlier releases.
+//! Installs and removes the signature bypass that allows unsigned pak mods to load. Installs Minimal ASI Loader as dsound.dll plus the bundled UTOC bypass payload as a plugins/*.asi, clears the version.dll loader and in-house payload left behind by earlier releases, and keeps the loader on removal while other plugins need it.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::paths::{binaries_dir, mods_dir};
+use crate::paths::{binaries_dir, mods_dir, plugins_dir};
 
 use super::{BYPASS_ASI_LOADER, BYPASS_PAYLOAD_ASI};
 
@@ -20,7 +20,7 @@ const SUPERSEDED_ASI_FILENAME: &str = "RivalsSigBypass.asi";
 /// Only builds we shipped are listed: an unrecognized `dsound.dll` is someone's own choice of
 /// loader and is left alone. Add the outgoing hash here whenever the bundled loader changes.
 const SUPERSEDED_LOADER_SHA256: &[&str] = &[
-    // oxiloader v0.2.1, which crashes the game.
+    // Minimal ASI Loader v0.2.1, released as oxiloader, which crashes the game.
     "2ec12163ddcba1182a6008848c66f42d0f48647c82ff107789479cc0e9dcbf2c",
     // The self-contained proxy shipped before the loader/payload split, same filename.
     "bb8767f918c52a2ad055d2de9baffd2478598643b9894f09abd20d1f1ffd170c",
@@ -51,6 +51,43 @@ fn loader_matches_any(loader_dll: &std::path::Path, hashes: &[&str]) -> bool {
     hashes.contains(&digest.as_str())
 }
 
+/// The part a file beside the game or in `plugins` plays in the bypass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum BypassRole {
+    Loader,
+    /// A loader build this toolkit shipped and has since replaced.
+    OutdatedLoader,
+    Payload,
+}
+
+fn switched_off(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".disabled");
+    PathBuf::from(name)
+}
+
+/// The payload is known by its name, the loader by its content, so a `dsound.dll` someone else put
+/// there is never claimed. Either may be switched off.
+pub(crate) fn bypass_role(path: &Path) -> Option<BypassRole> {
+    let name = path.file_name()?.to_string_lossy();
+    let base = name.strip_suffix(".disabled").unwrap_or(&name);
+    if base.eq_ignore_ascii_case(PAYLOAD_ASI_FILENAME) {
+        return Some(BypassRole::Payload);
+    }
+    if !base.eq_ignore_ascii_case(LOADER_DLL_FILENAME) {
+        return None;
+    }
+    let digest = sha256_hex(&fs::read(path).ok()?);
+    if digest == sha256_hex(BYPASS_ASI_LOADER) {
+        Some(BypassRole::Loader)
+    } else if SUPERSEDED_LOADER_SHA256.contains(&digest.as_str()) {
+        Some(BypassRole::OutdatedLoader)
+    } else {
+        None
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum BypassKind {
@@ -68,7 +105,7 @@ struct BypassPaths {
 
 fn bypass_paths(game_root: &str) -> BypassPaths {
     let bin_dir = binaries_dir(game_root);
-    let plugins = bin_dir.join("plugins");
+    let plugins = plugins_dir(game_root);
     BypassPaths {
         loader_dll: bin_dir.join(LOADER_DLL_FILENAME),
         payload_asi: plugins.join(PAYLOAD_ASI_FILENAME),
@@ -104,8 +141,8 @@ pub(crate) fn is_signature_bypass_installed(game_root: &str) -> bool {
 pub(crate) fn install_signature_bypass(game_root: &str) -> Result<String, String> {
     if !BYPASS_ASI_LOADER.starts_with(b"MZ") || !BYPASS_PAYLOAD_ASI.starts_with(b"MZ") {
         return Err(
-            "Bundled bypass binaries are placeholders. Put oxiloader's dsound.dll \
-             (from the oZanderr/oxiloader release) and the original \
+            "Bundled bypass binaries are placeholders. Put Minimal ASI Loader's dsound.dll \
+             (from the oZanderr/minimal-asi-loader release) and the original \
              MarvelRivalsUTOCSignatureBypass.asi into src-tauri/resources/bypass/, \
              then rebuild the app."
                 .to_string(),
@@ -129,7 +166,17 @@ pub(crate) fn install_signature_bypass(game_root: &str) -> Result<String, String
 
     // Cleared before anything is written, so a locked file leaves the existing install intact.
     // The old payload is the build the game flags, and its proxy has nothing left to load.
-    for stale in [&paths.superseded_asi, &paths.superseded_dll] {
+    // Switched-off copies of ours go too, so a fresh copy never lands beside one.
+    let mut leftovers = vec![
+        paths.superseded_asi.clone(),
+        paths.superseded_dll.clone(),
+        switched_off(&paths.payload_asi),
+    ];
+    let loader_off = switched_off(&paths.loader_dll);
+    if bypass_role(&loader_off).is_some() {
+        leftovers.push(loader_off);
+    }
+    for stale in &leftovers {
         if stale.exists() {
             fs::remove_file(stale).map_err(|e| {
                 format!(
@@ -164,8 +211,8 @@ pub(crate) fn remove_signature_bypass(game_root: &str) -> Result<String, String>
 
     let mut removed = 0usize;
     for path in &[
-        &paths.loader_dll,
         &paths.payload_asi,
+        &switched_off(&paths.payload_asi),
         &paths.superseded_dll,
         &paths.superseded_asi,
     ] {
@@ -175,8 +222,20 @@ pub(crate) fn remove_signature_bypass(game_root: &str) -> Result<String, String>
         }
     }
 
+    // The loader loads every other plugin too, so it stays while any of them is switched on.
+    let others = rivals_core::plugins::scan(game_root)
+        .plugins
+        .iter()
+        .filter(|plugin| plugin.enabled)
+        .count();
+    let kept_loader = paths.loader_dll.exists() && others > 0;
+    if paths.loader_dll.exists() && !kept_loader {
+        fs::remove_file(&paths.loader_dll).map_err(|e| e.to_string())?;
+        removed += 1;
+    }
+
     // Drop the plugins dir if our removals left it empty.
-    let plugins = binaries_dir(game_root).join("plugins");
+    let plugins = plugins_dir(game_root);
     if plugins.is_dir()
         && plugins
             .read_dir()
@@ -186,11 +245,77 @@ pub(crate) fn remove_signature_bypass(game_root: &str) -> Result<String, String>
         let _ = fs::remove_dir(&plugins);
     }
 
-    if removed == 0 {
+    if kept_loader {
+        Ok(format!(
+            "Removed {removed} bypass file(s) and kept {LOADER_DLL_FILENAME}, which {others} other \
+             plugin(s) still need"
+        ))
+    } else if removed == 0 {
         Ok("Bypass files were not present!".to_string())
     } else {
         Ok(format!("Removed {removed} bypass file(s)"))
     }
+}
+
+/// Writes the bundled loader alone, for plugins with nothing to load them, or over an outdated
+/// build of ours. A `dsound.dll` of anyone else's is left alone, and so is another loader already
+/// switched on, which would load the same plugins.
+pub(crate) fn install_asi_loader(game_root: &str) -> Result<String, String> {
+    if !BYPASS_ASI_LOADER.starts_with(b"MZ") {
+        return Err(
+            "The bundled loader is a placeholder. Put Minimal ASI Loader's dsound.dll into \
+             src-tauri/resources/bypass/, then rebuild the app."
+                .to_string(),
+        );
+    }
+    let bin_dir = binaries_dir(game_root);
+    if !bin_dir.is_dir() {
+        return Err(format!(
+            "Binaries directory not found: {}\nMake sure the game root path is correct.",
+            bin_dir.display()
+        ));
+    }
+    let paths = bypass_paths(game_root);
+    let updating = paths.loader_dll.exists();
+    if updating {
+        match bypass_role(&paths.loader_dll) {
+            Some(BypassRole::Loader) => {
+                return Ok(format!(
+                    "{LOADER_DLL_FILENAME} is already the current loader."
+                ));
+            }
+            Some(BypassRole::OutdatedLoader) => {}
+            _ => {
+                return Err(format!(
+                    "{LOADER_DLL_FILENAME} is already there and is not one the toolkit \
+                     installed, so it is left alone."
+                ));
+            }
+        }
+    }
+    let status = rivals_core::plugins::scan(game_root);
+    if let Some(other) = status.loaders.iter().find(|loader| {
+        loader.enabled
+            && loader.kind != rivals_core::plugins::LoaderKind::Unknown
+            && Path::new(&loader.path) != paths.loader_dll
+    }) {
+        return Err(format!(
+            "{} is switched on and already loads plugins.",
+            other.file_name
+        ));
+    }
+    let loader_off = switched_off(&paths.loader_dll);
+    if bypass_role(&loader_off).is_some() {
+        fs::remove_file(&loader_off)
+            .map_err(|e| format!("remove {}: {e}", loader_off.display()))?;
+    }
+    fs::write(&paths.loader_dll, BYPASS_ASI_LOADER)
+        .map_err(|e| format!("write {LOADER_DLL_FILENAME}: {e}"))?;
+    Ok(if updating {
+        format!("Updated {LOADER_DLL_FILENAME} to the current Minimal ASI Loader.")
+    } else {
+        format!("Installed Minimal ASI Loader as {LOADER_DLL_FILENAME}.")
+    })
 }
 
 #[cfg(test)]
@@ -341,6 +466,103 @@ mod tests {
             !SUPERSEDED_LOADER_SHA256.contains(&digest.as_str()),
             "the bundled loader ({digest}) is listed as superseded"
         );
+    }
+
+    #[test]
+    fn remove_keeps_the_loader_while_other_plugins_need_it() {
+        let root = scratch_game_root();
+        let gr = root.to_str().unwrap();
+        let paths = bypass_paths(gr);
+        touch(&paths.loader_dll);
+        touch(&paths.payload_asi);
+        touch(&plugins_dir(gr).join("Other.asi"));
+
+        let msg = remove_signature_bypass(gr).expect("remove");
+
+        assert!(msg.contains("kept dsound.dll"), "{msg}");
+        assert!(!paths.payload_asi.exists());
+        assert!(paths.loader_dll.exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn remove_takes_the_loader_when_nothing_else_is_switched_on() {
+        let root = scratch_game_root();
+        let gr = root.to_str().unwrap();
+        let paths = bypass_paths(gr);
+        touch(&paths.loader_dll);
+        touch(&paths.payload_asi);
+        touch(&plugins_dir(gr).join("Other.asi.disabled"));
+
+        remove_signature_bypass(gr).expect("remove");
+
+        assert!(!paths.loader_dll.exists());
+        assert!(plugins_dir(gr).join("Other.asi.disabled").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn install_clears_a_switched_off_payload() {
+        let root = scratch_game_root();
+        let gr = root.to_str().unwrap();
+        let paths = bypass_paths(gr);
+        touch(&switched_off(&paths.payload_asi));
+
+        install_signature_bypass(gr).expect("install");
+
+        assert!(paths.payload_asi.exists());
+        assert!(!switched_off(&paths.payload_asi).exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn roles_go_by_name_for_the_payload_and_by_content_for_the_loader() {
+        let root = scratch_game_root();
+        let gr = root.to_str().unwrap();
+        let paths = bypass_paths(gr);
+        touch(&paths.loader_dll);
+        assert_eq!(
+            bypass_role(&paths.loader_dll),
+            None,
+            "a dsound.dll of another's"
+        );
+        fs::write(&paths.loader_dll, BYPASS_ASI_LOADER).expect("write loader");
+        assert_eq!(bypass_role(&paths.loader_dll), Some(BypassRole::Loader));
+        assert_eq!(
+            bypass_role(&switched_off(&paths.payload_asi)),
+            Some(BypassRole::Payload)
+        );
+        assert_eq!(bypass_role(&plugins_dir(gr).join("Other.asi")), None);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_bundled_loader_reads_as_minimal_asi_loader() {
+        if !BYPASS_ASI_LOADER.starts_with(b"MZ") {
+            return;
+        }
+        let (kind, _) = rivals_core::plugins::identify(BYPASS_ASI_LOADER);
+        assert_eq!(kind, rivals_core::plugins::LoaderKind::MinimalAsiLoader);
+    }
+
+    #[test]
+    fn the_loader_alone_installs_beside_plugins_and_leaves_another_dsound_alone() {
+        let root = scratch_game_root();
+        let gr = root.to_str().unwrap();
+        let paths = bypass_paths(gr);
+        touch(&plugins_dir(gr).join("Other.asi"));
+
+        install_asi_loader(gr).expect("install loader");
+        assert_eq!(
+            fs::read(&paths.loader_dll).expect("loader"),
+            BYPASS_ASI_LOADER
+        );
+        assert!(!paths.payload_asi.exists());
+
+        fs::write(&paths.loader_dll, b"MZ").expect("swap");
+        assert!(install_asi_loader(gr).is_err());
+        assert_eq!(fs::read(&paths.loader_dll).expect("loader"), b"MZ");
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
