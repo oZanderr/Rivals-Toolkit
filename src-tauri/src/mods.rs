@@ -10,12 +10,13 @@ pub(crate) mod heroes;
 pub(crate) mod profiles;
 mod status;
 
-pub(crate) use bypass::BypassKind;
-pub(crate) use conflicts::ConflictReport;
-pub(crate) use folder::{BulkOpResult, InstallResult};
+pub(crate) use bypass::{BypassKind, BypassRole, bypass_role, install_asi_loader};
+pub(crate) use conflicts::{CachedLister, ConflictReport};
+pub(crate) use folder::{BulkOpResult, InstallOutcome};
 pub(crate) use status::ModsStatus;
 
-// Oxide ASI Loader (oZanderr/oxiloader) proxy DLL named dsound.dll; loads the payload below.
+// Minimal ASI Loader (oZanderr/minimal-asi-loader) proxy DLL named dsound.dll; loads the payload
+// below.
 static BYPASS_ASI_LOADER: &[u8] = include_bytes!("../resources/bypass/dsound.dll");
 // The original community UTOC bypass payload, redistributed unmodified (resources/bypass/NOTICE.md).
 static BYPASS_PAYLOAD_ASI: &[u8] =
@@ -23,32 +24,9 @@ static BYPASS_PAYLOAD_ASI: &[u8] =
 
 pub(crate) use rivals_core::mods::walk_mod_files;
 
-/// Total on-disk size of a mod pak plus companion `.ucas`/`.utoc` when present.
-/// Mirrors the size reported in `ModEntry::size_bytes` so hero-cache validation
-/// compares like-for-like across status enrichment and explicit rescans.
-pub(crate) fn mod_size_on_disk(mods_folder: &std::path::Path, full_name: &str) -> u64 {
-    let pak_path = mods_folder.join(full_name);
-    let pak_size = std::fs::metadata(&pak_path).map(|m| m.len()).unwrap_or(0);
-
-    let (stem, suffix) = if let Some(s) = full_name.strip_suffix(".pak.disabled") {
-        (s, ".disabled")
-    } else if let Some(s) = full_name.strip_suffix(".pak") {
-        (s, "")
-    } else {
-        return pak_size;
-    };
-
-    let ucas = mods_folder.join(format!("{stem}.ucas{suffix}"));
-    // Gate on .ucas existence so we match status.rs's has_companions semantics
-    // exactly (a lone .utoc without .ucas is not treated as an IoStore mod).
-    if !ucas.exists() {
-        return pak_size;
-    }
-    let utoc = mods_folder.join(format!("{stem}.utoc{suffix}"));
-    let ucas_size = std::fs::metadata(&ucas).map(|m| m.len()).unwrap_or(0);
-    let utoc_size = std::fs::metadata(&utoc).map(|m| m.len()).unwrap_or(0);
-    pak_size + ucas_size + utoc_size
-}
+/// Total on-disk size of a mod pak plus companion `.ucas`/`.utoc` when present. The size the
+/// status reports, so hero-cache validation compares like for like.
+pub(crate) use rivals_core::mod_library::size_on_disk as mod_size_on_disk;
 
 pub(crate) fn get_mods_status(game_root: &str, recursive: bool) -> ModsStatus {
     status::get_mods_status(game_root, recursive)
@@ -106,8 +84,13 @@ pub(crate) fn delete_mods(mods_folder: &str, names: &[String]) -> BulkOpResult {
     folder::delete_mods(mods_folder, names)
 }
 
-pub(crate) fn install_mod(mods_folder: &str, source_path: &str) -> Result<InstallResult, String> {
-    folder::install_mod(mods_folder, source_path)
+pub(crate) fn install_mods(
+    mods_folder: &str,
+    sources: &[String],
+    io: rivals_core::pak::iostore_out::IoStoreOptions,
+    game_root: Option<&str>,
+) -> Vec<InstallOutcome> {
+    folder::install_mods(mods_folder, sources, io, game_root)
 }
 
 pub(crate) fn rename_mod(
@@ -116,13 +99,6 @@ pub(crate) fn rename_mod(
     new_base: &str,
 ) -> Result<String, String> {
     folder::rename_mod(mods_folder, full_name, new_base)
-}
-
-pub(crate) fn install_from_archive(
-    mods_folder: &str,
-    archive_path: &str,
-) -> Result<Vec<InstallResult>, String> {
-    folder::install_from_archive(mods_folder, archive_path)
 }
 
 pub(crate) fn check_conflicts(game_root: &str, recursive: bool) -> Result<ConflictReport, String> {
