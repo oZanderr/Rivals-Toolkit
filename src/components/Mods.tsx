@@ -96,7 +96,10 @@ interface ModEntry {
 
 interface AssetConflict {
   asset: string;
+  /** Winner first: highest `_N_P` patch number, then alphabetical. */
   mods: string[];
+  /** The base game ships this asset too. */
+  overrides_game: boolean;
 }
 
 interface ConflictGroup {
@@ -159,6 +162,20 @@ interface Props {
 }
 
 type StatusType = "ok" | "err" | "info";
+
+/** One mod an install found in what was dropped, and what installing it did. */
+interface InstallOutcome {
+  /** Where it was: the path dropped, or its path in the folder or archive dropped. */
+  at: string;
+  installed: {
+    file_name: string;
+    replaced_disabled: boolean;
+    replaced_enabled: boolean;
+    /** Packed into a container as it went in: a folder of loose files, or a plain pak's packages. */
+    packed?: { from: "folder" | "plain_pak"; packages: number };
+  } | null;
+  error: string | null;
+}
 
 export function Mods({
   gamePath,
@@ -225,32 +242,31 @@ export function Mods({
   }, [gameRunning]);
 
   const refresh = useCallback(
-    async (silent = false) => {
-      if (!gamePath) return;
-      try {
-        const s = await invoke<ModsStatus>("get_mods_status", { gameRoot: gamePath });
-        setModsStatus(s);
-        if (!silent) showNotice("Mods refreshed", "ok", 4000);
-        else if (s.conflicts_resolved > 0)
-          showNotice(
-            `Removed ${s.conflicts_resolved} outdated disabled mod${s.conflicts_resolved !== 1 ? "s" : ""} (replaced by enabled version)`,
-            "info"
-          );
-        // Check for asset-level conflicts between enabled mods (skipped if user disabled the setting).
-        const enabledMods = s.mod_entries.filter((m) => m.enabled);
-        const conflictCheckEnabled = await invoke<boolean>("get_mod_conflict_check_enabled").catch(
-          () => true
-        );
-        if (conflictCheckEnabled && enabledMods.length >= 2) {
-          invoke<ConflictReport>("check_mod_conflicts", { gameRoot: gamePath })
-            .then(setConflictReport)
-            .catch(() => setConflictReport(null));
-        } else {
-          setConflictReport(null);
-        }
-      } catch (e: unknown) {
-        showNotice(String(e), "err");
-      }
+    (silent = false) => {
+      if (!gamePath) return Promise.resolve();
+      return invoke<ModsStatus>("get_mods_status", { gameRoot: gamePath })
+        .then(async (s) => {
+          setModsStatus(s);
+          if (!silent) showNotice("Mods refreshed", "ok", 4000);
+          else if (s.conflicts_resolved > 0)
+            showNotice(
+              `Removed ${s.conflicts_resolved} outdated disabled mod${s.conflicts_resolved !== 1 ? "s" : ""} (replaced by enabled version)`,
+              "info"
+            );
+          // Check for asset-level conflicts between enabled mods (skipped if user disabled the setting).
+          const enabledMods = s.mod_entries.filter((m) => m.enabled);
+          const conflictCheckEnabled = await invoke<boolean>(
+            "get_mod_conflict_check_enabled"
+          ).catch(() => true);
+          if (conflictCheckEnabled && enabledMods.length >= 2) {
+            invoke<ConflictReport>("check_mod_conflicts", { gameRoot: gamePath })
+              .then(setConflictReport)
+              .catch(() => setConflictReport(null));
+          } else {
+            setConflictReport(null);
+          }
+        })
+        .catch((e: unknown) => showNotice(String(e), "err"));
     },
     [gamePath, showNotice]
   );
@@ -258,14 +274,10 @@ export function Mods({
     refreshRef.current = refresh;
   }, [refresh]);
 
-  const refreshProfiles = useCallback(async () => {
-    try {
-      const p = await invoke<ModProfile[]>("list_mod_profiles");
-      setProfiles(p);
-    } catch {
-      setProfiles([]);
-    }
-  }, []);
+  const refreshProfiles = useCallback(
+    () => invoke<ModProfile[]>("list_mod_profiles").then(setProfiles, () => setProfiles([])),
+    []
+  );
 
   useEffect(() => {
     if (gamePath) refresh(true);
@@ -320,18 +332,21 @@ export function Mods({
   }, [loadKnownHeroes]);
 
   // Drop selected entries that no longer exist after a refresh.
-  useEffect(() => {
-    if (!modsStatus) return;
-    setSelected((prev) => {
-      if (prev.size === 0) return prev;
-      const alive = new Set(modsStatus.mod_entries.map((e) => e.full_name));
-      const next = new Set<string>();
-      for (const name of prev) if (alive.has(name)) next.add(name);
-      return next.size === prev.size ? prev : next;
-    });
-  }, [modsStatus]);
+  const [prunedFor, setPrunedFor] = useState(modsStatus);
+  if (modsStatus !== prunedFor) {
+    setPrunedFor(modsStatus);
+    if (modsStatus) {
+      setSelected((prev) => {
+        if (prev.size === 0) return prev;
+        const alive = new Set(modsStatus.mod_entries.map((e) => e.full_name));
+        const next = new Set<string>();
+        for (const name of prev) if (alive.has(name)) next.add(name);
+        return next.size === prev.size ? prev : next;
+      });
+    }
+  }
 
-  // Drag-and-drop: accept .pak and archive files dropped anywhere on the window.
+  // Drag-and-drop: install the mods, archives and folders dropped anywhere on the window.
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     getCurrentWindow()
@@ -352,63 +367,52 @@ export function Mods({
           }
           const folder = modsStatusRef.current?.mods_folder_path;
           if (!folder) return;
-          const pakPaths = event.payload.paths.filter((p) => p.endsWith(".pak"));
-          const archivePaths = event.payload.paths.filter((p) => {
-            const lower = p.toLowerCase();
-            return lower.endsWith(".zip") || lower.endsWith(".7z") || lower.endsWith(".rar");
-          });
-          if (pakPaths.length === 0 && archivePaths.length === 0) return;
+          const sourcePaths = event.payload.paths;
+          if (sourcePaths.length === 0) return;
           dropProcessingRef.current = true;
+          // Packing a folder of loose files can take a while.
+          showNotice("Installing…", "info", 600_000);
           try {
+            const outcomes = await invoke<InstallOutcome[]>("install_mods", {
+              modsFolder: folder,
+              sourcePaths,
+            });
             let installed = 0;
+            let packed = 0;
             let replacedDisabled = 0;
             let replacedEnabled = 0;
             const errors: string[] = [];
-
-            // Install loose .pak files
-            for (const p of pakPaths) {
-              try {
-                const result = await invoke<{
-                  file_name: string;
-                  replaced_disabled: boolean;
-                  replaced_enabled: boolean;
-                }>("install_mod", { modsFolder: folder, sourcePath: p });
-                installed++;
-                if (result.replaced_disabled) replacedDisabled++;
-                if (result.replaced_enabled) replacedEnabled++;
-              } catch (e: unknown) {
-                errors.push(String(e));
+            for (const { at, installed: result, error } of outcomes) {
+              if (!result) {
+                const name = at.split(/[\\/]/).pop() ?? at;
+                const why = error ?? "not installed";
+                errors.push(why.includes(at) ? why : `${name}: ${why}`);
+                continue;
               }
+              installed++;
+              if (result.packed) packed++;
+              if (result.replaced_disabled) replacedDisabled++;
+              if (result.replaced_enabled) replacedEnabled++;
             }
-
-            // Install mods from .zip / .7z / .rar archives
-            for (const z of archivePaths) {
-              try {
-                const results = await invoke<
-                  { file_name: string; replaced_disabled: boolean; replaced_enabled: boolean }[]
-                >("install_from_archive", { modsFolder: folder, archivePath: z });
-                for (const result of results) {
-                  installed++;
-                  if (result.replaced_disabled) replacedDisabled++;
-                  if (result.replaced_enabled) replacedEnabled++;
-                }
-              } catch (e: unknown) {
-                errors.push(String(e));
-              }
-            }
-
-            if (errors.length > 0) showNotice(errors[0], "err");
-            else if (installed > 0) {
+            if (installed > 0) {
               await refreshRef.current(true);
               emitChange();
-              const n = (c: number, s: string) => `${c} ${s}${c !== 1 ? "s" : ""}`;
-              const parts: string[] = [];
-              if (replacedEnabled > 0) parts.push(`updated ${n(replacedEnabled, "existing mod")}`);
-              if (replacedDisabled > 0)
-                parts.push(`replaced ${n(replacedDisabled, "disabled version")}`);
-              const suffix = parts.length > 0 ? ` (${parts.join(", ")})` : "";
-              showNotice(`Installed ${n(installed, "mod")}${suffix}`, "ok");
             }
+            const n = (c: number, s: string) => `${c} ${s}${c !== 1 ? "s" : ""}`;
+            const parts: string[] = [];
+            if (packed > 0) parts.push(`packed ${n(packed, "mod")} into containers`);
+            if (replacedEnabled > 0) parts.push(`updated ${n(replacedEnabled, "existing mod")}`);
+            if (replacedDisabled > 0)
+              parts.push(`replaced ${n(replacedDisabled, "disabled version")}`);
+            const suffix = parts.length > 0 ? ` (${parts.join(", ")})` : "";
+            const done = `Installed ${n(installed, "mod")}${suffix}`;
+            if (errors.length > 0) {
+              const more =
+                errors.length > 1 ? ` (and ${errors.length - 1} more not installed)` : "";
+              showNotice(`${installed > 0 ? `${done}; ` : ""}${errors[0]}${more}`, "err");
+            } else showNotice(done, "ok");
+          } catch (e: unknown) {
+            showNotice(String(e), "err");
           } finally {
             dropProcessingRef.current = false;
           }
@@ -962,7 +966,7 @@ export function Mods({
         <div className="pointer-events-none absolute inset-0 z-50 flex flex-col items-center justify-center gap-3 rounded-lg border-2 border-dashed border-ok bg-background/80 backdrop-blur-sm">
           <UploadCloud size={36} className="text-ok" />
           <span className="text-sm font-semibold text-ok">
-            Drop .pak, .zip, .7z or .rar to install
+            Drop mods, archives or folders to install
           </span>
         </div>
       )}
@@ -1759,7 +1763,7 @@ export function Mods({
             <AlertDialogDescription>
               {conflictReport?.asset_conflicts.length ?? 0} asset
               {conflictReport?.asset_conflicts.length !== 1 ? "s" : ""} modified by multiple mods.
-              The alphabetically first pak file wins.
+              The alphabetically first pak wins, unless another carries a higher _N_P patch number.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <ConflictList conflicts={conflictReport?.asset_conflicts ?? []} />
@@ -1858,6 +1862,12 @@ function Code({ children }: { children: React.ReactNode }) {
   );
 }
 
+/** The number in a `Name_<N>_P` file name, which the engine mounts by before the name. */
+function pakPriority(file: string): number | null {
+  const match = /_(\d+)_P(?:\.[a-z]+)+$/i.exec(file.split(/[\\/]/).pop() ?? file);
+  return match ? Number(match[1]) : null;
+}
+
 function ConflictList({ conflicts }: { conflicts: AssetConflict[] }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   // TanStack Virtual returns unstable functions by design; this hook is safe here.
@@ -1875,6 +1885,8 @@ function ConflictList({ conflicts }: { conflicts: AssetConflict[] }) {
       <div style={{ height: `${virtualizer.getTotalSize()}px`, position: "relative" }}>
         {virtualizer.getVirtualItems().map((vRow) => {
           const c = conflicts[vRow.index];
+          // Nearly every mod is `_9999999_P`, so the number only matters when these differ.
+          const byPriority = new Set(c.mods.map(pakPriority)).size > 1;
           return (
             <div
               key={vRow.index}
@@ -1890,9 +1902,20 @@ function ConflictList({ conflicts }: { conflicts: AssetConflict[] }) {
               className="pb-3"
             >
               <div className="rounded border border-border bg-secondary/30 p-2.5 text-[12px]">
-                <Tip content={c.asset}>
-                  <p className="truncate font-mono text-[11px] text-muted-foreground">{c.asset}</p>
-                </Tip>
+                <div className="flex items-center gap-1.5">
+                  <Tip content={c.asset}>
+                    <p className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground">
+                      {c.asset}
+                    </p>
+                  </Tip>
+                  {c.overrides_game && (
+                    <Tip content="The base game ships this asset; each mod here replaces it.">
+                      <span className="shrink-0 rounded bg-warn/15 px-1 py-0.5 text-[9px] font-semibold uppercase leading-none text-warn">
+                        Vanilla override
+                      </span>
+                    </Tip>
+                  )}
+                </div>
                 <div className="mt-1.5 flex flex-col gap-0.5">
                   {c.mods.map((mod, i) => (
                     <span key={mod} className="flex items-center gap-1.5">
@@ -1901,6 +1924,13 @@ function ConflictList({ conflicts }: { conflicts: AssetConflict[] }) {
                         <span className="shrink-0 rounded bg-ok/15 px-1 py-0.5 text-[9px] font-semibold uppercase leading-none text-ok">
                           Active
                         </span>
+                      )}
+                      {i === 0 && byPriority && (
+                        <Tip content="Wins on its higher _N_P patch number rather than its name.">
+                          <span className="shrink-0 text-[10px] text-muted-foreground">
+                            patch {pakPriority(mod)}
+                          </span>
+                        </Tip>
                       )}
                       {i > 0 && (
                         <span className="shrink-0 rounded bg-muted px-1 py-0.5 text-[9px] font-semibold uppercase leading-none text-muted-foreground">
