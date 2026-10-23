@@ -1,6 +1,6 @@
 {
   "source": "https://raw.githubusercontent.com/donutman07/MarvelRivalsCharacterIDs/main/MarvelRivalsCharacterIDs.md",
-  "generated_at": "2026-10-15T11:11:21.949Z",
+  "generated_at": "2026-10-23T11:20:23.326Z",
   "characters": {
     "1011": {
       "name": "Hulk",
@@ -167,7 +167,8 @@
         "1022504": "Capwolf",
         "1022505": "PRIMAL PATRIOT",
         "1022506": "ASTRAL AEGIS",
-        "1022801": "Avengers: Infinity War"
+        "1022801": "Avengers: Infinity War",
+        "1022802": "Captain America: The Winter Soldier"
       }
     },
     "1023": {
@@ -679,6 +680,7 @@
         "1047502": "Business Shark",
         "1047505": "JEFF-POOL",
         "1047506": "INCOGNITO BLUE",
+        "1047507": "SHARKNOS",
         "1047508": "SHARK IN SHEEP'S CLOTHING",
         "1047509": "GWENPOOL",
         "1047800": "8-BIT BASH"
@@ -927,6 +929,7 @@
         "1059300": "YOUNG BLOOD",
         "1059301": "SILVER STALKER",
         "1059302": "JADE JAGUAR",
+        "1059304": "GOTHIC HUNTRESS",
         "1059500": "BLOODY BLOODSTONE",
         "1059501": "MARINE MAID",
         "1059502": "PASTEL POLISHER",
@@ -955,6 +958,7 @@
         "1061300": "URBAN PREDATOR",
         "1061301": "PURPLE PROWL",
         "1061302": "PINK PURR",
+        "1061303": "FATAL WEAVER",
         "1061304": "PEARL PAWS",
         "1061305": "GOLDEN CLAWS",
         "1061500": "WILD CARD",
