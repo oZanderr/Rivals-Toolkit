@@ -8138,15 +8138,25 @@ mod game_data_tests {
     /// A sound cue whose wave players name their waves after two strip bytes.
     const SOUND_CUE: &str = "Marvel/Content/Marvel/Environment/FluidFlux/Surface/Templates/River/Audio/CS_RiverSource.uasset";
     const RIG: &str = "Marvel/Content/Marvel/Characters/Common/Rig/Paragon_Proto_Retarget.uasset";
+    /// A Wwise aux bus: its cooked data, then the attenuation radius the bus writes after it.
+    const WWISE_BUS: &str =
+        "Marvel/Content/Marvel/Wwise/Assets/WwiseBus/spatial/rev_room_wood_small.uasset";
+    /// A static mesh whose render data closes with eight screen sizes this game writes at sixteen
+    /// bytes each.
+    const SCREEN_SIZES: &str =
+        "Marvel/Content/Marvel/Characters/1014/1014502/Weapons/Cup/Meshes/SM_WP_1014502_Cup.uasset";
+    /// A music event with one bank and one streamed medium, closing with its durations and the
+    /// three fields this game's engine adds.
+    const WWISE_EVENT: &str =
+        "Marvel/Content/Marvel/Wwise/Assets/Events/Music/music_new/event/Dead.uasset";
+    /// An ability timeline whose third track fires a camera shake.
+    const HULK_TIMELINE: &str =
+        "Marvel/Content/Marvel/AbilitySystem/1014/101433/Timeline_101433_01.uasset";
     /// Exports whose remainder is cooked data the reader names rather than decodes.
-    const NAMED_PAYLOADS: [(&str, &str); 6] = [
+    const NAMED_PAYLOADS: [(&str, &str); 5] = [
         (
             "Marvel/Content/Marvel/Characters/GameMode/2206/4040/Skelot_4040001.uasset",
             "Skelot animation data",
-        ),
-        (
-            "Marvel/Content/Marvel/Wwise/Assets/WwiseBus/spatial/rev_room_wood_small.uasset",
-            "Wwise audio data",
         ),
         (
             "Marvel/Content/Marvel/Environment/5007/50070010/GC_BluePrint/Component/GC_50070010Component036I/GC_50070010Component036I.uasset",
@@ -8264,6 +8274,10 @@ mod game_data_tests {
         ("POSE_ASSET", POSE_ASSET),
         ("SOUND_CUE", SOUND_CUE),
         ("RIG", RIG),
+        ("WWISE_BUS", WWISE_BUS),
+        ("WWISE_EVENT", WWISE_EVENT),
+        ("SCREEN_SIZES", SCREEN_SIZES),
+        ("HULK_TIMELINE", HULK_TIMELINE),
         ("GROUND_MOTION_ANIM_BP", GROUND_MOTION_ANIM_BP),
         ("CURVE_ANIM_BP", CURVE_ANIM_BP),
         ("INSTANCED", INSTANCED),
@@ -16778,6 +16792,261 @@ mod game_data_tests {
         );
     }
 
+    /// Every span the game's layout has and a stock cook's lacks, by the field naming it: a skeletal
+    /// mesh slot's tags, a static mesh screen size's second value, a string table entry's marker.
+    fn game_only_spans(parsed: &rivals_uasset::ParsedPackage) -> Vec<(u64, u64)> {
+        fn walk(entries: &[PropertyEntry], out: &mut Vec<(u64, u64)>) {
+            for entry in entries {
+                if matches!(entry.name.as_str(), "MaterialTags" | "Extra")
+                    && let Some(span) = entry.span
+                {
+                    out.push(span);
+                    continue;
+                }
+                let nested: Vec<&[PropertyEntry]> = match &entry.value {
+                    PropertyValue::Struct { fields, .. } => vec![fields],
+                    PropertyValue::Array { items } => items
+                        .iter()
+                        .filter_map(|item| match item {
+                            PropertyValue::Struct { fields, .. } => Some(fields.as_slice()),
+                            _ => None,
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                for fields in nested {
+                    walk(fields, out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for export in &parsed.exports {
+            walk(&export.properties, &mut out);
+        }
+        for table in &parsed.string_tables {
+            out.extend(table.entries.iter().map(|entry| (entry.tag_at, entry.end)));
+        }
+        out.sort();
+        out
+    }
+
+    /// Real packages taken down to a stock editor's layout and converted back. What a stock cook
+    /// lacks the conversion cannot know, so it writes each part empty; the package has to come back
+    /// as the game's own with exactly those parts emptied, byte for byte, sizes, offsets and the
+    /// bulk data placed inside each export included.
+    #[test]
+    fn game_packages_taken_to_a_stock_layout_convert_back_byte_for_byte() {
+        for (entry, gaps) in [(SAMPLED_MESH, 1), (SCREEN_SIZES, 8), (TAGGED_TABLE, 2)] {
+            let Some(fixture) = Fixture::open(entry) else {
+                return;
+            };
+            let bundle = fixture.bundle();
+            let spans = game_only_spans(&fixture.parse());
+            // A mesh's real LODs have a screen size; the slots past its last hold none.
+            let fixture_lods = fixture
+                .parse()
+                .exports
+                .iter()
+                .flat_map(|export| export.properties.iter())
+                .filter(|entry| entry.name == "ScreenSize")
+                .map(|entry| match &entry.value {
+                    PropertyValue::Array { items } => items
+                        .iter()
+                        .filter(|item| match item {
+                            PropertyValue::Struct { fields, .. } => fields.iter().any(|field| {
+                                field.name == "Default"
+                                    && matches!(field.value, PropertyValue::Float { value } if value > 0.0)
+                            }),
+                            _ => false,
+                        })
+                        .count() as u32,
+                    _ => 0,
+                })
+                .next()
+                .unwrap_or(0);
+            assert!(spans.len() >= gaps, "{entry}: {} spans", spans.len());
+            let rewrite = |empty: bool| {
+                // The eight-byte parts are a static mesh's LOD distances, LOD 0 first.
+                let mut lod = 0u32;
+                let splices: Vec<rivals_uasset::Splice> = spans
+                    .iter()
+                    .map(|&(start, end)| rivals_uasset::Splice {
+                        start,
+                        end,
+                        bytes: if !empty {
+                            Vec::new()
+                        } else if end - start == 8 {
+                            let kind = rivals_uasset::StockGapKind::ScreenSize {
+                                lod: lod % 8,
+                                lods: fixture_lods,
+                            };
+                            lod += 1;
+                            kind.filler()
+                        } else {
+                            vec![0; 4]
+                        },
+                    })
+                    .collect();
+                rivals_uasset::rewrite(&bundle, &splices, rivals_uasset::HeaderDraft::default())
+                    .expect("rewrite")
+            };
+            let stripped = rewrite(false);
+            let expected = rewrite(true);
+            let stock = AssetBundle {
+                asset: &stripped.asset,
+                exports: &stripped.exports,
+            };
+            let reread =
+                rivals_uasset::parse_package(&stock, Some(&fixture.schema)).expect("parse");
+            // The game's distance fields read as the editor's once the mesh reads as a stock cook;
+            // that finding is no stripped part.
+            let filled = reread
+                .stock_gaps
+                .iter()
+                .filter(|gap| !matches!(gap.kind, rivals_uasset::StockGapKind::RenderData { .. }))
+                .count();
+            assert_eq!(
+                filled,
+                spans.len(),
+                "{entry}: every stripped part reads as a gap"
+            );
+            let converted = rivals_uasset::conform_layout(&stock, Some(&fixture.schema))
+                .expect("convert")
+                .expect("something to convert");
+            assert!(
+                converted.asset == expected.asset,
+                "{entry}: the header differs from the game's with the parts emptied"
+            );
+            assert!(
+                converted.exports == expected.exports,
+                "{entry}: the exports differ from the game's with the parts emptied"
+            );
+        }
+    }
+
+    /// A Wwise event's cooked data is ordinary struct data once read: a medium's id inside the
+    /// language map and a duration from the trailer both take an edit and read back.
+    #[test]
+    fn a_wwise_event_s_medium_and_duration_take_edits() {
+        let Some(fixture) = Fixture::open(WWISE_EVENT) else {
+            return;
+        };
+        let medium_id = |export: &rivals_uasset::ParsedExport| -> PropertyEntry {
+            let cooked = find_field(&export.properties, &|f| f.name == "EventCookedData")
+                .expect("the cooked data");
+            let PropertyValue::Struct { fields, .. } = &cooked.value else {
+                panic!("{:?}", cooked.value);
+            };
+            let map = find_field(fields, &|f| f.name == "EventLanguageMap").expect("a map");
+            let PropertyValue::Map { entries } = &map.value else {
+                panic!("{:?}", map.value);
+            };
+            let PropertyValue::Struct { fields, .. } = &entries[0].value else {
+                panic!("{:?}", entries[0].value);
+            };
+            let media = find_field(fields, &|f| f.name == "Media").expect("the media");
+            let PropertyValue::Array { items } = &media.value else {
+                panic!("{:?}", media.value);
+            };
+            let PropertyValue::Struct { fields, .. } = &items[0] else {
+                panic!("{:?}", items[0]);
+            };
+            find_field(fields, &|f| f.name == "MediaId")
+                .expect("a medium id")
+                .clone()
+        };
+        let before = fixture.parse();
+        let event = export_of_class(&before, "AkAudioEvent");
+        let id = medium_id(event);
+        let duration = find_field(&event.properties, &|f| f.name == "MaximumDuration")
+            .expect("the duration")
+            .clone();
+
+        let (_, after) = fixture.apply(vec![
+            edit_of(
+                &id,
+                EditOp::Set {
+                    text: "133371219".into(),
+                },
+            ),
+            edit_of(
+                &duration,
+                EditOp::Set {
+                    text: "12.5".into(),
+                },
+            ),
+        ]);
+        let event = export_of_class(&after, "AkAudioEvent");
+        assert!(
+            matches!(event.status, ExportStatus::Complete),
+            "{:?}",
+            event.status
+        );
+        assert!(
+            matches!(
+                medium_id(event).value,
+                PropertyValue::Int { value: 133371219 }
+            ),
+            "{:?}",
+            medium_id(event).value
+        );
+        let duration =
+            find_field(&event.properties, &|f| f.name == "MaximumDuration").expect("the duration");
+        assert!(
+            matches!(duration.value, PropertyValue::Float { value } if value == 12.5),
+            "{:?}",
+            duration.value
+        );
+    }
+
+    /// An ability timeline's own copy of its tracks reads to the export's end, and a start time set
+    /// on the property copy lands on both copies.
+    #[test]
+    fn a_timeline_notify_s_start_time_is_set_on_both_copies() {
+        let Some(fixture) = Fixture::open(HULK_TIMELINE) else {
+            return;
+        };
+        let start_time = |export: &rivals_uasset::ParsedExport, copy: &str| -> PropertyEntry {
+            let tracks = find_field(&export.properties, &|f| f.name == copy).expect("the tracks");
+            let PropertyValue::Array { items } = &tracks.value else {
+                panic!("{:?}", tracks.value);
+            };
+            let PropertyValue::Struct { fields, .. } = &items[2] else {
+                panic!("{:?}", items[2]);
+            };
+            let notifies = find_field(fields, &|f| f.name == "Notifies").expect("the notifies");
+            let PropertyValue::Array { items } = &notifies.value else {
+                panic!("{:?}", notifies.value);
+            };
+            let PropertyValue::Struct { fields, .. } = &items[0] else {
+                panic!("{:?}", items[0]);
+            };
+            find_field(fields, &|f| f.name == "StartTime")
+                .expect("a start time")
+                .clone()
+        };
+        let before = fixture.parse();
+        let timeline = export_of_class(&before, "AnimTimeline");
+        assert!(
+            matches!(timeline.status, ExportStatus::Complete),
+            "{:?}",
+            timeline.status
+        );
+        let (_, after) = fixture.apply(vec![edit_of(
+            &start_time(timeline, "AnimNotifyTracks"),
+            EditOp::Set { text: "0.5".into() },
+        )]);
+        let timeline = export_of_class(&after, "AnimTimeline");
+        for copy in ["AnimNotifyTracks", "CookedNotifyTracks"] {
+            let held = start_time(timeline, copy);
+            assert!(
+                matches!(held.value, PropertyValue::Float { value } if value == 0.5),
+                "{copy}: {:?}",
+                held.value
+            );
+        }
+    }
+
     /// The class tails that were left unexplained across the containers: a pose asset and a rig
     /// read to their end, a cue and its wave players too, an animation sequence's payload now
     /// starts after its skeleton guid, and the rest are named as the payloads they are.
@@ -16807,6 +17076,10 @@ mod game_data_tests {
         complete(SOUND_CUE, "SoundCue", "");
         complete(SOUND_CUE, "SoundNodeWavePlayer", "SoundWave");
         complete(RIG, "Rig", "");
+        complete(WWISE_BUS, "AkAuxBus", "AuxBusCookedData");
+        complete(WWISE_BUS, "AkAuxBus", "MaxAttenuationRadius");
+        complete(WWISE_EVENT, "AkAudioEvent", "EventCookedData");
+        complete(WWISE_EVENT, "AkAudioEvent", "bHasMotionEvent");
         for (entry, kind) in NAMED_PAYLOADS {
             let Some(fixture) = Fixture::open(entry) else {
                 return;

@@ -73,6 +73,9 @@ pub(crate) struct Settings {
     pub(crate) game_running_check_enabled: bool,
     #[serde(default = "default_true")]
     pub(crate) mod_conflict_check_enabled: bool,
+    /// Bring what a stock editor cooked to this game's layout as a mod is installed or packed.
+    #[serde(default = "default_true")]
+    pub(crate) conform_mods: bool,
     /// Path to a .usmap mappings file, or a folder holding one. Reading asset properties needs it.
     #[serde(default)]
     pub(crate) usmap_path: Option<String>,
@@ -117,6 +120,7 @@ impl Default for Settings {
             vanilla_compression_level: default_vanilla_compression_level(),
             game_running_check_enabled: true,
             mod_conflict_check_enabled: true,
+            conform_mods: true,
             usmap_path: None,
             asset_mod_name: None,
             asset_save_target: None,
@@ -258,6 +262,37 @@ pub(crate) fn set_mod_compression_level(
 ) -> Result<(), String> {
     let mut guard = state.lock().map_err(|e| e.to_string())?;
     guard.mod_compression_level = level;
+    guard.save()
+}
+
+/// The game's schema from the mappings file `usmap` names, which bringing an editor-made static
+/// mesh to the game's layout writes its properties against. Loaded off the main thread, since a
+/// first read of the file takes a moment.
+pub(crate) fn load_mappings(
+    usmap: Option<&str>,
+) -> Option<std::sync::Arc<rivals_uasset::Mappings>> {
+    rivals_core::mappings::resolve(None, usmap)
+        .and_then(|path| rivals_core::mappings::load(&path))
+        .ok()
+}
+
+/// Whether installs and packs bring what a stock editor cooked to this game's layout.
+pub(crate) fn conform_mods(state: &State<'_, SettingsState>) -> bool {
+    state.lock().map(|s| s.conform_mods).unwrap_or(true)
+}
+
+#[tauri::command]
+pub(crate) fn get_conform_mods(state: State<'_, SettingsState>) -> bool {
+    conform_mods(&state)
+}
+
+#[tauri::command]
+pub(crate) fn set_conform_mods(
+    state: State<'_, SettingsState>,
+    enabled: bool,
+) -> Result<(), String> {
+    let mut guard = state.lock().map_err(|e| e.to_string())?;
+    guard.conform_mods = enabled;
     guard.save()
 }
 

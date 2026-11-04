@@ -17,6 +17,15 @@ struct Slot {
     element: u32,
 }
 
+impl std::fmt::Debug for Mappings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Mappings")
+            .field("structs", &self.struct_count())
+            .field("enums", &self.enum_count())
+            .finish()
+    }
+}
+
 pub struct Mappings {
     inner: Arc<Usmap>,
     structs: HashMap<String, u32>,

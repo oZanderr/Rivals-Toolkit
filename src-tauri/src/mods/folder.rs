@@ -51,7 +51,7 @@ pub(crate) fn delete_mods(mods_folder: &str, names: &[String]) -> BulkOpResult {
 
 /// Delete a mod and its companion `.ucas`/`.utoc` files.
 pub(crate) fn delete_mod(mods_folder: &str, full_name: &str) -> Result<(), String> {
-    rivals_core::mods::delete_mod(Path::new(mods_folder), full_name)
+    mod_library::delete_one(Path::new(mods_folder), full_name)
 }
 
 /// Rename a mod and its companion `.ucas`/`.utoc` files.

@@ -4,6 +4,7 @@ use serde::Serialize;
 
 use crate::props::{Ctx, Diagnostics};
 use crate::reader::Cursor;
+use crate::stock::{StockGap, StockGapKind};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct StringTable {
@@ -77,15 +78,51 @@ pub struct StringEntrySpan {
     pub end: u64,
 }
 
-/// `FStringTable::Serialize` as this game writes it: the namespace, then each entry as its key,
-/// its source string and a marker string stock UE does not write, then the metadata map keyed by
-/// entry key: a count, then per record the key, an item count and the name and value pairs.
-/// Strings are `FString`s, so a key or a value may be UTF-16.
-pub(crate) fn read_string_table(
+/// Reads a table as this game lays it out, or failing that as a stock editor does, with no marker
+/// after each source. A stock table is read for what it holds and its gaps recorded, but keeps no
+/// layout, so its entries are not edited until a conversion has added the markers.
+pub(crate) fn read_either_layout(
     cursor: &mut Cursor<'_>,
     ctx: &Ctx<'_>,
     export: u32,
     diagnostics: &mut Diagnostics,
+) -> Result<StringTable, String> {
+    let (at, names, marks, layouts) = (
+        cursor.position(),
+        cursor.names_len(),
+        diagnostics.marks(),
+        diagnostics.string_tables.len(),
+    );
+    let game = read_string_table(cursor, ctx, export, diagnostics, true);
+    if game.is_ok() && cursor.remaining() == 0 {
+        return game;
+    }
+    let rewind = |cursor: &mut Cursor<'_>, diagnostics: &mut Diagnostics| {
+        cursor.truncate_names(names);
+        diagnostics.rewind(&marks);
+        diagnostics.string_tables.truncate(layouts);
+        cursor.seek_to(at)
+    };
+    rewind(cursor, diagnostics)?;
+    match read_string_table(cursor, ctx, export, diagnostics, false) {
+        Ok(table) if cursor.remaining() == 0 => Ok(table),
+        _ => {
+            rewind(cursor, diagnostics)?;
+            read_string_table(cursor, ctx, export, diagnostics, true)
+        }
+    }
+}
+
+/// `FStringTable::Serialize`: the namespace, then each entry as its key, its source string and,
+/// as this game writes it, a marker string stock UE does not, then the metadata map keyed by
+/// entry key: a count, then per record the key, an item count and the name and value pairs.
+/// Strings are `FString`s, so a key or a value may be UTF-16.
+fn read_string_table(
+    cursor: &mut Cursor<'_>,
+    ctx: &Ctx<'_>,
+    export: u32,
+    diagnostics: &mut Diagnostics,
+    marker: bool,
 ) -> Result<StringTable, String> {
     let namespace_at = cursor.file_offset();
     let namespace = cursor.read_string()?;
@@ -99,7 +136,16 @@ pub(crate) fn read_string_table(
         let source_at = cursor.file_offset();
         let source = cursor.read_string()?;
         let tag_at = cursor.file_offset();
-        let tag = cursor.read_string()?;
+        let tag = if marker {
+            cursor.read_string()?
+        } else {
+            diagnostics.stock_gaps.push(StockGap {
+                export,
+                at: tag_at,
+                kind: StockGapKind::StringMarker { key: key.clone() },
+            });
+            String::new()
+        };
         spans.push(StringEntrySpan {
             key: (key_at, source_at),
             source: (source_at, tag_at),
@@ -146,6 +192,13 @@ pub(crate) fn read_string_table(
             Some(entry) => entry.metadata.extend(pairs),
             None => loose_metadata.push(StringTableMetaData { key, pairs }),
         }
+    }
+    if !marker {
+        return Ok(StringTable {
+            namespace,
+            entries,
+            loose_metadata,
+        });
     }
     diagnostics.string_tables.push(StringTableLayout {
         export,
@@ -231,7 +284,7 @@ mod tests {
         };
         let mut diagnostics = Diagnostics::default();
         let mut cursor = Cursor::new(&data, 0);
-        let table = read_string_table(&mut cursor, &ctx, 3, &mut diagnostics).expect("table");
+        let table = read_string_table(&mut cursor, &ctx, 3, &mut diagnostics, true).expect("table");
         assert_eq!(cursor.remaining(), 0);
         assert_eq!(table.namespace, "104_Currency_ST");
         assert_eq!(table.entries.len(), 2);
@@ -284,7 +337,51 @@ mod tests {
         };
         let mut diagnostics = Diagnostics::default();
         let mut cursor = Cursor::new(&data, 0);
-        let err = read_string_table(&mut cursor, &ctx, 0, &mut diagnostics).expect_err("refused");
+        let err =
+            read_string_table(&mut cursor, &ctx, 0, &mut diagnostics, true).expect_err("refused");
         assert!(err.contains("-1"), "{err}");
+    }
+
+    /// A stock table has no marker after each source. Read as this game's layout its second key
+    /// is taken for the first marker and the table overruns, so it reads as a stock one: what it
+    /// holds, where each marker goes, and no layout to edit through.
+    #[test]
+    fn a_stock_table_reads_with_its_missing_markers_recorded() {
+        let mut data = Vec::new();
+        string(&mut data, "NS");
+        data.extend_from_slice(&2i32.to_le_bytes());
+        string(&mut data, "Title");
+        string(&mut data, "Hello");
+        let first_gap = data.len() as u64;
+        string(&mut data, "Body");
+        string(&mut data, "World");
+        let second_gap = data.len() as u64;
+        data.extend_from_slice(&0i32.to_le_bytes());
+        let header = FLegacyPackageHeader::default();
+        let ctx = Ctx {
+            mappings: None,
+            header: &header,
+            fixups: None,
+            synth: None,
+            local: None,
+            tagged: false,
+        };
+        let mut diagnostics = Diagnostics::default();
+        let mut cursor = Cursor::new(&data, 0);
+        let table = read_either_layout(&mut cursor, &ctx, 4, &mut diagnostics).expect("read");
+        assert_eq!(cursor.remaining(), 0);
+        let read: Vec<(&str, &str)> = table
+            .entries
+            .iter()
+            .map(|entry| (entry.key.as_str(), entry.source.as_str()))
+            .collect();
+        assert_eq!(read, [("Title", "Hello"), ("Body", "World")]);
+        let gaps: Vec<(u32, u64)> = diagnostics
+            .stock_gaps
+            .iter()
+            .map(|gap| (gap.export, gap.at))
+            .collect();
+        assert_eq!(gaps, [(4, first_gap), (4, second_gap)]);
+        assert!(diagnostics.string_tables.is_empty());
     }
 }

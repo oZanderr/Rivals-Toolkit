@@ -1311,6 +1311,9 @@ pub fn patch_package_with(
     edits: &PackageEdits,
     mappings: Option<&Mappings>,
 ) -> Result<PatchedBundle, String> {
+    crate::mirror::refuse_one_sided(parsed, edits)?;
+    let mirrored = crate::mirror::with_mirrors(parsed, edits);
+    let edits = mirrored.as_ref().unwrap_or(edits);
     check_expectations(parsed, edits)?;
     header_round_trips(bundle)?;
     check_inline_bulk(bundle)?;
@@ -4935,7 +4938,7 @@ fn tag_type(inner: &usmap::PropertyInner) -> Result<&'static str, String> {
 /// A whole tag for a property: its name, type, size and array index, the part its type adds, no
 /// property guid, then the value. Returns where the value lands within it, or for a bool, where
 /// its value byte does, since a bool keeps it in the tag.
-fn tag_bytes(
+pub(crate) fn tag_bytes(
     name: &str,
     array_index: u32,
     inner: &usmap::PropertyInner,
@@ -6213,6 +6216,8 @@ pub fn verify_patch(
     edits: &PackageEdits,
     applied: &[AppliedEdit],
 ) -> Result<(), String> {
+    let mirrored = crate::mirror::with_mirrors(before, edits);
+    let edits = mirrored.as_ref().unwrap_or(edits);
     check_header_shapes(before, after)?;
     if !edits.remove_records.is_empty() {
         return crate::member_edit::verify_record_removal(before, after, &edits.remove_records);
@@ -9241,6 +9246,7 @@ mod tests {
             native_leaves: Vec::new(),
             tag_bounds: Vec::new(),
             tagged_absent: Vec::new(),
+            stock_gaps: Vec::new(),
             script_tokens: Default::default(),
             text_histories: Default::default(),
             text_flags: Default::default(),

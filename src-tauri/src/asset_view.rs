@@ -25,11 +25,11 @@ pub(crate) struct MappingsStatus {
     pub warning: Option<String>,
 }
 
-fn configured_usmap(state: &State<'_, SettingsState>) -> Option<String> {
+pub(crate) fn configured_usmap(state: &State<'_, SettingsState>) -> Option<String> {
     state.lock().ok().and_then(|s| s.usmap_path.clone())
 }
 
-fn text_culture(state: &State<'_, SettingsState>) -> String {
+pub(crate) fn text_culture(state: &State<'_, SettingsState>) -> String {
     state
         .lock()
         .ok()
@@ -421,6 +421,8 @@ pub(crate) struct ScriptView {
     buffer_size: u32,
     storage_size: u32,
     statements: usize,
+    /// The script read as control flow, with its pseudo-code, when it decoded whole.
+    flow: Option<rivals_uasset::ScriptFlow>,
 }
 
 /// A Niagara script's VM program as the inspector shows it: the script read, its listing, what
@@ -505,6 +507,9 @@ pub(crate) async fn export_script_view(
             .remove(&found.object_name)
             .unwrap_or_default();
         let text = rivals_uasset::print_script(&parsed, export);
+        let flow = text
+            .as_ref()
+            .and_then(|text| rivals_uasset::flow_with(&parsed, export, text));
         Ok(ScriptView {
             lines: rivals_uasset::script_lines(&parsed, export),
             end_labels: text
@@ -529,6 +534,7 @@ pub(crate) async fn export_script_view(
             buffer_size: script.buffer_size,
             storage_size: script.storage_size,
             statements: script.statements.len(),
+            flow,
         })
     })
     .await
@@ -1284,11 +1290,12 @@ pub(crate) async fn get_mappings_status(
                 let status = mappings::status(Some(&path));
                 MappingsStatus {
                     path: Some(path.display().to_string()),
-                    loaded: status.struct_count > 0,
+                    loaded: status.error.is_none(),
                     struct_count: status.struct_count,
                     enum_count: status.enum_count,
-                    error: (status.struct_count == 0)
-                        .then(|| "the mappings file could not be parsed".to_string()),
+                    error: status
+                        .error
+                        .map(|why| format!("the mappings file could not be read: {why}")),
                     warning: game_root
                         .as_deref()
                         .and_then(|root| mappings::drift_warning(root, &path)),

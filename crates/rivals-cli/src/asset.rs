@@ -17,6 +17,21 @@ use rivals_uasset::{
 };
 use serde::Serialize;
 
+/// The mappings to read packages with. None set reads only what a package stores its own types
+/// for. One set that does not load is said on stderr, since reading on without it fails later in
+/// ways that do not name it.
+pub fn schema(usmap: Option<&str>, configured: Option<&str>) -> Option<std::sync::Arc<Mappings>> {
+    match mappings::resolve(usmap, configured).and_then(|path| mappings::load(&path)) {
+        Ok(schema) => Some(schema),
+        Err(why) => {
+            if usmap.or(configured).is_some() {
+                eprintln!("warning: reading without mappings: {why}");
+            }
+            None
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Request<'a> {
     pub game_root: &'a str,
@@ -140,9 +155,7 @@ fn parse_quietly(request: &Request<'_>) -> Result<ParsedPackage, String> {
     )?;
     // A tagged package carries its own type information, so missing mappings are only fatal for
     // the unversioned case, which parse_package reports itself.
-    let schema = mappings::resolve(request.usmap, request.configured_usmap)
-        .and_then(|path| mappings::load(&path))
-        .ok();
+    let schema = schema(request.usmap, request.configured_usmap);
     let parsed = schema_synth::parse_package_opts(
         &AssetBundle {
             asset: &bundle.asset_file_buffer,
@@ -204,9 +217,7 @@ pub fn preview_edits(
     replace: bool,
     changes: PackageEdits,
 ) -> Result<EditPreview, String> {
-    let schema = mappings::resolve(request.usmap, request.configured_usmap)
-        .and_then(|path| mappings::load(&path))
-        .ok();
+    let schema = schema(request.usmap, request.configured_usmap);
     let outcome = asset_edit::preview_save(
         &edit_request(request, mod_name, changes),
         schema.as_deref(),
@@ -237,9 +248,7 @@ pub struct EditPreview {
 
 /// What removing `exports` would do, without writing anything.
 pub fn plan_removal(request: &Request<'_>, exports: &[u32]) -> Result<RemovalPlan, String> {
-    let schema = mappings::resolve(request.usmap, request.configured_usmap)
-        .and_then(|path| mappings::load(&path))
-        .ok();
+    let schema = schema(request.usmap, request.configured_usmap);
     asset_edit::plan_export_removal(
         &edit_request(
             request,
@@ -255,9 +264,7 @@ pub fn plan_removal(request: &Request<'_>, exports: &[u32]) -> Result<RemovalPla
 
 /// The names nothing in the package uses, as a save dropping them would find them.
 pub fn unused_names(request: &Request<'_>, mod_name: &str) -> Result<Vec<String>, String> {
-    let schema = mappings::resolve(request.usmap, request.configured_usmap)
-        .and_then(|path| mappings::load(&path))
-        .ok();
+    let schema = schema(request.usmap, request.configured_usmap);
     asset_edit::unused_names(
         &edit_request(request, mod_name, PackageEdits::default()),
         schema.as_deref(),
@@ -278,9 +285,7 @@ pub fn rename_package(request: &Request<'_>, to: &str) -> Result<String, String>
         return Err("only a package in an IoStore mod can be moved inside it".into());
     }
     let mod_name = asset_edit::mod_name_of(Path::new(&*request.container))?;
-    let schema = mappings::resolve(request.usmap, request.configured_usmap)
-        .and_then(|path| mappings::load(&path))
-        .ok();
+    let schema = schema(request.usmap, request.configured_usmap);
     let changes = PackageEdits::default();
     match asset_edit::rename_mod_package(
         &edit_request(
@@ -308,9 +313,7 @@ pub fn rename_package(request: &Request<'_>, to: &str) -> Result<String, String>
 
 /// The bytes an export carries after its properties.
 pub fn payload_bytes(request: &Request<'_>, export: u32) -> Result<Vec<u8>, String> {
-    let schema = mappings::resolve(request.usmap, request.configured_usmap)
-        .and_then(|path| mappings::load(&path))
-        .ok();
+    let schema = schema(request.usmap, request.configured_usmap);
     asset_edit::read_payload(
         &edit_request(request, "", PackageEdits::default()),
         schema.as_deref(),
@@ -463,9 +466,7 @@ fn write_edits(
     replace: bool,
     changes: PackageEdits,
 ) -> Result<String, String> {
-    let schema = mappings::resolve(request.usmap, request.configured_usmap)
-        .and_then(|path| mappings::load(&path))
-        .ok();
+    let schema = schema(request.usmap, request.configured_usmap);
     match asset_edit::save_edits(
         &edit_request(request, mod_name, changes),
         schema.as_deref(),
@@ -493,9 +494,7 @@ pub fn sweep(
     target: asset_edit::SaveTarget,
     request: &asset_edit::sweep::SweepRequest<'_>,
 ) -> Result<asset_edit::sweep::SweepReport, String> {
-    let schema = mappings::resolve(usmap, configured_usmap)
-        .and_then(|path| mappings::load(&path))
-        .ok();
+    let schema = schema(usmap, configured_usmap);
     asset_edit::sweep::sweep(
         request,
         schema.as_deref(),
@@ -641,9 +640,7 @@ pub fn apply(
             message: None,
         })
         .collect();
-    let schema = mappings::resolve(usmap, configured_usmap)
-        .and_then(|path| mappings::load(&path))
-        .ok();
+    let schema = schema(usmap, configured_usmap);
 
     let mut groups: Vec<ApplyGroup> = Vec::new();
     for (index, (base, file)) in items.iter().enumerate() {
@@ -1107,9 +1104,7 @@ pub fn members(
     function: Option<u32>,
     only: Option<&str>,
 ) -> Result<rivals_core::members::MemberReport, String> {
-    let schema = mappings::resolve(request.usmap, request.configured_usmap)
-        .and_then(|path| mappings::load(&path))
-        .ok();
+    let schema = schema(request.usmap, request.configured_usmap);
     rivals_core::members::member_report(
         &edit_request(request, "", PackageEdits::default()),
         schema.as_deref(),
@@ -1124,9 +1119,7 @@ pub fn texture_info(
     request: &Request<'_>,
     export: Option<u32>,
 ) -> Result<rivals_core::texture::TextureInfo, String> {
-    let schema = mappings::resolve(request.usmap, request.configured_usmap)
-        .and_then(|path| mappings::load(&path))
-        .ok();
+    let schema = schema(request.usmap, request.configured_usmap);
     rivals_core::texture::texture_info(
         &edit_request(request, "", PackageEdits::default()),
         schema.as_deref(),
@@ -1141,9 +1134,7 @@ pub fn save_texture_image(
     mip: Option<usize>,
     out: &Path,
 ) -> Result<rivals_core::texture::SavedImage, String> {
-    let schema = mappings::resolve(request.usmap, request.configured_usmap)
-        .and_then(|path| mappings::load(&path))
-        .ok();
+    let schema = schema(request.usmap, request.configured_usmap);
     rivals_core::texture::save_image(
         &edit_request(request, "", PackageEdits::default()),
         schema.as_deref(),
@@ -1165,9 +1156,7 @@ pub fn import_texture_image(
     quality: rivals_core::texture::Quality,
     dry_run: bool,
 ) -> Result<rivals_core::texture::ImportReport, String> {
-    let schema = mappings::resolve(request.usmap, request.configured_usmap)
-        .and_then(|path| mappings::load(&path))
-        .ok();
+    let schema = schema(request.usmap, request.configured_usmap);
     rivals_core::texture::import_image(
         &edit_request(request, mod_name, PackageEdits::default()),
         schema.as_deref(),
@@ -1188,9 +1177,7 @@ pub fn import_texture_images(
     quality: rivals_core::texture::Quality,
     dry_run: bool,
 ) -> Result<rivals_core::texture::ImportBatch, String> {
-    let schema = mappings::resolve(request.usmap, request.configured_usmap)
-        .and_then(|path| mappings::load(&path))
-        .ok();
+    let schema = schema(request.usmap, request.configured_usmap);
     rivals_core::texture::import_images(
         &edit_request(request, mod_name, PackageEdits::default()),
         schema.as_deref(),
@@ -1275,9 +1262,7 @@ pub fn remove_member(
     drop_bindings: bool,
     dry_run: bool,
 ) -> Result<rivals_core::members::RemoveReport, String> {
-    let schema = mappings::resolve(request.usmap, request.configured_usmap)
-        .and_then(|path| mappings::load(&path))
-        .ok();
+    let schema = schema(request.usmap, request.configured_usmap);
     rivals_core::members::remove_members(
         &edit_request(request, mod_name, PackageEdits::default()),
         schema.as_deref(),
@@ -1309,9 +1294,7 @@ pub fn rename_member(
     possible: rivals_uasset::PossibleUses,
     dry_run: bool,
 ) -> Result<rivals_core::members::RenameReport, String> {
-    let schema = mappings::resolve(request.usmap, request.configured_usmap)
-        .and_then(|path| mappings::load(&path))
-        .ok();
+    let schema = schema(request.usmap, request.configured_usmap);
     rivals_core::members::rename_member(
         &edit_request(request, mod_name, PackageEdits::default()),
         schema.as_deref(),
@@ -1562,9 +1545,7 @@ pub fn plan_export_edits(
     edits: &[rivals_uasset::ExportEdit],
     resets: &[u32],
 ) -> Result<rivals_uasset::ExportEditPlan, String> {
-    let schema = mappings::resolve(request.usmap, request.configured_usmap)
-        .and_then(|path| mappings::load(&path))
-        .ok();
+    let schema = schema(request.usmap, request.configured_usmap);
     asset_edit::plan_export_edits(
         &edit_request(
             request,
@@ -1977,9 +1958,7 @@ pub fn plan_copy(
     request: &Request<'_>,
     args: &CopyArgs<'_>,
 ) -> Result<rivals_uasset::CopyPlan, String> {
-    let schema = mappings::resolve(request.usmap, request.configured_usmap)
-        .and_then(|path| mappings::load(&path))
-        .ok();
+    let schema = schema(request.usmap, request.configured_usmap);
     let from = asset_edit::CopyFrom {
         container: args.from_container.to_string(),
         entry: args.from_entry.to_string(),
@@ -2015,9 +1994,7 @@ pub fn copy_export(
     mod_name: &str,
     replace: bool,
 ) -> Result<String, String> {
-    let schema = mappings::resolve(request.usmap, request.configured_usmap)
-        .and_then(|path| mappings::load(&path))
-        .ok();
+    let schema = schema(request.usmap, request.configured_usmap);
     let from = asset_edit::CopyFrom {
         container: args.from_container.to_string(),
         entry: args.from_entry.to_string(),
@@ -2041,9 +2018,7 @@ pub fn preview_copy_export(
     mod_name: &str,
     replace: bool,
 ) -> Result<EditPreview, String> {
-    let schema = mappings::resolve(request.usmap, request.configured_usmap)
-        .and_then(|path| mappings::load(&path))
-        .ok();
+    let schema = schema(request.usmap, request.configured_usmap);
     let from = asset_edit::CopyFrom {
         container: args.from_container.to_string(),
         entry: args.from_entry.to_string(),
@@ -2097,9 +2072,7 @@ pub fn plan_import_removal(
     request: &Request<'_>,
     imports: &[u32],
 ) -> Result<rivals_uasset::ImportRemovalPlan, String> {
-    let schema = mappings::resolve(request.usmap, request.configured_usmap)
-        .and_then(|path| mappings::load(&path))
-        .ok();
+    let schema = schema(request.usmap, request.configured_usmap);
     asset_edit::plan_import_removal(
         &edit_request(
             request,
@@ -2188,9 +2161,7 @@ pub fn trace(
         &request.entry,
         source,
     )?;
-    let schema = mappings::resolve(request.usmap, request.configured_usmap)
-        .and_then(|path| mappings::load(&path))
-        .ok();
+    let schema = schema(request.usmap, request.configured_usmap);
     let (parsed, trace) = schema_synth::parse_package_traced(
         &AssetBundle {
             asset: &bundle.asset_file_buffer,
@@ -2259,6 +2230,90 @@ pub struct ScriptReport {
     pub end_labels: Vec<rivals_uasset::TextLabel>,
     /// The whole script as assembler text, which `asset assemble-script` reads back.
     pub text: String,
+}
+
+/// The control flow of export `export`'s script, with the export's name.
+pub fn script_flow(
+    request: &Request<'_>,
+    export: u32,
+) -> Result<(String, rivals_uasset::ScriptFlow), String> {
+    let parsed = parse(request)?;
+    let found = parsed
+        .exports
+        .iter()
+        .find(|e| e.index == export)
+        .ok_or_else(|| format!("no export {export}"))?;
+    let Some(script) = &found.script else {
+        return Err(format!(
+            "export {export} ({}) carries no bytecode this reader measured",
+            found.class_name
+        ));
+    };
+    if let Some(stop) = &script.stopped {
+        return Err(format!(
+            "export {export}'s script stops decoding at 0x{:04X}, so where its jumps lead is not \
+             known: {}",
+            stop.offset, stop.reason
+        ));
+    }
+    let flow = rivals_uasset::script_flow(&parsed, export)
+        .ok_or_else(|| format!("export {export}'s script could not be read as control flow"))?;
+    Ok((found.object_name.clone(), flow))
+}
+
+/// The blocks, the entries and the edges, a line each.
+pub fn print_flow(flow: &rivals_uasset::ScriptFlow, out: &mut impl FnMut(String)) {
+    use rivals_uasset::{EdgeKind, EntryKind};
+
+    for entry in &flow.entries {
+        let kind = match entry.kind {
+            EntryKind::Start => "start",
+            EntryKind::Event => "event",
+            EntryKind::Resume => "resume",
+        };
+        let note = entry
+            .note
+            .as_deref()
+            .map(|n| format!(": {n}"))
+            .unwrap_or_default();
+        out(format!(
+            "{kind:<6} @{:04X} -> block {}{note}",
+            entry.offset, entry.block
+        ));
+    }
+    for (at, block) in flow.blocks.iter().enumerate() {
+        out(format!(
+            "block {at}: @{:04X}..@{:04X}, {} statement(s)",
+            block.start,
+            block.end,
+            block.statements.len()
+        ));
+        for edge in flow.edges.iter().filter(|edge| edge.from == at) {
+            let kind = match edge.kind {
+                EdgeKind::Fall => "falls into",
+                EdgeKind::Jump => "jumps to",
+                EdgeKind::True => "when true, falls into",
+                EdgeKind::False => "when false, jumps to",
+                EdgeKind::Pop => "pops to",
+                EdgeKind::Dispatch => "dispatches to",
+            };
+            let to = edge
+                .to
+                .map_or_else(|| "the end".to_string(), |to| format!("block {to}"));
+            out(format!("    {kind} {to}"));
+        }
+    }
+    out(format!(
+        "{} block(s), {} edge(s), {} goto(s) left in the pseudo-code{}",
+        flow.blocks.len(),
+        flow.edges.len(),
+        flow.gotos,
+        if flow.truncated {
+            "; some flow stack paths were not followed to their end"
+        } else {
+            ""
+        }
+    ));
 }
 
 pub fn script(request: &Request<'_>, export: u32) -> Result<ScriptReport, String> {
@@ -2344,9 +2399,7 @@ pub struct VmScriptReport {
 
 pub fn vm(request: &Request<'_>, export: Option<u32>) -> Result<VmReport, String> {
     let parsed = parse(request)?;
-    let schema = mappings::resolve(request.usmap, request.configured_usmap)
-        .and_then(|path| mappings::load(&path))
-        .ok();
+    let schema = schema(request.usmap, request.configured_usmap);
     let outer = |found: &rivals_uasset::ParsedExport| {
         usize::try_from(found.outer_index)
             .ok()
@@ -2647,6 +2700,270 @@ pub fn print_script(report: &ScriptReport, expressions: bool, out: &mut impl FnM
     }
 }
 
+/// A mesh's material slots and what the game reads about them, its LOD screen sizes and its
+/// skeleton.
+#[derive(Serialize)]
+pub struct MeshReport {
+    pub export: u32,
+    pub name: String,
+    pub class: String,
+    pub slots: Vec<MeshSlot>,
+    /// Each LOD's hidden-by-default flag per slot, from `DefaultHiddenMaterials`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hidden: Vec<Vec<bool>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub screen_sizes: Vec<f64>,
+    /// The distance in centimetres this game switches to each LOD at, which it picks LODs by.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub lod_distances: Vec<f64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub bones: Vec<MeshBone>,
+    /// Slots where the copy a static mesh keeps among its properties disagrees with the one the
+    /// engine reads after them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub disagreements: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct MeshSlot {
+    pub slot: String,
+    pub material: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct MeshBone {
+    pub name: String,
+    pub parent: i64,
+}
+
+/// The mesh `export` names, or the package's first skeletal or static mesh.
+pub fn mesh(request: &Request<'_>, export: Option<u32>) -> Result<MeshReport, String> {
+    let parsed = parse(request)?;
+    let found = parsed
+        .exports
+        .iter()
+        .find(|e| match export {
+            Some(index) => e.index == index,
+            None => matches!(e.class_name.as_str(), "SkeletalMesh" | "StaticMesh"),
+        })
+        .ok_or_else(|| match export {
+            Some(index) => format!("no export {index}"),
+            None => "the package holds no skeletal or static mesh".to_string(),
+        })?;
+    let field = |name: &str| found.properties.iter().find(|e| e.name == name);
+    let items = |name: &str| match field(name).map(|e| &e.value) {
+        Some(PropertyValue::Array { items }) => items.as_slice(),
+        _ => &[],
+    };
+    let slot_of = |item: &PropertyValue| -> Option<MeshSlot> {
+        let PropertyValue::Struct { fields, .. } = item else {
+            return None;
+        };
+        let get = |name: &str| fields.iter().find(|e| e.name == name).map(|e| &e.value);
+        Some(MeshSlot {
+            slot: get("MaterialSlotName")
+                .map(PropertyValue::summary)
+                .unwrap_or_default(),
+            material: match get("MaterialInterface") {
+                Some(PropertyValue::Object { path, .. }) => path.clone(),
+                _ => None,
+            },
+            tags: match get("MaterialTags") {
+                Some(PropertyValue::Array { items }) => {
+                    items.iter().map(PropertyValue::summary).collect()
+                }
+                _ => Vec::new(),
+            },
+        })
+    };
+    let skeletal = !items("Materials").is_empty();
+    let slots: Vec<MeshSlot> = if skeletal {
+        items("Materials").iter().filter_map(slot_of).collect()
+    } else {
+        items("CookedStaticMaterials")
+            .iter()
+            .filter_map(slot_of)
+            .collect()
+    };
+    let mut disagreements = Vec::new();
+    if !skeletal {
+        let held: Vec<MeshSlot> = items("StaticMaterials")
+            .iter()
+            .filter_map(slot_of)
+            .collect();
+        for (at, (held, cooked)) in held.iter().zip(&slots).enumerate() {
+            if held.material != cooked.material || held.slot != cooked.slot {
+                disagreements.push(format!(
+                    "slot {at}: the property holds {} ({}), the copy the engine reads {} ({})",
+                    held.slot,
+                    held.material.as_deref().unwrap_or("None"),
+                    cooked.slot,
+                    cooked.material.as_deref().unwrap_or("None")
+                ));
+            }
+        }
+    }
+    let hidden = items("LODInfo")
+        .iter()
+        .map(|lod| match lod {
+            PropertyValue::Struct { fields, .. } => fields
+                .iter()
+                .find(|e| e.name == "DefaultHiddenMaterials")
+                .map(|e| match &e.value {
+                    PropertyValue::Array { items } => items
+                        .iter()
+                        .map(|flag| matches!(flag, PropertyValue::Bool { value: true }))
+                        .collect(),
+                    _ => Vec::new(),
+                })
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        })
+        .collect::<Vec<Vec<bool>>>();
+    let default_of = |fields: &[PropertyEntry]| {
+        fields
+            .iter()
+            .find(|e| e.name == "Default")
+            .and_then(|e| match e.value {
+                PropertyValue::Float { value } => Some(value),
+                _ => None,
+            })
+    };
+    let screen_sizes = items("ScreenSize")
+        .iter()
+        .filter_map(|size| match size {
+            PropertyValue::Struct { fields, .. } => default_of(fields),
+            _ => None,
+        })
+        .collect();
+    let lod_distances = items("ScreenSize")
+        .iter()
+        .filter_map(|size| match size {
+            PropertyValue::Struct { fields, .. } => fields
+                .iter()
+                .find(|e| e.name == "Extra")
+                .and_then(|e| match &e.value {
+                    PropertyValue::Struct { fields, .. } => default_of(fields),
+                    _ => None,
+                }),
+            _ => None,
+        })
+        .collect();
+    let bones = match field("RefSkeleton").map(|e| &e.value) {
+        Some(PropertyValue::Struct { fields, .. }) => match fields.first().map(|e| &e.value) {
+            Some(PropertyValue::Array { items }) => items
+                .iter()
+                .filter_map(|bone| match bone {
+                    PropertyValue::Struct { fields, .. } => Some(MeshBone {
+                        name: fields
+                            .iter()
+                            .find(|e| e.name == "Name")
+                            .map(|e| e.value.summary())
+                            .unwrap_or_default(),
+                        parent: fields
+                            .iter()
+                            .find_map(|e| match e.value {
+                                PropertyValue::Int { value } if e.name == "ParentIndex" => {
+                                    Some(value)
+                                }
+                                _ => None,
+                            })
+                            .unwrap_or(-1),
+                    }),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        },
+        _ => Vec::new(),
+    };
+    Ok(MeshReport {
+        export: found.index,
+        name: found.object_name.clone(),
+        class: found.class_name.clone(),
+        slots,
+        hidden,
+        screen_sizes,
+        lod_distances,
+        bones,
+        disagreements,
+    })
+}
+
+pub fn print_mesh(report: &MeshReport, all_bones: bool, out: &mut impl FnMut(String)) {
+    out(format!(
+        "{} ({}), export {}",
+        report.name, report.class, report.export
+    ));
+    out(format!("{} material slot(s):", report.slots.len()));
+    for (at, slot) in report.slots.iter().enumerate() {
+        let hidden: Vec<String> = report
+            .hidden
+            .iter()
+            .enumerate()
+            .filter(|(_, flags)| flags.get(at).copied().unwrap_or(false))
+            .map(|(lod, _)| lod.to_string())
+            .collect();
+        let mut line = format!(
+            "  {at:>3}  {}  {}",
+            slot.slot,
+            slot.material.as_deref().unwrap_or("None")
+        );
+        if !slot.tags.is_empty() {
+            line.push_str(&format!("  tags: {}", slot.tags.join(", ")));
+        }
+        if !hidden.is_empty() {
+            line.push_str(&format!("  hidden by default in LOD {}", hidden.join(", ")));
+        }
+        out(line);
+    }
+    for line in &report.disagreements {
+        out(format!("warning: {line}"));
+    }
+    if !report.screen_sizes.is_empty() {
+        let sizes: Vec<String> = report
+            .screen_sizes
+            .iter()
+            .enumerate()
+            .map(|(lod, size)| format!("LOD {lod} {size}"))
+            .collect();
+        out(format!("screen sizes: {}", sizes.join(", ")));
+    }
+    // The game switches by these, so only the LODs the mesh has are shown.
+    let distances: Vec<String> = report
+        .lod_distances
+        .iter()
+        .zip(&report.screen_sizes)
+        .enumerate()
+        .skip(1)
+        .filter(|(_, (_, size))| **size > 0.0)
+        .map(|(lod, (distance, _))| {
+            if *distance >= 8.0e12 {
+                format!("LOD {lod} never")
+            } else {
+                format!("LOD {lod} at {} m", distance / 100.0)
+            }
+        })
+        .collect();
+    if !distances.is_empty() {
+        out(format!("LOD distances: {}", distances.join(", ")));
+    }
+    if !report.bones.is_empty() {
+        out(format!("{} bone(s)", report.bones.len()));
+        if all_bones {
+            for (at, bone) in report.bones.iter().enumerate() {
+                let parent = usize::try_from(bone.parent)
+                    .ok()
+                    .and_then(|parent| report.bones.get(parent))
+                    .map_or("-", |parent| parent.name.as_str());
+                out(format!("  {at:>4}  {}  (under {parent})", bone.name));
+            }
+        }
+    }
+}
+
 /// The field records a class or struct export declares.
 #[derive(Serialize)]
 pub struct FieldsReport {
@@ -2769,9 +3086,7 @@ fn show_game_text(
         Err(reason) if culture.asked => return Err(reason),
         Err(_) => return Ok(()),
     };
-    let schema = mappings::resolve(request.usmap, request.configured_usmap)
-        .and_then(|path| mappings::load(&path))
-        .ok();
+    let schema = schema(request.usmap, request.configured_usmap);
     localization::localize(
         parsed,
         &localizer,
@@ -2798,9 +3113,7 @@ pub fn inherited(
     request: &Request<'_>,
     parsed: &ParsedPackage,
 ) -> Result<BTreeMap<u32, inherit::InheritReport>, String> {
-    let schema = mappings::resolve(request.usmap, request.configured_usmap)
-        .and_then(|path| mappings::load(&path))
-        .ok();
+    let schema = schema(request.usmap, request.configured_usmap);
     let source = inherit::ArchetypeSource {
         game_root: request.game_root,
         container: &request.container,
@@ -3887,6 +4200,7 @@ pub fn audit(
     skip_blueprint: bool,
     relocation_check: bool,
     text_check: bool,
+    flow_check: bool,
     progress: impl Fn(usize, usize) + Sync,
 ) -> Result<AuditReport, String> {
     let path = mappings::resolve(usmap, configured_usmap)?;
@@ -3909,6 +4223,7 @@ pub fn audit(
     let mut acc = Accumulator::new(container.to_string(), skip_blueprint);
     acc.relocation_check = relocation_check;
     acc.text_check = text_check;
+    acc.flow_check = flow_check;
     acc.report.mappings_warning = mappings::drift_warning(game_root, &path);
     acc.walk(&packages[..total], &progress, |run, part, step| {
         let converter = asset::PackageConverter::new(&*store);
@@ -3984,6 +4299,9 @@ struct Accumulator {
     relocation_check: bool,
     /// Print every script as text and assemble it again, as `--text-check` asks.
     text_check: bool,
+    /// Print every script as pseudo-code and hold it to each statement once, as `--flow-check`
+    /// asks.
+    flow_check: bool,
     report: AuditReport,
     kinds: BTreeMap<String, usize>,
     failures: BTreeMap<String, usize>,
@@ -4018,6 +4336,7 @@ impl Accumulator {
             skip_blueprint,
             relocation_check: false,
             text_check: false,
+            flow_check: false,
             report: AuditReport {
                 container: source,
                 mappings_warning: None,
@@ -4108,6 +4427,7 @@ impl Accumulator {
         let mut alike = Self::new(self.report.container.clone(), self.skip_blueprint);
         alike.relocation_check = self.relocation_check;
         alike.text_check = self.text_check;
+        alike.flow_check = self.flow_check;
         alike
     }
 
@@ -4154,6 +4474,7 @@ impl Accumulator {
             skip_blueprint: _,
             relocation_check: _,
             text_check: _,
+            flow_check: _,
             report,
             kinds,
             failures,
@@ -4400,6 +4721,9 @@ impl Accumulator {
         if self.text_check {
             self.check_text(asset, exports, schema, source, layouts, &parsed);
         }
+        if self.flow_check {
+            self.check_flow(source, &parsed);
+        }
         let census = rivals_uasset::script_census(&parsed);
         for (line, count) in census.counts {
             *self.relocation.entry(line).or_default() += count;
@@ -4532,6 +4856,84 @@ impl Accumulator {
     /// functions that come back byte for byte and why the others do not. Then saves the package
     /// with every one that did written from its own text, the way a text edit is saved, which has
     /// to verify and give back the package's own bytes.
+    /// Reads each whole script of the package as control flow and holds its pseudo-code to printing
+    /// every statement once, counting the functions that do and the gotos they keep.
+    fn check_flow(&mut self, source: &PackageSource<'_>, parsed: &rivals_uasset::ParsedPackage) {
+        let printer = rivals_uasset::ScriptPrinter::new(parsed);
+        for export in &parsed.exports {
+            let Some(script) = export.script.as_ref().filter(|script| script.complete()) else {
+                continue;
+            };
+            let flow = printer
+                .print(export.index)
+                .and_then(|text| rivals_uasset::flow_with(parsed, export.index, &text));
+            let fault = match &flow {
+                Some(flow) => rivals_uasset::flow_fault(script, flow),
+                None => Some("no control flow read".to_string()),
+            };
+            let (line, example) = match (fault, &flow) {
+                (None, Some(flow)) => {
+                    *self
+                        .relocation
+                        .entry("flow check: gotos left in the pseudo-code".to_string())
+                        .or_default() += flow.gotos;
+                    if flow.gotos == 0 {
+                        *self
+                            .relocation
+                            .entry("flow check: functions nested without a goto".to_string())
+                            .or_default() += 1;
+                    }
+                    for line in flow
+                        .lines
+                        .iter()
+                        .filter(|line| line.text.contains("goto @"))
+                    {
+                        let kind = if line.text.starts_with("goto") {
+                            "flow check: gotos from a jump"
+                        } else {
+                            "flow check: gotos from a condition"
+                        };
+                        *self.relocation.entry(kind.to_string()).or_default() += 1;
+                        let seen = self
+                            .relocation_examples
+                            .entry(kind.to_string())
+                            .or_default();
+                        if seen.len() < PARTIAL_EXAMPLES {
+                            seen.push(format!("{}#{}: {}", source.entry, export.index, line.text));
+                        }
+                    }
+                    if flow.truncated {
+                        *self
+                            .relocation
+                            .entry(
+                                "flow check: functions with flow stack paths not followed to their end"
+                                    .to_string(),
+                            )
+                            .or_default() += 1;
+                    }
+                    (
+                        "flow check: functions printing each statement once".to_string(),
+                        None,
+                    )
+                }
+                (fault, _) => {
+                    let fault = fault.unwrap_or_default();
+                    (
+                        format!("flow check failed: {}", short_reason(&fault)),
+                        Some(format!("{}#{}: {fault}", source.entry, export.index)),
+                    )
+                }
+            };
+            *self.relocation.entry(line.clone()).or_default() += 1;
+            if let Some(example) = example {
+                let seen = self.relocation_examples.entry(line).or_default();
+                if seen.len() < PARTIAL_EXAMPLES {
+                    seen.push(example);
+                }
+            }
+        }
+    }
+
     fn check_text(
         &mut self,
         asset: &[u8],

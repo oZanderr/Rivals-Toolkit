@@ -1,38 +1,107 @@
 //! Finds and caches the .usmap schema file that unversioned property parsing depends on.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::time::SystemTime;
 
 use rivals_uasset::Mappings;
 
-/// Parsing a full game mappings file takes long enough that doing it per asset click would show.
-/// Keyed by path and modification time so replacing the file after a game patch is picked up.
-type Cache = Mutex<HashMap<(PathBuf, u64), Arc<Mappings>>>;
-static CACHE: LazyLock<Cache> = LazyLock::new(|| Mutex::new(HashMap::new()));
+/// What tells a file from the one that replaced it: when it was written, as finely as the file
+/// system records it, and how long it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Stamp {
+    modified: Option<SystemTime>,
+    len: u64,
+}
+
+impl Stamp {
+    fn of(path: &Path) -> Result<Self, String> {
+        let meta = std::fs::metadata(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        Ok(Self {
+            modified: meta.modified().ok(),
+            len: meta.len(),
+        })
+    }
+}
+
+type Parsed = Arc<OnceLock<Result<Arc<Mappings>, String>>>;
+
+/// The file being read with and its parse, shared by every thread asking for it.
+struct Slot {
+    path: PathBuf,
+    stamp: Stamp,
+    parsed: Parsed,
+}
+
+/// The mappings file in use, parsed once: parsing a whole game's takes long enough that doing it
+/// per asset click would show. Only one file is held, so the one a game patch replaced or the one
+/// the app stopped using is let go rather than kept beside it.
+struct Current {
+    slot: Mutex<Option<Slot>>,
+}
+
+impl Current {
+    const fn new() -> Self {
+        Self {
+            slot: Mutex::new(None),
+        }
+    }
+
+    fn load(&self, path: &Path) -> Result<Arc<Mappings>, String> {
+        let stamp = Stamp::of(path)?;
+        let parsed = {
+            let mut slot = self.slot.lock().unwrap_or_else(PoisonError::into_inner);
+            match slot.as_ref() {
+                Some(held) if held.path == path && held.stamp == stamp => held.parsed.clone(),
+                _ => {
+                    let parsed = Parsed::default();
+                    *slot = Some(Slot {
+                        path: path.to_path_buf(),
+                        stamp,
+                        parsed: parsed.clone(),
+                    });
+                    parsed
+                }
+            }
+        };
+        // Parsed outside the lock: a thread asking for this file waits for the one parse of it,
+        // and nothing else waits. The parse uses no thread pool, so it cannot be handed work that
+        // asks for the file again.
+        let result = parsed
+            .get_or_init(|| {
+                let bytes =
+                    std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+                Mappings::load(&bytes).map(Arc::new)
+            })
+            .clone();
+        if result.is_err() {
+            // A file that did not read is read again next time, in case it was still being written.
+            let mut slot = self.slot.lock().unwrap_or_else(PoisonError::into_inner);
+            if slot
+                .as_ref()
+                .is_some_and(|held| Arc::ptr_eq(&held.parsed, &parsed))
+            {
+                *slot = None;
+            }
+        }
+        result
+    }
+}
+
+static CURRENT: Current = Current::new();
 
 #[derive(Clone)]
 pub struct MappingsStatus {
     pub path: Option<PathBuf>,
     pub struct_count: usize,
     pub enum_count: usize,
+    /// Why the file did not load, when it did not.
+    pub error: Option<String>,
 }
 
+/// The mappings file at `path`, parsed once for as long as it is the one asked for and unchanged.
 pub fn load(path: &Path) -> Result<Arc<Mappings>, String> {
-    let key = (path.to_path_buf(), modified_stamp(path));
-    if let Ok(cache) = CACHE.lock()
-        && let Some(hit) = cache.get(&key)
-    {
-        return Ok(hit.clone());
-    }
-
-    let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    let mappings = Arc::new(Mappings::load(&bytes)?);
-    if let Ok(mut cache) = CACHE.lock() {
-        // A stale entry per replaced file is not worth tracking; the map stays tiny either way.
-        cache.insert(key, mappings.clone());
-    }
-    Ok(mappings)
+    CURRENT.load(path)
 }
 
 /// Check bytes really are a mappings file, answering what they hold. Nothing is cached: this is
@@ -48,6 +117,7 @@ pub fn status(path: Option<&Path>) -> MappingsStatus {
             path: None,
             struct_count: 0,
             enum_count: 0,
+            error: None,
         };
     };
     match load(path) {
@@ -55,11 +125,13 @@ pub fn status(path: Option<&Path>) -> MappingsStatus {
             path: Some(path.to_path_buf()),
             struct_count: mappings.struct_count(),
             enum_count: mappings.enum_count(),
+            error: None,
         },
-        Err(_) => MappingsStatus {
+        Err(error) => MappingsStatus {
             path: Some(path.to_path_buf()),
             struct_count: 0,
             enum_count: 0,
+            error: Some(error),
         },
     }
 }
@@ -69,19 +141,17 @@ pub fn status(path: Option<&Path>) -> MappingsStatus {
 ///
 /// Nowhere else is searched. Guessing at conventional spots meant the file in use was whichever
 /// one happened to be found first, which is the wrong one to read a patched game with, and the
-/// failure had to recite every path it had tried to explain itself.
+/// failure had to recite every path it had tried to explain itself. For the same reason an
+/// explicit path that is not there is an error, not a reason to read with the configured one.
 pub fn resolve(explicit: Option<&str>, configured: Option<&str>) -> Result<PathBuf, String> {
-    let mut given = false;
-    for candidate in [explicit, configured].into_iter().flatten() {
-        given = true;
-        if let Some(found) = pick(Path::new(candidate)) {
-            return Ok(found);
-        }
+    let given = explicit.or(configured);
+    if let Some(found) = given.and_then(|path| pick(Path::new(path))) {
+        return Ok(found);
     }
 
     Err(format!(
         "{} Reading asset properties needs one because Marvel Rivals ships unversioned properties.",
-        if given {
+        if given.is_some() {
             "the .usmap mappings file that is set is not there any more."
         } else {
             "no .usmap mappings file is set."
@@ -226,6 +296,123 @@ mod tests {
         root
     }
 
+    /// A mappings file of empty structs with these names, written at `path`.
+    fn write_usmap(path: &Path, structs: &[&str]) {
+        let usmap = usmap::Usmap {
+            enums: Vec::new(),
+            structs: structs
+                .iter()
+                .map(|name| usmap::Struct {
+                    name: name.to_string(),
+                    super_struct: None,
+                    properties: Vec::new(),
+                })
+                .collect(),
+            cext: None,
+            ppth: None,
+            eatr: None,
+            envp: None,
+        };
+        let mut bytes = Vec::new();
+        usmap.write(&mut bytes).expect("write the usmap");
+        std::fs::write(path, bytes).expect("write");
+    }
+
+    /// The same file is parsed once however often it is asked for. Rewritten, it is parsed again,
+    /// and the copy it replaced is let go.
+    #[test]
+    fn a_file_is_parsed_once_and_again_only_once_rewritten() {
+        let root = scratch("cache");
+        let path = root.join("game.usmap");
+        write_usmap(&path, &["A"]);
+        let current = Current::new();
+        let first = current.load(&path).expect("load");
+        assert!(Arc::ptr_eq(&first, &current.load(&path).expect("again")));
+
+        write_usmap(&path, &["A", "B"]);
+        let second = current.load(&path).expect("rewritten");
+        assert_eq!((first.struct_count(), second.struct_count()), (1, 2));
+        assert!(Arc::ptr_eq(&second, &current.load(&path).expect("again")));
+        assert_eq!(Arc::strong_count(&first), 1, "the replaced copy is let go");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A file rewritten to the same size within the same second still reads as rewritten, by
+    /// the time the file system gives it.
+    #[test]
+    fn a_rewrite_of_the_same_size_is_told_apart_by_its_time() {
+        let root = scratch("same-size");
+        let path = root.join("game.usmap");
+        write_usmap(&path, &["A"]);
+        let written = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let current = Current::new();
+        let first = current.load(&path).expect("load");
+        write_usmap(&path, &["B"]);
+        let file = std::fs::File::options().write(true).open(&path).unwrap();
+        file.set_modified(written + std::time::Duration::from_millis(1))
+            .unwrap();
+        drop(file);
+        let second = current.load(&path).expect("rewritten");
+        assert!(!Arc::ptr_eq(&first, &second));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Switching to another file lets the one used before go.
+    #[test]
+    fn only_the_file_in_use_is_held() {
+        let root = scratch("switch");
+        let (old, new) = (root.join("old.usmap"), root.join("new.usmap"));
+        write_usmap(&old, &["A"]);
+        write_usmap(&new, &["A", "B"]);
+        let current = Current::new();
+        let before = current.load(&old).expect("old");
+        let after = current.load(&new).expect("new");
+        assert_eq!(Arc::strong_count(&before), 1);
+        assert!(Arc::ptr_eq(&after, &current.load(&new).expect("again")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Threads asking for a file nothing has parsed yet wait for one parse of it and share it.
+    #[test]
+    fn threads_asking_at_once_share_one_parse() {
+        let root = scratch("threads");
+        let path = root.join("game.usmap");
+        let names: Vec<String> = (0..20_000).map(|at| format!("S{at}")).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        write_usmap(&path, &names);
+        let current = Current::new();
+        let start = std::sync::Barrier::new(8);
+        let loaded: Vec<Arc<Mappings>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        start.wait();
+                        current.load(&path).expect("load")
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert!(loaded.iter().all(|each| Arc::ptr_eq(each, &loaded[0])));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A file that does not parse says why, and is read again once it does.
+    #[test]
+    fn a_file_that_does_not_parse_is_not_kept() {
+        let root = scratch("broken");
+        let path = root.join("game.usmap");
+        std::fs::write(&path, b"not a mappings file").unwrap();
+        let current = Current::new();
+        assert!(current.load(&path).is_err());
+        assert!(current.slot.lock().unwrap().is_none());
+        write_usmap(&path, &["A"]);
+        assert_eq!(current.load(&path).expect("fixed").struct_count(), 1);
+        let status = status(Some(&root.join("missing.usmap")));
+        assert!(status.error.is_some_and(|e| e.contains("missing.usmap")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn a_folder_resolves_to_the_newest_usmap_inside_it() {
         let root = scratch("folder");
@@ -257,6 +444,13 @@ mod tests {
         )
         .expect("resolve");
         assert_eq!(resolved, explicit);
+        let missing = root.join("missing.usmap");
+        let refused = resolve(
+            Some(&missing.display().to_string()),
+            Some(&configured.display().to_string()),
+        )
+        .expect_err("a missing explicit path is not swapped for the configured one");
+        assert!(refused.contains("not there any more"), "{refused}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

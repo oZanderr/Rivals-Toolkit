@@ -21,6 +21,7 @@ mod paths;
 mod plugins;
 mod settings;
 mod sounds;
+mod translations;
 mod tweaks;
 mod update_check;
 mod updater;
@@ -63,6 +64,8 @@ pub fn run() {
             settings::set_game_path,
             settings::get_mod_compression_level,
             settings::set_mod_compression_level,
+            settings::get_conform_mods,
+            settings::set_conform_mods,
             settings::get_vanilla_compression_level,
             settings::set_vanilla_compression_level,
             settings::get_game_running_check_enabled,
@@ -95,6 +98,7 @@ pub fn run() {
             pak::commands::cancel_repack_iostore,
             pak::commands::is_utoc_obfuscated,
             pak::commands::repack_mod_in_place,
+            pak::commands::conform_mod,
             pak::commands::list_utoc_contents,
             pak::commands::extract_utoc,
             pak::commands::extract_utoc_file,
@@ -208,6 +212,11 @@ pub fn run() {
             asset_view::inherited_values,
             asset_view::get_text_culture,
             asset_view::set_text_culture,
+            translations::table_translations,
+            translations::text_translation,
+            translations::save_text_translation,
+            translations::text_edited_mods,
+            translations::rebuild_mod_text,
             asset_view::save_asset_edits,
             asset_view::plan_export_removal,
             asset_view::plan_import_removal,

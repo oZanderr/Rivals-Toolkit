@@ -53,6 +53,12 @@ pub struct Packed {
     /// Shader archives written into the container as libraries.
     pub shader_libraries: Vec<String>,
     pub warnings: Vec<String>,
+    /// Packages a stock editor cooked, brought to this game's layout as they went in.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conformed: Vec<crate::pak::pack::ConformedPackage>,
+    /// Packages a stock editor cooked that could not be brought to it, packed as they were.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unconformed: Vec<crate::pak::pack::UnconformedPackage>,
 }
 
 /// What a mod was packed from.
@@ -66,7 +72,7 @@ pub enum PackedFrom {
     PlainPak,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct InstallOptions<'a> {
     /// Write over a mod of the same name already installed, switched on or off.
     pub replace: bool,
@@ -652,6 +658,8 @@ fn install_packed(
             loose: report.loose,
             shader_libraries: report.shader_libraries,
             warnings: report.warnings,
+            conformed: report.conformed,
+            unconformed: report.unconformed,
         }),
     })
 }

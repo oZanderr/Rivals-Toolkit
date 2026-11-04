@@ -22,7 +22,7 @@ use crate::pak::profile::{
 /// Marvel Rivals ships UE 5.3, and a mod container has to answer to the same loader.
 const ENGINE: EngineVersion = EngineVersion::UE5_3;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct IoStoreOptions {
     pub compression: PackCompression,
     pub oodle_level: Option<retoc::OodleCompressionLevel>,
@@ -32,6 +32,11 @@ pub struct IoStoreOptions {
     /// they keep the blocks they were stored in, and only a block in another method is compressed
     /// again.
     pub reencode: bool,
+    /// Bring loose packages a stock editor cooked to this game's layout as they are packed.
+    pub conform: bool,
+    /// The game's schema, which bringing a static mesh to the game's layout writes its properties
+    /// against.
+    pub mappings: Option<std::sync::Arc<rivals_uasset::Mappings>>,
 }
 
 impl IoStoreOptions {
@@ -51,6 +56,8 @@ impl Default for IoStoreOptions {
             oodle_level: None,
             obfuscate: None,
             reencode: false,
+            conform: true,
+            mappings: None,
         }
     }
 }

@@ -4,6 +4,7 @@
 mod call_shape;
 mod class_variable;
 mod component;
+mod conform;
 mod copy;
 mod datatable;
 mod dependency;
@@ -20,6 +21,8 @@ mod kismet;
 mod mappings;
 mod member_edit;
 mod members;
+mod mesh;
+mod mirror;
 mod moviescene;
 mod named_edit;
 mod names;
@@ -38,6 +41,7 @@ mod script_edit;
 mod script_encode;
 #[cfg(any(test, feature = "test-support"))]
 pub mod script_fixture;
+mod script_flow;
 mod script_text;
 mod script_text_edit;
 pub use call_shape::{
@@ -49,9 +53,14 @@ pub use script_encode::{
     AssembleOptions, Assembled, NewImport, RoundTripFailure, RoundTrips, imports_text_adds,
     script_round_trips, text_diagnostics,
 };
+pub use script_flow::{
+    EdgeKind, EntryKind, FlowBlock, FlowEdge, FlowEntry, FlowLine, ScriptFlow, flow_fault,
+    flow_with, script_flow,
+};
 pub use script_text::{
     Diagnostic, ScriptPrinter, ScriptText, TextLabel, TextLine, print_expr, print_script,
 };
+mod stock;
 mod stringtable;
 mod struct_field;
 mod structs;
@@ -63,6 +72,8 @@ pub mod tagged_fixture;
 mod tails;
 pub mod text_literal;
 mod texture;
+mod timeline;
+mod unversion;
 mod unversioned;
 #[cfg(test)]
 mod unversioned_edit_tests;
@@ -80,6 +91,7 @@ pub use component::{
     inherited_component_wiring, plan_component, plan_component_removal, plan_inherited_component,
     verify_component, verify_component_removal, verify_inherited_component,
 };
+pub use conform::{CARRIER_PLUGINS, ConformChange, Conformed, conform_layout, conform_package};
 pub use copy::{CopiedExport, CopyExport, CopyPlan, CopySource, plan_copy};
 pub use datatable::{DataTable, DataTableLayout, DataTableRow, RowSpan};
 pub use dependency::{
@@ -114,12 +126,12 @@ pub use import_remove::{
     unused_imports,
 };
 pub use kismet::{
-    CallInfo, CallTexts, CallUse, Expr, ExpressionSlot, LiteralSlot, ObjectRef, PropertyRef,
-    ResizeLock, Script, ScriptCensus, ScriptLine, ScriptStop, SlotKind, Statement, SwitchCase,
-    Term, TermKind, TextLiteral, call_at, call_expr_at, call_sites, call_target_at, callee_name,
-    census as script_census, children as expression_children, event_graphs, expression_at,
-    expression_starting, literals, render_script, script_lines, shape as expression_shape,
-    statement_terms, token_name, ubergraph_entries, visit_spans,
+    CallInfo, CallTexts, CallUse, Expr, ExpressionSlot, LiteralSlot, MISAIMED_CALLS, ObjectRef,
+    PropertyRef, ResizeLock, Script, ScriptCensus, ScriptLine, ScriptStop, SlotKind, Statement,
+    SwitchCase, Term, TermKind, TextLiteral, call_at, call_expr_at, call_sites, call_target_at,
+    callee_name, census as script_census, children as expression_children, event_graphs,
+    expression_at, expression_starting, literals, render_script, script_lines,
+    shape as expression_shape, statement_terms, token_name, ubergraph_entries, visit_spans,
 };
 pub use mappings::{Mappings, Schema, SchemaFixups, SchemaSlot, kind_name};
 pub use member_edit::{
@@ -159,6 +171,7 @@ pub use props::{
     PREVIEW_DEPTH, TYPE_FIELD, TraceEntry, UNDECODED_FIELD, UndecodedPayload, UnsetSlot,
 };
 pub use remove::{ClearedReference, Importers, RemovalPlan, RemovedExport, plan_removal};
+pub use stock::{StockGap, StockGapKind, StockRender};
 pub use stringtable::{StringEntrySpan, StringTable, StringTableEntry, StringTableLayout};
 pub use struct_field::{AddField, fields_held, member_shown_as, new_field_names, struct_of};
 pub use structs::stored_whole;
@@ -167,6 +180,7 @@ pub use texture::{
     is_texture_class, patch_textures_alone, read_texture, read_texture_export, texture_lock,
     texture_save_lock, verify_texture_save,
 };
+pub use unversion::{Unversioned, unversion_package};
 pub use ustruct::type_text as property_type_text;
 pub use ustruct::{
     FieldRecord, FieldRole, FunctionField, FunctionSignature, RecordTail, StructDefinition,

@@ -15,7 +15,7 @@ pub use install::{
     Found, InstallOptions, InstallResult, NamedInstall, Packed, PackedFrom, UnpackedArchive,
     install, install_each, install_pak, install_source, unpack_archive,
 };
-pub use manage::{BulkFailure, BulkOpResult, delete_many, toggle, toggle_many};
+pub use manage::{BulkFailure, BulkOpResult, delete_many, delete_one, toggle, toggle_many};
 #[cfg(feature = "archives")]
 pub use manage::{archived_mod_count, export_archive};
 pub use status::{ModKind, ModLibrary, ModStatus, list_mods, remove_stale_copies, size_on_disk};

@@ -42,6 +42,7 @@ import {
   Table2,
   Trash2,
   Languages,
+  Layers3,
   Undo2,
   X,
 } from "lucide-react";
@@ -111,7 +112,12 @@ import {
 } from "@/hooks/useAssetEdits";
 import { useExportClipboard, type ExportClipboard } from "@/hooks/useExportClipboard";
 import { useSaveHotkeys } from "@/hooks/useSaveHotkeys";
-import { type ModEntry, previewContainerFilename, saveTargetNames } from "@/lib/pakName";
+import {
+  type ModEntry,
+  previewContainerFilename,
+  previewPakFilename,
+  saveTargetNames,
+} from "@/lib/pakName";
 import { textLiteral } from "@/lib/textLiteral";
 import { cn } from "@/lib/utils";
 
@@ -438,7 +444,7 @@ interface MappingsStatus {
   warning?: string | null;
 }
 
-type ViewMode = "table" | "strings" | "tree" | "json" | "bytes" | "script" | "vm";
+type ViewMode = "table" | "strings" | "slots" | "tree" | "json" | "bytes" | "script" | "vm";
 
 const INHERITED_KEY = "assetInspector.showInherited";
 
@@ -805,6 +811,20 @@ function childrenOf(row: TreeRow, draft?: Draft): TreeRow[] {
         };
       });
       if (draft?.op === "reorder") return reordered(rows, draft.order);
+      if (draft?.op === "set_items") {
+        return draft.items.map((text, i) => ({
+          entry: {
+            name: i < rows.length ? `[${i}]` : `[${i}] new`,
+            value:
+              text === "true" || text === "false"
+                ? { kind: "bool", value: text === "true" }
+                : { kind: "str", value: text },
+          },
+          target: null,
+          reason: null,
+          within: inner,
+        }));
+      }
       // The element an add brings to an array starts as a copy of the one at its index, or of the
       // last, and is filled in through its index in the same save.
       if (value.kind === "array" && target && draft?.op === "insert" && value.items.length > 0) {
@@ -869,7 +889,13 @@ function structuralLock(row: TreeRow, session: EditSession): string | null {
   if (above) {
     const held = session.drafts[above];
     const what =
-      held.draft.op === "reorder" ? "move" : held.draft.op === "set_raw" ? "new bytes" : "add/drop";
+      held.draft.op === "reorder"
+        ? "move"
+        : held.draft.op === "set_raw"
+          ? "new bytes"
+          : held.draft.op === "set_items"
+            ? "new elements"
+            : "add/drop";
     return `Finish or discard the ${what} on ${held.target.name} first.`;
   }
   return null;
@@ -930,6 +956,232 @@ const TreeMenuContext = createContext<TreeMenu | null>(null);
 /** Whether the package tags each value it stores. A tagged value has no zero flag: it is written
  *  out, or taken out to inherit. */
 const TaggedContext = createContext(false);
+
+/** A text the translation dialog is open on: its name as the translation commands take it, and
+ *  how the dialog titles it. */
+interface TranslationAsk {
+  text: string;
+  label: string;
+}
+
+interface Translations {
+  gameRoot: string;
+  culture: string;
+  /** Changes whenever what the texts show may have, so their translations are read again. */
+  epoch: number;
+  open: (text: string, label: string) => void;
+}
+
+const TranslationContext = createContext<Translations | null>(null);
+
+interface Translation {
+  culture: string;
+  namespace: string;
+  key: string;
+  game: string | null;
+  held: string | null;
+}
+
+interface TextReport {
+  pak: string;
+  files: {
+    culture: string;
+    path: string;
+    edits: number;
+    removed: boolean;
+    adopted: number;
+    dropped: number;
+  }[];
+  written: boolean;
+}
+
+/** How the translation commands name a text: NAMESPACE/KEY, or a string table entry as its table's
+ *  id and its key. `null` for a text no translation is filed under. */
+function translationName(value: PropertyValue): string | null {
+  if (value.kind !== "text") return null;
+  if (value.namespace !== undefined && value.key !== undefined && value.key !== "") {
+    return `${value.namespace}/${value.key}`;
+  }
+  const part = (name: string) => value.parts?.find((entry) => entry.name === name)?.value;
+  const table = part("TableId");
+  const key = part("Key");
+  if (table?.kind === "name" && key?.kind === "str" && table.value.startsWith("/")) {
+    return `${table.value}:${key.value}`;
+  }
+  return null;
+}
+
+function translationSaved(report: TextReport, label: string, unset: boolean): string {
+  const pak = report.pak.split(/[\\/]/).pop() ?? report.pak;
+  const file = report.files.at(0);
+  if (!file) return `Wrote ${pak}`;
+  const plural = (n: number, word: string) => `${n} ${word}${n !== 1 ? "s" : ""}`;
+  return [
+    unset
+      ? `Gave ${label} back the game's ${file.culture} wording in ${pak}`
+      : `Gave ${label} its own ${file.culture} wording in ${pak}`,
+    file.removed
+      ? `the mod words no other ${file.culture} text, so its translation file was taken out`
+      : null,
+    file.adopted > 0
+      ? `kept ${plural(file.adopted, "wording")} from the translation file it already shipped`
+      : null,
+    file.dropped > 0
+      ? `left out ${plural(file.dropped, "text")} the game's translations no longer have`
+      : null,
+  ]
+    .filter((line): line is string => line !== null)
+    .join("; ");
+}
+
+function TranslationDialog({
+  ask,
+  gameRoot,
+  modName,
+  onClose,
+  onSaved,
+}: {
+  ask: TranslationAsk | null;
+  gameRoot: string;
+  modName: string;
+  onClose: () => void;
+  onSaved: (message: string) => void;
+}) {
+  return (
+    <AlertDialog open={ask !== null} onOpenChange={(open) => !open && onClose()}>
+      <AlertDialogContent>
+        {ask && (
+          <TranslationForm
+            key={ask.text}
+            ask={ask}
+            gameRoot={gameRoot}
+            modName={modName}
+            onClose={onClose}
+            onSaved={onSaved}
+          />
+        )}
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+
+function TranslationForm({
+  ask,
+  gameRoot,
+  modName,
+  onClose,
+  onSaved,
+}: {
+  ask: TranslationAsk;
+  gameRoot: string;
+  modName: string;
+  onClose: () => void;
+  onSaved: (message: string) => void;
+}) {
+  const [loaded, setLoaded] = useState<Translation | null>(null);
+  const [text, setText] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const pak = previewPakFilename(modName);
+  useEffect(() => {
+    let live = true;
+    invoke<Translation>("text_translation", { gameRoot, modName, text: ask.text }).then(
+      (found) => {
+        if (!live) return;
+        setLoaded(found);
+        setText(found.held ?? found.game ?? "");
+      },
+      (e: unknown) => {
+        if (live) setError(String(e));
+      }
+    );
+    return () => {
+      live = false;
+    };
+  }, [ask.text, gameRoot, modName]);
+  const save = (wording: string | null, overwrite: boolean) => {
+    setSaving(true);
+    setError(null);
+    invoke<TextReport>("save_text_translation", {
+      gameRoot,
+      modName,
+      text: ask.text,
+      wording,
+      overwrite,
+    })
+      .then((report) => {
+        onSaved(translationSaved(report, ask.label, wording === null));
+        onClose();
+      })
+      .catch((e: unknown) => setError(String(e)))
+      .finally(() => setSaving(false));
+  };
+  // A translation file the mod ships holding texts the game dropped is written over only when
+  // asked a second time.
+  const refusedOver = error?.includes("--overwrite") ?? false;
+  const changed = loaded !== null && text !== (loaded.held ?? loaded.game ?? "");
+  return (
+    <>
+      <AlertDialogHeader>
+        <AlertDialogTitle>
+          Translation of {ask.label}
+          {loaded ? ` (${loaded.culture})` : ""}
+        </AlertDialogTitle>
+        <AlertDialogDescription>
+          Written into {pak || "the mod"} straight away, as the game&apos;s whole translation file
+          for this language with the mod&apos;s wordings over it. The toolkit keeps the wordings, so
+          the file can be written again after a patch. The package itself is not changed.
+        </AlertDialogDescription>
+      </AlertDialogHeader>
+      {loaded && (
+        <div className="space-y-1 text-xs">
+          <p className="font-mono text-muted-foreground">
+            {loaded.namespace}/{loaded.key}
+          </p>
+          <p>
+            <span className="text-muted-foreground">The game&apos;s: </span>
+            {loaded.game ?? "not translated"}
+          </p>
+        </div>
+      )}
+      {loaded === null && error === null ? (
+        <p className="text-xs text-muted-foreground">Reading its translation…</p>
+      ) : (
+        <textarea
+          aria-label="Wording"
+          autoFocus
+          value={text}
+          disabled={loaded === null}
+          onChange={(e) => setText(e.target.value)}
+          rows={4}
+          className="w-full resize-y rounded-md border border-input bg-transparent p-2 text-xs"
+        />
+      )}
+      {error && (
+        <p className="text-xs text-red-400">
+          {refusedOver ? `${error.split("; pass --overwrite")[0]}.` : error}
+        </p>
+      )}
+      <AlertDialogFooter>
+        <AlertDialogCancel disabled={saving}>Cancel</AlertDialogCancel>
+        <Button
+          variant="outline"
+          disabled={saving || !loaded?.held}
+          onClick={() => save(null, refusedOver)}
+        >
+          Use the game&apos;s
+        </Button>
+        <Button
+          disabled={saving || loaded === null || (!changed && !refusedOver)}
+          onClick={() => save(text, refusedOver)}
+        >
+          {saving ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}
+          {refusedOver ? "Write anyway" : "Save"}
+        </Button>
+      </AlertDialogFooter>
+    </>
+  );
+}
 
 /** Where the package on show is read from, for a row that fetches its own bytes. */
 const PackageContext = createContext<{ gamePath: string; container: string; entry: string } | null>(
@@ -1592,6 +1844,7 @@ function RowMenu({
   onBytes: (ask: BytesAsk) => void;
 }) {
   const tagged = useContext(TaggedContext);
+  const translations = useContext(TranslationContext);
   const { entry, target, within } = row;
   if (!target) return null;
   const key = draftKey(target);
@@ -1628,6 +1881,18 @@ function RowMenu({
         Discard change
       </ContextMenuItem>
     </>
+  );
+  const textName = translationName(entry.value);
+  const translateItem = textName !== null && translations && (
+    <Tip
+      content="Gives the text a wording of its own in this language, written into the mod straight away rather than with the package's edits."
+      side="right"
+    >
+      <ContextMenuItem onSelect={() => translations.open(textName, displayName(entry.name))}>
+        <Languages size={14} />
+        Edit translation ({translations.culture})…
+      </ContextMenuItem>
+    </Tip>
   );
 
   if (target.index !== undefined && target.field === "key") {
@@ -1708,6 +1973,7 @@ function RowMenu({
           <ArrowDown size={14} />
           Move down
         </ContextMenuItem>
+        {translateItem}
         {discard}
       </>
     );
@@ -1824,16 +2090,463 @@ function RowMenu({
           Inherit default
         </ContextMenuItem>
       </Tip>
+      {translateItem}
       {bytesItem}
       {discard}
     </>
   );
 }
 
+/** Gives the value a row shows the text typed for it, or drops its draft when the text is what the
+ *  file already holds. */
+function commitRow(session: EditSession, row: TreeRow, next: string) {
+  const { entry, target, within } = row;
+  if (!target) return;
+  const key = draftKey(target);
+  const stored = target.index !== undefined || isPendingElement(row) || isStored(entry);
+  const original = stored ? initialText(entry, target) : null;
+  if (next === original) {
+    session.dropDraft(key);
+    return;
+  }
+  session.setDraft(
+    target,
+    target.index === undefined
+      ? { op: "set", text: next }
+      : target.field === "key"
+        ? { op: "set_key", index: target.index, text: next }
+        : { op: "set_element", index: target.index, text: next },
+    within
+  );
+}
+
+/** The array of material slots a mesh export holds, when it holds one: a skeletal mesh's
+ *  `Materials` or a static mesh's `StaticMaterials`. */
+function meshSlots(properties: PropertyEntry[]): PropertyEntry | null {
+  return (
+    properties.find(
+      (property) =>
+        (property.name === "Materials" || property.name === "StaticMaterials") &&
+        property.value.kind === "array" &&
+        property.value.items.some(
+          (item) =>
+            item.kind === "struct" &&
+            item.fields.some((field) => field.name === "MaterialInterface")
+        )
+    ) ?? null
+  );
+}
+
+/** A field's row under a struct's row, by name. */
+function fieldRow(row: TreeRow | undefined, name: string): TreeRow | undefined {
+  return row ? childrenOf(row).find((child) => child.entry.name === name) : undefined;
+}
+
+/** What a bool row reads as, its draft first. */
+function boolShown(session: EditSession, row: TreeRow): boolean | null {
+  if (row.entry.value.kind !== "bool") return null;
+  const draft = row.target ? session.drafts[draftKey(row.target)]?.draft : undefined;
+  if (draft?.op === "set" || draft?.op === "set_element") return draft.text === "true";
+  return row.entry.value.value;
+}
+
+/** A mesh's material slots as a table: each slot's material, its gameplay tags and whether it is
+ *  hidden by default, edited through the same drafts as the tree. A skeletal mesh's reference
+ *  skeleton follows, read only, since its render data and every animation index the bones. */
+function MeshSlotsView({ properties }: { properties: PropertyEntry[] }) {
+  const session = useEditSession();
+  const [editing, setEditing] = useState<string | null>(null);
+  const [tagAsk, setTagAsk] = useState<number | null>(null);
+  const [newTag, setNewTag] = useState("");
+  const [boneFilter, setBoneFilter] = useState("");
+  const slotsEntry = meshSlots(properties);
+  const slotsRow = slotsEntry ? rowOf(slotsEntry, [], [slotsEntry.name]) : null;
+  const slots = slotsRow ? childrenOf(slotsRow) : [];
+  const lodsEntry = properties.find((property) => property.name === "LODInfo");
+  const lods = lodsEntry ? childrenOf(rowOf(lodsEntry, [], ["LODInfo"])) : [];
+  // Each LOD's hidden flags, one per slot, where the LOD stores a list of them.
+  const hidden = lods.flatMap((lod, at) => {
+    const flags = fieldRow(lod, "DefaultHiddenMaterials");
+    return flags?.entry.value.kind === "array" ? [{ lod: at, flags }] : [];
+  });
+  const skeleton = properties.find((property) => property.name === "RefSkeleton");
+  const bones = useMemo(() => {
+    if (skeleton?.value.kind !== "array") return [];
+    const depths: number[] = [];
+    return skeleton.value.items.map((bone, index) => {
+      const fields = bone.kind === "struct" ? bone.fields : [];
+      const name = fields.find((field) => field.name === "Name")?.value;
+      const parent = fields.find((field) => field.name === "ParentIndex")?.value;
+      const parentIndex = parent?.kind === "int" ? parent.value : -1;
+      depths[index] = parentIndex >= 0 ? (depths[parentIndex] ?? 0) + 1 : 0;
+      return {
+        index,
+        name: name?.kind === "name" ? name.value : `bone ${index}`,
+        depth: depths[index],
+      };
+    });
+  }, [skeleton]);
+  const needle = boneFilter.trim().toLowerCase();
+
+  const tagsOf = (slot: TreeRow) => fieldRow(slot, "MaterialTags");
+  /** Why a slot's tags cannot take an add or a drop now, or null. */
+  const tagLock = (tags: TreeRow): string | null => {
+    const blocked = structuralLock(tags, session);
+    if (blocked) return blocked;
+    if (!tags.target) return tags.reason;
+    const key = draftKey(tags.target);
+    const held = session.drafts[key]?.draft;
+    // A container takes one add or drop a save, and none while an element of it is being edited.
+    if ((held && isStructural(held)) || hasDraftsWithin(session, key))
+      return "Save or discard the change already made to this slot's tags first.";
+    return null;
+  };
+  const addTag = (slot: number, tag: string) => {
+    const tags = tagsOf(slots[slot]);
+    if (!tags?.target || tags.entry.value.kind !== "array") return;
+    const count = tags.entry.value.items.length;
+    const inner = [...tags.within, draftKey(tags.target)];
+    session.setDraft(tags.target, { op: "insert", index: count }, tags.within);
+    session.setDraft(
+      { ...tags.target, path: [`[${count}]`], was: undefined },
+      { op: "set", text: tag },
+      inner
+    );
+  };
+
+  /** Whether a LOD hides a slot, its pending change first. A LOD listing no flag for it shows it. */
+  const hiddenIn = (flags: TreeRow, slot: number): boolean => {
+    const held = flags.target ? session.drafts[draftKey(flags.target)]?.draft : undefined;
+    if (held?.op === "set_items") return held.items[slot] === "true";
+    const flag = childrenOf(flags)[slot];
+    return (flag ? boolShown(session, flag) : null) ?? false;
+  };
+  const hiddenChanged = (flags: TreeRow, slot: number): boolean => {
+    if (!flags.target) return false;
+    const held = session.drafts[draftKey(flags.target)]?.draft;
+    if (held?.op === "set_items") return held.items[slot] !== (held.held[slot] ?? "false");
+    const flag = childrenOf(flags)[slot];
+    return !!flag?.target && session.drafts[draftKey(flag.target)] !== undefined;
+  };
+  /** Why a LOD's hidden flags cannot change now, or null. */
+  const hiddenLock = (flags: TreeRow): string | null => {
+    const blocked = structuralLock(flags, session);
+    if (blocked) return blocked;
+    if (!flags.target) return flags.reason;
+    const held = session.drafts[draftKey(flags.target)]?.draft;
+    if (held && held.op !== "set_items" && isStructural(held))
+      return `Save or discard the change already made to ${flags.entry.name} first.`;
+    return null;
+  };
+  const hideBlocked = hidden.map(({ flags }) => hiddenLock(flags)).find((why) => why !== null);
+  /** Hides or shows a slot in every LOD, since in game hiding it in LOD 0 alone left it visible. A
+   *  LOD listing fewer flags than there are slots is given the whole list, so it grows in one save. */
+  const setHidden = (slot: number, hide: boolean) => {
+    for (const { flags } of hidden) {
+      if (!flags.target || flags.entry.value.kind !== "array") continue;
+      const rows = childrenOf(flags);
+      const pending = session.drafts[draftKey(flags.target)]?.draft;
+      if (pending?.op !== "set_items" && slot < rows.length) {
+        commitRow(session, rows[slot], String(hide));
+        continue;
+      }
+      const held = flags.entry.value.items.map((item) =>
+        item.kind === "bool" ? String(item.value) : ""
+      );
+      const items =
+        pending?.op === "set_items"
+          ? [...pending.items]
+          : rows.map((row) => String(boolShown(session, row) ?? false));
+      while (items.length < slots.length) items.push("false");
+      items[slot] = String(hide);
+      if (items.every((text, index) => text === (held[index] ?? "false"))) {
+        session.dropDraft(draftKey(flags.target));
+      } else {
+        session.setDraft(flags.target, { op: "set_items", items, held }, flags.within);
+      }
+    }
+  };
+
+  if (!slotsRow) return null;
+  return (
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-auto">
+      <div className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-2 text-xs text-muted-foreground">
+        <Layers3 size={13} className="shrink-0" />
+        {slots.length} material slot{slots.length !== 1 ? "s" : ""}
+        {bones.length > 0 && `, ${bones.length} bones`}
+      </div>
+      <div className="min-w-0 text-[11px]">
+        <div className="sticky top-0 z-10 flex border-b border-border bg-card text-[10px] font-semibold uppercase text-muted-foreground">
+          <div className="w-10 shrink-0 px-2 py-1">#</div>
+          <div className="w-40 shrink-0 px-2 py-1">Slot</div>
+          <div className="min-w-0 flex-1 px-2 py-1">Material</div>
+          {slots.some((slot) => tagsOf(slot)) && (
+            <div className="w-56 shrink-0 px-2 py-1">Tags</div>
+          )}
+          {hidden.length > 0 && (
+            <Tip content="Hidden by default, set in every LOD at once: in game, a slot hidden in LOD 0 alone stayed visible.">
+              <div className="w-14 shrink-0 px-2 py-1 text-center">Hidden</div>
+            </Tip>
+          )}
+        </div>
+        {slots.map((slot, index) => {
+          const material = fieldRow(slot, "MaterialInterface");
+          const slotName = fieldRow(slot, "MaterialSlotName");
+          const tags = tagsOf(slot);
+          const materialKey = material?.target ? draftKey(material.target) : null;
+          const materialDraft = materialKey ? session.drafts[materialKey]?.draft : undefined;
+          const materialLock = material ? rowLock(material, session) : NO_POSITION;
+          const tagsHeld = tags?.target ? session.drafts[draftKey(tags.target)]?.draft : undefined;
+          const tagItems = tags ? childrenOf(tags, tagsHeld) : [];
+          // The tree shows an added element as a copy of one already there, which an empty slot
+          // has none of, so the tag it is getting is shown here.
+          if (
+            tags?.target &&
+            tagsHeld?.op === "insert" &&
+            !tagItems.some((item) => item.pending !== undefined)
+          ) {
+            tagItems.push({
+              entry: { name: `[${tagsHeld.index}] new`, value: { kind: "name", value: "None" } },
+              target: { ...tags.target, path: [`[${tagsHeld.index}]`], was: undefined },
+              reason: null,
+              within: [...tags.within, draftKey(tags.target)],
+              pending: draftKey(tags.target),
+            });
+          }
+          const tagBlocked = tags ? tagLock(tags) : null;
+          const hiddenLods = hidden.flatMap(({ lod, flags }) =>
+            hiddenIn(flags, index) ? [lod] : []
+          );
+          const hiddenState =
+            hiddenLods.length === 0
+              ? false
+              : hiddenLods.length === hidden.length
+                ? true
+                : ("indeterminate" as const);
+          return (
+            <div
+              key={index}
+              className="flex items-start border-b border-border/30 hover:bg-muted/40"
+            >
+              <div className="w-10 shrink-0 px-2 py-1 font-mono text-muted-foreground">{index}</div>
+              <div className="w-40 shrink-0 truncate px-2 py-1 font-mono">
+                {slotName ? summarise(slotName.entry.value) : ""}
+              </div>
+              <div className="min-w-0 flex-1 px-0.5 py-0.5">
+                {material && editing === materialKey && !materialLock ? (
+                  <ValueInput
+                    value={material.entry.value}
+                    initial={
+                      materialDraft?.op === "set" || materialDraft?.op === "set_element"
+                        ? materialDraft.text
+                        : material.target
+                          ? initialText(material.entry, material.target)
+                          : ""
+                    }
+                    onCommit={(next) => {
+                      setEditing(null);
+                      commitRow(session, material, next);
+                    }}
+                    onCancel={() => setEditing(null)}
+                  />
+                ) : (
+                  <Tip
+                    content={
+                      materialLock ?? "Click to point the slot at another material, by its path."
+                    }
+                  >
+                    <div
+                      onClick={() => {
+                        if (!materialLock && materialKey) setEditing(materialKey);
+                      }}
+                      className={cn(
+                        "truncate px-1.5 py-0.5 font-mono",
+                        materialDraft !== undefined &&
+                          "rounded-sm bg-blue-accent/15 text-blue-accent-foreground",
+                        !materialLock &&
+                          "cursor-text hover:ring-1 hover:ring-inset hover:ring-primary/40"
+                      )}
+                    >
+                      {draftText(materialDraft, null) ??
+                        (material ? summarise(material.entry.value) : "")}
+                    </div>
+                  </Tip>
+                )}
+              </div>
+              {slots.some((other) => tagsOf(other)) && (
+                <div className="flex w-56 shrink-0 flex-wrap items-center gap-1 px-2 py-1">
+                  {tagItems.map((tag) => {
+                    const pending = tag.pending !== undefined;
+                    const removing =
+                      tagsHeld?.op === "remove" && tag.target?.index === tagsHeld.index;
+                    const pendingDraft =
+                      pending && tag.target
+                        ? session.drafts[draftKey(tag.target)]?.draft
+                        : undefined;
+                    const text = pending
+                      ? pendingDraft?.op === "set"
+                        ? pendingDraft.text
+                        : "None"
+                      : summarise(tag.entry.value);
+                    return (
+                      <span
+                        key={tag.entry.name}
+                        className={cn(
+                          "inline-flex max-w-full items-center gap-0.5 rounded border border-border px-1 font-mono text-[10px]",
+                          pending &&
+                            "border-blue-accent/50 bg-blue-accent/15 text-blue-accent-foreground",
+                          removing && "line-through opacity-60"
+                        )}
+                      >
+                        <span className="truncate">{text}</span>
+                        {tags?.target && (pending || removing) && (
+                          <Tip content={pending ? "Discard the added tag" : "Keep this tag"}>
+                            <button
+                              type="button"
+                              aria-label={pending ? `Discard tag ${text}` : `Keep tag ${text}`}
+                              className="text-muted-foreground hover:text-foreground"
+                              onClick={() => {
+                                if (tag.target) session.dropDraft(draftKey(tag.target));
+                                if (tags.target) session.dropDraft(draftKey(tags.target));
+                              }}
+                            >
+                              {pending ? <X size={10} /> : <Undo2 size={10} />}
+                            </button>
+                          </Tip>
+                        )}
+                        {!pending &&
+                          !removing &&
+                          tags?.target &&
+                          tag.target?.index !== undefined && (
+                            <Tip content={tagBlocked ?? "Take this tag off the slot"}>
+                              <button
+                                type="button"
+                                aria-label={`Remove tag ${text}`}
+                                disabled={tagBlocked !== null}
+                                className="text-muted-foreground hover:text-foreground disabled:opacity-40"
+                                onClick={() => {
+                                  const index = tag.target?.index;
+                                  if (tags.target && index !== undefined)
+                                    session.setDraft(
+                                      tags.target,
+                                      { op: "remove", index },
+                                      tags.within
+                                    );
+                                }}
+                              >
+                                <X size={10} />
+                              </button>
+                            </Tip>
+                          )}
+                      </span>
+                    );
+                  })}
+                  {tags &&
+                    (tagAsk === index ? (
+                      <Input
+                        autoFocus
+                        aria-label="New tag"
+                        value={newTag}
+                        onChange={(e) => setNewTag(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" && newTag.trim()) {
+                            addTag(index, newTag.trim());
+                            setTagAsk(null);
+                            setNewTag("");
+                          } else if (e.key === "Escape") {
+                            setTagAsk(null);
+                            setNewTag("");
+                          }
+                        }}
+                        onBlur={() => {
+                          setTagAsk(null);
+                          setNewTag("");
+                        }}
+                        placeholder="Tag.Name"
+                        className="h-5 w-32 px-1 font-mono text-[10px]"
+                      />
+                    ) : (
+                      <Tip content={tagBlocked ?? "Add a gameplay tag to the slot"}>
+                        <button
+                          type="button"
+                          aria-label={`Add a tag to slot ${index}`}
+                          disabled={tagBlocked !== null}
+                          className="rounded border border-dashed border-border px-1 text-muted-foreground hover:text-foreground disabled:opacity-40"
+                          onClick={() => setTagAsk(index)}
+                        >
+                          <Plus size={10} />
+                        </button>
+                      </Tip>
+                    ))}
+                </div>
+              )}
+              {hidden.length > 0 && (
+                <div className="flex w-14 shrink-0 justify-center px-2 py-1">
+                  <Tip
+                    content={
+                      hideBlocked ??
+                      (hiddenState === "indeterminate"
+                        ? `Hidden in LOD ${hiddenLods.join(", ")} only, which left a slot visible in game. Click to hide it in every LOD.`
+                        : "Hidden by default, in every LOD")
+                    }
+                  >
+                    <span
+                      className={cn(
+                        hidden.some(({ flags }) => hiddenChanged(flags, index)) &&
+                          "rounded-sm ring-1 ring-blue-accent"
+                      )}
+                    >
+                      <Checkbox
+                        aria-label={`Hide slot ${index}`}
+                        checked={hiddenState}
+                        disabled={hideBlocked !== undefined}
+                        onCheckedChange={(next) => setHidden(index, next === true)}
+                      />
+                    </span>
+                  </Tip>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      {bones.length > 0 && (
+        <div className="border-t border-border">
+          <div className="flex items-center gap-2 px-3 py-2">
+            <span className="text-[10px] font-semibold uppercase text-muted-foreground">
+              Reference skeleton
+            </span>
+            <Input
+              value={boneFilter}
+              onChange={(e) => setBoneFilter(e.target.value)}
+              placeholder="Filter bones"
+              className="ml-auto h-7 w-40 text-xs"
+            />
+          </div>
+          <div className="pb-2 font-mono text-[11px]">
+            {bones
+              .filter((bone) => !needle || bone.name.toLowerCase().includes(needle))
+              .map((bone) => (
+                <div
+                  key={bone.index}
+                  className="flex gap-2 py-px pr-3"
+                  style={{ paddingLeft: `${(needle ? 0 : bone.depth) * 12 + 12}px` }}
+                >
+                  <span className="w-10 shrink-0 text-muted-foreground">{bone.index}</span>
+                  <span className="truncate">{bone.name}</span>
+                </div>
+              ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 const PropertyRow = memo(function PropertyRow({ row, depth }: { row: TreeRow; depth: number }) {
   const session = useEditSession();
   const menu = useContext(TreeMenuContext);
-  const { entry, target, within } = row;
+  const { entry, target } = row;
   const [open, setOpen] = useState(depth < 1);
   const expandable = isExpandable(entry.value) || row.key !== undefined;
   const label = labelOf(entry);
@@ -1858,22 +2571,7 @@ const PropertyRow = memo(function PropertyRow({ row, depth }: { row: TreeRow; de
 
   const commit = (next: string) => {
     menu?.setEditingKey(null);
-    if (!target || !key) return;
-    // Typing a value back to what the file already holds is not a change.
-    const original = stored ? initialText(entry, target) : null;
-    if (next === original) {
-      session.dropDraft(key);
-      return;
-    }
-    session.setDraft(
-      target,
-      target.index === undefined
-        ? { op: "set", text: next }
-        : target.field === "key"
-          ? { op: "set_key", index: target.index, text: next }
-          : { op: "set_element", index: target.index, text: next },
-      within
-    );
+    commitRow(session, row, next);
   };
 
   return (
@@ -2138,6 +2836,9 @@ function ScriptPane({
   const [busy, setBusy] = useState(true);
   const session = useEditSession();
   const [asText, setAsText] = useState(false);
+  const [pseudo, setPseudo] = useState(false);
+  /** A statement a pseudo-code line opened in the listing. */
+  const [opened, setOpened] = useState<number | null>(null);
   const [adding, setAdding] = useState<{ name: string; signature: string } | null>(null);
   const [variable, setVariable] = useState<{ name: string; type: string } | null>(null);
   const [writing, setWriting] = useState(false);
@@ -2287,6 +2988,30 @@ function ScriptPane({
         )}
         {draftText !== null && (
           <span className="text-blue-accent-foreground">written from text, not saved yet</span>
+        )}
+        {view.flow && (
+          <div className="flex items-center gap-0.5 rounded-md border border-border/60 p-0.5">
+            <button
+              className={cn(
+                "rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase",
+                !pseudo ? "bg-background text-foreground" : "hover:text-foreground"
+              )}
+              onClick={() => setPseudo(false)}
+            >
+              Listing
+            </button>
+            <Tip content="Read the function with its conditions, loops and branches nested. Read only: click a line to open its statement in the listing.">
+              <button
+                className={cn(
+                  "rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase",
+                  pseudo ? "bg-background text-foreground" : "hover:text-foreground"
+                )}
+                onClick={() => setPseudo(true)}
+              >
+                Pseudo-code
+              </button>
+            </Tip>
+          </div>
         )}
         <Tip
           content={
@@ -2439,18 +3164,28 @@ function ScriptPane({
           ))}
         </div>
       )}
-      <EditSessionContext.Provider value={listed}>
-        <ScriptLines
-          exportIndex={exportIndex}
-          lines={view.lines}
-          endLabels={view.end_labels ?? []}
-          entries={view.entries}
-          exportNames={exportNames}
-          focus={focus}
-          onOpen={onOpen}
-          previewCall={previewCall}
+      {pseudo && view.flow ? (
+        <PseudoLines
+          flow={view.flow}
+          onStatement={(offset) => {
+            setOpened(offset);
+            setPseudo(false);
+          }}
         />
-      </EditSessionContext.Provider>
+      ) : (
+        <EditSessionContext.Provider value={listed}>
+          <ScriptLines
+            exportIndex={exportIndex}
+            lines={view.lines}
+            endLabels={view.end_labels ?? []}
+            entries={view.entries}
+            exportNames={exportNames}
+            focus={opened ?? focus}
+            onOpen={onOpen}
+            previewCall={previewCall}
+          />
+        </EditSessionContext.Provider>
+      )}
     </div>
   );
 }
@@ -2997,6 +3732,97 @@ interface ScriptView {
   buffer_size: number;
   storage_size: number;
   statements: number;
+  /** The script read as control flow, when it decoded whole. */
+  flow?: ScriptFlow | null;
+}
+
+/** One line of a function's pseudo-code, and the statements it stands for by offset. */
+interface FlowLine {
+  depth: number;
+  text: string;
+  offsets?: number[];
+}
+
+interface ScriptFlow {
+  lines: FlowLine[];
+  /** Jumps the pseudo-code could not nest, left as `goto`. */
+  gotos: number;
+  truncated?: boolean;
+}
+
+const PSEUDO_KEYWORD = /^(if|while|goto|push|pop|return|dispatch on|end)\b/;
+
+/** A function as pseudo-code: conditions, loops and branches nested, labels where a `goto` or a
+ *  pushed flow lands. A line standing for a statement opens it in the listing, where it edits. */
+function PseudoLines({
+  flow,
+  onStatement,
+}: {
+  flow: ScriptFlow;
+  onStatement: (offset: number) => void;
+}) {
+  const labelRefs = useRef(new Map<string, HTMLDivElement>());
+  const go = (label: string) =>
+    labelRefs.current.get(label)?.scrollIntoView({ block: "center", behavior: "smooth" });
+  return (
+    <div className="px-3 py-2 font-mono text-[11px] leading-relaxed">
+      {flow.gotos > 0 && (
+        <p className="mb-2 font-sans text-muted-foreground">
+          {flow.gotos} jump{flow.gotos === 1 ? "" : "s"} could not be nested and stay as goto.
+        </p>
+      )}
+      {flow.lines.map((line, index) => {
+        const label = /^(@[0-9A-F]{4,}):/.exec(line.text)?.[1];
+        const offset = line.offsets?.[0];
+        const comment = line.text.indexOf("  // ");
+        const code = comment >= 0 ? line.text.slice(0, comment) : line.text;
+        const keyword = label ? null : PSEUDO_KEYWORD.exec(code.trimStart())?.[1];
+        const jump = /(?:goto|push) (@[0-9A-F]{4,})/.exec(code)?.[1];
+        const body = keyword ? code.slice(keyword.length) : code;
+        return (
+          <div
+            key={offset !== undefined ? `s${offset}` : `l${index}`}
+            ref={(el) => {
+              if (!label) return;
+              if (el) labelRefs.current.set(label, el);
+              else labelRefs.current.delete(label);
+            }}
+            style={{ paddingLeft: `${line.depth * 16}px` }}
+            className={cn(
+              "whitespace-pre-wrap break-all rounded-sm",
+              label && "text-blue-accent-foreground",
+              offset !== undefined && "cursor-pointer hover:bg-muted/50"
+            )}
+            onClick={offset !== undefined ? () => onStatement(offset) : undefined}
+          >
+            {keyword && (
+              <span className="font-semibold text-blue-accent-foreground">{keyword}</span>
+            )}
+            {jump ? (
+              <>
+                {body.slice(0, body.indexOf(jump))}
+                <button
+                  className="text-blue-accent-foreground hover:underline"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    go(jump);
+                  }}
+                >
+                  {jump}
+                </button>
+                {body.slice(body.indexOf(jump) + jump.length)}
+              </>
+            ) : (
+              body
+            )}
+            {comment >= 0 && (
+              <span className="font-sans text-muted-foreground">{line.text.slice(comment)}</span>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 function BytesPane({
@@ -3358,6 +4184,8 @@ function draftText(draft: Draft | undefined, count: number | null): string | nul
       return "(inherited)";
     case "insert":
       return `${(count ?? 0) + 1} items`;
+    case "set_items":
+      return `${draft.items.length} items`;
     case "remove":
       return `${Math.max((count ?? 1) - 1, 0)} items`;
     default:
@@ -6912,6 +7740,31 @@ function StringTableView({ table, exportIndex }: { table: StringTable; exportInd
   const [metaAsk, setMetaAsk] = useState<{ index: number; key: string } | null>(null);
   const [tagsWanted, setTagsWanted] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const translations = useContext(TranslationContext);
+  /** What the game shows for each entry in the chosen language, `null` where it shows the source. */
+  const [translated, setTranslated] = useState<(string | null)[] | null>(null);
+  const gameRoot = translations?.gameRoot;
+  const textEpoch = translations?.epoch;
+  useEffect(() => {
+    if (!gameRoot) return;
+    let live = true;
+    invoke<(string | null)[]>("table_translations", {
+      gameRoot,
+      namespace: table.namespace,
+      sources: table.entries.map((entry) => [entry.key, entry.source]),
+    }).then(
+      (shown) => {
+        if (live) setTranslated(shown);
+      },
+      () => {
+        if (live) setTranslated(null);
+      }
+    );
+    return () => {
+      live = false;
+    };
+  }, [gameRoot, textEpoch, table]);
+  const translate = (key: string) => translations?.open(`${table.namespace}/${key}`, key);
 
   const draftsHere = useMemo(() => {
     const byKey = new Map<string, DraftRecord>();
@@ -7026,6 +7879,9 @@ function StringTableView({ table, exportIndex }: { table: StringTable; exportInd
             Key
           </div>
           <div className="min-w-0 flex-1 px-2 py-1">Source string</div>
+          {translated && (
+            <div className="min-w-0 flex-1 px-2 py-1">Translation ({translations?.culture})</div>
+          )}
           {hasTags && <div className="w-24 shrink-0 px-2 py-1">Tag</div>}
         </div>
         <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
@@ -7053,6 +7909,7 @@ function StringTableView({ table, exportIndex }: { table: StringTable; exportInd
                       <div className="min-w-0 flex-1 truncate px-2 py-1 font-mono text-blue-accent-foreground">
                         {row.source}
                       </div>
+                      {translated && <div className="min-w-0 flex-1" />}
                       {hasTags && <div className="w-24 shrink-0" />}
                     </div>
                   </ContextMenuTrigger>
@@ -7173,6 +8030,29 @@ function StringTableView({ table, exportIndex }: { table: StringTable; exportInd
                     </div>
                     {cell("key")}
                     {cell("source")}
+                    {translated &&
+                      (() => {
+                        const shown = translated.at(row.index) ?? null;
+                        const body = (
+                          <div
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              translate(row.key);
+                            }}
+                            className={cn(
+                              "min-w-0 flex-1 cursor-pointer truncate px-2 py-1 hover:ring-1 hover:ring-inset hover:ring-primary/40",
+                              shown === null && "italic text-muted-foreground"
+                            )}
+                          >
+                            {shown ?? "shows the source"}
+                          </div>
+                        );
+                        return shown !== null && shown.length > 40 ? (
+                          <Tip content={shown}>{body}</Tip>
+                        ) : (
+                          body
+                        );
+                      })()}
                     {hasTags && cell("tag")}
                   </div>
                 </ContextMenuTrigger>
@@ -7191,6 +8071,12 @@ function StringTableView({ table, exportIndex }: { table: StringTable; exportInd
                     <Pencil size={14} />
                     Edit source string
                   </ContextMenuItem>
+                  {translations && (
+                    <ContextMenuItem onSelect={() => translate(row.key)}>
+                      <Languages size={14} />
+                      Edit translation ({translations.culture})…
+                    </ContextMenuItem>
+                  )}
                   <Tip
                     content="The marker string after the source. This game writes Encrypt on some lobby entries and nothing elsewhere."
                     side="right"
@@ -7919,6 +8805,16 @@ export default function AssetInspector({
       () => undefined
     );
   };
+  const [translating, setTranslating] = useState<TranslationAsk | null>(null);
+  const translations = useMemo<Translations>(
+    () => ({
+      gameRoot: gamePath,
+      culture,
+      epoch: textEpoch,
+      open: (text, label) => setTranslating({ text, label }),
+    }),
+    [gamePath, culture, textEpoch]
+  );
   /// What to run once the user confirms abandoning unsaved edits.
   const [confirmLeave, setConfirmLeave] = useState<(() => void) | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -8445,6 +9341,11 @@ export default function AssetInspector({
   const views: { id: ViewMode; label: string }[] = [
     { id: "table" as const, label: "Table", shown: Boolean(active?.data_table) },
     { id: "strings" as const, label: "Strings", shown: Boolean(active?.string_table) },
+    {
+      id: "slots" as const,
+      label: "Slots",
+      shown: active ? meshSlots(active.properties) !== null : false,
+    },
     { id: "script" as const, label: "Script", shown: Boolean(active?.script) },
     { id: "vm" as const, label: "VM", shown: active?.class_name === "NiagaraScript" },
     { id: "tree" as const, label: "Tree", shown: !codeOnly },
@@ -8471,721 +9372,739 @@ export default function AssetInspector({
   return (
     <EditSessionContext.Provider value={edits.session}>
       <TaggedContext.Provider value={pkg ? !pkg.unversioned_properties : false}>
-        <PackageContext.Provider value={packagePlace}>
-          <div className="absolute inset-0 z-20 flex flex-col bg-background">
-            <div className="flex items-center gap-2 border-b border-border px-3 py-2">
-              <Button size="sm" variant="ghost" className="h-7" onClick={() => guarded(onClose)}>
-                <ArrowLeft size={13} /> Back
-              </Button>
-              <Tip content={entry} side="bottom" align="start">
-                <span className="min-w-0 flex-1 truncate font-mono text-xs text-foreground/80">
-                  {fileName}
-                </span>
-              </Tip>
-              {pkg && !showPackage && (
-                <div className="flex shrink-0 items-center gap-2">
-                  {active && (
-                    <StatusBadge
-                      status={active.status}
-                      note={active.note}
-                      undecoded={active.undecoded}
-                    />
-                  )}
-                  {active && (
-                    <ExportActions
-                      export={active}
-                      lock={structuralLock}
-                      duplicateLock={duplicateLockOf(active, pkg, structuralLock)}
-                      onDuplicate={() => setAsk({ kind: "duplicate", index: active.index })}
-                      payload={{
-                        lock: payloadLockOf(active, pkg),
-                        drafted:
-                          edits.session.drafts[draftKey(payloadTarget(active.index))] !== undefined,
-                        onExport: () =>
-                          bytesActions.exportPayload(active.index, active.object_name),
-                        onReplace: () => bytesActions.replacePayload(active.index),
-                        onDiscard: () =>
-                          edits.session.dropDraft(draftKey(payloadTarget(active.index))),
-                      }}
-                      onRemove={() => askRemoval(active.index)}
-                      onReset={() => setAsk({ kind: "reset", index: active.index })}
-                      onRename={() =>
-                        setAsk({
-                          kind: "rename",
-                          index: active.index,
-                          name: active.object_name,
-                          plan: null,
-                          error: null,
-                        })
-                      }
-                      onMove={() =>
-                        setAsk({
-                          kind: "move",
-                          index: active.index,
-                          outer: active.outer_index > 0 ? active.outer_index - 1 : null,
-                          plan: null,
-                          error: null,
-                        })
-                      }
-                      onAddUnder={() => setAddingObject({ outer: active.index })}
-                      onAddField={() => setAsk({ kind: "field", index: active.index })}
-                      onAddComponent={() => setAddingComponent(active.index)}
-                      onRemoveComponent={() => setRemovingComponent(active.index)}
-                      onFlags={() =>
-                        setAsk({ kind: "flags", index: active.index, set: 0, clear: 0 })
-                      }
-                      onRetype={() =>
-                        setAsk({
-                          kind: "retype",
-                          index: active.index,
-                          class: null,
-                          plan: null,
-                          error: null,
-                        })
-                      }
-                      onDeps={() =>
-                        setAsk({
-                          kind: "deps",
-                          index: active.index,
-                          runs: pkg.dependencies?.[active.index] ?? {
-                            serialize_before_serialize: [],
-                            create_before_serialize: [],
-                            serialize_before_create: [],
-                            create_before_create: [],
-                          },
-                          plan: null,
-                          error: null,
-                        })
-                      }
-                    />
-                  )}
-                  {(effectiveView === "tree" || effectiveView === "table") &&
-                    cultures.length > 0 && (
-                      <Select value={culture} onValueChange={chooseCulture}>
-                        <Tip
-                          content="The language texts are shown in, as the game shows them"
-                          side="bottom"
-                        >
-                          <SelectTrigger
-                            size="sm"
-                            className="h-7 w-24 px-2 text-[10px] font-semibold uppercase"
-                          >
-                            <Languages size={13} className="text-muted-foreground" />
-                            <SelectValue />
-                          </SelectTrigger>
-                        </Tip>
-                        <SelectContent className="max-h-72">
-                          {cultures.map((name) => (
-                            <SelectItem key={name} value={name} className="text-[11px]">
-                              {name}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
+        <TranslationContext.Provider value={translations}>
+          <PackageContext.Provider value={packagePlace}>
+            <div className="absolute inset-0 z-20 flex flex-col bg-background">
+              <div className="flex items-center gap-2 border-b border-border px-3 py-2">
+                <Button size="sm" variant="ghost" className="h-7" onClick={() => guarded(onClose)}>
+                  <ArrowLeft size={13} /> Back
+                </Button>
+                <Tip content={entry} side="bottom" align="start">
+                  <span className="min-w-0 flex-1 truncate font-mono text-xs text-foreground/80">
+                    {fileName}
+                  </span>
+                </Tip>
+                {pkg && !showPackage && (
+                  <div className="flex shrink-0 items-center gap-2">
+                    {active && (
+                      <StatusBadge
+                        status={active.status}
+                        note={active.note}
+                        undecoded={active.undecoded}
+                      />
                     )}
-                  {(effectiveView === "tree" || effectiveView === "table") && (
-                    <Tip
-                      content={
-                        showInherited
-                          ? "Hide the slots this export does not store"
-                          : "Show the slots this export declares but does not store. They take the value the class inherits, and can be given one of their own."
-                      }
-                      side="bottom"
-                    >
-                      <Button
-                        size="sm"
-                        variant={showInherited ? "outline" : "ghost"}
-                        className="h-7 px-2 text-[10px] font-semibold uppercase"
-                        onClick={() => toggleInherited(!showInherited)}
+                    {active && (
+                      <ExportActions
+                        export={active}
+                        lock={structuralLock}
+                        duplicateLock={duplicateLockOf(active, pkg, structuralLock)}
+                        onDuplicate={() => setAsk({ kind: "duplicate", index: active.index })}
+                        payload={{
+                          lock: payloadLockOf(active, pkg),
+                          drafted:
+                            edits.session.drafts[draftKey(payloadTarget(active.index))] !==
+                            undefined,
+                          onExport: () =>
+                            bytesActions.exportPayload(active.index, active.object_name),
+                          onReplace: () => bytesActions.replacePayload(active.index),
+                          onDiscard: () =>
+                            edits.session.dropDraft(draftKey(payloadTarget(active.index))),
+                        }}
+                        onRemove={() => askRemoval(active.index)}
+                        onReset={() => setAsk({ kind: "reset", index: active.index })}
+                        onRename={() =>
+                          setAsk({
+                            kind: "rename",
+                            index: active.index,
+                            name: active.object_name,
+                            plan: null,
+                            error: null,
+                          })
+                        }
+                        onMove={() =>
+                          setAsk({
+                            kind: "move",
+                            index: active.index,
+                            outer: active.outer_index > 0 ? active.outer_index - 1 : null,
+                            plan: null,
+                            error: null,
+                          })
+                        }
+                        onAddUnder={() => setAddingObject({ outer: active.index })}
+                        onAddField={() => setAsk({ kind: "field", index: active.index })}
+                        onAddComponent={() => setAddingComponent(active.index)}
+                        onRemoveComponent={() => setRemovingComponent(active.index)}
+                        onFlags={() =>
+                          setAsk({ kind: "flags", index: active.index, set: 0, clear: 0 })
+                        }
+                        onRetype={() =>
+                          setAsk({
+                            kind: "retype",
+                            index: active.index,
+                            class: null,
+                            plan: null,
+                            error: null,
+                          })
+                        }
+                        onDeps={() =>
+                          setAsk({
+                            kind: "deps",
+                            index: active.index,
+                            runs: pkg.dependencies?.[active.index] ?? {
+                              serialize_before_serialize: [],
+                              create_before_serialize: [],
+                              serialize_before_create: [],
+                              create_before_create: [],
+                            },
+                            plan: null,
+                            error: null,
+                          })
+                        }
+                      />
+                    )}
+                    {(effectiveView === "tree" ||
+                      effectiveView === "table" ||
+                      effectiveView === "strings") &&
+                      cultures.length > 0 && (
+                        <Select value={culture} onValueChange={chooseCulture}>
+                          <Tip
+                            content="The language texts are shown in, as the game shows them"
+                            side="bottom"
+                          >
+                            <SelectTrigger
+                              size="sm"
+                              className="h-7 w-24 px-2 text-[10px] font-semibold uppercase"
+                            >
+                              <Languages size={13} className="text-muted-foreground" />
+                              <SelectValue />
+                            </SelectTrigger>
+                          </Tip>
+                          <SelectContent className="max-h-72">
+                            {cultures.map((name) => (
+                              <SelectItem key={name} value={name} className="text-[11px]">
+                                {name}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      )}
+                    {(effectiveView === "tree" || effectiveView === "table") && (
+                      <Tip
+                        content={
+                          showInherited
+                            ? "Hide the slots this export does not store"
+                            : "Show the slots this export declares but does not store. They take the value the class inherits, and can be given one of their own."
+                        }
+                        side="bottom"
                       >
-                        {showInherited ? <Eye size={13} /> : <EyeOff size={13} />} Inherited
+                        <Button
+                          size="sm"
+                          variant={showInherited ? "outline" : "ghost"}
+                          className="h-7 px-2 text-[10px] font-semibold uppercase"
+                          onClick={() => toggleInherited(!showInherited)}
+                        >
+                          {showInherited ? <Eye size={13} /> : <EyeOff size={13} />} Inherited
+                        </Button>
+                      </Tip>
+                    )}
+                    <div className="flex items-center gap-0.5 rounded-md bg-muted p-0.5">
+                      {views.map((option) => (
+                        <button
+                          key={option.id}
+                          onClick={() => setView(option.id)}
+                          className={cn(
+                            "rounded px-2 py-0.5 text-[10px] font-semibold uppercase transition-colors",
+                            effectiveView === option.id
+                              ? "bg-background text-foreground"
+                              : "text-muted-foreground hover:text-foreground"
+                          )}
+                        >
+                          {option.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Outside the loaded branch on purpose: a save re-reads the asset, and the notice has to
+            outlive that. */}
+              {edits.modCopy && !edits.onModCopy && onOpenCopy && (
+                <div className="flex shrink-0 items-center gap-2 border-b border-border bg-warn/10 px-3 py-1.5 text-[11px]">
+                  <AlertTriangle size={13} className="shrink-0 text-warn" />
+                  <span className="min-w-0 truncate">
+                    {previewContainerFilename(edits.modName, edits.saveTarget)} already holds an
+                    edited copy of this asset. Edits made here would start over from this one.
+                  </span>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="ml-auto h-6 shrink-0"
+                    onClick={() => edits.modCopy && onOpenCopy(edits.modCopy)}
+                  >
+                    Open the edited copy
+                  </Button>
+                </div>
+              )}
+
+              {(edits.dirty || edits.notice) && (
+                <EditBar
+                  edits={edits}
+                  gamePath={gamePath}
+                  gameRunning={gameRunning}
+                  onOpenCopy={onOpenCopy}
+                />
+              )}
+
+              {busy && (
+                <div className="flex flex-1 items-center justify-center gap-2 text-sm text-muted-foreground">
+                  <Loader2 size={15} className="animate-spin" /> Reading asset
+                </div>
+              )}
+
+              {!busy && error && (
+                <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
+                  <AlertTriangle size={26} className="text-amber-400/70" />
+                  {needsMappings ? (
+                    <>
+                      <p className="max-w-lg text-sm text-foreground">
+                        This asset needs a .usmap mappings file.
+                      </p>
+                      <p className="max-w-lg text-xs text-muted-foreground">
+                        Marvel Rivals ships packages with unversioned properties, so their property
+                        names and types are not stored in the asset itself. Assets saved out of the
+                        editor keep that information and open without a mappings file.
+                      </p>
+                      <Button size="sm" variant="outline" onClick={onOpenSettings}>
+                        Set the mappings file
                       </Button>
-                    </Tip>
+                    </>
+                  ) : (
+                    <p className="max-w-2xl break-words text-sm text-muted-foreground">{error}</p>
                   )}
-                  <div className="flex items-center gap-0.5 rounded-md bg-muted p-0.5">
-                    {views.map((option) => (
+                </div>
+              )}
+
+              {!busy && pkg && (
+                <div className="flex min-h-0 min-w-0 flex-1">
+                  <div className="w-[240px] shrink-0 overflow-y-auto border-r border-border">
+                    <Tip content={pkg.package_name} side="right">
                       <button
-                        key={option.id}
-                        onClick={() => setView(option.id)}
+                        onClick={() => setShowPackage(true)}
                         className={cn(
-                          "rounded px-2 py-0.5 text-[10px] font-semibold uppercase transition-colors",
-                          effectiveView === option.id
-                            ? "bg-background text-foreground"
-                            : "text-muted-foreground hover:text-foreground"
+                          "flex w-full flex-col gap-0.5 border-b border-border px-3 py-2 text-left transition-colors",
+                          showPackage ? "bg-muted" : "hover:bg-muted/50"
                         )}
                       >
-                        {option.label}
+                        <span className="flex items-center gap-1.5">
+                          <Package size={11} className="shrink-0 text-muted-foreground" />
+                          <span className="truncate font-mono text-[11px] text-foreground">
+                            {pkg.package_name.split("/").pop()}
+                          </span>
+                        </span>
+                        <span className="truncate text-[10px] text-muted-foreground">
+                          {pkg.names.length} names · {pkg.imports.length} imports ·{" "}
+                          {pkg.exports.length} exports
+                        </span>
                       </button>
+                    </Tip>
+                    {pkg.exports.map((exp, index) => (
+                      <ContextMenu key={exp.index}>
+                        <ContextMenuTrigger asChild>
+                          <button
+                            onClick={() => {
+                              if (index === selected) {
+                                setShowPackage(false);
+                                return;
+                              }
+                              guarded(() => {
+                                discard();
+                                setSelected(index);
+                                setShowPackage(false);
+                              });
+                            }}
+                            className={cn(
+                              "flex w-full flex-col gap-0.5 border-b border-border/40 py-2 pr-3 pl-6 text-left transition-colors",
+                              !showPackage && index === selected ? "bg-muted" : "hover:bg-muted/50"
+                            )}
+                          >
+                            <span className="flex items-center gap-1.5">
+                              <span className="truncate font-mono text-[11px] text-foreground">
+                                {exp.object_name}
+                              </span>
+                              {exp.data_table && (
+                                <Table2 size={11} className="shrink-0 text-sky-400" />
+                              )}
+                            </span>
+                            <span className="flex items-center gap-1.5">
+                              <span className="truncate text-[10px] text-muted-foreground">
+                                {exp.class_name}
+                              </span>
+                              <StatusBadge
+                                status={exp.status}
+                                note={exp.note}
+                                undecoded={exp.undecoded}
+                              />
+                            </span>
+                          </button>
+                        </ContextMenuTrigger>
+                        <ContextMenuContent>
+                          <ContextMenuItem
+                            disabled={!!structuralLock}
+                            onSelect={() => askRemoval(exp.index)}
+                          >
+                            <Trash2 size={14} />
+                            Remove export…
+                          </ContextMenuItem>
+                          <ContextMenuItem
+                            disabled={!!resetLockOf(exp, structuralLock)}
+                            onSelect={() => setAsk({ kind: "reset", index: exp.index })}
+                          >
+                            <RotateCcw size={14} />
+                            Reset to defaults…
+                          </ContextMenuItem>
+                        </ContextMenuContent>
+                      </ContextMenu>
                     ))}
+                  </div>
+
+                  <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+                    {unreadWithoutMappings && (
+                      <div className="flex shrink-0 items-center gap-3 border-b border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-300">
+                        <span className="min-w-0 flex-1">
+                          No mappings file is loaded. This asset stores its own property types, so
+                          its values still read, but what some engine classes keep after them is
+                          only read with one. Those are likely the unexplained bytes here.
+                        </span>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-6 shrink-0"
+                          onClick={onOpenSettings}
+                        >
+                          Set the mappings file
+                        </Button>
+                      </div>
+                    )}
+                    {pkg.schema_fixups && pkg.schema_fixups.length > 0 && (
+                      <div className="shrink-0 border-b border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-300">
+                        Your mappings file declares{" "}
+                        {pkg.schema_fixups.map((f) => `${f.struct_name}.${f.property}`).join(", ")},
+                        which this build does not store. It was skipped so the rest of the asset
+                        reads correctly.
+                      </div>
+                    )}
+
+                    {!showPackage && active?.status.state === "failed" && (
+                      <div className="shrink-0 border-b border-red-500/30 bg-red-500/10 px-3 py-2 text-[11px] text-red-300">
+                        {active.status.reason}
+                      </div>
+                    )}
+
+                    {showPackage ? (
+                      <PackageView
+                        pkg={pkg}
+                        edits={edits}
+                        lock={structuralLock}
+                        bytes={bytesActions}
+                        onSelectExport={(index) => {
+                          if (index === selected) {
+                            setShowPackage(false);
+                            return;
+                          }
+                          guarded(() => {
+                            discard();
+                            setSelected(index);
+                            setShowPackage(false);
+                          });
+                        }}
+                        onRemove={askRemoval}
+                        onReset={(index) => setAsk({ kind: "reset", index })}
+                        onDuplicate={(index) => setAsk({ kind: "duplicate", index })}
+                        onRename={(index) =>
+                          setAsk({
+                            kind: "rename",
+                            index,
+                            name: pkg.exports[index].object_name,
+                            plan: null,
+                            error: null,
+                          })
+                        }
+                        onMove={(index) => {
+                          const outer = pkg.exports[index].outer_index;
+                          setAsk({
+                            kind: "move",
+                            index,
+                            outer: outer > 0 ? outer - 1 : null,
+                            plan: null,
+                            error: null,
+                          });
+                        }}
+                        onFlags={(index) => setAsk({ kind: "flags", index, set: 0, clear: 0 })}
+                        onRetype={(index) =>
+                          setAsk({ kind: "retype", index, class: null, plan: null, error: null })
+                        }
+                        onCopyOut={(index) => {
+                          const exp = pkg.exports[index];
+                          clipboard.copy({
+                            container,
+                            entry,
+                            export: index,
+                            name: exp.object_name,
+                            className: exp.class_name,
+                            path: exp.path,
+                          });
+                          edits.report(
+                            `${exp.object_name} is ready to paste into another package`,
+                            "ok"
+                          );
+                        }}
+                        clipboard={clipboard.held}
+                        onPaste={() => {
+                          if (!clipboard.held) return;
+                          setAsk({
+                            kind: "paste",
+                            held: clipboard.held,
+                            outer: null,
+                            name: clipboard.held.name,
+                            plan: null,
+                            error: null,
+                          });
+                        }}
+                        onDeps={(index) =>
+                          setAsk({
+                            kind: "deps",
+                            index,
+                            runs: pkg.dependencies?.[index] ?? {
+                              serialize_before_serialize: [],
+                              create_before_serialize: [],
+                              serialize_before_create: [],
+                              create_before_create: [],
+                            },
+                            plan: null,
+                            error: null,
+                          })
+                        }
+                        onDropImport={askDropImport}
+                        onCompactNames={askCompactNames}
+                        onSaveAs={() => setSavingAs(true)}
+                        onAddObject={(outer) => setAddingObject({ outer })}
+                        onAddField={(index) => setAsk({ kind: "field", index })}
+                        onAddComponent={(node) => setAddingComponent(node)}
+                        onRemoveComponent={(node) => setRemovingComponent(node)}
+                        onAddParentComponent={() => setAddingParentComponent(true)}
+                      />
+                    ) : active && effectiveView === "table" && active.data_table ? (
+                      <DataTableGrid table={active.data_table} exportIndex={active.index} />
+                    ) : active && effectiveView === "strings" && active.string_table ? (
+                      <StringTableView table={active.string_table} exportIndex={active.index} />
+                    ) : active && effectiveView === "slots" ? (
+                      <MeshSlotsView properties={active.properties} />
+                    ) : active && effectiveView === "json" ? (
+                      <JsonView export={active} />
+                    ) : active && effectiveView === "bytes" ? (
+                      <BytesPane
+                        key={epoch}
+                        gamePath={gamePath}
+                        container={container}
+                        entry={entry}
+                        exportIndex={active.index}
+                      />
+                    ) : active && effectiveView === "vm" ? (
+                      <VmPane
+                        key={`${epoch}:${active.index}`}
+                        gamePath={gamePath}
+                        container={container}
+                        entry={entry}
+                        exportIndex={active.index}
+                      />
+                    ) : active && effectiveView === "script" ? (
+                      <ScriptPane
+                        key={`${epoch}:${active.index}:${scriptFocus?.offset ?? ""}`}
+                        gamePath={gamePath}
+                        container={container}
+                        entry={entry}
+                        exportIndex={active.index}
+                        exportNames={exportNames}
+                        focus={scriptFocus?.index === selected ? scriptFocus.offset : null}
+                        onOpen={openScript}
+                        onAddFunction={(add) =>
+                          void edits.save({ structural: { newFunctions: [add] } })
+                        }
+                        onAddVariable={(add) =>
+                          void edits.save({ structural: { addVariables: [add] } })
+                        }
+                        addBlocked={
+                          edits.saving
+                            ? "A save is under way."
+                            : previewContainerFilename(edits.modName, edits.saveTarget)
+                              ? null
+                              : "Name the mod to save into first."
+                        }
+                      />
+                    ) : active && treeRows.length > 0 ? (
+                      <InheritedContext.Provider value={inheritedValues}>
+                        <PropertyTree rows={treeRows} />
+                      </InheritedContext.Provider>
+                    ) : (
+                      <div className="min-h-0 min-w-0 flex-1 overflow-auto">
+                        <p className="p-6 text-center text-sm text-muted-foreground">
+                          {active && inheritedCount > 0 ? (
+                            <>
+                              Stores no properties. {inheritedCount} declared{" "}
+                              {inheritedCount === 1
+                                ? "property inherits its value"
+                                : "properties inherit their values"}
+                              .{" "}
+                              <button
+                                className="underline hover:text-foreground"
+                                onClick={() => toggleInherited(true)}
+                              >
+                                Show inherited
+                              </button>
+                            </>
+                          ) : active &&
+                            pkg.unversioned_properties &&
+                            active.properties.length === 0 &&
+                            active.status.state !== "failed" ? (
+                            "This class declares no properties of its own."
+                          ) : (
+                            "This export stores no properties."
+                          )}
+                        </p>
+                      </div>
+                    )}
+
+                    {!showPackage &&
+                      active?.trailing_hex &&
+                      active.status.state !== "payload" &&
+                      effectiveView !== "bytes" && (
+                        <details className="shrink-0 border-t border-border">
+                          <summary className="cursor-pointer px-3 py-1.5 text-[11px] text-muted-foreground hover:text-foreground">
+                            Undecoded bytes
+                          </summary>
+                          <pre className="max-h-40 overflow-auto px-3 pb-3 font-mono text-[10px] leading-relaxed text-muted-foreground">
+                            {active.trailing_hex}
+                          </pre>
+                        </details>
+                      )}
                   </div>
                 </div>
               )}
-            </div>
 
-            {/* Outside the loaded branch on purpose: a save re-reads the asset, and the notice has to
-            outlive that. */}
-            {edits.modCopy && !edits.onModCopy && onOpenCopy && (
-              <div className="flex shrink-0 items-center gap-2 border-b border-border bg-warn/10 px-3 py-1.5 text-[11px]">
-                <AlertTriangle size={13} className="shrink-0 text-warn" />
-                <span className="min-w-0 truncate">
-                  {previewContainerFilename(edits.modName, edits.saveTarget)} already holds an
-                  edited copy of this asset. Edits made here would start over from this one.
-                </span>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="ml-auto h-6 shrink-0"
-                  onClick={() => edits.modCopy && onOpenCopy(edits.modCopy)}
-                >
-                  Open the edited copy
-                </Button>
-              </div>
-            )}
-
-            {(edits.dirty || edits.notice) && (
-              <EditBar
-                edits={edits}
-                gamePath={gamePath}
-                gameRunning={gameRunning}
-                onOpenCopy={onOpenCopy}
-              />
-            )}
-
-            {busy && (
-              <div className="flex flex-1 items-center justify-center gap-2 text-sm text-muted-foreground">
-                <Loader2 size={15} className="animate-spin" /> Reading asset
-              </div>
-            )}
-
-            {!busy && error && (
-              <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
-                <AlertTriangle size={26} className="text-amber-400/70" />
-                {needsMappings ? (
-                  <>
-                    <p className="max-w-lg text-sm text-foreground">
-                      This asset needs a .usmap mappings file.
-                    </p>
-                    <p className="max-w-lg text-xs text-muted-foreground">
-                      Marvel Rivals ships packages with unversioned properties, so their property
-                      names and types are not stored in the asset itself. Assets saved out of the
-                      editor keep that information and open without a mappings file.
-                    </p>
-                    <Button size="sm" variant="outline" onClick={onOpenSettings}>
-                      Set the mappings file
-                    </Button>
-                  </>
-                ) : (
-                  <p className="max-w-2xl break-words text-sm text-muted-foreground">{error}</p>
-                )}
-              </div>
-            )}
-
-            {!busy && pkg && (
-              <div className="flex min-h-0 min-w-0 flex-1">
-                <div className="w-[240px] shrink-0 overflow-y-auto border-r border-border">
-                  <Tip content={pkg.package_name} side="right">
-                    <button
-                      onClick={() => setShowPackage(true)}
-                      className={cn(
-                        "flex w-full flex-col gap-0.5 border-b border-border px-3 py-2 text-left transition-colors",
-                        showPackage ? "bg-muted" : "hover:bg-muted/50"
-                      )}
-                    >
-                      <span className="flex items-center gap-1.5">
-                        <Package size={11} className="shrink-0 text-muted-foreground" />
-                        <span className="truncate font-mono text-[11px] text-foreground">
-                          {pkg.package_name.split("/").pop()}
-                        </span>
-                      </span>
-                      <span className="truncate text-[10px] text-muted-foreground">
-                        {pkg.names.length} names · {pkg.imports.length} imports ·{" "}
-                        {pkg.exports.length} exports
-                      </span>
-                    </button>
-                  </Tip>
-                  {pkg.exports.map((exp, index) => (
-                    <ContextMenu key={exp.index}>
-                      <ContextMenuTrigger asChild>
-                        <button
-                          onClick={() => {
-                            if (index === selected) {
-                              setShowPackage(false);
-                              return;
-                            }
-                            guarded(() => {
-                              discard();
-                              setSelected(index);
-                              setShowPackage(false);
-                            });
-                          }}
-                          className={cn(
-                            "flex w-full flex-col gap-0.5 border-b border-border/40 py-2 pr-3 pl-6 text-left transition-colors",
-                            !showPackage && index === selected ? "bg-muted" : "hover:bg-muted/50"
-                          )}
-                        >
-                          <span className="flex items-center gap-1.5">
-                            <span className="truncate font-mono text-[11px] text-foreground">
-                              {exp.object_name}
-                            </span>
-                            {exp.data_table && (
-                              <Table2 size={11} className="shrink-0 text-sky-400" />
-                            )}
-                          </span>
-                          <span className="flex items-center gap-1.5">
-                            <span className="truncate text-[10px] text-muted-foreground">
-                              {exp.class_name}
-                            </span>
-                            <StatusBadge
-                              status={exp.status}
-                              note={exp.note}
-                              undecoded={exp.undecoded}
-                            />
-                          </span>
-                        </button>
-                      </ContextMenuTrigger>
-                      <ContextMenuContent>
-                        <ContextMenuItem
-                          disabled={!!structuralLock}
-                          onSelect={() => askRemoval(exp.index)}
-                        >
-                          <Trash2 size={14} />
-                          Remove export…
-                        </ContextMenuItem>
-                        <ContextMenuItem
-                          disabled={!!resetLockOf(exp, structuralLock)}
-                          onSelect={() => setAsk({ kind: "reset", index: exp.index })}
-                        >
-                          <RotateCcw size={14} />
-                          Reset to defaults…
-                        </ContextMenuItem>
-                      </ContextMenuContent>
-                    </ContextMenu>
-                  ))}
-                </div>
-
-                <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-                  {unreadWithoutMappings && (
-                    <div className="flex shrink-0 items-center gap-3 border-b border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-300">
-                      <span className="min-w-0 flex-1">
-                        No mappings file is loaded. This asset stores its own property types, so its
-                        values still read, but what some engine classes keep after them is only read
-                        with one. Those are likely the unexplained bytes here.
-                      </span>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="h-6 shrink-0"
-                        onClick={onOpenSettings}
+              <AlertDialog
+                open={edits.pendingReplace !== null}
+                onOpenChange={(open) => !open && edits.cancelReplace()}
+              >
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>
+                      {edits.pendingReplace?.pak} already holds an edited copy
+                    </AlertDialogTitle>
+                    <AlertDialogDescription>
+                      {`To build on the edits saved there, open that copy and make ${
+                        edits.count === 1 ? "this change" : "these changes"
+                      } in it; unsaved changes here point into this copy's bytes and do not carry over. Starting over writes ${fileName} as it is here plus ${
+                        edits.pendingReplace?.structural || edits.count === 1
+                          ? "this change"
+                          : `these ${edits.count} changes`
+                      }, and the edits saved there earlier are lost.`}
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel>Keep it</AlertDialogCancel>
+                    {edits.modCopy && onOpenCopy && (
+                      <AlertDialogAction
+                        onClick={() => {
+                          const copy = edits.modCopy;
+                          edits.cancelReplace();
+                          if (copy) onOpenCopy(copy);
+                        }}
                       >
-                        Set the mappings file
-                      </Button>
-                    </div>
-                  )}
-                  {pkg.schema_fixups && pkg.schema_fixups.length > 0 && (
-                    <div className="shrink-0 border-b border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-300">
-                      Your mappings file declares{" "}
-                      {pkg.schema_fixups.map((f) => `${f.struct_name}.${f.property}`).join(", ")},
-                      which this build does not store. It was skipped so the rest of the asset reads
-                      correctly.
-                    </div>
-                  )}
-
-                  {!showPackage && active?.status.state === "failed" && (
-                    <div className="shrink-0 border-b border-red-500/30 bg-red-500/10 px-3 py-2 text-[11px] text-red-300">
-                      {active.status.reason}
-                    </div>
-                  )}
-
-                  {showPackage ? (
-                    <PackageView
-                      pkg={pkg}
-                      edits={edits}
-                      lock={structuralLock}
-                      bytes={bytesActions}
-                      onSelectExport={(index) => {
-                        if (index === selected) {
-                          setShowPackage(false);
-                          return;
-                        }
-                        guarded(() => {
-                          discard();
-                          setSelected(index);
-                          setShowPackage(false);
-                        });
-                      }}
-                      onRemove={askRemoval}
-                      onReset={(index) => setAsk({ kind: "reset", index })}
-                      onDuplicate={(index) => setAsk({ kind: "duplicate", index })}
-                      onRename={(index) =>
-                        setAsk({
-                          kind: "rename",
-                          index,
-                          name: pkg.exports[index].object_name,
-                          plan: null,
-                          error: null,
-                        })
-                      }
-                      onMove={(index) => {
-                        const outer = pkg.exports[index].outer_index;
-                        setAsk({
-                          kind: "move",
-                          index,
-                          outer: outer > 0 ? outer - 1 : null,
-                          plan: null,
-                          error: null,
-                        });
-                      }}
-                      onFlags={(index) => setAsk({ kind: "flags", index, set: 0, clear: 0 })}
-                      onRetype={(index) =>
-                        setAsk({ kind: "retype", index, class: null, plan: null, error: null })
-                      }
-                      onCopyOut={(index) => {
-                        const exp = pkg.exports[index];
-                        clipboard.copy({
-                          container,
-                          entry,
-                          export: index,
-                          name: exp.object_name,
-                          className: exp.class_name,
-                          path: exp.path,
-                        });
-                        edits.report(
-                          `${exp.object_name} is ready to paste into another package`,
-                          "ok"
-                        );
-                      }}
-                      clipboard={clipboard.held}
-                      onPaste={() => {
-                        if (!clipboard.held) return;
-                        setAsk({
-                          kind: "paste",
-                          held: clipboard.held,
-                          outer: null,
-                          name: clipboard.held.name,
-                          plan: null,
-                          error: null,
-                        });
-                      }}
-                      onDeps={(index) =>
-                        setAsk({
-                          kind: "deps",
-                          index,
-                          runs: pkg.dependencies?.[index] ?? {
-                            serialize_before_serialize: [],
-                            create_before_serialize: [],
-                            serialize_before_create: [],
-                            create_before_create: [],
-                          },
-                          plan: null,
-                          error: null,
-                        })
-                      }
-                      onDropImport={askDropImport}
-                      onCompactNames={askCompactNames}
-                      onSaveAs={() => setSavingAs(true)}
-                      onAddObject={(outer) => setAddingObject({ outer })}
-                      onAddField={(index) => setAsk({ kind: "field", index })}
-                      onAddComponent={(node) => setAddingComponent(node)}
-                      onRemoveComponent={(node) => setRemovingComponent(node)}
-                      onAddParentComponent={() => setAddingParentComponent(true)}
-                    />
-                  ) : active && effectiveView === "table" && active.data_table ? (
-                    <DataTableGrid table={active.data_table} exportIndex={active.index} />
-                  ) : active && effectiveView === "strings" && active.string_table ? (
-                    <StringTableView table={active.string_table} exportIndex={active.index} />
-                  ) : active && effectiveView === "json" ? (
-                    <JsonView export={active} />
-                  ) : active && effectiveView === "bytes" ? (
-                    <BytesPane
-                      key={epoch}
-                      gamePath={gamePath}
-                      container={container}
-                      entry={entry}
-                      exportIndex={active.index}
-                    />
-                  ) : active && effectiveView === "vm" ? (
-                    <VmPane
-                      key={`${epoch}:${active.index}`}
-                      gamePath={gamePath}
-                      container={container}
-                      entry={entry}
-                      exportIndex={active.index}
-                    />
-                  ) : active && effectiveView === "script" ? (
-                    <ScriptPane
-                      key={`${epoch}:${active.index}:${scriptFocus?.offset ?? ""}`}
-                      gamePath={gamePath}
-                      container={container}
-                      entry={entry}
-                      exportIndex={active.index}
-                      exportNames={exportNames}
-                      focus={scriptFocus?.index === selected ? scriptFocus.offset : null}
-                      onOpen={openScript}
-                      onAddFunction={(add) =>
-                        void edits.save({ structural: { newFunctions: [add] } })
-                      }
-                      onAddVariable={(add) =>
-                        void edits.save({ structural: { addVariables: [add] } })
-                      }
-                      addBlocked={
-                        edits.saving
-                          ? "A save is under way."
-                          : previewContainerFilename(edits.modName, edits.saveTarget)
-                            ? null
-                            : "Name the mod to save into first."
-                      }
-                    />
-                  ) : active && treeRows.length > 0 ? (
-                    <InheritedContext.Provider value={inheritedValues}>
-                      <PropertyTree rows={treeRows} />
-                    </InheritedContext.Provider>
-                  ) : (
-                    <div className="min-h-0 min-w-0 flex-1 overflow-auto">
-                      <p className="p-6 text-center text-sm text-muted-foreground">
-                        {active && inheritedCount > 0 ? (
-                          <>
-                            Stores no properties. {inheritedCount} declared{" "}
-                            {inheritedCount === 1
-                              ? "property inherits its value"
-                              : "properties inherit their values"}
-                            .{" "}
-                            <button
-                              className="underline hover:text-foreground"
-                              onClick={() => toggleInherited(true)}
-                            >
-                              Show inherited
-                            </button>
-                          </>
-                        ) : active &&
-                          pkg.unversioned_properties &&
-                          active.properties.length === 0 &&
-                          active.status.state !== "failed" ? (
-                          "This class declares no properties of its own."
-                        ) : (
-                          "This export stores no properties."
-                        )}
-                      </p>
-                    </div>
-                  )}
-
-                  {!showPackage &&
-                    active?.trailing_hex &&
-                    active.status.state !== "payload" &&
-                    effectiveView !== "bytes" && (
-                      <details className="shrink-0 border-t border-border">
-                        <summary className="cursor-pointer px-3 py-1.5 text-[11px] text-muted-foreground hover:text-foreground">
-                          Undecoded bytes
-                        </summary>
-                        <pre className="max-h-40 overflow-auto px-3 pb-3 font-mono text-[10px] leading-relaxed text-muted-foreground">
-                          {active.trailing_hex}
-                        </pre>
-                      </details>
+                        Open the edited copy
+                      </AlertDialogAction>
                     )}
-                </div>
-              </div>
-            )}
+                    <AlertDialogAction
+                      onClick={() => void edits.save({ replace: true })}
+                      className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                    >
+                      Start over
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
 
-            <AlertDialog
-              open={edits.pendingReplace !== null}
-              onOpenChange={(open) => !open && edits.cancelReplace()}
-            >
-              <AlertDialogContent>
-                <AlertDialogHeader>
-                  <AlertDialogTitle>
-                    {edits.pendingReplace?.pak} already holds an edited copy
-                  </AlertDialogTitle>
-                  <AlertDialogDescription>
-                    {`To build on the edits saved there, open that copy and make ${
-                      edits.count === 1 ? "this change" : "these changes"
-                    } in it; unsaved changes here point into this copy's bytes and do not carry over. Starting over writes ${fileName} as it is here plus ${
-                      edits.pendingReplace?.structural || edits.count === 1
-                        ? "this change"
-                        : `these ${edits.count} changes`
-                    }, and the edits saved there earlier are lost.`}
-                  </AlertDialogDescription>
-                </AlertDialogHeader>
-                <AlertDialogFooter>
-                  <AlertDialogCancel>Keep it</AlertDialogCancel>
-                  {edits.modCopy && onOpenCopy && (
+              <AlertDialog
+                open={edits.pendingDrift !== null}
+                onOpenChange={(open) => !open && edits.cancelDrift()}
+              >
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>
+                      {fileName} has changed since these edits were made
+                    </AlertDialogTitle>
+                    <AlertDialogDescription>
+                      {edits.pendingDrift?.message} Saving anyway writes each edit where it now
+                      lands.
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel>Cancel</AlertDialogCancel>
+                    <AlertDialogAction
+                      onClick={() => void edits.save({ allowDrift: true })}
+                      className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                    >
+                      Save anyway
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
+
+              <AlertDialog
+                open={edits.pendingMissing !== null}
+                onOpenChange={(open) => !open && edits.cancelMissing()}
+              >
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>
+                      {edits.pendingMissing?.loadOrder
+                        ? "This save would leave the load order wrong"
+                        : edits.pendingMissing?.unchecked
+                          ? "These edits could not be checked"
+                          : "These edits point at nothing"}
+                    </AlertDialogTitle>
+                    <AlertDialogDescription className="whitespace-pre-line">
+                      {edits.pendingMissing?.message}
+                      {"\n\n"}
+                      {edits.pendingMissing?.loadOrder
+                        ? "The game loads a package's objects in the order these edges give, so an object named with no edge can read as nothing. Only a toolkit bug leaves one; save anyway only to keep the result as it is, and report it."
+                        : edits.pendingMissing?.unchecked
+                          ? "The script was compiled for what it held there. Something that does not fit can break the code around it or crash the game. Save anyway only if you know the two are used the same way."
+                          : "The game finds nothing there: an import loads as nothing, and a text shows a placeholder. Save anyway only if a mod loaded alongside this one provides it."}
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel>Cancel</AlertDialogCancel>
                     <AlertDialogAction
                       onClick={() => {
-                        const copy = edits.modCopy;
-                        edits.cancelReplace();
-                        if (copy) onOpenCopy(copy);
+                        const pending = edits.pendingMissing;
+                        void edits.save(
+                          pending?.unchecked
+                            ? { ...pending.options, allowUnchecked: true }
+                            : { ...pending?.options, allowMissing: true }
+                        );
                       }}
+                      className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
                     >
-                      Open the edited copy
+                      Save anyway
                     </AlertDialogAction>
-                  )}
-                  <AlertDialogAction
-                    onClick={() => void edits.save({ replace: true })}
-                    className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-                  >
-                    Start over
-                  </AlertDialogAction>
-                </AlertDialogFooter>
-              </AlertDialogContent>
-            </AlertDialog>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
 
-            <AlertDialog
-              open={edits.pendingDrift !== null}
-              onOpenChange={(open) => !open && edits.cancelDrift()}
-            >
-              <AlertDialogContent>
-                <AlertDialogHeader>
-                  <AlertDialogTitle>
-                    {fileName} has changed since these edits were made
-                  </AlertDialogTitle>
-                  <AlertDialogDescription>
-                    {edits.pendingDrift?.message} Saving anyway writes each edit where it now lands.
-                  </AlertDialogDescription>
-                </AlertDialogHeader>
-                <AlertDialogFooter>
-                  <AlertDialogCancel>Cancel</AlertDialogCancel>
-                  <AlertDialogAction
-                    onClick={() => void edits.save({ allowDrift: true })}
-                    className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-                  >
-                    Save anyway
-                  </AlertDialogAction>
-                </AlertDialogFooter>
-              </AlertDialogContent>
-            </AlertDialog>
+              {pkg && savingAs && (
+                <SaveAsDialog pkg={pkg} edits={edits} onClose={() => setSavingAs(false)} />
+              )}
 
-            <AlertDialog
-              open={edits.pendingMissing !== null}
-              onOpenChange={(open) => !open && edits.cancelMissing()}
-            >
-              <AlertDialogContent>
-                <AlertDialogHeader>
-                  <AlertDialogTitle>
-                    {edits.pendingMissing?.loadOrder
-                      ? "This save would leave the load order wrong"
-                      : edits.pendingMissing?.unchecked
-                        ? "These edits could not be checked"
-                        : "These edits point at nothing"}
-                  </AlertDialogTitle>
-                  <AlertDialogDescription className="whitespace-pre-line">
-                    {edits.pendingMissing?.message}
-                    {"\n\n"}
-                    {edits.pendingMissing?.loadOrder
-                      ? "The game loads a package's objects in the order these edges give, so an object named with no edge can read as nothing. Only a toolkit bug leaves one; save anyway only to keep the result as it is, and report it."
-                      : edits.pendingMissing?.unchecked
-                        ? "The script was compiled for what it held there. Something that does not fit can break the code around it or crash the game. Save anyway only if you know the two are used the same way."
-                        : "The game finds nothing there: an import loads as nothing, and a text shows a placeholder. Save anyway only if a mod loaded alongside this one provides it."}
-                  </AlertDialogDescription>
-                </AlertDialogHeader>
-                <AlertDialogFooter>
-                  <AlertDialogCancel>Cancel</AlertDialogCancel>
-                  <AlertDialogAction
-                    onClick={() => {
-                      const pending = edits.pendingMissing;
-                      void edits.save(
-                        pending?.unchecked
-                          ? { ...pending.options, allowUnchecked: true }
-                          : { ...pending?.options, allowMissing: true }
-                      );
-                    }}
-                    className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-                  >
-                    Save anyway
-                  </AlertDialogAction>
-                </AlertDialogFooter>
-              </AlertDialogContent>
-            </AlertDialog>
+              {pkg && addingComponent !== null && (
+                <AddComponentDialog
+                  pkg={pkg}
+                  edits={edits}
+                  node={addingComponent}
+                  onClose={() => setAddingComponent(null)}
+                />
+              )}
 
-            {pkg && savingAs && (
-              <SaveAsDialog pkg={pkg} edits={edits} onClose={() => setSavingAs(false)} />
-            )}
+              {pkg && addingParentComponent && (
+                <ParentComponentDialog
+                  edits={edits}
+                  gamePath={gamePath}
+                  container={container}
+                  entry={entry}
+                  onClose={() => setAddingParentComponent(false)}
+                />
+              )}
 
-            {pkg && addingComponent !== null && (
-              <AddComponentDialog
-                pkg={pkg}
-                edits={edits}
-                node={addingComponent}
-                onClose={() => setAddingComponent(null)}
-              />
-            )}
+              {pkg && removingComponent !== null && (
+                <RemoveComponentDialog
+                  pkg={pkg}
+                  edits={edits}
+                  node={removingComponent}
+                  onClose={() => setRemovingComponent(null)}
+                />
+              )}
 
-            {pkg && addingParentComponent && (
-              <ParentComponentDialog
-                edits={edits}
-                gamePath={gamePath}
-                container={container}
-                entry={entry}
-                onClose={() => setAddingParentComponent(false)}
-              />
-            )}
+              {pkg && addingObject && (
+                <AddObjectDialog
+                  pkg={pkg}
+                  edits={edits}
+                  outer={addingObject.outer}
+                  onClose={() => setAddingObject(null)}
+                />
+              )}
 
-            {pkg && removingComponent !== null && (
-              <RemoveComponentDialog
-                pkg={pkg}
-                edits={edits}
-                node={removingComponent}
-                onClose={() => setRemovingComponent(null)}
-              />
-            )}
+              {pkg && (
+                <StructuralDialog
+                  ask={ask}
+                  pkg={pkg}
+                  modName={edits.modName}
+                  saveTarget={edits.saveTarget}
+                  saving={edits.saving}
+                  indexing={indexing}
+                  onBuildIndex={(index) => void buildIndex(index)}
+                  onRenamePlan={askRenamePlan}
+                  onMovePlan={askMovePlan}
+                  onRetypePlan={askRetypePlan}
+                  onDependencyPlan={askDependencyPlan}
+                  onPastePlan={askPastePlan}
+                  onPaste={paste}
+                  onClose={() => setAsk(null)}
+                  onConfirm={(structural) => {
+                    setAsk(null);
+                    void edits.save({ structural });
+                  }}
+                />
+              )}
 
-            {pkg && addingObject && (
-              <AddObjectDialog
-                pkg={pkg}
-                edits={edits}
-                outer={addingObject.outer}
-                onClose={() => setAddingObject(null)}
-              />
-            )}
-
-            {pkg && (
-              <StructuralDialog
-                ask={ask}
-                pkg={pkg}
+              <AlertDialog
+                open={confirmLeave !== null}
+                onOpenChange={(open) => !open && setConfirmLeave(null)}
+              >
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>Discard unsaved changes?</AlertDialogTitle>
+                    <AlertDialogDescription>
+                      Edits that have not been saved as a mod will be lost.
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel>Keep editing</AlertDialogCancel>
+                    <AlertDialogAction
+                      onClick={() => {
+                        const leave = confirmLeave;
+                        setConfirmLeave(null);
+                        leave?.();
+                      }}
+                      className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                    >
+                      Discard
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
+              <TranslationDialog
+                ask={translating}
+                gameRoot={gamePath}
                 modName={edits.modName}
-                saveTarget={edits.saveTarget}
-                saving={edits.saving}
-                indexing={indexing}
-                onBuildIndex={(index) => void buildIndex(index)}
-                onRenamePlan={askRenamePlan}
-                onMovePlan={askMovePlan}
-                onRetypePlan={askRetypePlan}
-                onDependencyPlan={askDependencyPlan}
-                onPastePlan={askPastePlan}
-                onPaste={paste}
-                onClose={() => setAsk(null)}
-                onConfirm={(structural) => {
-                  setAsk(null);
-                  void edits.save({ structural });
+                onClose={() => setTranslating(null)}
+                onSaved={(message) => {
+                  edits.report(message, "ok");
+                  setTextEpoch((n) => n + 1);
                 }}
               />
-            )}
-
-            <AlertDialog
-              open={confirmLeave !== null}
-              onOpenChange={(open) => !open && setConfirmLeave(null)}
-            >
-              <AlertDialogContent>
-                <AlertDialogHeader>
-                  <AlertDialogTitle>Discard unsaved changes?</AlertDialogTitle>
-                  <AlertDialogDescription>
-                    Edits that have not been saved as a mod will be lost.
-                  </AlertDialogDescription>
-                </AlertDialogHeader>
-                <AlertDialogFooter>
-                  <AlertDialogCancel>Keep editing</AlertDialogCancel>
-                  <AlertDialogAction
-                    onClick={() => {
-                      const leave = confirmLeave;
-                      setConfirmLeave(null);
-                      leave?.();
-                    }}
-                    className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-                  >
-                    Discard
-                  </AlertDialogAction>
-                </AlertDialogFooter>
-              </AlertDialogContent>
-            </AlertDialog>
-          </div>
-        </PackageContext.Provider>
+            </div>
+          </PackageContext.Provider>
+        </TranslationContext.Provider>
       </TaggedContext.Provider>
     </EditSessionContext.Provider>
   );

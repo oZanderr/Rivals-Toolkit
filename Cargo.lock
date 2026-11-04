@@ -3565,7 +3565,7 @@ dependencies = [
 [[package]]
 name = "retoc"
 version = "0.1.5"
-source = "git+https://github.com/oZanderr/retoc?branch=master#af3c7371412e482abdded3bbcdc01f2e8c6054c8"
+source = "git+https://github.com/oZanderr/retoc?branch=master#c700472ccdbf197641b448e2243b3fa6334ca7ce"
 dependencies = [
  "aes",
  "anyhow",
@@ -3678,6 +3678,7 @@ dependencies = [
  "similar",
  "sysinfo",
  "unrar",
+ "usmap",
  "walkdir",
  "zip",
 ]

@@ -197,6 +197,8 @@ export function Settings({
   const [savedGameRunningCheck, setSavedGameRunningCheck] = useState<boolean | null>(null);
   const [draftConflictCheck, setDraftConflictCheck] = useState<boolean | null>(null);
   const [savedConflictCheck, setSavedConflictCheck] = useState<boolean | null>(null);
+  const [draftConform, setDraftConform] = useState<boolean | null>(null);
+  const [savedConform, setSavedConform] = useState<boolean | null>(null);
   const [draftLogKey, setDraftLogKey] = useState<LogKeyOverride | null>(null);
   const [savedLogKey, setSavedLogKey] = useState<LogKeyOverride | null>(null);
   const [logKeyError, setLogKeyError] = useState<string | null>(null);
@@ -431,6 +433,19 @@ export function Settings({
         console.error(e);
         setDraftConflictCheck(true);
         setSavedConflictCheck(true);
+      });
+  }, []);
+
+  useEffect(() => {
+    invoke<boolean>("get_conform_mods")
+      .then((v) => {
+        setDraftConform(v);
+        setSavedConform(v);
+      })
+      .catch((e) => {
+        console.error(e);
+        setDraftConform(true);
+        setSavedConform(true);
       });
   }, []);
 
@@ -718,6 +733,8 @@ export function Settings({
     draftConflictCheck !== null &&
     savedConflictCheck !== null &&
     draftConflictCheck !== savedConflictCheck;
+  const conformDirty =
+    draftConform !== null && savedConform !== null && draftConform !== savedConform;
   const logKeyDirty =
     draftLogKey !== null &&
     savedLogKey !== null &&
@@ -733,7 +750,8 @@ export function Settings({
     modLevelDirty ||
     vanillaLevelDirty ||
     gameRunningCheckDirty ||
-    conflictCheckDirty;
+    conflictCheckDirty ||
+    conformDirty;
 
   async function save() {
     setSaving(true);
@@ -829,6 +847,14 @@ export function Settings({
         try {
           await invoke("set_mod_conflict_check_enabled", { enabled: draftConflictCheck });
           setSavedConflictCheck(draftConflictCheck);
+        } catch (e) {
+          console.error(e);
+        }
+      }
+      if (conformDirty && draftConform !== null) {
+        try {
+          await invoke("set_conform_mods", { enabled: draftConform });
+          setSavedConform(draftConform);
         } catch (e) {
           console.error(e);
         }
@@ -1155,6 +1181,21 @@ export function Settings({
                 checked={draftConflictCheck ?? true}
                 onCheckedChange={setDraftConflictCheck}
                 disabled={draftConflictCheck === null}
+              />
+            </label>
+            <label className="flex items-center gap-3 rounded-sm px-3 py-3 hover:bg-secondary/50">
+              <div className="flex flex-1 flex-col gap-0.5">
+                <span className="text-[13px] font-medium">Convert editor-made mods</span>
+                <span className="text-[11px] text-muted-foreground">
+                  When a mod cooked in the Unreal editor is installed or repacked, give its skeletal
+                  mesh material slots, static mesh screen sizes and string table entries the layout
+                  the game reads, and apply the material tag plugin's tags and hidden slots.
+                </span>
+              </div>
+              <Switch
+                checked={draftConform ?? true}
+                onCheckedChange={setDraftConform}
+                disabled={draftConform === null}
               />
             </label>
           </div>

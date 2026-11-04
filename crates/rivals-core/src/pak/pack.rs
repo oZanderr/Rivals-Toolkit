@@ -192,19 +192,97 @@ fn loose_bundle(reader: &FSFileReader, path: &UEPath) -> Result<FSerializedAsset
     })
 }
 
-/// One of the packages a [`LooseFolder`] lists, read for a container writer to take.
-pub(crate) fn read_loose_package(dir: &Path, entry: &str) -> Result<PackageBytes, String> {
-    let bundle = loose_bundle(&FSFileReader::new(dir), UEPath::new(entry))
+/// One of the packages a [`LooseFolder`] lists, read for a container writer to take and, with
+/// `conform`, brought to this game's layout.
+pub(crate) fn read_loose_package(
+    dir: &Path,
+    entry: &str,
+    conform: bool,
+    mappings: Option<&rivals_uasset::Mappings>,
+) -> Result<(PackageBytes, Conformance), String> {
+    let mut bundle = loose_bundle(&FSFileReader::new(dir), UEPath::new(entry))
         .map_err(|e| format!("read {entry}: {e}"))?;
-    Ok(PackageBytes {
-        entry: entry.to_string(),
-        asset: bundle.asset_file_buffer,
-        exports: bundle.exports_file_buffer,
-        bulk: bundle.bulk_data_buffer,
-        optional_bulk: bundle.optional_bulk_data_buffer,
-        memory_mapped_bulk: bundle.memory_mapped_bulk_data_buffer,
-        shader_map_hashes: Vec::new(),
-    })
+    let conformance = if conform {
+        conform_bundle(&mut bundle, entry, mappings)
+    } else {
+        Conformance::Unchanged
+    };
+    Ok((
+        PackageBytes {
+            entry: entry.to_string(),
+            asset: bundle.asset_file_buffer,
+            exports: bundle.exports_file_buffer,
+            bulk: bundle.bulk_data_buffer,
+            optional_bulk: bundle.optional_bulk_data_buffer,
+            memory_mapped_bulk: bundle.memory_mapped_bulk_data_buffer,
+            shader_map_hashes: Vec::new(),
+        },
+        conformance,
+    ))
+}
+
+/// A package brought to this game's layout, and what that changed.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct ConformedPackage {
+    pub package: String,
+    pub changes: Vec<String>,
+}
+
+/// A package left as it was cooked, and why it could not be brought to this game's layout.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct UnconformedPackage {
+    pub package: String,
+    pub reason: String,
+}
+
+/// What bringing one package to this game's layout did.
+pub(crate) enum Conformance {
+    Unchanged,
+    Changed(ConformedPackage),
+    Refused(UnconformedPackage),
+}
+
+/// Brings a package a stock editor cooked to this game's layout, in place. A package the game
+/// cooked, or one this cannot read, is left as it is.
+pub(crate) fn conform_bundle(
+    bundle: &mut FSerializedAssetBundle,
+    entry: &str,
+    mappings: Option<&rivals_uasset::Mappings>,
+) -> Conformance {
+    let package = rivals_uasset::AssetBundle {
+        asset: &bundle.asset_file_buffer,
+        exports: &bundle.exports_file_buffer,
+    };
+    match rivals_uasset::conform_package(&package, mappings) {
+        Ok(None) => Conformance::Unchanged,
+        Ok(Some(done)) => {
+            bundle.asset_file_buffer = done.asset;
+            bundle.exports_file_buffer = done.exports;
+            Conformance::Changed(ConformedPackage {
+                package: entry.to_string(),
+                changes: done.changes.into_iter().map(|c| c.change).collect(),
+            })
+        }
+        Err(reason) => Conformance::Refused(UnconformedPackage {
+            package: entry.to_string(),
+            reason,
+        }),
+    }
+}
+
+impl Conformance {
+    /// Files the outcome under the report's lists.
+    pub(crate) fn file(
+        self,
+        conformed: &mut Vec<ConformedPackage>,
+        unconformed: &mut Vec<UnconformedPackage>,
+    ) {
+        match self {
+            Self::Unchanged => {}
+            Self::Changed(package) => conformed.push(package),
+            Self::Refused(package) => unconformed.push(package),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -219,6 +297,12 @@ pub struct PackReport {
     /// Shader archives left out, each with a warning saying why.
     pub left_out: Vec<String>,
     pub warnings: Vec<String>,
+    /// Packages a stock editor cooked, brought to this game's layout.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub conformed: Vec<ConformedPackage>,
+    /// Packages a stock editor cooked that could not be brought to it, packed as they were.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unconformed: Vec<UnconformedPackage>,
 }
 
 /// Deletes partial output on drop unless disarmed.
@@ -316,10 +400,14 @@ pub fn pack_folder(
     }
     let shader_maps = &libraries.shader_maps;
     let total = asset_paths.len();
+    let (mut conformed, mut unconformed) = (Vec::new(), Vec::new());
 
     let converters = crate::parallel::own_pool(threads)?;
-    let (tx, rx) =
-        std::sync::mpsc::sync_channel::<Result<ConvertedZenAssetBundle, String>>(threads.max(2));
+    let (tx, rx) = std::sync::mpsc::sync_channel::<
+        Result<(ConvertedZenAssetBundle, Conformance), String>,
+    >(threads.max(2));
+    let conform = options.conform;
+    let mappings = options.mappings.as_deref();
 
     std::thread::scope(|scope| -> Result<(), String> {
         let asset_paths_ref = &asset_paths;
@@ -338,12 +426,17 @@ pub fn pack_folder(
                             return Err(());
                         }
                         let ue_path: &UEPath = path.as_ref();
-                        let bundle = match loose_bundle(reader_ref, ue_path) {
+                        let mut bundle = match loose_bundle(reader_ref, ue_path) {
                             Ok(bundle) => bundle,
                             Err(e) => {
                                 let _ = tx.send(Err(e));
                                 return Err(());
                             }
+                        };
+                        let conformance = if conform {
+                            conform_bundle(&mut bundle, ue_path.as_str(), mappings)
+                        } else {
+                            Conformance::Unchanged
                         };
                         let mounted_path: UEPathBuf =
                             format!("{RIVALS_MOUNT_POINT}{ue_path}").into();
@@ -358,7 +451,8 @@ pub fn pack_folder(
                             None,
                             &log,
                         )
-                        .map_err(|e| format!("Failed to convert {ue_path}: {e}"));
+                        .map_err(|e| format!("Failed to convert {ue_path}: {e}"))
+                        .map(|converted| (converted, conformance));
                         let failed = converted.is_err();
                         if tx.send(converted).is_err() || failed {
                             return Err(());
@@ -374,7 +468,8 @@ pub fn pack_folder(
         let rx = rx;
         let mut completed = 0usize;
         while let Ok(item) = rx.recv() {
-            let mut converted = item?;
+            let (mut converted, conformance) = item?;
+            conformance.file(&mut conformed, &mut unconformed);
             carry.restore_shader_maps(&mut converted);
             converted
                 .write_package_data(&mut writer)
@@ -418,6 +513,8 @@ pub fn pack_folder(
         shader_libraries: libraries.written,
         left_out: libraries.left_out,
         warnings: libraries.warnings,
+        conformed,
+        unconformed,
     })
 }
 

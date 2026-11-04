@@ -106,6 +106,24 @@ type PackCompression = "oodle" | "zlib";
 // a matter of adding the control back.
 const REPACK_COMPRESSION: PackCompression = "oodle";
 
+/** What packing did to packages an editor cooked: given the layout the game reads, or left. */
+interface Conformance {
+  conformed?: { package: string; changes: string[] }[];
+  unconformed?: { package: string; reason: string }[];
+}
+
+function conformanceNote(report: Conformance): string {
+  const done = report.conformed?.length ?? 0;
+  return done > 0 ? `; gave ${done} package${done !== 1 ? "s" : ""} the layout the game reads` : "";
+}
+
+function conformanceWarning(report: Conformance): string {
+  const left = report.unconformed ?? [];
+  if (left.length === 0) return "";
+  const more = left.length > 1 ? ` (and ${left.length - 1} more)` : "";
+  return `; left as the editor cooked it: ${left[0].package}: ${left[0].reason}${more}`;
+}
+
 // Only packages carry properties; every other extension is opaque payload.
 const INSPECTABLE = /[.](uasset|umap)$/i;
 type StatusType = "ok" | "err" | "info";
@@ -242,6 +260,7 @@ export function AssetManager({
     msg: string;
     type: StatusType;
     revealPath?: string;
+    details?: string[];
   } | null>(null);
   const [busy, setBusy] = useState(false);
   const [manualPaks, setManualPaks] = useState<Set<string>>(new Set());
@@ -348,13 +367,13 @@ export function AssetManager({
   const showNotice = (
     msg: string,
     type: StatusType,
-    opts?: { duration?: number; revealPath?: string }
+    opts?: { duration?: number; revealPath?: string; details?: string[] }
   ) => {
     // Strip any trailing path from error messages
     const clean =
       type === "err" ? msg.replace(/:\s*[A-Za-z]:\\[^\r\n]*|:\s*\/[^\r\n]*/g, "").trim() : msg;
     if (noticeTimer.current) clearTimeout(noticeTimer.current);
-    setNotice({ msg: clean, type, revealPath: opts?.revealPath });
+    setNotice({ msg: clean, type, revealPath: opts?.revealPath, details: opts?.details });
     // "info" notices persist until replaced by another notice (no auto-dismiss)
     const ms = opts?.duration ?? (type === "info" ? 0 : 6000);
     if (ms > 0) {
@@ -1300,12 +1319,14 @@ export function AssetManager({
   }
 
   async function repackOneInPlace(modPak: string, prompt: RepackPrompt) {
-    return invoke<{
-      container_name: string;
-      assets_in: number;
-      assets_out: number;
-      carried_pak_entries: number;
-    }>("repack_mod_in_place", {
+    return invoke<
+      {
+        container_name: string;
+        assets_in: number;
+        assets_out: number;
+        carried_pak_entries: number;
+      } & Conformance
+    >("repack_mod_in_place", {
       gameRoot: gamePath,
       modPak,
       toIostore: prompt.toIoStore,
@@ -1340,17 +1361,17 @@ export function AssetManager({
           done++;
         } catch (e: unknown) {
           // Each mod is verified and swapped on its own, so one failure leaves the rest alone.
-          failures.push(`${name}: ${String(e)}`);
+          failures.push(`${name}: ${String(e).replace(/[A-Za-z]:\\(?:[^\\\r\n:]+\\)+/g, "")}`);
         }
       }
       setOperation(null);
       setBusy(false);
       if (failures.length > 0) {
-        console.error("Batch repack failures:", failures);
+        // Stays up until replaced, so there is time to hover for the reasons.
         showNotice(
-          `Repacked ${done} of ${mods.length}; ${failures.length} failed, see the console.`,
+          `Repacked ${done} of ${mods.length}; ${failures.length} failed (hover for why)`,
           "err",
-          { duration: 8000 }
+          { duration: 0, details: failures }
         );
       } else {
         showNotice(`Repacked ${done} mod${done === 1 ? "" : "s"} to ${label}`, "ok");
@@ -1374,9 +1395,10 @@ export function AssetManager({
         const carried = report.carried_pak_entries
           ? `, ${report.carried_pak_entries} pak file(s) carried over`
           : "";
+        const left = conformanceWarning(report);
         showNotice(
-          `Repacked ${report.container_name} to ${label}: ${report.assets_in} item(s)${carried}`,
-          "ok",
+          `Repacked ${report.container_name} to ${label}: ${report.assets_in} item(s)${carried}${conformanceNote(report)}${left}`,
+          left ? "err" : "ok",
           { revealPath: prompt.source }
         );
         pakContentsCacheRef.current.delete(prompt.source);
@@ -1411,8 +1433,9 @@ export function AssetManager({
     startOperation(`Repacking ${baseName}`, ["cancel_repack_iostore"]);
     showNotice(`Repacking to ${label}\u2026`, "info");
     try {
+      let packed: Conformance = {};
       if (prompt.toIoStore) {
-        await invoke("repack_iostore", {
+        packed = await invoke<Conformance>("repack_iostore", {
           inputDir: prompt.source,
           outputUtoc: output,
           obfuscate: prompt.obfuscate,
@@ -1425,7 +1448,12 @@ export function AssetManager({
           compression: REPACK_COMPRESSION,
         });
       }
-      showNotice(`Repacked ${label} to: ${output}`, "ok", { revealPath: output });
+      const left = conformanceWarning(packed);
+      showNotice(
+        `Repacked ${label} to: ${output}${conformanceNote(packed)}${left}`,
+        left ? "err" : "ok",
+        { revealPath: output }
+      );
       emitModsChanged({
         modsFolder: output.replace(/[\\/][^\\/]+$/, ""),
         source: "AssetManager",
@@ -1556,7 +1584,20 @@ export function AssetManager({
       <div className="flex min-h-8 shrink-0 items-center gap-3">
         <h2 className="shrink-0 text-xl font-bold">Asset Manager</h2>
         {notice && !operation && (
-          <Tip content="Click to reveal in explorer" disabled={!notice.revealPath}>
+          <Tip
+            content={
+              notice.details ? (
+                <ul className="space-y-1">
+                  {notice.details.map((line) => (
+                    <li key={line}>{line}</li>
+                  ))}
+                </ul>
+              ) : (
+                "Click to reveal in explorer"
+              )
+            }
+            disabled={!notice.revealPath && !notice.details}
+          >
             <span
               className={cn(
                 "flex min-w-0 items-center gap-1.5 truncate text-[12px] font-medium",

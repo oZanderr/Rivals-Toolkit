@@ -169,6 +169,7 @@ impl ParsedPackage {
             native_leaves: Vec::new(),
             tag_bounds: Vec::new(),
             tagged_absent: Vec::new(),
+            stock_gaps: Vec::new(),
             script_tokens: Default::default(),
             text_histories: Default::default(),
             text_flags: Default::default(),
@@ -369,6 +370,9 @@ pub struct ParsedPackage {
     /// Properties tagged blocks do not hold, for edits that add one.
     #[serde(skip)]
     pub tagged_absent: Vec<crate::props::TaggedAbsent>,
+    /// Where a stock cook stops short of this game's layout. Empty for a package the game cooked.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub stock_gaps: Vec<crate::stock::StockGap>,
     /// How many of each bytecode token the package's scripts hold, named where the reader knows
     /// the name. A token with no name is one this build adds.
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -706,6 +710,7 @@ fn parse_inner(
             native_leaves: diagnostics.native_leaves,
             tag_bounds: diagnostics.tag_bounds,
             tagged_absent: diagnostics.tagged_absent,
+            stock_gaps: diagnostics.stock_gaps,
             script_tokens: diagnostics
                 .script_tokens
                 .iter()
@@ -1142,8 +1147,12 @@ fn parse_one(
     diagnostics: &mut Diagnostics,
 ) -> ParsedExport {
     let from = diagnostics.undecoded.len();
+    let gaps = diagnostics.stock_gaps.len();
     let mut parsed = parse_one_inner(bundle, header, ctx, index, tagged, diagnostics);
     parsed.undecoded = diagnostics.undecoded.drain(from..).collect();
+    for gap in diagnostics.stock_gaps.iter_mut().skip(gaps) {
+        gap.export = index;
+    }
     // Bytes that did not decode were stepped over, and whatever names they hold went unrecorded.
     parsed.names_complete &= parsed.undecoded.is_empty();
     parsed
@@ -1231,7 +1240,14 @@ fn parse_one_inner(
 
     // Only animation Blueprint classes declare sparse class data, and it is written with their
     // default object, whose own chain runs through `AnimInstance`.
-    let chain = ctx.ancestry_at(&class_name, class_path.as_deref());
+    let mut chain = ctx.ancestry_at(&class_name, class_path.as_deref());
+    // A tagged package read without mappings still knows the engine classes a conversion reads.
+    if chain.is_empty() && tagged {
+        chain = native_class_chain(&class_name)
+            .iter()
+            .map(|step| (*step).to_string())
+            .collect();
+    }
     let mut sparse_payload = None;
     if base.object_flags & RF_CLASS_DEFAULT_OBJECT != 0
         && chain.iter().any(|step| step == "AnimInstance")
@@ -1273,11 +1289,13 @@ fn parse_one_inner(
     }
 
     let mut string_table = None;
-    if ctx
-        .mappings
-        .is_some_and(|m| m.inherits_from(&class_name, "StringTable"))
+    // A tagged package read without mappings still names its own string tables.
+    if class_name == "StringTable"
+        || ctx
+            .mappings
+            .is_some_and(|m| m.inherits_from(&class_name, "StringTable"))
     {
-        match stringtable::read_string_table(&mut cursor, ctx, index, diagnostics) {
+        match stringtable::read_either_layout(&mut cursor, ctx, index, diagnostics) {
             Ok(table) => string_table = Some(table),
             Err(reason) => {
                 return ParsedExport {
@@ -1801,6 +1819,21 @@ fn hex_preview_at(cursor: &Cursor<'_>) -> String {
 
 /// The class chain, root first, of an engine class that is itself a struct: a function, a
 /// class, a Blueprint's generated class or a script struct. Empty for anything else.
+/// The chain of an engine class whose tail is read without mappings, so a tagged mod's meshes and
+/// string tables can be checked against this game's layout with no mappings file at hand.
+fn native_class_chain(class_name: &str) -> &'static [&'static str] {
+    match class_name {
+        "SkeletalMesh" => &[
+            "Object",
+            "StreamableRenderAsset",
+            "SkinnedAsset",
+            "SkeletalMesh",
+        ],
+        "StaticMesh" => &["Object", "StreamableRenderAsset", "StaticMesh"],
+        _ => &[],
+    }
+}
+
 fn engine_struct_chain(class_name: &str) -> &'static [&'static str] {
     const FUNCTION: &[&str] = &["Object", "Field", "Struct", "Function"];
     const CLASS: &[&str] = &["Object", "Field", "Struct", "Class"];
@@ -2423,6 +2456,8 @@ mod tagged_package_tests {
         out.into_inner()
     }
 
+    /// Every way in to the property reader refuses an unversioned package without mappings,
+    /// structs recovered from other packages included, so nothing decodes one by guesswork.
     #[test]
     fn an_unversioned_package_without_mappings_says_so_plainly() {
         let (asset, exports) = tagged_package();
@@ -2430,16 +2465,26 @@ mod tagged_package_tests {
         let asset = reserialize(&asset, &exports, |header| {
             header.summary.package_flags |= EPackageFlags::UsesUnversionedProperties as u32;
         });
-
-        let err = parse_package(
-            &AssetBundle {
-                asset: &asset,
-                exports: &exports,
-            },
-            None,
-        )
-        .expect_err("unversioned without mappings cannot be read");
-        assert!(err.contains(".usmap"), "{err}");
+        let bundle = AssetBundle {
+            asset: &asset,
+            exports: &exports,
+        };
+        let synth = crate::unversioned_fixture::unversioned_mappings();
+        let options = ParseOptions::default();
+        let refusals = [
+            parse_package(&bundle, None).map(|_| ()),
+            parse_package_traced(&bundle, None).map(|_| ()),
+            parse_package_with(&bundle, None, Some(&synth)).map(|_| ()),
+            parse_package_opts(&bundle, None, Some(&synth), options).map(|_| ()),
+            parse_package_traced_with(&bundle, None, Some(&synth)).map(|_| ()),
+            parse_package_checked(&bundle, None, Some(&synth)).map(|_| ()),
+            parse_package_probed(&bundle, None, Some(&synth), &SchemaFixups::default()).map(|_| ()),
+            parse_exports_at(&bundle, None, Some(&synth), options, &[0]).map(|_| ()),
+        ];
+        for (at, refused) in refusals.into_iter().enumerate() {
+            let err = refused.expect_err("unversioned without mappings cannot be read");
+            assert!(err.contains(".usmap"), "entry point {at}: {err}");
+        }
     }
 
     /// The export table is the one thing a rewrite has to get right, and a doubled offset is

@@ -120,6 +120,166 @@ pub struct PackageReport {
     /// link saved against the wrong export leaves them.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub stray_edges: Vec<String>,
+    /// What the package keeps of a stock editor's layout, which this game's engine misreads, one
+    /// line a kind.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub stock_layout: Vec<String>,
+    /// The collision a static mesh brings that the game's copy of it does not have, which players
+    /// run into.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub collision: Option<String>,
+}
+
+/// What a static mesh collides with: its simple shapes, whether traces use its triangles as its
+/// simple collision, and how many bytes of cooked collision it carries.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Collision {
+    shapes: usize,
+    complex_as_simple: bool,
+    cooked: u64,
+}
+
+impl Collision {
+    /// The first `BodySetup` among `parsed`'s exports, which is the mesh's own.
+    pub(crate) fn of(parsed: &ParsedPackage) -> Option<Self> {
+        let body = parsed
+            .exports
+            .iter()
+            .find(|export| export.class_name == "BodySetup")?;
+        let field = |fields: &'_ [rivals_uasset::PropertyEntry], name: &str| {
+            fields
+                .iter()
+                .find(|entry| entry.name == name)
+                .map(|entry| entry.value.clone())
+        };
+        let shapes = match field(&body.properties, "AggGeom") {
+            Some(PropertyValue::Struct { fields, .. }) => fields
+                .iter()
+                .map(|entry| match &entry.value {
+                    PropertyValue::Array { items } => items.len(),
+                    _ => 0,
+                })
+                .sum(),
+            _ => 0,
+        };
+        let complex_as_simple = matches!(
+            field(&body.properties, "CollisionTraceFlag"),
+            Some(PropertyValue::Enum { name: Some(name), .. }) if name.ends_with("UseComplexAsSimple")
+        );
+        let cooked = match body.status {
+            rivals_uasset::ExportStatus::Payload { payload_bytes, .. } => payload_bytes,
+            _ => 0,
+        };
+        Some(Self {
+            shapes,
+            complex_as_simple,
+            cooked,
+        })
+    }
+}
+
+/// Why a mod's static mesh, with `ours`, collides where the game's copy, with `game`, does not.
+pub(crate) fn collision_change(game: Collision, ours: Collision) -> Option<String> {
+    let mut adds = Vec::new();
+    if ours.shapes > game.shapes {
+        adds.push(format!(
+            "{} simple collision shape(s) the game's copy has {}",
+            ours.shapes,
+            if game.shapes == 0 {
+                "none of".to_string()
+            } else {
+                format!("{} of", game.shapes)
+            }
+        ));
+    }
+    if ours.complex_as_simple && !game.complex_as_simple {
+        adds.push("collision against its triangles, which the game's copy does not use".into());
+    }
+    if adds.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "brings {} (cooked collision {} bytes, the game's {}), so players run into it; cook it again \
+         with Auto Generate Collision off and Collision Complexity set to Use Simple Collision As \
+         Complex",
+        adds.join(" and "),
+        ours.cooked,
+        game.cooked
+    ))
+}
+
+/// What a package keeps of a stock editor's layout, one line a kind, and what to do about it:
+/// convert a tagged cook, recook an unversioned one. `stamped` is a header carrying the engine
+/// versions its editor saved it with.
+fn stock_layout(
+    parsed: &rivals_uasset::ParsedPackage,
+    stamped: bool,
+    imports: &[String],
+) -> Vec<String> {
+    use rivals_uasset::StockGapKind;
+    let count = |want: fn(&StockGapKind) -> bool| {
+        parsed
+            .stock_gaps
+            .iter()
+            .filter(|gap| want(&gap.kind))
+            .count()
+    };
+    let mut lines = Vec::new();
+    if stamped {
+        lines.push(
+            "stamped with its editor's engine versions, which the game reads it under instead of \
+             its own"
+                .into(),
+        );
+    }
+    if !parsed.info.unversioned_properties
+        && parsed
+            .exports
+            .iter()
+            .any(|export| export.class_name == "StaticMesh")
+    {
+        lines.push("a static mesh with tagged properties, which the game crashes on".into());
+    }
+    let slots = count(|kind| matches!(kind, StockGapKind::MaterialTags { .. }));
+    if slots > 0 {
+        lines.push(format!(
+            "{slots} skeletal mesh material slot(s) have no gameplay tags"
+        ));
+    }
+    let sizes = count(|kind| matches!(kind, StockGapKind::ScreenSize { .. }));
+    if sizes > 0 {
+        lines.push(format!(
+            "{sizes} static mesh LOD screen size(s) are eight bytes short"
+        ));
+    }
+    let markers = count(|kind| matches!(kind, StockGapKind::StringMarker { .. }));
+    if markers > 0 {
+        lines.push(format!("{markers} string table entr(ies) have no marker"));
+    }
+    for gap in &parsed.stock_gaps {
+        if let StockGapKind::RenderData { found } = &gap.kind {
+            lines.push(match found.fix() {
+                Some(fix) => format!("{}; cook it again with {fix}", gap.kind.describe()),
+                None => gap.kind.describe(),
+            });
+        }
+    }
+    for import in imports.iter().filter(|path| {
+        rivals_uasset::CARRIER_PLUGINS.iter().any(|plugin| {
+            path.get(..plugin.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(plugin))
+        })
+    }) {
+        lines.push(format!("imports {import}, which the game does not have"));
+    }
+    if !lines.is_empty() && parsed.info.unversioned_properties {
+        lines.push(
+            "cooked with unversioned properties, so it has to be recooked with tagged ones \
+             before it can be converted"
+                .into(),
+        );
+    }
+    lines
 }
 
 /// Reads every package `utoc_path` ships. Unversioned packages need `mappings` for their scripts
@@ -152,6 +312,9 @@ pub fn mod_report(
     // Each combined table the mod ships, its parents and the rows it stores, checked once every
     // package is read.
     let mut composites: Vec<(String, Vec<String>, Vec<DataTableRow>)> = Vec::new();
+    // The static meshes that replace the game's, whose collision is held to the game's copy once
+    // every package is read, so its store is opened once.
+    let mut meshes: Vec<(retoc::FPackageId, String, Collision)> = Vec::new();
     for (id, path) in &packages {
         let chunk = FIoChunkId::from_package_id(*id, 0, EIoChunkType::ExportBundleData);
         let overrides_game = store
@@ -170,6 +333,8 @@ pub fn mod_report(
                     names_unknown: None,
                     unwaited: Vec::new(),
                     stray_edges: Vec::new(),
+                    stock_layout: Vec::new(),
+                    collision: None,
                 });
                 continue;
             }
@@ -198,6 +363,7 @@ pub fn mod_report(
         let mut names_unknown = None;
         let mut unwaited = Vec::new();
         let mut stray_edges = Vec::new();
+        let mut stock = Vec::new();
         let stem = Path::new(path)
             .file_stem()
             .and_then(|s| s.to_str())
@@ -217,6 +383,20 @@ pub fn mod_report(
             ParseOptions::default(),
         ) {
             Ok(parsed) => {
+                stock = stock_layout(
+                    &parsed,
+                    !header.summary.versioning_info.is_unversioned,
+                    &imports,
+                );
+                if overrides_game
+                    && parsed
+                        .exports
+                        .iter()
+                        .any(|export| export.class_name == "StaticMesh")
+                    && let Some(ours) = Collision::of(&parsed)
+                {
+                    meshes.push((*id, path.clone(), ours));
+                }
                 unused_imports = rivals_uasset::unused_imports(&parsed, &header)
                     .into_iter()
                     .filter(|import| import.blocked.is_none())
@@ -291,9 +471,37 @@ pub fn mod_report(
             names_unknown,
             unwaited,
             stray_edges,
+            stock_layout: stock,
+            collision: None,
         });
     }
     report.packages.sort_by(|a, b| a.path.cmp(&b.path));
+    if !meshes.is_empty() {
+        let paks = crate::paths::paks_dir(game_root);
+        let game = crate::pak::containers::open_base_game_paks(&paks, "")?;
+        let game_converter = PackageConverter::new(game.as_ref());
+        let game_layouts = LayoutReader::through(game.as_ref(), &game_converter);
+        let game_container = paks
+            .join("pakchunk0-Windows.utoc")
+            .to_string_lossy()
+            .into_owned();
+        let side = crate::override_check::Side {
+            converter: &game_converter,
+            layouts: &game_layouts,
+            container: &game_container,
+        };
+        for (id, path, ours) in meshes {
+            let Ok((_, game_copy)) =
+                crate::override_check::read_copy(&side, id, &path, game_root, mappings)
+            else {
+                continue;
+            };
+            let game = Collision::of(&game_copy).unwrap_or_default();
+            if let Some(package) = report.packages.iter_mut().find(|p| p.path == path) {
+                package.collision = collision_change(game, ours);
+            }
+        }
+    }
 
     // A parent is read where the game would find it: the mod's copy, or the game's.
     let read = |package: &str| -> Result<ParsedPackage, String> {
@@ -651,5 +859,42 @@ mod tests {
             "Widget Blueprint"
         );
         assert_eq!(friendly_kind("CompositeDataTable"), "CompositeDataTable");
+    }
+}
+
+/// Set `RIVALS_GAME_ROOT` and `RIVALS_USMAP` to run these against the game's own meshes.
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod game_data_tests {
+    use super::*;
+
+    fn collision_of(root: &str, mappings: &Mappings, filter: &str) -> Collision {
+        let read = crate::game_search::read_packages(root, mappings, false, &[filter]).unwrap();
+        assert_eq!(read.len(), 1, "{filter} names one package");
+        Collision::of(read[0].parsed.as_ref().unwrap()).expect("a body setup")
+    }
+
+    /// The Practice Range bush has no collision, so players walk through it; a mesh with a convex
+    /// shape put in its place is warned about, and the bush against itself is not.
+    #[test]
+    fn a_mesh_that_collides_where_the_game_s_copy_does_not_is_named() {
+        let (Ok(root), Ok(usmap)) = (
+            std::env::var("RIVALS_GAME_ROOT"),
+            std::env::var("RIVALS_USMAP"),
+        ) else {
+            return;
+        };
+        let mappings = crate::mappings::load(Path::new(&usmap)).unwrap();
+        let bush = collision_of(&root, &mappings, "Geometries/SM_CommonBush010A.");
+        let prop = collision_of(&root, &mappings, "Geometries/SM_CommonProps008A.");
+        assert_eq!(bush.shapes, 0);
+        assert_eq!(prop.shapes, 1);
+        let why = collision_change(bush, prop).expect("a warning");
+        assert!(
+            why.contains("1 simple collision shape(s) the game's copy has none of"),
+            "{why}"
+        );
+        assert_eq!(collision_change(bush, bush), None);
+        assert_eq!(collision_change(prop, bush), None);
     }
 }

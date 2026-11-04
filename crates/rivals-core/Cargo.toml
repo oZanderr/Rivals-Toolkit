@@ -40,3 +40,5 @@ rar = ["archives", "dep:unrar"]
 
 [dev-dependencies]
 rivals-uasset = { path = "../rivals-uasset", features = ["test-support"] }
+# Writes the small mappings files the cache's tests read.
+usmap.workspace = true

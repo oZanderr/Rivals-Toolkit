@@ -158,10 +158,16 @@ pub(crate) async fn install_mods(
     }
     let io = rivals_core::pak::iostore_out::IoStoreOptions {
         oodle_level: Some(mod_compression_level(&state).to_oodle()),
+        conform: crate::settings::conform_mods(&state),
         ..Default::default()
     };
     let game_root = state.lock().ok().and_then(|s| s.game_path.clone());
+    let usmap = crate::asset_view::configured_usmap(&state);
     tauri::async_runtime::spawn_blocking(move || {
+        let io = rivals_core::pak::iostore_out::IoStoreOptions {
+            mappings: crate::settings::load_mappings(usmap.as_deref()),
+            ..io
+        };
         mods::install_mods(&mods_folder, &source_paths, io, game_root.as_deref())
     })
     .await

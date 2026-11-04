@@ -136,6 +136,9 @@ rivals-cli mods list --all-ini --no-recursive         # any INI, top level of ~m
 rivals-cli logs list --crashes                        # game sessions that crashed, the newest first
 rivals-cli logs analyze latest-crash                  # the last crash, and the mods its errors name
 
+rivals-cli text list "Jeff the Land Shark"            # texts that mention him, as the game shows them
+rivals-cli text set 101_Replay_ST/TXT_Replay_Sign_New "[NEWEST] " --into MyText
+
 rivals-cli tweaks list                                # the tweak catalogue
 rivals-cli tweaks status --pak MyMod                  # which tweaks a pak has on
 rivals-cli tweaks apply  --pak MyMod --on fix_dark_maps --off cas_sharpening
@@ -188,7 +191,8 @@ it is whether it is switched on or off, and `mods replace` changes a switched-of
 
 Reading and editing packages needs a `.usmap` mappings file for the game's build, since Marvel
 Rivals ships unversioned properties. Point `--usmap` at the file or at a folder holding one, or set
-it once in the app's settings. A mod saved from the editor with tagged properties names what it
+it once in the app's settings. `--usmap` wins over the setting, and a file named either way that is
+not there or does not read is said on stderr, never swapped for another. A mod saved from the editor with tagged properties names what it
 stores, and every edit works on it as on the game's own packages. Its instanced structs and the
 reflected parts of native structs are tagged blocks too, read as such, and when a value does not
 read, the package is read again with its own classes and the Blueprint ones it imports, which name
@@ -348,6 +352,8 @@ rivals-cli asset rename-package /Game/Mods/MyThing/DA_Copy --to /Game/Mods/MyThi
 rivals-cli asset deps    /Game/Data/DA_Thing --export 3                                 # load order
 rivals-cli asset script  /Game/Blueprints/BP_Thing --export ExecuteUbergraph_BP_Thing   # disassembly
 rivals-cli asset script  /Game/Blueprints/BP_Thing --export 26 --as-text > fn.txt       # assembler text
+rivals-cli asset script  /Game/Blueprints/BP_Thing --export 26 --pseudo                 # pseudo-code
+rivals-cli asset script  /Game/Blueprints/BP_Thing --export 26 --dot > fn.dot           # control flow graph
 rivals-cli asset vm      /Game/VFX/NS_Thing                                             # its Niagara scripts
 rivals-cli asset vm      /Game/VFX/NS_Thing --export SpawnScript --constants            # VM disassembly
 rivals-cli asset edit-vm /Game/VFX/NS_Thing --export SpawnScript --at 0x00BD --operand 0 --value 0.5 --into MyMod
@@ -358,6 +364,7 @@ rivals-cli asset copy-export /Game/Maps/MyMap --source /Game/Maps/Other --source
 rivals-cli asset audit pakchunk0-Windows --filter Data/DataTable
 rivals-cli asset audit pakchunk0-Windows --skip-blueprint   # native classes only
 rivals-cli asset audit game --text-check                   # every script back byte for byte from its own text
+rivals-cli asset audit game --flow-check                   # every script as pseudo-code, each statement once
 ```
 
 `asset set` names a value two ways. `--export` and `--path` find it by the fields leading to it,
@@ -578,6 +585,31 @@ rivals-cli asset texture /Game/Marvel/UI/Textures/T_Logo --from game --out logo.
 rivals-cli asset texture /Game/Marvel/UI/Textures/T_Logo --in logo.png --into MyMod_9999999_P
 rivals-cli asset texture Marvel/Content/Marvel/Maps/KrakoaC/KrakoaC01/KrakoaC01_Art.umap --export Weightmap_120 --in w120.png --export Heightmap_0 --in height.png --into MyMod_9999999_P
 rivals-cli asset texture /Game/Marvel/Environment/Common/LightingRes/X20_Hdri/T_Lighthdr_002 --from game --out sky.exr
+```
+
+`asset mesh` shows a mesh's material slots: each slot's material, its gameplay tags (which the game
+uses to hide or swap parts of a skin) and the LODs that hide it by default. It also shows a static
+mesh's LOD screen sizes, and a skeletal mesh's bone count, or with `--bones` every bone and the one
+it hangs from. Each is an ordinary value for `asset set`: `Materials[2].MaterialInterface` points a
+skeletal mesh's slot at another material, `Materials[2].MaterialTags` takes tags with `--op insert`,
+and `ScreenSize[1].Default` sets when a static mesh switches LOD. A static mesh keeps its slots twice,
+among its properties and again after its render data where the engine reads them, so a material set
+on either copy is written to both.
+
+```bash
+rivals-cli asset mesh Marvel/Content/Marvel/Characters/1014/1014001/Meshes/SK_1014_1014001.uasset --bones
+rivals-cli asset set Marvel/Content/Marvel/Characters/1014/1014001/Meshes/SK_1014_1014001.uasset --export SK_1014_1014001 --path Materials[2].MaterialTags --op insert --value MaterialTag.Hidden --into MySkin_9999999_P
+```
+
+An ability timeline (`AnimTimeline`) keeps its notify tracks, sections and montage path twice too:
+the properties `AnimNotifyTracks`, `AnimSections` and `MontagePath`, and the copy its own
+serializer writes after them, shown as `CookedNotifyTracks`, `CookedSections` and
+`CookedMontagePath`, which also names each notify's class. A value set on either copy is written to
+both, a property copy holding its default included. Adding, dropping or moving a track, a notify or
+a section would change one copy only, so it is refused. `--op set-raw` writes one copy alone.
+
+```bash
+rivals-cli asset set Marvel/Content/Marvel/AbilitySystem/1014/101433/Timeline_101433_01.uasset --export Timeline_101433_01 --path "AnimNotifyTracks[2].Notifies[0].StartTime" --value 0.5 --into MyMod_9999999_P
 ```
 
 `asset ability` sums up an ability from its six-digit id: its row in the hero's ability table (name,
@@ -909,6 +941,49 @@ rivals-cli mods convert MyOldMod_9999999_P --format iostore
 rivals-cli mods convert --all --format iostore --no-obfuscate
 ```
 
+### Mods cooked in the Unreal editor
+
+The game's engine writes a few things differently from a stock UE 5.3 editor: each skeletal mesh
+material slot carries a gameplay tag container after its UV densities, each of a static mesh's
+eight LOD screen sizes is followed by a second per-platform value, and each string table entry by a
+marker string. A package a stock editor cooked lacks them, and the game misreads everything after
+the first one. A package cooked without `-unversioned` also stamps the editor's engine versions in
+its header, which the game then reads it under instead of its own, and crashes on a mesh; the
+editor's Cook Content leaves the stamp out, a cook commandlet run by hand does not. Packing, installing and converting bring such packages to the game's layout as they
+go in: the missing parts are written empty, the material tag plugin's tags
+(`MaterialTagAssetUserData`) are written into the slots they name, and its hidden-by-default slots
+(`LODHiddenMaterials`) become each LOD's `DefaultHiddenMaterials`. The plugins' classes, which the
+game does not have, are named as the engine's `AssetUserData`. A 5.3 stamp is taken out of the
+header, which leaves the package as an `-unversioned` cook writes it; a stamp from another engine
+version is refused. A static mesh, which the game crashes on with tagged properties, has every
+export's properties written unversioned against the game's mappings and is refused without them,
+and each LOD screen size gets the distance the game switches to that LOD at, which a stock cook
+does not carry. The game picks a static mesh's LOD by distance at every View Distance quality but
+Cine, whatever the screen sizes say, so LOD 0 gets none, LODs 1 to 3 the 15, 45 and 130 m its own
+meshes switch at (each further LOD three times the one before), and the slots past the last LOD the
+value its meshes give a LOD they reach only through a low View Distance's LOD bias. `asset mesh`
+lists them, and `asset set --path "ScreenSize[1].Extra.Default"` changes one, in centimetres. A static mesh whose render data holds Nanite data, which the game does not
+draw, or the editor's distance field, where the game reads one in its own format, is refused and
+named with the setting to turn off before cooking again (Nanite on the mesh, Generate Mesh Distance
+Fields in the project); one whose render data the conversion cannot read through says it was not
+checked. Each report lists what it converted.
+
+Only a package cooked with tagged properties (`CanUseUnversionedPropertySerialization=False` under
+`[Core.System]`) is converted, since those are read by name and the fields the game inserted into
+its structs are no trouble to them. One cooked with unversioned properties would need every header
+renumbered against a stock schema, so it is left as it was and named, to be cooked again with
+tagged properties. `--no-conform` packs what a stock editor cooked
+as it is. `mods conform` converts mods already installed, going out to loose files and back, and
+leaves a mod with nothing to convert as it was; `mods check` names every package still in a stock
+editor's layout.
+
+```bash
+rivals-cli mods conform MySkin_9999999_P --dry-run
+rivals-cli mods conform MySkin_9999999_P OtherSkin_9999999_P
+rivals-cli mods install D:\Downloads\Skin.zip --no-conform
+rivals-cli mods pack    D:\Mods\MySkin --to MySkin_9999999_P --no-conform
+```
+
 ### Managing the mods folder
 
 `mods list` lists every mod in `~mods` with its rank in the load order (1 is the one whose copy of a
@@ -1006,6 +1081,40 @@ rivals-cli logs decode latest --verbosity error,warning
 rivals-cli logs decode latest --filter ~mods --out D:\mounts.txt
 rivals-cli logs decode latest-crash --redact --out D:\crash.txt --overwrite
 rivals-cli logs key
+```
+
+### Translations
+
+The game reads one translation file a language, `Marvel/Content/Localization/Game/<language>/Game.locres`,
+so a mod that changes what a text says ships its own copy of that whole file. The `text` commands
+read and write those copies. A text is named `NAMESPACE/KEY`, as `text list` prints it, or by the
+string table holding it and its key, `/Game/Marvel/Data/StringTable/101_Replay_ST.101_Replay_ST:KEY`.
+The language is the global `--culture`, which defaults to the app's setting, then English.
+
+`text list FILTER` lists the texts whose name or wording holds FILTER, and `text get TEXT` prints
+one. Both read what the game shows with the switched-on mods, or with `--from game` the game's own
+translations, or with `--from` a mod that mod's copy; `text list --from MOD` lists only the texts
+that mod words its own way.
+
+`text set TEXT WORDING` gives a text a wording in a mod, `--into` it as an asset save goes, and
+`text unset TEXT` gives it back the game's. A mod it makes is a container holding nothing but its
+header, with the translation files in the pak beside it, since the game logs out at login over a
+plain pak in `~mods`. Each writes the game's current translation file with
+every wording the mod gives over it, and keeps the wordings themselves in the toolkit's settings
+folder, so that after a patch changes the game's translations `text rebuild MOD`, or `--all` for
+every mod the toolkit keeps wordings for, writes the mod's copy again over the new one. A
+translation file a mod already ships that the toolkit did not write has its wordings taken in;
+one holding texts the game no longer has is written over only with `--overwrite`, which leaves
+them out. `mods check` warns when a mod's copy has fallen behind the game's.
+
+```bash
+rivals-cli text list "Jeff the Land Shark"
+rivals-cli text get 101_Replay_ST/TXT_Replay_Sign_New --culture ja --from game
+rivals-cli text get /Game/Marvel/Data/StringTable/101_Replay_ST.101_Replay_ST:TXT_Replay_Sign_New
+rivals-cli text set 101_Replay_ST/TXT_Replay_Sign_New "[NEWEST] " --into MyText --dry-run
+rivals-cli text unset 101_Replay_ST/TXT_Replay_Sign_New --into MyText
+rivals-cli text list --from MyText_9999999_P
+rivals-cli text rebuild --all --dry-run
 ```
 
 ### Editing a package as JSON
@@ -1133,6 +1242,15 @@ numbers, strings and names take forms that say which instruction holds them (`5`
 `1.5f`, `"one byte a character"`, `u"wide"`, `'Name'`); and `#` marks anything written exactly as
 the bytes hold it. A text is assembled only for a function whose own text assembles back to its
 exact bytes, which `asset audit --text-check` counts across the game.
+
+`asset script --pseudo` reads a function rather than editing it: the same statements in the same
+order, with a condition and the code it skips nested as `if` and `else`, a loop as `while`, an
+event graph's sequences as the `push` and `pop` that run them, and a label where an event enters or
+a jump lands. Each statement prints once, and a jump that does not nest stays a `goto`; `asset
+audit --flow-check` holds every script in the game to that and counts the gotos. `--flow` lists the
+blocks the jumps divide the function into and the edges between them, following its flow stack so
+a pop leads where its push said, and `--dot` writes them for Graphviz. In the app, the script pane's
+Pseudo-code switch shows the same, and a line opens its statement in the listing.
 
 A text can give its function locals of its own, one `local Name: Type` line each ahead of the first
 statement; the function gains a field for each after the ones it has, so its parameters stay first.

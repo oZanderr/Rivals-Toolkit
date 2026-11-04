@@ -105,6 +105,7 @@ pub(crate) fn write_pak_bytes(
     writer::write_pak_bytes(output_pak, files, None, profile::PackCompression::default())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn repack_iostore(
     input_dir: &str,
     output_utoc: &str,
@@ -112,8 +113,10 @@ pub(crate) fn repack_iostore(
     obfuscate: bool,
     compression: profile::PackCompression,
     game_root: Option<&str>,
+    conform: bool,
+    mappings: Option<std::sync::Arc<rivals_uasset::Mappings>>,
     app: tauri::AppHandle,
-) -> Result<(), String> {
+) -> Result<rivals_core::pak::pack::PackReport, String> {
     iostore::repack_iostore(
         input_dir,
         output_utoc,
@@ -122,6 +125,8 @@ pub(crate) fn repack_iostore(
         compression,
         &Default::default(),
         game_root,
+        conform,
+        mappings,
         app,
     )
 }
@@ -135,6 +140,8 @@ pub(crate) fn repack_mod_in_place(
     recompress: bool,
     oodle_level: Option<retoc::OodleCompressionLevel>,
     compression: profile::PackCompression,
+    conform: bool,
+    mappings: Option<std::sync::Arc<rivals_uasset::Mappings>>,
     app: tauri::AppHandle,
 ) -> Result<InPlaceReport, String> {
     in_place::repack_mod_in_place(
@@ -145,8 +152,21 @@ pub(crate) fn repack_mod_in_place(
         recompress,
         oodle_level,
         compression,
+        conform,
+        mappings,
         app,
     )
+}
+
+pub(crate) fn conform_mod_in_place(
+    game_root: &str,
+    mod_pak: &str,
+    oodle_level: Option<retoc::OodleCompressionLevel>,
+    compression: profile::PackCompression,
+    mappings: Option<std::sync::Arc<rivals_uasset::Mappings>>,
+    app: tauri::AppHandle,
+) -> Result<InPlaceReport, String> {
+    in_place::conform_mod_in_place(game_root, mod_pak, oodle_level, compression, mappings, app)
 }
 
 /// Drop cached listings for these containers. The cache key is `(path, size)`, so a repack that

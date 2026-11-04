@@ -7,6 +7,7 @@
 //!
 //! Because the tags carry their own type information, a tagged package needs no mappings file.
 
+use retoc::legacy_asset::FPackageNameMap;
 use usmap::PropertyInner;
 
 use crate::props::{
@@ -20,18 +21,18 @@ use crate::value::{PropertyEntry, PropertyValue};
 const MAX_PROPERTIES: usize = 65536;
 
 /// What a tag says about the value that follows.
-struct Tag {
-    name: String,
-    type_name: String,
-    size: i32,
+pub(crate) struct Tag {
+    pub(crate) name: String,
+    pub(crate) type_name: String,
+    pub(crate) size: i32,
     /// Where the size sits, so an edit that changes the value's width can move it.
     size_at: usize,
-    array_index: i32,
+    pub(crate) array_index: i32,
     /// Set for structs, and for the element type of a container.
     inner_name: Option<String>,
     value_type_name: Option<String>,
     /// A bool stores its value in the tag itself and occupies no value bytes.
-    bool_value: bool,
+    pub(crate) bool_value: bool,
     /// Where that byte sits, which is the only place a bool can be rewritten.
     bool_at: Option<usize>,
 }
@@ -61,7 +62,7 @@ pub(crate) fn read_tagged_block(
             list_absent(ctx, diagnostics, owner, &held, name_at, entries);
             return Ok(());
         }
-        let tag = read_tag(name, cursor, ctx)?;
+        let tag = read_tag(name, cursor, ctx.names())?;
         held.push((tag.name.clone(), tag.array_index));
         let start = cursor.position();
         let end = start
@@ -218,8 +219,12 @@ fn undecoded(tag: &Tag, reason: &str, base: u64, payload: &[u8], start: usize) -
     }
 }
 
-fn read_tag(name: String, cursor: &mut Cursor<'_>, ctx: &Ctx<'_>) -> Result<Tag, String> {
-    let type_name = cursor.read_name(ctx.names())?;
+pub(crate) fn read_tag(
+    name: String,
+    cursor: &mut Cursor<'_>,
+    names: &FPackageNameMap,
+) -> Result<Tag, String> {
+    let type_name = cursor.read_name(names)?;
     let size_at = cursor.position();
     let size = cursor.read_i32()?;
     let array_index = cursor.read_i32()?;
@@ -230,18 +235,18 @@ fn read_tag(name: String, cursor: &mut Cursor<'_>, ctx: &Ctx<'_>) -> Result<Tag,
     let mut bool_at = None;
     match type_name.as_str() {
         "StructProperty" => {
-            inner_name = Some(cursor.read_name(ctx.names())?);
+            inner_name = Some(cursor.read_name(names)?);
             cursor.skip(16)?;
         }
         "BoolProperty" => {
             bool_at = Some(cursor.position());
             bool_value = cursor.read_u8()? != 0;
         }
-        "ByteProperty" | "EnumProperty" => inner_name = Some(cursor.read_name(ctx.names())?),
-        "ArrayProperty" | "SetProperty" => inner_name = Some(cursor.read_name(ctx.names())?),
+        "ByteProperty" | "EnumProperty" => inner_name = Some(cursor.read_name(names)?),
+        "ArrayProperty" | "SetProperty" => inner_name = Some(cursor.read_name(names)?),
         "MapProperty" => {
-            inner_name = Some(cursor.read_name(ctx.names())?);
-            value_type_name = Some(cursor.read_name(ctx.names())?);
+            inner_name = Some(cursor.read_name(names)?);
+            value_type_name = Some(cursor.read_name(names)?);
         }
         _ => {}
     }
@@ -415,7 +420,7 @@ fn read_tagged_array(
 
     if inner_type == "StructProperty" {
         let element_name = cursor.read_name(ctx.names())?;
-        let element_tag = read_tag(element_name, cursor, ctx)?;
+        let element_tag = read_tag(element_name, cursor, ctx.names())?;
         // The element tag's size covers every element, so it follows edits inside them too.
         let base = cursor.file_offset() - cursor.position() as u64;
         let elements_start = base + cursor.position() as u64;

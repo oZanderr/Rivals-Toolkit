@@ -11,6 +11,7 @@ import {
   Archive,
   Check,
   FolderOpen,
+  Languages,
   Layers,
   PackageOpen,
   Pencil,
@@ -82,6 +83,15 @@ interface SyncResult {
   fetched_at: number;
   bytes: number;
   source_url: string;
+}
+
+/** A mod's name without its extension or `.disabled`, in lower case, as the toolkit keys what it
+ *  keeps for a mod. */
+function modStem(fullName: string): string {
+  return fullName
+    .replace(/\.disabled$/i, "")
+    .replace(/\.(pak|utoc|ucas)$/i, "")
+    .toLowerCase();
 }
 
 interface ModEntry {
@@ -172,9 +182,33 @@ interface InstallOutcome {
     replaced_disabled: boolean;
     replaced_enabled: boolean;
     /** Packed into a container as it went in: a folder of loose files, or a plain pak's packages. */
-    packed?: { from: "folder" | "plain_pak"; packages: number };
+    packed?: {
+      from: "folder" | "plain_pak";
+      packages: number;
+      /** Packages an editor cooked, given the layout the game reads. */
+      conformed?: ConformedPackage[];
+      /** Packages an editor cooked that could not be, packed as they were. */
+      unconformed?: UnconformedPackage[];
+    };
   } | null;
   error: string | null;
+}
+
+interface ConformedPackage {
+  package: string;
+  changes: string[];
+}
+
+interface UnconformedPackage {
+  package: string;
+  reason: string;
+}
+
+/** What converting an installed mod to the game's layout did. */
+interface ConformReport {
+  conformed?: ConformedPackage[];
+  unconformed?: UnconformedPackage[];
+  written: boolean;
 }
 
 export function Mods({
@@ -192,6 +226,8 @@ export function Mods({
   } | null>(null);
   const showHeroIcons = useShowHeroIcons();
   const [busyMods, setBusyMods] = useState<Set<string>>(new Set());
+  /** The mods the toolkit keeps translations for, by their names in lower case. */
+  const [textEdited, setTextEdited] = useState<Set<string>>(new Set());
   const [isExporting, setIsExporting] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -247,6 +283,10 @@ export function Mods({
       return invoke<ModsStatus>("get_mods_status", { gameRoot: gamePath })
         .then(async (s) => {
           setModsStatus(s);
+          invoke<string[]>("text_edited_mods").then(
+            (stems) => setTextEdited(new Set(stems)),
+            () => setTextEdited(new Set())
+          );
           if (!silent) showNotice("Mods refreshed", "ok", 4000);
           else if (s.conflicts_resolved > 0)
             showNotice(
@@ -379,9 +419,11 @@ export function Mods({
             });
             let installed = 0;
             let packed = 0;
+            let conformed = 0;
             let replacedDisabled = 0;
             let replacedEnabled = 0;
             const errors: string[] = [];
+            const unconformed: string[] = [];
             for (const { at, installed: result, error } of outcomes) {
               if (!result) {
                 const name = at.split(/[\\/]/).pop() ?? at;
@@ -391,6 +433,10 @@ export function Mods({
               }
               installed++;
               if (result.packed) packed++;
+              conformed += result.packed?.conformed?.length ?? 0;
+              for (const left of result.packed?.unconformed ?? []) {
+                unconformed.push(`${left.package}: ${left.reason}`);
+              }
               if (result.replaced_disabled) replacedDisabled++;
               if (result.replaced_enabled) replacedEnabled++;
             }
@@ -401,6 +447,8 @@ export function Mods({
             const n = (c: number, s: string) => `${c} ${s}${c !== 1 ? "s" : ""}`;
             const parts: string[] = [];
             if (packed > 0) parts.push(`packed ${n(packed, "mod")} into containers`);
+            if (conformed > 0)
+              parts.push(`gave ${n(conformed, "package")} the layout the game reads`);
             if (replacedEnabled > 0) parts.push(`updated ${n(replacedEnabled, "existing mod")}`);
             if (replacedDisabled > 0)
               parts.push(`replaced ${n(replacedDisabled, "disabled version")}`);
@@ -410,6 +458,9 @@ export function Mods({
               const more =
                 errors.length > 1 ? ` (and ${errors.length - 1} more not installed)` : "";
               showNotice(`${installed > 0 ? `${done}; ` : ""}${errors[0]}${more}`, "err");
+            } else if (unconformed.length > 0) {
+              const more = unconformed.length > 1 ? ` (and ${unconformed.length - 1} more)` : "";
+              showNotice(`${done}; left as the editor cooked it: ${unconformed[0]}${more}`, "err");
             } else showNotice(done, "ok");
           } catch (e: unknown) {
             showNotice(String(e), "err");
@@ -675,6 +726,79 @@ export function Mods({
       setRenamingMod(null);
       await refresh(true);
       emitChange();
+    } catch (e: unknown) {
+      showNotice(String(e), "err");
+    } finally {
+      setBusyMods((prev) => {
+        const next = new Set(prev);
+        next.delete(entry.full_name);
+        return next;
+      });
+    }
+  }
+
+  /** Gives an installed mod an editor cooked the layout the game reads, where it is. */
+  async function conformMod(entry: ModEntry) {
+    if (!modsStatus || !gamePath) return;
+    const sep = modsStatus.mods_folder_path.includes("\\") ? "\\" : "/";
+    const modPak = `${modsStatus.mods_folder_path}${sep}${entry.full_name}`;
+    setBusyMods((prev) => new Set(prev).add(entry.full_name));
+    showNotice(`Converting ${entry.display_name}…`, "info", 600_000);
+    try {
+      const report = await invoke<ConformReport>("conform_mod", {
+        gameRoot: gamePath,
+        modPak,
+        compression: "oodle",
+      });
+      const done = report.conformed?.length ?? 0;
+      const left = report.unconformed ?? [];
+      if (done === 0 && left.length === 0) {
+        showNotice(`${entry.display_name} already matches the layout the game reads`, "ok");
+      } else if (left.length > 0) {
+        showNotice(
+          `${entry.display_name}: left as the editor cooked it: ${left[0].package}: ${left[0].reason}`,
+          "err"
+        );
+      } else {
+        showNotice(
+          `${entry.display_name}: gave ${done} package${done !== 1 ? "s" : ""} the layout the game reads`,
+          "ok"
+        );
+      }
+      if (report.written) {
+        await refreshRef.current(true);
+        emitChange();
+      }
+    } catch (e: unknown) {
+      showNotice(String(e), "err");
+    } finally {
+      setBusyMods((prev) => {
+        const next = new Set(prev);
+        next.delete(entry.full_name);
+        return next;
+      });
+    }
+  }
+
+  /** Writes a mod's translations again over the game's current ones, as a patch that changed them
+   *  needs. */
+  async function rebuildText(entry: ModEntry) {
+    if (!modsStatus || !gamePath) return;
+    const sep = modsStatus.mods_folder_path.includes("\\") ? "\\" : "/";
+    const modPak = `${modsStatus.mods_folder_path}${sep}${entry.full_name}`;
+    setBusyMods((prev) => new Set(prev).add(entry.full_name));
+    try {
+      const report = await invoke<{ files: { culture: string; removed: boolean }[] }>(
+        "rebuild_mod_text",
+        { gameRoot: gamePath, modPak }
+      );
+      const cultures = report.files.filter((file) => !file.removed).map((file) => file.culture);
+      showNotice(
+        cultures.length > 0
+          ? `${entry.display_name}: wrote its ${cultures.join(", ")} translations over the game's current ones`
+          : `${entry.display_name} words no text its own way any more, so its translations were taken out`,
+        "ok"
+      );
     } catch (e: unknown) {
       showNotice(String(e), "err");
     } finally {
@@ -1707,6 +1831,24 @@ export function Mods({
                             <RefreshCw />
                             Rescan heroes
                           </ContextMenuItem>
+                          {entry.kind === "IoStore" && (
+                            <ContextMenuItem
+                              disabled={busy || bulkBusy || gameRunning || !entry.enabled}
+                              onSelect={() => conformMod(entry)}
+                            >
+                              <Layers />
+                              Convert editor-made assets
+                            </ContextMenuItem>
+                          )}
+                          {textEdited.has(modStem(entry.full_name)) && (
+                            <ContextMenuItem
+                              disabled={busy || bulkBusy || gameRunning}
+                              onSelect={() => rebuildText(entry)}
+                            >
+                              <Languages />
+                              Rebuild translations
+                            </ContextMenuItem>
+                          )}
                         </>
                       )}
                       <ContextMenuSeparator />

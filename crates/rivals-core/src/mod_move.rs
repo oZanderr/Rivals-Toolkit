@@ -205,7 +205,7 @@ pub fn move_in_mod(
             mappings,
             &SaveOptions {
                 keep_referencers: options.keep_referencers,
-                iostore: options.iostore,
+                iostore: options.iostore.clone(),
                 ..Default::default()
             },
         )
@@ -257,7 +257,7 @@ pub fn move_in_mod(
                 &request,
                 mappings,
                 &SaveOptions {
-                    iostore: options.iostore,
+                    iostore: options.iostore.clone(),
                     ..Default::default()
                 },
                 None,

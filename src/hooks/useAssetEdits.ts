@@ -15,8 +15,9 @@ import { emitModsChanged } from "@/lib/modsEvents";
 import { textLiteral } from "@/lib/textLiteral";
 
 /**
- * A queued change. Sending a value back to its default is not the same as emptying it, and a
- * container is changed by adding or dropping an element rather than by retyping the whole thing.
+ * A queued change. Sending a value back to its default is not the same as emptying it. A container
+ * is changed by adding or dropping an element, or given its elements whole by `set_items`, which
+ * can add several in one save.
  * The row drafts belong to a target naming a table row: an add or a copy is keyed by the new
  * row's name, a removal or a rename by the row it acts on.
  */
@@ -28,6 +29,8 @@ export type Draft =
   | { op: "set_element"; index: number; text: string }
   | { op: "set_key"; index: number; text: string }
   | { op: "reorder"; order: number[] }
+  /** `held` is what the container read when the draft was made; `items` is never shorter. */
+  | { op: "set_items"; items: string[]; held: string[] }
   | { op: "set_raw"; hex: string }
   | { op: "store" }
   | { op: "unset" }
@@ -302,6 +305,7 @@ export function isStructural(draft: Draft): boolean {
     draft.op === "insert" ||
     draft.op === "remove" ||
     draft.op === "reorder" ||
+    draft.op === "set_items" ||
     draft.op === "set_raw" ||
     draft.op === "row_remove"
   );
@@ -384,6 +388,35 @@ function toValueEdit({ target, draft }: DraftRecord): ValueEdit | null {
     default:
       return null;
   }
+}
+
+/** What giving a container its elements whole comes to, as the sweep writes it: the elements it
+ *  holds that change, then an add for each new one, filled in through its index once the adds land. */
+function itemEdits({ target, draft }: DraftRecord): { values: ValueEdit[]; fieldSets: FieldSet[] } {
+  if (draft.op !== "set_items") return { values: [], fieldSets: [] };
+  const at: EditTargetFields = {
+    offset: target.offset,
+    name: target.name,
+    element: target.element,
+    kind: target.kind,
+  };
+  const values = draft.items.flatMap((text, index): ValueEdit[] =>
+    index < draft.held.length && text !== draft.held[index]
+      ? [{ ...at, op: "set_element", index, text }]
+      : []
+  );
+  const fieldSets: FieldSet[] = [];
+  for (let index = draft.held.length; index < draft.items.length; index++) {
+    values.push({ ...at, op: "insert", index: draft.held.length });
+    fieldSets.push({
+      offset: target.offset,
+      name: target.name,
+      element: target.element,
+      path: [`[${index}]`],
+      text: draft.items[index],
+    });
+  }
+  return { values, fieldSets };
 }
 
 /** One DataTable row change. `name` is the row the operation is about, except for a rename, where
@@ -592,6 +625,12 @@ function expectOf(records: DraftRecord[], exportPath: string | undefined, export
     // A path into an element an add brings starts at a stored container, not an unset struct.
     if (target.path) {
       if (!target.path[0]?.startsWith("[")) values[String(target.offset)] = NOT_STORED;
+      continue;
+    }
+    if (draft.op === "set_items") {
+      draft.held.forEach((was, index) => {
+        if (draft.items[index] !== was) values[`${target.offset}[${index}]`] = was;
+      });
       continue;
     }
     if (target.was === undefined) continue;
@@ -1115,7 +1154,9 @@ export function useAssetEdits({
           !record.target.path &&
           !isKeyDraft(record.draft)
       );
-      const fieldSets = records.flatMap((record) => toFieldSet(record) ?? []);
+      const fieldSets = records.flatMap(
+        (record) => toFieldSet(record) ?? itemEdits(record).fieldSets
+      );
       const rows = records.flatMap((record) => toRowEdit(record) ?? []);
       const strings = records.flatMap((record) => toStringEdit(record) ?? []);
       const keys = records.flatMap((record) => toKeyEdit(record) ?? []);
@@ -1130,7 +1171,7 @@ export function useAssetEdits({
       setSaving(true);
       try {
         const list: EditList = {
-          values: cells.flatMap((record) => toValueEdit(record) ?? []),
+          values: cells.flatMap((record) => toValueEdit(record) ?? itemEdits(record).values),
           imports: [
             ...imports.map(toImportEdit),
             ...dropped.map((at): ImportEdit => ({ op: "remove", import: at })),

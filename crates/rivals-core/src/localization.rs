@@ -94,12 +94,33 @@ impl Localizer {
     }
 
     /// One language's translations from every `.locres` the base game ships for it, the game's own
-    /// last so its entries win. Cached per game install and language.
+    /// last so its entries win, then the switched-on mods' copies, the one that loads first last.
+    /// Cached per game install and language for as long as no mod's pak changes.
     pub fn for_culture(game_root: &str, culture: &str) -> Result<Arc<Localizer>, String> {
-        static LOADED: OnceLock<Mutex<HashMap<String, Arc<Localizer>>>> = OnceLock::new();
-        let cache_key = format!("{game_root}\u{1}{culture}");
+        type Loaded = HashMap<String, (String, Arc<Localizer>)>;
+        static LOADED: OnceLock<Mutex<Loaded>> = OnceLock::new();
+        let mods = mod_paks(game_root);
+        let stamp: Vec<String> = mods
+            .iter()
+            .map(|pak| {
+                let meta = std::fs::metadata(pak).ok();
+                let modified = meta
+                    .as_ref()
+                    .and_then(|meta| meta.modified().ok())
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map_or(0, |since| since.as_nanos());
+                format!(
+                    "{}:{}:{modified}",
+                    pak.display(),
+                    meta.map_or(0, |meta| meta.len())
+                )
+            })
+            .collect();
+        let (cache_key, stamp) = (format!("{game_root}\u{1}{culture}"), stamp.join("\u{2}"));
         let loaded = LOADED.get_or_init(|| Mutex::new(HashMap::new()));
-        if let Some(found) = loaded.lock().map_err(|e| e.to_string())?.get(&cache_key) {
+        if let Some((held, found)) = loaded.lock().map_err(|e| e.to_string())?.get(&cache_key)
+            && *held == stamp
+        {
             return Ok(found.clone());
         }
         let wanted = format!("/{}/", culture.to_ascii_lowercase());
@@ -129,13 +150,45 @@ impl Localizer {
                     .map_err(|e| format!("{path}: {e}"))?;
             }
         }
+        // A mod's pak that cannot be read is no reason to show the game's text wrongly.
+        for pak in &mods {
+            let Ok(entries) = crate::pak::plain::list_files(pak) else {
+                continue;
+            };
+            for entry in entries
+                .iter()
+                .filter(|entry| entry.to_ascii_lowercase().contains(&wanted))
+                .filter(|entry| entry.to_ascii_lowercase().ends_with(".locres"))
+            {
+                if let Ok(Some(bytes)) = crate::pak::plain::read_one(pak, entry) {
+                    let _ = localizer.add_locres(&bytes);
+                }
+            }
+        }
         let localizer = Arc::new(localizer);
         loaded
             .lock()
             .map_err(|e| e.to_string())?
-            .insert(cache_key, localizer.clone());
+            .insert(cache_key, (stamp, localizer.clone()));
         Ok(localizer)
     }
+}
+
+/// The switched-on mods' paks, the one whose files load first last.
+fn mod_paks(game_root: &str) -> Vec<std::path::PathBuf> {
+    let mods = crate::paths::mods_dir(game_root);
+    let mut paks: Vec<std::path::PathBuf> = crate::mods::walk_mod_files(&mods, true)
+        .into_iter()
+        .filter(|rel| rel.extension().is_some_and(|ext| ext == "pak"))
+        .map(|rel| mods.join(rel))
+        .collect();
+    let stem = |pak: &std::path::PathBuf| {
+        pak.file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
+    paks.sort_by(|a, b| crate::mods::winner_order(&stem(b), &stem(a)));
+    paks
 }
 
 /// The languages the base game ships translations for.

@@ -365,6 +365,325 @@ describe("AssetInspector text edits", () => {
   });
 });
 
+/** One string table, which opens straight into its entries. */
+function tablePackage() {
+  return {
+    ...labelPackage(),
+    exports: [
+      {
+        ...exp(0, "Menu_ST", "StringTable"),
+        string_table: {
+          namespace: "Menu_ST",
+          entries: [
+            { key: "Play", source: "Play", tag: "", metadata: [] },
+            { key: "Quit", source: "Quit", tag: "", metadata: [] },
+          ],
+        },
+      },
+    ],
+  };
+}
+
+const TEXT_REPORT = {
+  pak: "C:\\Game\\MarvelGame\\Marvel\\Content\\Paks\\~mods\\TestMod_9999999_P.pak",
+  files: [
+    {
+      culture: "en",
+      path: "Marvel/Content/Localization/Game/en/Game.locres",
+      edits: 1,
+      removed: false,
+      adopted: 0,
+      dropped: 0,
+    },
+  ],
+  written: true,
+};
+
+describe("AssetInspector translations", () => {
+  it("gives a string table text a wording of its own in the mod, leaving the package alone", async () => {
+    mock = tauri(labelPackage())
+      .on("text_translation", () => ({
+        culture: "en",
+        namespace: "Menu_ST",
+        key: "Play",
+        game: "Play now",
+        held: null,
+      }))
+      .on("save_text_translation", () => TEXT_REPORT);
+    installTauri(mock);
+    mount();
+    const user = userEvent.setup();
+    const menu = await menuOf(user, "Play now");
+    await user.click(within(menu).getByRole("menuitem", { name: /Edit translation \(en\)/ }));
+    const wording = await screen.findByDisplayValue("Play now");
+    expect(mock.callsTo("text_translation")[0]).toMatchObject({
+      modName: "TestMod",
+      text: `${MENU_TABLE}:Play`,
+    });
+    await user.clear(wording);
+    await user.type(wording, "Go!");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(mock.callsTo("save_text_translation")[0]).toMatchObject({
+        text: `${MENU_TABLE}:Play`,
+        wording: "Go!",
+        overwrite: false,
+      })
+    );
+    expect(await screen.findByText(/its own en wording in TestMod_9999999_P\.pak/)).toBeTruthy();
+    expect(mock.callsTo("save_asset_edits")).toHaveLength(0);
+  });
+
+  it("writes over a translation file holding texts the game dropped only when asked again", async () => {
+    let calls = 0;
+    mock = tauri(labelPackage())
+      .on("text_translation", () => ({
+        culture: "en",
+        namespace: "Menu_ST",
+        key: "Play",
+        game: "Play now",
+        held: "Old",
+      }))
+      .on("save_text_translation", () => {
+        calls += 1;
+        if (calls === 1) {
+          throw new Error(
+            "TestMod_9999999_P ships it with 2 text(s) the game's en translations no longer have, which writing it again leaves out; pass --overwrite to write it anyway"
+          );
+        }
+        return TEXT_REPORT;
+      });
+    installTauri(mock);
+    mount();
+    const user = userEvent.setup();
+    const menu = await menuOf(user, "Play now");
+    await user.click(within(menu).getByRole("menuitem", { name: /Edit translation/ }));
+    const wording = await screen.findByDisplayValue("Old");
+    await user.type(wording, "er");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await user.click(await screen.findByRole("button", { name: "Write anyway" }));
+    await waitFor(() =>
+      expect(mock.callsTo("save_text_translation").map((args) => args.overwrite)).toEqual([
+        false,
+        true,
+      ])
+    );
+  });
+
+  it("shows each string table entry's translation and opens the dialog from it", async () => {
+    // jsdom lays nothing out, and the entries are virtualized: give them a viewport to fill.
+    vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(600);
+    vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockReturnValue(800);
+    mock = tauri(tablePackage())
+      .on("table_translations", () => ["Jouer", null])
+      .on("text_translation", () => ({
+        culture: "en",
+        namespace: "Menu_ST",
+        key: "Play",
+        game: "Jouer",
+        held: null,
+      }));
+    installTauri(mock);
+    mount();
+    const user = userEvent.setup();
+    await user.click(await screen.findByText("Jouer"));
+    expect(screen.getByText("shows the source")).toBeTruthy();
+    expect(mock.callsTo("table_translations")[0]).toMatchObject({
+      namespace: "Menu_ST",
+      sources: [
+        ["Play", "Play"],
+        ["Quit", "Quit"],
+      ],
+    });
+    await screen.findByDisplayValue("Jouer");
+    expect(mock.callsTo("text_translation")[0]).toMatchObject({ text: "Menu_ST/Play" });
+    vi.restoreAllMocks();
+  });
+});
+
+/** A skeletal mesh with two material slots, two LODs and three bones. The first LOD lists a hidden
+ *  flag for each slot, the second none. */
+function meshPackage(hiddenInLod0 = [false, false]) {
+  const slot = (at: number, name: string, tags: string[]) => ({
+    kind: "struct",
+    name: "SkeletalMaterial",
+    fields: [
+      {
+        name: "MaterialInterface",
+        span: [at, at + 4],
+        value: object(-(at / 100), `/Game/Mesh/MI_${name}.MI_${name}`),
+      },
+      { name: "MaterialSlotName", span: [at + 4, at + 12], value: { kind: "name", value: name } },
+      {
+        name: "MaterialTags",
+        span: [at + 40, at + 44 + 8 * tags.length],
+        value: { kind: "array", items: tags.map((tag) => ({ kind: "name", value: tag })) },
+      },
+    ],
+  });
+  const lod = (at: number, flags: boolean[]) => ({
+    kind: "struct",
+    name: "SkeletalMeshLODInfo",
+    fields: [
+      {
+        name: "DefaultHiddenMaterials",
+        span: [at, at + 4 + flags.length],
+        value: { kind: "array", items: flags.map((value) => ({ kind: "bool", value })) },
+      },
+    ],
+  });
+  const bone = (name: string, parent: number) => ({
+    kind: "struct",
+    name: "MeshBoneInfo",
+    fields: [
+      { name: "Name", value: { kind: "name", value: name } },
+      { name: "ParentIndex", value: { kind: "int", value: parent } },
+    ],
+  });
+  return {
+    ...labelPackage(),
+    exports: [
+      exp(0, "SK_Test", "SkeletalMesh", [
+        {
+          name: "LODInfo",
+          span: [100, 200],
+          value: { kind: "array", items: [lod(110, hiddenInLod0), lod(150, [])] },
+        },
+        {
+          name: "Materials",
+          span: [300, 500],
+          value: {
+            kind: "array",
+            items: [slot(300, "Body", ["MaterialTag.A"]), slot(400, "Head", [])],
+          },
+        },
+        {
+          name: "RefSkeleton",
+          value: {
+            kind: "array",
+            items: [bone("root", -1), bone("spine_01", 0), bone("head", 1)],
+          },
+        },
+      ]),
+    ],
+  };
+}
+
+describe("AssetInspector mesh slots", () => {
+  it("swaps a material, hides a slot in every LOD and adds and drops tags, as one save", async () => {
+    mock = tauri(meshPackage());
+    installTauri(mock);
+    mount();
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Slots" }));
+    expect(await screen.findByText("spine_01")).toBeTruthy();
+    expect(screen.getByText("Head")).toBeTruthy();
+
+    await user.click(screen.getByText("/Game/Mesh/MI_Body.MI_Body"));
+    const path = await screen.findByDisplayValue("/Game/Mesh/MI_Body.MI_Body");
+    await user.clear(path);
+    await user.type(path, "/Game/Mesh/MI_Gold.MI_Gold{Enter}");
+    await user.click(screen.getByRole("checkbox", { name: "Hide slot 1" }));
+    await user.click(screen.getByRole("button", { name: "Remove tag MaterialTag.A" }));
+    await user.click(screen.getByRole("button", { name: "Add a tag to slot 1" }));
+    await user.type(await screen.findByLabelText("New tag"), "MaterialTag.B{Enter}");
+    expect(await screen.findByText("MaterialTag.B")).toBeTruthy();
+
+    await user.click(await screen.findByRole("button", { name: /Save as mod/ }));
+    await waitFor(() => expect(lastSave().values).toHaveLength(6));
+    const values = lastSave().values as Record<string, unknown>[];
+    expect(values).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          offset: 300,
+          name: "MaterialInterface",
+          op: "set",
+          text: "/Game/Mesh/MI_Gold.MI_Gold",
+        }),
+        expect.objectContaining({
+          offset: 110,
+          name: "DefaultHiddenMaterials",
+          op: "set_element",
+          index: 1,
+          text: "true",
+        }),
+        expect.objectContaining({ offset: 340, name: "MaterialTags", op: "remove", index: 0 }),
+        expect.objectContaining({ offset: 440, name: "MaterialTags", op: "insert", index: 0 }),
+      ])
+    );
+    // The second LOD lists no flags, so it is given one per slot in the same save.
+    expect(
+      values.filter((value) => value.offset === 150 && value.op === "insert" && value.index === 0)
+    ).toHaveLength(2);
+    expect(lastSave().field_sets).toHaveLength(3);
+    expect(lastSave().field_sets).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          offset: 440,
+          name: "MaterialTags",
+          path: ["[0]"],
+          text: "MaterialTag.B",
+        }),
+        expect.objectContaining({
+          offset: 150,
+          name: "DefaultHiddenMaterials",
+          path: ["[0]"],
+          text: "false",
+        }),
+        expect.objectContaining({
+          offset: 150,
+          name: "DefaultHiddenMaterials",
+          path: ["[1]"],
+          text: "true",
+        }),
+      ])
+    );
+  });
+
+  it("takes one tag change a slot at a time, and leaves nothing pending once a slot is shown again", async () => {
+    mock = tauri(meshPackage());
+    installTauri(mock);
+    mount();
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Slots" }));
+    await user.click(await screen.findByRole("button", { name: "Remove tag MaterialTag.A" }));
+    expect(
+      (screen.getByRole("button", { name: "Add a tag to slot 0" }) as HTMLButtonElement).disabled
+    ).toBe(true);
+    await user.click(screen.getByRole("button", { name: "Keep tag MaterialTag.A" }));
+    expect(
+      (screen.getByRole("button", { name: "Add a tag to slot 0" }) as HTMLButtonElement).disabled
+    ).toBe(false);
+    await user.click(screen.getByRole("checkbox", { name: "Hide slot 0" }));
+    expect(await screen.findByText("2 unsaved changes")).toBeTruthy();
+    await user.click(screen.getByRole("checkbox", { name: "Hide slot 0" }));
+    await waitFor(() => expect(screen.queryByText(/unsaved change/)).toBeNull());
+  });
+
+  it("shows a slot hidden in some LODs as mixed, and hides it in the rest", async () => {
+    mock = tauri(meshPackage([true, false]));
+    installTauri(mock);
+    mount();
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Slots" }));
+    const box = await screen.findByRole("checkbox", { name: "Hide slot 0" });
+    expect(box.getAttribute("aria-checked")).toBe("mixed");
+    await user.click(box);
+    expect(box.getAttribute("aria-checked")).toBe("true");
+
+    await user.click(await screen.findByRole("button", { name: /Save as mod/ }));
+    await waitFor(() => expect(lastSave().values).toHaveLength(2));
+    expect(lastSave().values).toEqual([
+      expect.objectContaining({ offset: 150, op: "insert", index: 0 }),
+      expect.objectContaining({ offset: 150, op: "insert", index: 0 }),
+    ]);
+    expect(lastSave().field_sets).toEqual([
+      expect.objectContaining({ offset: 150, path: ["[0]"], text: "true" }),
+      expect.objectContaining({ offset: 150, path: ["[1]"], text: "false" }),
+    ]);
+  });
+});
+
 /** One export holding an array of two structs, which opens straight into its property tree. */
 function pointsPackage() {
   const point = (x: number, at: number) => ({
@@ -752,6 +1071,32 @@ describe("AssetInspector script edits", () => {
     expect(screen.getByText("@0104:")).toBeTruthy();
     expect(screen.getByText("@0139:")).toBeTruthy();
     expect(screen.getByText("; probably Greater_IntInt")).toBeTruthy();
+  });
+
+  it("reads a function as pseudo-code and opens a line's statement in the listing", async () => {
+    mock = tauri(functionPackage()).on("export_script_view", () => ({
+      ...scriptView(),
+      flow: {
+        lines: [
+          { depth: 0, text: "if (LocalVariable(Flag)) {", offsets: [0x55] },
+          { depth: 1, text: "goto @0139", offsets: [0x60] },
+          { depth: 0, text: "}" },
+          { depth: 0, text: "@0104:  // ReceiveBeginPlay enters here" },
+          { depth: 0, text: `LetBool LocalVariable(Greater) = ${CALL}`, offsets: [0x104] },
+        ],
+        gotos: 1,
+      },
+    }));
+    installTauri(mock);
+    mount();
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Pseudo-code" }));
+    expect(screen.getByText("1 jump could not be nested and stay as goto.")).toBeTruthy();
+    expect(screen.getByText("(LocalVariable(Flag)) {", { exact: false })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "@0139" }));
+    expect(screen.getByRole("button", { name: "Listing" })).toBeTruthy();
+    await user.click(screen.getByText(`LetBool LocalVariable(Greater) = ${CALL}`));
+    expect(await screen.findByRole("button", { name: "always false" })).toBeTruthy();
   });
 
   it("fixes a branch's condition by where it starts, holding it to what it read", async () => {

@@ -33,7 +33,15 @@ pub fn toggle_many(mods: &Path, names: &[String], enabled: bool) -> BulkOpResult
 
 /// Deletes each mod whose pak is named, its `.utoc` and `.ucas` with it.
 pub fn delete_many(mods: &Path, names: &[String]) -> BulkOpResult {
-    each(names, |name| crate::mods::delete_mod(mods, name))
+    each(names, |name| delete_one(mods, name))
+}
+
+/// Deletes the mod whose pak is named, its `.utoc` and `.ucas` with it, and the wordings the
+/// toolkit kept for it.
+pub fn delete_one(mods: &Path, name: &str) -> Result<(), String> {
+    crate::mods::delete_mod(mods, name)?;
+    crate::text_mod::forget_mod(name);
+    Ok(())
 }
 
 fn each(names: &[String], mut act: impl FnMut(&str) -> Result<(), String>) -> BulkOpResult {
