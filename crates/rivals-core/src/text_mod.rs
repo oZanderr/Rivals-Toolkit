@@ -80,7 +80,8 @@ pub fn recorded_mods() -> Result<Vec<String>, String> {
 /// Drops the wordings kept for a mod deleted for good, named by its pak, switched on or off. One
 /// that will not go is left: it does no harm beside a mod that is gone.
 pub fn forget_mod(full_name: &str) {
-    let name = full_name.strip_suffix(".disabled").unwrap_or(full_name);
+    let name = full_name.rsplit(['/', '\\']).next().unwrap_or(full_name);
+    let name = name.strip_suffix(".disabled").unwrap_or(name);
     let stem = name.strip_suffix(".pak").unwrap_or(name);
     if let Ok(path) = store_path(stem) {
         let _ = fs::remove_file(path);
@@ -565,19 +566,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn deleting_a_mod_forgets_its_wordings() {
+    fn deleting_a_mod_forgets_its_wordings_in_whatever_folder_it_is() {
         let stem = format!("ZZForget_{}_9999999_P", std::process::id());
         let record = store_path(&stem).expect("store");
-        fs::create_dir_all(record.parent().expect("store folder")).expect("store folder");
-        fs::write(&record, b"{}").expect("record");
         let mods = std::env::temp_dir().join(format!("rivals_forget_{}", std::process::id()));
-        fs::create_dir_all(&mods).expect("mods");
-        let pak = format!("{stem}.pak.disabled");
-        fs::write(mods.join(&pak), b"pak").expect("pak");
+        for folder in ["", "Skins/"] {
+            fs::create_dir_all(record.parent().expect("store folder")).expect("store folder");
+            fs::write(&record, b"{}").expect("record");
+            fs::create_dir_all(mods.join(folder)).expect("mods");
+            let pak = format!("{folder}{stem}.pak.disabled");
+            fs::write(mods.join(&pak), b"pak").expect("pak");
 
-        crate::mod_library::delete_one(&mods, &pak).expect("delete");
-        assert!(!mods.join(&pak).exists());
-        assert!(!record.exists(), "the wordings go with the mod");
+            crate::mod_library::delete_one(&mods, &pak).expect("delete");
+            assert!(!mods.join(&pak).exists());
+            assert!(
+                !record.exists(),
+                "the wordings go with the mod in {folder:?}"
+            );
+        }
         let _ = fs::remove_dir_all(&mods);
     }
 

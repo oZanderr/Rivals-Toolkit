@@ -66,16 +66,9 @@ pub fn mod_container_stems(paks_dir: &Path) -> HashSet<String> {
 
 /// The containers of every switched-on IoStore mod under `~mods`, the one whose copy wins first.
 pub fn mod_utocs(paks_dir: &Path) -> Vec<PathBuf> {
-    let mut utocs: Vec<PathBuf> = utoc_paths(&paks_dir.join("~mods")).collect();
-    utocs.sort_by(|a, b| {
-        let name = |path: &Path| {
-            path.file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned()
-        };
-        crate::mods::winner_order(&name(a), &name(b))
-    });
+    let mods = paks_dir.join("~mods");
+    let mut utocs: Vec<PathBuf> = utoc_paths(&mods).collect();
+    utocs.sort_by(|a, b| crate::mods::winner_order_below(&mods, a, b));
     utocs
 }
 

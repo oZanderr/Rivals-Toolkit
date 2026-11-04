@@ -5693,6 +5693,7 @@ pub fn other_overrides(game_root: &str, entry: &str, own: &Path) -> Vec<String> 
 /// The other mods the game mounts beside one, with what each holds, read once for a save of many
 /// packages.
 pub(crate) struct OtherMods {
+    /// Its container's path below `~mods`, as the others are named.
     own_name: String,
     plain: bool,
     held: Vec<(String, std::collections::HashSet<String>)>,
@@ -5700,16 +5701,12 @@ pub(crate) struct OtherMods {
 
 impl OtherMods {
     pub(crate) fn around(game_root: &str, own: &Path) -> Self {
-        let own_name = own
-            .with_extension("utoc")
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let mods = mods_dir(game_root);
+        let own_name = crate::mods::path_below(&mods, &own.with_extension("utoc"));
         let plain = own
             .extension()
             .is_some_and(|ext| ext.eq_ignore_ascii_case("pak"));
         // A mod the game does not mount, such as one outside `~mods`, is loaded over nothing.
-        let mods = mods_dir(game_root);
         if !crate::mod_ops::ModFiles::of(own).is_ok_and(|files| files.mounts(&mods)) {
             return Self {
                 own_name,
@@ -5723,7 +5720,7 @@ impl OtherMods {
             .map(walkdir::DirEntry::into_path)
             .filter(|path| path.extension().is_some_and(|ext| ext == "utoc"))
             .filter_map(|path| {
-                let name = path.file_name()?.to_string_lossy().into_owned();
+                let name = crate::mods::path_below(&mods, &path);
                 if name.eq_ignore_ascii_case(&own_name) {
                     return None;
                 }

@@ -154,6 +154,65 @@ pub fn install_each(
     sources: &[PathBuf],
     options: &InstallOptions,
 ) -> Vec<NamedInstall> {
+    install_placed(mods, mods, &HashMap::new(), sources, options)
+}
+
+/// [`install_each`] into the folder `folder` below `mods`, except that a mod already installed
+/// anywhere below `mods` is written over in the folder it is in, so sorting mods into folders never
+/// leaves two copies of one.
+pub fn install_into(
+    mods: &Path,
+    folder: &str,
+    sources: &[PathBuf],
+    options: &InstallOptions,
+) -> Result<Vec<NamedInstall>, String> {
+    let folder = super::folder_path(folder)?;
+    let target = if folder.is_empty() {
+        mods.to_path_buf()
+    } else {
+        mods.join(&folder)
+    };
+    let installed = installed_folders(mods, &target);
+    Ok(install_placed(mods, &target, &installed, sources, options))
+}
+
+/// The folder each mod below `mods` is in, by its name in lower case. A name `target` holds is
+/// placed there, wherever else a copy is.
+fn installed_folders(mods: &Path, target: &Path) -> HashMap<String, PathBuf> {
+    let mut folders = HashMap::new();
+    for relative in crate::mods::walk_mod_files(mods, true) {
+        let Some(name) = relative.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let Some(stem) = name
+            .strip_suffix(".pak.disabled")
+            .or_else(|| name.strip_suffix(".pak"))
+        else {
+            continue;
+        };
+        let dir = match relative.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => mods.join(parent),
+            _ => mods.to_path_buf(),
+        };
+        let at = folders
+            .entry(stem.to_ascii_lowercase())
+            .or_insert_with(|| dir.clone());
+        if dir == target {
+            *at = dir;
+        }
+    }
+    folders
+}
+
+/// Installs into `target`, or for a mod `installed` places, into the folder it names. `mods` is
+/// the folder the game mounts mods from, which no folder given may be in.
+fn install_placed(
+    mods: &Path,
+    target: &Path,
+    installed: &HashMap<String, PathBuf>,
+    sources: &[PathBuf],
+    options: &InstallOptions,
+) -> Vec<NamedInstall> {
     let mut mods_named: Vec<(PathBuf, Vec<PathBuf>)> = Vec::new();
     for source in sources {
         let read = install_source(source);
@@ -180,7 +239,13 @@ pub fn install_each(
             result: found.map(|found| {
                 found
                     .into_iter()
-                    .map(|located| install_located(mods, located, &clashes, options))
+                    .map(|located| {
+                        let into = located
+                            .stem()
+                            .and_then(|stem| installed.get(&stem.to_ascii_lowercase()))
+                            .map_or(target, PathBuf::as_path);
+                        install_located(into, located, &clashes, options)
+                    })
                     .collect()
             }),
         })
@@ -1510,6 +1575,50 @@ mod tests {
             ["Marvel/Config/DefaultGame.ini"],
             "the pak keeps the files beside the packages"
         );
+        std::fs::remove_dir_all(&from).ok();
+        std::fs::remove_dir_all(&mods).ok();
+    }
+
+    /// A mod dropped on a folder goes in there, and one already installed elsewhere below `~mods`
+    /// is written over where it is rather than copied in a second time.
+    #[test]
+    fn a_mod_installs_into_a_folder_or_where_its_copy_is() {
+        let from = scratch("into-from");
+        let mods = scratch("into-mods");
+        trio(&from, "New_9999999_P", "new");
+        trio(&from, "Old_9999999_P", "update");
+        std::fs::create_dir_all(mods.join("Skins")).unwrap();
+        trio(&mods.join("Skins"), "Old_9999999_P", "old");
+        let options = InstallOptions {
+            replace: true,
+            ..zlib()
+        };
+        let sources = [
+            from.join("New_9999999_P.pak"),
+            from.join("Old_9999999_P.pak"),
+        ];
+        let done = install_into(&mods, "Art", &sources, &options).expect("install");
+        for each in &done {
+            for found in each.result.as_ref().expect("found") {
+                assert!(found.result.is_ok(), "{:?}", found.result);
+            }
+        }
+        assert_eq!(
+            std::fs::read(mods.join("Art/New_9999999_P.utoc")).unwrap(),
+            b"new"
+        );
+        assert_eq!(
+            std::fs::read(mods.join("Skins/Old_9999999_P.utoc")).unwrap(),
+            b"update"
+        );
+        assert!(!mods.join("Art/Old_9999999_P.pak").exists());
+
+        let inside = install_into(&mods, "", &[mods.join("Skins")], &options).expect("install");
+        assert!(
+            inside[0].result.is_err(),
+            "a folder inside ~mods is installed already"
+        );
+        assert!(install_into(&mods, "../Out", &sources, &options).is_err());
         std::fs::remove_dir_all(&from).ok();
         std::fs::remove_dir_all(&mods).ok();
     }

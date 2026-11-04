@@ -122,6 +122,9 @@ pub(crate) struct Settings {
         skip_serializing_if = "Option::is_none"
     )]
     pub(crate) tab_layout: Option<TabLayout>,
+    /// The Mods page's folders shown collapsed, by their paths below `~mods`.
+    #[serde(default, deserialize_with = "lenient")]
+    pub(crate) collapsed_mod_folders: Vec<String>,
     /// Settings this build does not know, written back as they were read: another build of the
     /// app, newer or older, may share this file, and saving here must not lose what it stored.
     #[serde(flatten)]
@@ -155,6 +158,7 @@ impl Default for Settings {
             log_key: None,
             log_iv: None,
             tab_layout: None,
+            collapsed_mod_folders: Vec::new(),
             others: serde_json::Map::new(),
         }
     }
@@ -250,6 +254,24 @@ pub(crate) fn set_tab_layout(
 ) -> Result<(), String> {
     let mut guard = state.lock().map_err(|e| e.to_string())?;
     guard.tab_layout = Some(layout);
+    guard.save()
+}
+
+#[tauri::command]
+pub(crate) fn get_collapsed_mod_folders(state: State<'_, SettingsState>) -> Vec<String> {
+    state
+        .lock()
+        .map(|s| s.collapsed_mod_folders.clone())
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+pub(crate) fn set_collapsed_mod_folders(
+    state: State<'_, SettingsState>,
+    folders: Vec<String>,
+) -> Result<(), String> {
+    let mut guard = state.lock().map_err(|e| e.to_string())?;
+    guard.collapsed_mod_folders = folders;
     guard.save()
 }
 
@@ -437,6 +459,17 @@ mod tests {
             );
             assert!(settings.tab_layout.is_none(), "{layout}");
         }
+    }
+
+    #[test]
+    fn unreadable_collapsed_folders_fall_back_alone() {
+        let stored = r#"{"game_path": "C:/Games/MarvelRivals", "collapsed_mod_folders": [1]}"#;
+        let settings: Settings = serde_json::from_str(stored).expect("read");
+        assert_eq!(settings.game_path.as_deref(), Some("C:/Games/MarvelRivals"));
+        assert!(settings.collapsed_mod_folders.is_empty());
+        let stored = r#"{"collapsed_mod_folders": ["Skins/Venom"]}"#;
+        let settings: Settings = serde_json::from_str(stored).expect("read");
+        assert_eq!(settings.collapsed_mod_folders, ["Skins/Venom"]);
     }
 
     /// The ids are kept as they were stored, unknown ones too, and a layout naming only an order

@@ -1013,7 +1013,8 @@ export function Settings({
               <div className="flex flex-1 flex-col gap-0.5">
                 <span className="text-[13px] font-medium">Scan ~mods subfolders</span>
                 <span className="text-[11px] text-muted-foreground">
-                  Include mods nested in subfolders. This matches the game's native load behavior.
+                  List mods nested in subfolders, which the game loads too, as a folder tree. Off
+                  hides them here, and the folders with them.
                 </span>
               </div>
               <Switch

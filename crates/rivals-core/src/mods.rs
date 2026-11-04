@@ -34,10 +34,8 @@ pub fn delete_mod(dir: &Path, full_name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Collect relative paths of mod-related files (.pak, .ucas, .utoc, and their
-/// `.disabled` variants) under the given root directory. When `recursive` is
-/// false, only direct children of `root` are scanned (matches UE's native
-/// `~mods` load behavior).
+/// The paths below `root` of the mod files there (`.pak`, `.ucas` and `.utoc`, switched on or
+/// off), in its subfolders too when `recursive`, as the game finds them.
 pub fn walk_mod_files(root: &Path, recursive: bool) -> Vec<PathBuf> {
     let mut walker = walkdir::WalkDir::new(root);
     if !recursive {
@@ -112,12 +110,37 @@ pub fn pak_priority(file_name: &str) -> Option<u32> {
     rest.rsplit_once('_')?.1.parse().ok()
 }
 
-/// Orders mods so the one whose copy of a shared asset wins comes first: highest patch number,
-/// then alphabetical, which is the order the loader breaks a tie in.
+/// Orders mods, named by their paths below `~mods`, so the one whose copy of a shared asset wins
+/// comes first: highest patch number, then alphabetical by that whole path, ignoring case, which is
+/// the order the loader breaks a tie in. A folder's name counts: `AA/C` wins over `B`, and `B`
+/// over `ZZ/A` (seen in game, 2026-11-03).
 pub fn winner_order(a: &str, b: &str) -> std::cmp::Ordering {
     pak_priority(b)
         .cmp(&pak_priority(a))
         .then_with(|| a.to_lowercase().cmp(&b.to_lowercase()))
+}
+
+/// [`winner_order`] for two of the mods' files below `mods`.
+pub fn winner_order_below(mods: &Path, a: &Path, b: &Path) -> std::cmp::Ordering {
+    winner_order(&path_below(mods, a), &path_below(mods, b))
+}
+
+/// `path` below `mods`, `/` between its parts, or whole when it is not below it. A path spelt
+/// otherwise than `mods` is is compared resolved.
+pub fn path_below(mods: &Path, path: &Path) -> String {
+    let relative = path
+        .strip_prefix(mods)
+        .ok()
+        .map(Path::to_path_buf)
+        .or_else(|| {
+            let mods = mods.canonicalize().ok()?;
+            let dir = path.parent()?.canonicalize().ok()?;
+            Some(dir.strip_prefix(&mods).ok()?.join(path.file_name()?))
+        });
+    match relative {
+        Some(relative) => relative.to_string_lossy().replace('\\', "/"),
+        None => path.to_string_lossy().into_owned(),
+    }
 }
 
 #[cfg(test)]
@@ -134,6 +157,25 @@ mod tests {
         assert_eq!(pak_priority("sub/Foo_Bar_12_p.utoc.disabled"), Some(12));
         assert_eq!(pak_priority("Foo_P.pak"), None);
         assert_eq!(pak_priority("Foo_12.pak"), None);
+    }
+
+    /// The order the game broke ties in, between mods of one patch number in and out of folders.
+    #[test]
+    fn a_tie_goes_to_the_first_whole_path_below_mods() {
+        let mods = Path::new("C:/Game/~mods");
+        let first =
+            |a: &str, b: &str| winner_order_below(mods, &mods.join(a), &mods.join(b)).is_lt();
+        assert!(first("A_Rifle_9999999_P.utoc", "B_Rifle_9999999_P.utoc"));
+        assert!(first("B_Body_9999999_P.utoc", "ZZ/A_Body_9999999_P.utoc"));
+        assert!(first("AA/C_Face_9999999_P.utoc", "B_Face_9999999_P.utoc"));
+        assert!(
+            first("zz/Low_10_P.utoc", "A_Low_9_P.utoc"),
+            "a higher patch number first"
+        );
+        assert_eq!(
+            path_below(mods, &mods.join("ZZ").join("A.utoc")),
+            "ZZ/A.utoc"
+        );
         assert_eq!(pak_priority("Foo.pak"), None);
     }
 

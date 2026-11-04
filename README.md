@@ -156,10 +156,12 @@ rivals-cli ini set   --pak MyMod --file Marvel/Config/DefaultEngine.ini=./Engine
 rivals-cli ini unset --pak MyMod r.Foo
 ```
 
-A mod is named the same way everywhere: by a path to its `.pak` or `.utoc`, or by its whole name in
-`~mods`, such as `MyMod_9999999_P`, with or without the extension and in any case, switched on or
-off. Nothing short of the whole name is taken: a part of one is refused, with the installed names it
-may have meant. The `mods` commands take the mod as their first argument, `mods check
+A mod is named the same way everywhere: by a path to its `.pak` or `.utoc`, by its whole name in
+whichever folder of `~mods` it is, such as `MyMod_9999999_P`, or by its path below `~mods`, such as
+`Skins/MyMod_9999999_P`, with or without the extension and in any case, switched on or off. Nothing
+short of the whole name is taken: a part of one is refused, with the installed names it may have
+meant. A name two folders hold is refused with the path below `~mods` naming each, `./MyMod_9999999_P`
+for the one at the top. The `mods` commands take the mod as their first argument, `mods check
 MyMod_9999999_P`, and those working on several take each in turn, `mods disable A B`; `paks`, the
 family's old name, still works, and `ini` and `tweaks` take the mod with `--pak`.
 
@@ -177,8 +179,8 @@ A save goes `--into` a mod named as above. `--into MyMod` also finds `MyMod_9999
 desktop app names the mods it saves into, and a name no installed mod has makes a new mod: the save
 says so, and names any installed mod the name is close to. Without `--into` a save goes into the
 mod the desktop app last saved into, then `AssetEdits`. A save goes only into a switched-on mod
-whose name ends `_9999999_P`, and says why of any other: one in `~mods` by its name or a path, or an
-IoStore mod anywhere else, such as a build kept in its own folder, by a path to one of its files.
+whose name ends `_9999999_P`, and says why of any other: one in `~mods` or a folder of it by its name
+or a path, or an IoStore mod anywhere else, such as a build kept in its own folder, by a path to one of its files.
 That one is written where it is and never made, and the game loads nothing from it, so a mod of its
 name in `~mods` is another mod, which the save neither reads nor writes. A save into a mod
 already holding the asset builds on the mod's copy; with `--from` naming somewhere else it is

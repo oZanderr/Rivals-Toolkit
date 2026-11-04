@@ -160,10 +160,11 @@ pub(crate) struct InstallOutcome {
 /// says, a shader archive in one checked against the libraries of the game at `game_root`.
 pub(crate) fn install_mods(
     mods_folder: &str,
+    folder: &str,
     sources: &[String],
     io: IoStoreOptions,
     game_root: Option<&str>,
-) -> Vec<InstallOutcome> {
+) -> Result<Vec<InstallOutcome>, String> {
     let game_libraries = || {
         let root = game_root.ok_or(
             "Set the game folder first: a shader archive is checked against the game's own \
@@ -178,7 +179,8 @@ pub(crate) fn install_mods(
         game_libraries: &game_libraries,
     };
     let paths: Vec<std::path::PathBuf> = sources.iter().map(Into::into).collect();
-    mod_library::install_each(Path::new(mods_folder), &paths, &options)
+    let installed = mod_library::install_into(Path::new(mods_folder), folder, &paths, &options)?;
+    let outcomes = installed
         .into_iter()
         .flat_map(|each| {
             let named: Vec<String> = each
@@ -210,7 +212,8 @@ pub(crate) fn install_mods(
                 }],
             }
         })
-        .collect()
+        .collect();
+    Ok(outcomes)
 }
 
 pub(crate) fn export_mods_archive(

@@ -182,12 +182,7 @@ fn mod_paks(game_root: &str) -> Vec<std::path::PathBuf> {
         .filter(|rel| rel.extension().is_some_and(|ext| ext == "pak"))
         .map(|rel| mods.join(rel))
         .collect();
-    let stem = |pak: &std::path::PathBuf| {
-        pak.file_stem()
-            .map(|stem| stem.to_string_lossy().into_owned())
-            .unwrap_or_default()
-    };
-    paks.sort_by(|a, b| crate::mods::winner_order(&stem(b), &stem(a)));
+    paks.sort_by(|a, b| crate::mods::winner_order_below(&mods, b, a));
     paks
 }
 

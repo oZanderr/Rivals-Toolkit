@@ -74,6 +74,8 @@ pub fn run() {
             settings::set_mod_conflict_check_enabled,
             settings::get_tab_layout,
             settings::set_tab_layout,
+            settings::get_collapsed_mod_folders,
+            settings::set_collapsed_mod_folders,
             // update_check
             update_check::check_for_update,
             update_check::get_auto_check_updates,
@@ -157,6 +159,10 @@ pub fn run() {
             mods::commands::delete_mod,
             mods::commands::delete_mods,
             mods::commands::install_mods,
+            mods::subfolders::move_mods,
+            mods::subfolders::create_mod_folder,
+            mods::subfolders::rename_mod_folder,
+            mods::subfolders::delete_mod_folder,
             // plugins
             plugins::get_plugins_status,
             plugins::set_plugin_enabled,

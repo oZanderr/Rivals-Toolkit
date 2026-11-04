@@ -44,7 +44,10 @@ pub fn delete_one(mods: &Path, name: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn each(names: &[String], mut act: impl FnMut(&str) -> Result<(), String>) -> BulkOpResult {
+pub(super) fn each(
+    names: &[String],
+    mut act: impl FnMut(&str) -> Result<(), String>,
+) -> BulkOpResult {
     let mut result = BulkOpResult::default();
     for name in names {
         match act(name) {

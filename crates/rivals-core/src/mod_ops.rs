@@ -100,7 +100,7 @@ impl ModFiles {
     }
 
     /// Every file of its name, switched on or off, which another mod would be written over.
-    fn any_files(&self) -> Vec<PathBuf> {
+    pub(crate) fn any_files(&self) -> Vec<PathBuf> {
         PARTS
             .iter()
             .flat_map(|extension| {

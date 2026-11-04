@@ -97,6 +97,8 @@ pub(crate) async fn export_mods_archive(
 /// An IoStore mod is rebuilt under its new name, which takes as long as writing the container.
 #[tauri::command]
 pub(crate) async fn rename_mod(
+    settings: State<'_, SettingsState>,
+    cache: State<'_, HeroCacheState>,
     mods_folder: String,
     full_name: String,
     new_base: String,
@@ -104,11 +106,16 @@ pub(crate) async fn rename_mod(
     if game_status::should_block_for_game() {
         return Err(game_status::game_running_error());
     }
-    tauri::async_runtime::spawn_blocking(move || {
+    let old = full_name.clone();
+    let renamed = tauri::async_runtime::spawn_blocking(move || {
         mods::rename_mod(&mods_folder, &full_name, &new_base)
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())??;
+    let shown = |name: &str| name.strip_suffix(".disabled").unwrap_or(name).to_string();
+    let (from, to) = (shown(&old), shown(&renamed));
+    mods::subfolders::follow_renames(&settings, &cache, |name| (name == from).then(|| to.clone()));
+    Ok(renamed)
 }
 
 #[tauri::command]
@@ -146,12 +153,14 @@ pub(crate) fn delete_mods(
     Ok(mods::delete_mods(&mods_folder, &full_names))
 }
 
-/// Installs the paks, archives and folders at `source_paths`, each mod found in them on its own.
+/// Installs the paks, archives and folders at `source_paths`, each mod found in them on its own,
+/// into `folder` below `mods_folder`, or where a copy of the mod already is.
 #[tauri::command]
 pub(crate) async fn install_mods(
     state: State<'_, SettingsState>,
     mods_folder: String,
     source_paths: Vec<String>,
+    folder: Option<String>,
 ) -> Result<Vec<InstallOutcome>, String> {
     if game_status::should_block_for_game() {
         return Err(game_status::game_running_error());
@@ -168,8 +177,14 @@ pub(crate) async fn install_mods(
             mappings: crate::settings::load_mappings(usmap.as_deref()),
             ..io
         };
-        mods::install_mods(&mods_folder, &source_paths, io, game_root.as_deref())
+        mods::install_mods(
+            &mods_folder,
+            folder.as_deref().unwrap_or(""),
+            &source_paths,
+            io,
+            game_root.as_deref(),
+        )
     })
     .await
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?
 }

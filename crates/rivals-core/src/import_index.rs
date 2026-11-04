@@ -134,14 +134,15 @@ fn install_of(game_root: &str) -> String {
 /// the game loads first leading, so a package several mods ship is read from the winner.
 pub fn enabled_mod_containers(paks: &Path) -> Vec<PathBuf> {
     let undecryptable = undecryptable_container_stems(paks);
-    let mut found: Vec<PathBuf> = walkdir::WalkDir::new(paks.join("~mods"))
+    let mods = paks.join("~mods");
+    let mut found: Vec<PathBuf> = walkdir::WalkDir::new(&mods)
         .into_iter()
         .filter_map(Result::ok)
         .map(walkdir::DirEntry::into_path)
         .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("utoc"))
         .filter(|path| !undecryptable.contains(&stem(path)))
         .collect();
-    found.sort_by(|a, b| crate::mods::winner_order(&stem(a), &stem(b)));
+    found.sort_by(|a, b| crate::mods::winner_order_below(&mods, a, b));
     found
 }
 
