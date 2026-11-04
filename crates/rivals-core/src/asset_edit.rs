@@ -4486,14 +4486,11 @@ pub fn plan_export_removal(
     let mut plan = rivals_uasset::plan_removal(&parsed, &request.changes.remove_exports)?;
     // The generic "may be imported" warning gives way to names when an index has been built.
     if !plan.public.is_empty()
-        && let Ok(Some(index)) = crate::import_index::load(request.game_root)
+        && let Ok(Some(index)) = crate::import_index::current_if_built(request.game_root)
     {
         plan.resolve_importers(|path| index.importers_of(path).packages);
         plan.resolve_mentions(|package| index.mentions_of(package));
-        if index.is_stale(request.game_root) {
-            plan.warnings
-                .push(crate::import_index::STALE_WARNING.to_string());
-        }
+        plan.warnings.extend(index.notes());
     }
     Ok(plan)
 }
@@ -4761,14 +4758,11 @@ pub fn plan_export_edits(
         &request.changes.reset_exports,
     )?;
     if !plan.public.is_empty()
-        && let Ok(Some(index)) = crate::import_index::load(request.game_root)
+        && let Ok(Some(index)) = crate::import_index::current_if_built(request.game_root)
     {
         plan.resolve_importers(|path| index.importers_of(path).packages);
         plan.resolve_mentions(|package| index.mentions_of(package));
-        if index.is_stale(request.game_root) {
-            plan.warnings
-                .push(crate::import_index::STALE_WARNING.to_string());
-        }
+        plan.warnings.extend(index.notes());
     }
     Ok(plan)
 }

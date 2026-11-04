@@ -457,6 +457,8 @@ pub struct Diagnostics {
     /// Emit an entry for every declared slot the header skips, so a value that inherits its
     /// parent's can be shown and stored. Off for corpus statistics, which count stored values.
     pub declared_slots: bool,
+    /// Leave an export that holds no script unread, as `ParseOptions::scripts_only` asks.
+    pub scripts_only: bool,
     pub headers_checked: usize,
     pub headers_differing: usize,
     /// How many headers took each shape the audit counts, recorded with `check_headers`.

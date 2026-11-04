@@ -27,6 +27,8 @@ struct OpenLog {
     session: Arc<OpenedSession>,
     /// The lines the current filter keeps.
     rows: Vec<u32>,
+    /// The filter `rows` came from, by the order the viewer sent it in.
+    filter_seq: u64,
 }
 
 /// The one log the viewer has open. A snapshot is fixed when it opens, so paging a log the game
@@ -131,6 +133,7 @@ pub(crate) async fn open_game_log(
         snapshot,
         session: Arc::new(opened),
         rows,
+        filter_seq: 0,
     });
     Ok(overview)
 }
@@ -140,18 +143,26 @@ fn path_string(path: Option<&PathBuf>) -> Option<String> {
 }
 
 /// Keeps the lines `filter` matches as the rows the viewer pages through, and says how many.
+/// `seq` orders the filters the viewer sent, so one that finishes after a later one leaves the
+/// later one's rows in place.
 #[tauri::command]
 pub(crate) async fn filter_game_log(
     cache: State<'_, GameLogCache>,
     snapshot: u64,
     filter: LogFilter,
+    seq: u64,
 ) -> Result<u32, String> {
     let session = cache.with(snapshot, |open| open.session.clone())?;
     let rows = tauri::async_runtime::spawn_blocking(move || session.log.filter(&filter))
         .await
         .map_err(|e| e.to_string())??;
     let total = rows.len() as u32;
-    cache.with(snapshot, |open| open.rows = rows)?;
+    cache.with(snapshot, |open| {
+        if seq > open.filter_seq {
+            open.rows = rows;
+            open.filter_seq = seq;
+        }
+    })?;
     Ok(total)
 }
 

@@ -1049,6 +1049,10 @@ struct AssetSearchArgs {
     /// them all.
     #[arg(long, value_name = "N", default_value_t = 5000)]
     limit: usize,
+
+    /// Print how long each part of the search took, to stderr.
+    #[arg(long)]
+    timings: bool,
 }
 
 /// What `asset set` does to the value it names.
@@ -1201,7 +1205,9 @@ struct ImportersArgs {
     #[arg(value_name = "PATH")]
     path: String,
 
-    /// Build the index first, or rebuild it after the game updated. Reads every package once.
+    /// Read every package again. Without this the index is built the first time it is needed and
+    /// then brought up to date by reading again only what changed: a mod saved, switched on or
+    /// off, or the game after an update.
     #[arg(long)]
     build: bool,
 }
@@ -8926,8 +8932,10 @@ fn asset_search(
     use std::io::IsTerminal;
     use std::sync::atomic::AtomicBool;
 
+    let started = std::time::Instant::now();
     let root = resolve::game_root(cli.game_root.as_deref(), app)?;
     let mappings = game_mappings(cli, app)?;
+    let read_mappings = started.elapsed().as_secs_f64();
     let values = args.values
         || args
             .kind
@@ -8976,6 +8984,25 @@ fn asset_search(
     )?;
     if shown {
         eprintln!();
+    }
+    if args.timings {
+        let t = &result.timings;
+        eprintln!(
+            "took {:.1}s: mappings {read_mappings:.2}s, open {:.2}s, listing {:.2}s, functions {:.2}s, \
+             walk {:.2}s on {} threads, {} converters (summed: convert {:.1}s, parse {:.1}s with \
+             layouts {:.1}s, matching {:.1}s)",
+            started.elapsed().as_secs_f64(),
+            t.open,
+            t.listing,
+            t.functions,
+            t.walk,
+            t.threads,
+            t.converters,
+            t.convert,
+            t.parse,
+            t.layouts,
+            t.matching
+        );
     }
     emit(cli, &result, || {
         match args.by {

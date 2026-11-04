@@ -3624,7 +3624,7 @@ dependencies = [
 [[package]]
 name = "retoc"
 version = "0.1.5"
-source = "git+https://github.com/oZanderr/retoc?branch=master#c700472ccdbf197641b448e2243b3fa6334ca7ce"
+source = "git+https://github.com/oZanderr/retoc?branch=master#ec7bed651cf6eead88dc3610ce07554f123399f7"
 dependencies = [
  "aes",
  "anyhow",

@@ -393,25 +393,21 @@ pub fn bulk_list(request: &Request<'_>) -> Result<Vec<rivals_uasset::ResourceInf
     Ok(parse(request)?.resources)
 }
 
-/// The packages importing an object or a package, from the import index.
+/// The packages importing an object or a package, from the import index brought up to date
+/// first, or read again whole with `build`.
 pub fn importers(
     game_root: &str,
     path: &str,
     build: bool,
     progress: &mut dyn FnMut(usize, usize),
 ) -> Result<rivals_core::import_index::Importers, String> {
-    let index = match (build, rivals_core::import_index::load(game_root)?) {
-        (false, Some(index)) => index,
-        (false, None) => {
-            return Err(format!(
-                "no import index has been built yet (it would live at {}); pass --build to create one",
-                rivals_core::import_index::cache_path(game_root)?.display()
-            ));
-        }
-        (true, _) => rivals_core::import_index::build(game_root, progress)?,
+    let index = if build {
+        rivals_core::import_index::build(game_root, progress)?
+    } else {
+        rivals_core::import_index::refresh(game_root, progress)?
     };
-    if index.is_stale(game_root) {
-        eprintln!("warning: {}", rivals_core::import_index::STALE_WARNING);
+    for note in index.notes() {
+        eprintln!("warning: {note}");
     }
     Ok(index.importers_of(path))
 }

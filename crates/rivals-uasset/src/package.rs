@@ -557,6 +557,10 @@ pub struct ParseOptions {
     /// Leave a name the mappings file holds twice on its default entry even when an export fails
     /// under it. A caller that can recover a class from its own package tries that first.
     pub skip_twins: bool,
+    /// Leave unread every export that holds no script, one whose class chain has no Class,
+    /// Function or ScriptStruct: each stands in its place as a payload, so a reader after
+    /// bytecode alone decodes only what holds it.
+    pub scripts_only: bool,
 }
 
 fn parse_inner(
@@ -915,6 +919,7 @@ fn parse_chosen(
         trace: options.trace.then(Vec::new),
         check_headers: options.check_headers,
         declared_slots: options.declared_slots,
+        scripts_only: options.scripts_only,
         ..Default::default()
     };
     let exports: Vec<ParsedExport> = chosen
@@ -1135,6 +1140,23 @@ fn winning_slot(
     })
 }
 
+/// The class chain a class's, function's or struct's own data is walked by: the mappings', or
+/// the engine's own struct classes for a package read without them, which lay out the same in
+/// every package.
+fn struct_chain<'a>(ctx: &Ctx<'a>, class_name: &str) -> Vec<&'a str> {
+    match ctx.mappings.map(|m| m.ancestry(class_name)) {
+        Some(chain) if !chain.is_empty() => chain,
+        _ => engine_struct_chain(class_name).to_vec(),
+    }
+}
+
+/// Whether an export of a class with this chain can hold bytecode.
+fn holds_script(chain: &[&str]) -> bool {
+    chain
+        .iter()
+        .any(|step| matches!(*step, "Class" | "Function" | "ScriptStruct"))
+}
+
 /// One export, with the undecoded payloads found while reading it charged to it. The diagnostics
 /// are per package, so the drain is what turns them into a per-export figure whatever path the
 /// body took out.
@@ -1187,6 +1209,16 @@ fn parse_one_inner(
                 consumed: 0,
                 payload_bytes: base.serial_size.max(0) as u64,
                 kind,
+            },
+            ..base
+        };
+    }
+    if diagnostics.scripts_only && !holds_script(&struct_chain(ctx, &class_name)) {
+        return ParsedExport {
+            status: ExportStatus::Payload {
+                consumed: 0,
+                payload_bytes: base.serial_size.max(0) as u64,
+                kind: "not read: holds no script",
             },
             ..base
         };
@@ -1345,14 +1377,8 @@ fn parse_one_inner(
         // The engine's own struct classes lay out the same in every package, so a package read
         // without mappings, such as one cooked with tagged properties, still has its classes and
         // functions walked.
-        let chain = match ctx.mappings.map(|m| m.ancestry(&class_name)) {
-            Some(chain) if !chain.is_empty() => chain,
-            _ => engine_struct_chain(&class_name).to_vec(),
-        };
-        if chain.contains(&"Class")
-            || chain.contains(&"Function")
-            || chain.contains(&"ScriptStruct")
-        {
+        let chain = struct_chain(ctx, &class_name);
+        if holds_script(&chain) {
             let restore = cursor.position();
             let named = cursor.names_len();
             match crate::ustruct::scan_struct_tail(&mut cursor, header, &chain) {

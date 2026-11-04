@@ -398,11 +398,21 @@ names, read as a save reads its asset unless `--source-from` says where, under `
 lists it in a level's actors with `--level`. `asset revert` takes one asset back out of a mod, so the
 game's own copy loads again; a mod left holding nothing is deleted, which `--dry-run` says first.
 
+`asset importers` lists the packages that import an object (`/Game/Path/Asset.Object:Sub`) or
+anything in a package, from the import index, which removal and rename plans read too. The index
+keeps the game and each enabled mod apart, so a package a mod ships is answered from the mod's
+copy, as the game loads it. It is built the first time a command needs it, in a few seconds, and
+kept in the user cache folder; after that only what changed is read again: a mod saved, switched
+on or off reads that mod alone, and a game update reads the game. `--build` reads everything
+again. Each write of it deletes an index an older build wrote, one for an install that is gone,
+and one an interrupted build left half written. A package a walk could not read is named as a
+warning wherever the index is used.
+
 ```bash
 rivals-cli asset hex       /Game/Data/DA_Thing --export 3 --offset 0x40      # an export's bytes, from an offset
 rivals-cli asset fields    /Game/Data/S_Thing --export S_Thing               # the fields a struct or class declares
 rivals-cli asset dump      /Game/Data/DA_Thing --export 3 --inherited        # unset values as its archetypes hold them
-rivals-cli asset importers /Game/Data/DA_Thing --build                       # every package importing it, from the import index
+rivals-cli asset importers /Game/Data/DA_Thing                               # every package importing it, from the import index
 rivals-cli asset edit-imports /Game/Data/DA_Thing --import -12 --path /Game/Data/DA_Other.DA_Other --into MyMod
 rivals-cli asset edit-export  /Game/Data/DA_Thing --export 3 --set-flag Public --clear-flag Transactional --into MyMod
 rivals-cli asset deps         /Game/Data/DA_Thing --export 3 --cbs 6,-39 --into MyMod --dry-run
@@ -438,20 +448,21 @@ rivals-cli asset audit --dir D:\Mods\MyMod --limit 200
 `asset search` finds where the game's scripts name something: a call, a bound or broadcast delegate,
 a string, a name constant, an object, or a variable read or written. It reads each package from the
 copy the game loads, enabled mods included and labelled. A script search parses only the packages
-holding functions, which takes under half a minute for the whole game; `--values` searches stored
-values too, at any depth, which means reading every package and takes about a minute, or less with
-`--filter`. `--kind` keeps one kind of term, `--word` matches whole words only, and `--no-mods`
-reads the base game alone. `--kind write` lists only where a variable is assigned or changed in
-place: a call changing a variable it is handed counts only for the engine functions known to, the
-array, map and set functions, timer handles, random streams and gameplay tag containers, since
-nothing in the bytecode says which arguments other calls change. A call shows with its arguments,
-and `--kind bind` and `--kind broadcast` tell where a delegate is bound or unbound from where it is
-fired (`delegate` is both). With `--values` a field is found by its name too, with what it holds,
-and a table's value names its row and the row's id, as `[GamePlayModeId 600]`; `--kind value` and
-`--kind field` keep one or the other. `--no-self` leaves out a package's paths to its own objects
-where its own name is what matched, so an id finds who refers to it. `--by hero` and `--by ability`
-list the places under the hero and ability their path names, a mode's or an event's version of an
-ability flagged and listed after the game's own.
+holding functions, which the import index records (built once in a few seconds, then read again
+only for what changed), so it takes a couple of seconds for the whole game; `--values` searches
+stored values too, at any depth, which means reading every package and takes about a minute, or
+less with `--filter`. `--timings` prints how long each part took. `--kind` keeps one kind of term,
+`--word` matches whole words only, and `--no-mods` reads the base game alone. `--kind write` lists
+only where a variable is assigned or changed in place: a call changing a variable it is handed
+counts only for the engine functions known to, the array, map and set functions, timer handles,
+random streams and gameplay tag containers, since nothing in the bytecode says which arguments other
+calls change. A call shows with its arguments, and `--kind bind` and `--kind broadcast` tell where a
+delegate is bound or unbound from where it is fired (`delegate` is both). With `--values` a field is
+found by its name too, with what it holds, and a table's value names its row and the row's id, as
+`[GamePlayModeId 600]`; `--kind value` and `--kind field` keep one or the other. `--no-self` leaves
+out a package's paths to its own objects where its own name is what matched, so an id finds who
+refers to it. `--by hero` and `--by ability` list the places under the hero and ability their path
+names, a mode's or an event's version of an ability flagged and listed after the game's own.
 
 `asset members` lists a Blueprint class's variables and functions, or with `--function` a
 function's parameters and locals, with what uses each: a field path or a call in a script, a call
