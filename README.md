@@ -124,8 +124,9 @@ cargo test --workspace
 
 ## Command Line
 
-`rivals-cli.exe` ships in the release zip next to the desktop app and scripts the same config-tweak
-and pak INI engine. It reads the game path the app saved, so `--game-root` is only needed when that
+`rivals-cli.exe` ships as its own download, `rivals-cli-<version>-windows-x64.zip`, with the Oodle
+DLL it reads compressed paks with, and scripts the same config-tweak and pak INI engine. The app's
+updater updates only the app, so download a new CLI with each release you want it from. It reads the game path the app saved, so `--game-root` is only needed when that
 is unset or you want a different install. In a dev checkout, run it with
 `cargo run -p rivals-cli -- <args>`.
 
