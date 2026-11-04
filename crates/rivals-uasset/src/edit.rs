@@ -269,8 +269,11 @@ pub struct PackageEdits {
     pub paths: Vec<crate::path_edit::PathEdit>,
     /// Constants a Niagara script's VM program reads, given new values. Each is planned against
     /// the package as the save reads it and made as path edits, which the caller does: see
-    /// `rivals_core::asset_edit` and [`crate::lower_vm_consts`].
+    /// `rivals_core::asset_edit` and [`crate::lower_vm_edits`].
     pub vm_consts: Vec<crate::niagara_vm_edit::VmConstEdit>,
+    /// Colours a Niagara script writes, transformed where they are written, planned and made the
+    /// way `vm_consts` are.
+    pub vm_colors: Vec<crate::niagara_vm_edit::VmColorTransform>,
     /// Drop the names nothing in the package uses. A save of its own: it renumbers every name.
     pub compact_names: bool,
     /// Rename a Blueprint class's member and every use of it the package holds. A save of its own:
@@ -929,6 +932,7 @@ impl PackageEdits {
         self.field_sets.extend(other.field_sets);
         self.paths.extend(other.paths);
         self.vm_consts.extend(other.vm_consts);
+        self.vm_colors.extend(other.vm_colors);
         self.compact_names |= other.compact_names;
         self.rename_members.extend(other.rename_members);
         self.remove_records.extend(other.remove_records);
@@ -987,6 +991,7 @@ impl PackageEdits {
             && self.field_sets.is_empty()
             && self.paths.is_empty()
             && self.vm_consts.is_empty()
+            && self.vm_colors.is_empty()
             && !self.compact_names
             && self.rename_members.is_empty()
             && self.remove_records.is_empty()

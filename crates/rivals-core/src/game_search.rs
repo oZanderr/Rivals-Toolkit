@@ -293,12 +293,10 @@ fn holding_functions(
                 return false;
             }
             let store = order.layers[candidate.layer].store.as_ref();
-            let keep = header_of(store, candidate).is_none_or(|header| {
-                header
-                    .export_map
-                    .iter()
-                    .any(|export| export.class_index == function)
-            });
+            let keep = candidate
+                .versions
+                .and_then(|versions| header_names_class(store, candidate.id, versions, &[function]))
+                .unwrap_or(true);
             let now = done.fetch_add(1, Ordering::Relaxed) + 1;
             if now.is_multiple_of(1024) || now == total {
                 progress(SearchPhase::Headers, now, total);
@@ -308,19 +306,43 @@ fn holding_functions(
         .collect()
 }
 
-/// A package's IoStore header, read from the store holding it.
-fn header_of(store: &dyn IoStoreTrait, candidate: &Candidate) -> Option<FZenPackageHeader> {
-    let (toc_version, header_version) = candidate.versions?;
-    let chunk = FIoChunkId::from_package_id(candidate.id, 0, EIoChunkType::ExportBundleData);
+/// Whether package `id`'s IoStore header, read from `store` by its container's `versions`, gives
+/// one of its exports one of `classes`, a native class as a script import names it. `None` when
+/// the header does not read, which a caller takes as a reason to read the package whole.
+pub(crate) fn header_names_class(
+    store: &dyn IoStoreTrait,
+    id: FPackageId,
+    versions: (EIoStoreTocVersion, EIoContainerHeaderVersion),
+    classes: &[FPackageObjectIndex],
+) -> Option<bool> {
+    let held = export_classes(store, id, versions)?;
+    Some(held.iter().any(|class| classes.contains(class)))
+}
+
+/// The class of each of package `id`'s exports, as its IoStore header gives them, read from
+/// `store` by its container's `versions`. `None` when the header does not read.
+pub(crate) fn export_classes(
+    store: &dyn IoStoreTrait,
+    id: FPackageId,
+    (toc_version, header_version): (EIoStoreTocVersion, EIoContainerHeaderVersion),
+) -> Option<Vec<FPackageObjectIndex>> {
+    let chunk = FIoChunkId::from_package_id(id, 0, EIoChunkType::ExportBundleData);
     let data = store.read(chunk).ok()?;
-    FZenPackageHeader::deserialize(
+    let header = FZenPackageHeader::deserialize(
         &mut Cursor::new(&data),
-        store.package_store_entry(candidate.id),
+        store.package_store_entry(id),
         toc_version,
         header_version,
         Some(ENGINE_VERSION.package_file_version()),
     )
-    .ok()
+    .ok()?;
+    Some(
+        header
+            .export_map
+            .iter()
+            .map(|export| export.class_index)
+            .collect(),
+    )
 }
 
 fn search_one(

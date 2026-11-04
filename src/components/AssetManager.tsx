@@ -18,6 +18,8 @@ import {
   Folder,
   FolderOpen,
   Hammer,
+  ImageDown,
+  ImageUp,
   Layers,
   ListTree,
   Loader2,
@@ -148,7 +150,49 @@ const PROGRESS_EVENTS: [string, string][] = [
   ["repack-iostore-progress", "packing"],
   ["vanilla-extract-progress", "extracting"],
   ["vanilla-rebuild-progress", "rebuilding"],
+  ["texture-batch-progress", "textures"],
 ];
+
+/** The image files a batch saves textures as. One holding high dynamic range values goes out as
+ *  OpenEXR whichever is asked for, but a DDS, which holds its own bytes. */
+const TEXTURE_KINDS = [
+  { id: "png", label: "As PNG" },
+  { id: "tga", label: "As TGA" },
+  { id: "dds", label: "As DDS, Blocks and Mips as Stored" },
+] as const;
+
+interface TextureFailure {
+  entry: string;
+  export?: string;
+  image?: string;
+  reason: string;
+}
+
+interface TexturesOut {
+  packages: number;
+  /** `note` says why one went out as another kind than asked for. */
+  saved: { path: string; note?: string }[];
+  failed: TextureFailure[];
+  /** Virtual textures, the engine's placeholders, whose tiles are not read. */
+  skipped: TextureFailure[];
+  cancelled: boolean;
+}
+
+interface TexturesIn {
+  images: number;
+  packages: number;
+  given: unknown[];
+  failed: TextureFailure[];
+  written: string | null;
+  cancelled: boolean;
+}
+
+function textureFailures(failed: TextureFailure[]): string[] {
+  return failed.map(
+    (failure) =>
+      `${failure.entry}${failure.export ? ` (${failure.export})` : ""}: ${failure.reason}`
+  );
+}
 
 // The three things a repack can produce. Obfuscation is a property of an IoStore container rather
 // than a format of its own, so it rides along here instead of as a separate toggle that would be
@@ -247,6 +291,12 @@ export function AssetManager({
   /// A package the user asked to take back out of the selected mod, awaiting confirmation.
   const [revertPrompt, setRevertPrompt] = useState<string | null>(null);
   const [renamePrompt, setRenamePrompt] = useState<{ path: string; to: string } | null>(null);
+  // Images for a game container's textures go into a mod, named here.
+  const [textureInto, setTextureInto] = useState<{
+    utoc: string;
+    images: string;
+    modName: string;
+  } | null>(null);
   /// A container to read the inspected entry from instead of the selected one: the copy a save
   /// just wrote, or the container a game-wide search found it in.
   const [inspectFrom, setInspectFrom] = useState<string | null>(null);
@@ -1236,6 +1286,112 @@ export function AssetManager({
     }
   }
 
+  /** Saves the textures of `pak`'s packages the filters keep, or every one with none, under a
+   *  folder chosen here. */
+  async function exportTextures(pak: string, filters: string[], kind: string) {
+    if (!gamePath) return showNotice("Set the game path first.", "err");
+    const out = await open({
+      directory: true,
+      multiple: false,
+      title: "Choose a folder for the textures",
+    });
+    if (typeof out !== "string") return;
+    setBusy(true);
+    startOperation("Exporting textures", ["cancel_texture_batch"]);
+    try {
+      const report = await invoke<TexturesOut>("export_textures", {
+        gameRoot: gamePath,
+        container: pak.replace(/\.pak$/i, ".utoc"),
+        filters,
+        out,
+        kind,
+        mip: null,
+      });
+      const failures = textureFailures(report.failed);
+      const asExr = report.saved.filter((t) => t.note && /\.exr$/i.test(t.path)).length;
+      const notes = [
+        asExr > 0 &&
+          `${asExr} with high dynamic range went out as OpenEXR, which ${kind.toUpperCase()} cannot hold`,
+        report.skipped.length > 0 &&
+          `skipped ${report.skipped.length} virtual texture(s), the engine's placeholders`,
+      ].filter(Boolean);
+      const saved = `${report.cancelled ? "Cancelled after saving" : "Saved"} ${report.saved.length} texture(s) of ${report.packages} package(s) to ${out}${notes.map((note) => `; ${note}`).join("")}`;
+      if (failures.length > 0)
+        showNotice(`${saved}; ${failures.length} failed (hover for why)`, "err", {
+          duration: 0,
+          details: failures,
+        });
+      else showNotice(saved, "ok", { revealPath: out });
+    } catch (e: unknown) {
+      showNotice(String(e), "err");
+    } finally {
+      setOperation(null);
+      setBusy(false);
+    }
+  }
+
+  /** Gives `pak`'s textures the images of a folder chosen here: into the mod itself, or for a game
+   *  container into a mod named next. */
+  async function replaceTextures(pak: string, isMod: boolean) {
+    if (!gamePath) return showNotice("Set the game path first.", "err");
+    const images = await open({
+      directory: true,
+      multiple: false,
+      title: "Choose the folder of images, each named for its texture as an export names them",
+    });
+    if (typeof images !== "string") return;
+    const utoc = pak.replace(/\.pak$/i, ".utoc");
+    if (isMod) return runTextureImport(utoc, images, utoc);
+    const modName = await invoke<string>("get_asset_mod_name").catch(() => "");
+    setTextureInto({ utoc, images, modName });
+  }
+
+  async function runTextureImport(utoc: string, images: string, modName: string) {
+    setBusy(true);
+    startOperation("Replacing textures", ["cancel_texture_batch"]);
+    try {
+      const report = await invoke<TexturesIn>("import_textures", {
+        gameRoot: gamePath,
+        container: utoc,
+        filters: [],
+        images,
+        modName,
+        quality: "default",
+        replace: false,
+      });
+      const failures = textureFailures(report.failed);
+      const failed = failures.length > 0 ? `; ${failures.length} failed (hover for why)` : "";
+      const details = failures.length > 0 ? { duration: 0, details: failures } : undefined;
+      if (report.cancelled) {
+        showNotice("Cancelled; the mod was left as it was", "info");
+      } else if (!report.written) {
+        showNotice(
+          report.images === 0 ? `${images} holds no image` : `No texture took an image${failed}`,
+          "err",
+          details
+        );
+      } else {
+        const written = report.written;
+        showNotice(
+          `Gave ${report.given.length} texture(s) in ${report.packages} package(s) new pixels in ${written.split(/[\\/]/).pop()}${failed}`,
+          failed ? "err" : "ok",
+          details ?? { revealPath: written }
+        );
+        pakContentsCacheRef.current.delete(written.replace(/\.utoc$/i, ".pak"));
+        emitModsChanged({
+          modsFolder: written.replace(/[\\/][^\\/]+$/, ""),
+          source: "AssetManager",
+        });
+        await listPaks(true);
+      }
+    } catch (e: unknown) {
+      showNotice(String(e), "err");
+    } finally {
+      setOperation(null);
+      setBusy(false);
+    }
+  }
+
   async function exportLegacySelected() {
     if (selectedUtocEntries.length === 0 || !selectedPak) return;
     const dir = await open({ directory: true, multiple: false });
@@ -1774,6 +1930,30 @@ export function AssetManager({
                               Repack in place…
                             </ContextMenuItem>
                           )}
+                          {isIoStore && (
+                            <>
+                              <ContextMenuSub>
+                                <ContextMenuSubTrigger>
+                                  <ImageDown size={14} />
+                                  Export Textures
+                                </ContextMenuSubTrigger>
+                                <ContextMenuSubContent>
+                                  {TEXTURE_KINDS.map((kind) => (
+                                    <ContextMenuItem
+                                      key={kind.id}
+                                      onSelect={() => void exportTextures(p, [], kind.id)}
+                                    >
+                                      {kind.label}…
+                                    </ContextMenuItem>
+                                  ))}
+                                </ContextMenuSubContent>
+                              </ContextMenuSub>
+                              <ContextMenuItem onSelect={() => void replaceTextures(p, isMod)}>
+                                <ImageUp size={14} />
+                                Replace Textures from Folder…
+                              </ContextMenuItem>
+                            </>
+                          )}
                           <ContextMenuSeparator />
                           <ContextMenuItem onSelect={() => copyToClipboard(p, "path")}>
                             <Copy size={14} />
@@ -2265,6 +2445,36 @@ export function AssetManager({
                             </ContextMenuSubContent>
                           </ContextMenuSub>
                         )}
+                        {entry.source === "utoc" && INSPECTABLE.test(entry.path) && (
+                          <ContextMenuSub>
+                            <ContextMenuSubTrigger>
+                              <ImageDown />
+                              {showExtractSelected
+                                ? `Export Textures of ${selectedEntries.size} Selected`
+                                : "Export Textures"}
+                            </ContextMenuSubTrigger>
+                            <ContextMenuSubContent>
+                              {TEXTURE_KINDS.map((kind) => (
+                                <ContextMenuItem
+                                  key={kind.id}
+                                  onSelect={() =>
+                                    void exportTextures(
+                                      selectedPak,
+                                      showExtractSelected
+                                        ? selectedUtocEntries
+                                            .map((e) => e.path)
+                                            .filter((path) => INSPECTABLE.test(path))
+                                        : [entry.path],
+                                      kind.id
+                                    )
+                                  }
+                                >
+                                  {kind.label}…
+                                </ContextMenuItem>
+                              ))}
+                            </ContextMenuSubContent>
+                          </ContextMenuSub>
+                        )}
                         {entry.source === "utoc" && !entry.path.endsWith(".ubulk") && (
                           <ContextMenuItem
                             onSelect={() =>
@@ -2560,6 +2770,44 @@ export function AssetManager({
               }}
             >
               Rename
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={textureInto !== null}
+        onOpenChange={(open) => !open && setTextureInto(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Replace textures into a mod</AlertDialogTitle>
+            <AlertDialogDescription>
+              Gives the textures of {textureInto?.utoc.split(/[\\/]/).pop()} the images in{" "}
+              <span className="font-mono">{textureInto?.images}</span>, each named for its texture
+              as an export names them, in one rewrite of the mod named here. A texture the mod
+              already holds is built on.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <Input
+            aria-label="Mod"
+            value={textureInto?.modName ?? ""}
+            onChange={(e) =>
+              setTextureInto((held) => (held ? { ...held, modName: e.target.value } : held))
+            }
+            className="h-8 font-mono text-xs"
+          />
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={!textureInto?.modName.trim()}
+              onClick={() => {
+                const held = textureInto;
+                setTextureInto(null);
+                if (held) void runTextureImport(held.utoc, held.images, held.modName.trim());
+              }}
+            >
+              Replace
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

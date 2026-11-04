@@ -2,7 +2,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { createTauri, installTauri, type TauriMock } from "@/test/tauri";
+import { createTauri, dialogStub, installTauri, type TauriMock } from "@/test/tauri";
 
 vi.mock("@tauri-apps/api/core", async () => {
   const { invokeProxy } = await import("@/test/tauri");
@@ -1383,5 +1383,181 @@ describe("AssetInspector script text", () => {
         (screen.getByRole("button", { name: /Edit as text/ }) as HTMLButtonElement).disabled
       ).toBe(true)
     );
+  });
+});
+
+/** A package holding one texture. */
+function texturePackage() {
+  return {
+    ...blueprint(),
+    exports: [exp(0, "T_Test", "Texture2D")],
+  };
+}
+
+const TEXTURE_INFO = {
+  export: 0,
+  name: "T_Test",
+  layout: {
+    class: "Texture2D",
+    platforms: [
+      {
+        format: "PF_DXT1",
+        size_x: 256,
+        size_y: 256,
+        slices: 1,
+        cubemap: false,
+        first_mip: 0,
+        mips: [
+          { size_x: 256, size_y: 256, size_z: 1, placement: "uptnl", size: 32768 },
+          { size_x: 128, size_y: 128, size_z: 1, placement: "inline", size: 8192 },
+        ],
+      },
+    ],
+  },
+  absent_mips: [0],
+};
+
+function textureTauri(): TauriMock {
+  return tauri(texturePackage())
+    .on("texture_info", () => TEXTURE_INFO)
+    .on("texture_preview", () => new ArrayBuffer(8))
+    .on("export_texture", ({ path }) => ({
+      path,
+      export: 0,
+      mip: 1,
+      mips: 1,
+      format: "PF_DXT1",
+      width: 128,
+      height: 128,
+    }));
+}
+
+describe("AssetInspector textures", () => {
+  it("opens a texture on its mips, and saves one as the image file chosen", async () => {
+    mock = textureTauri();
+    installTauri(mock);
+    dialogStub.save.mockResolvedValueOnce("C:\\Out\\T_Test.dds");
+    mount();
+    const user = userEvent.setup();
+    expect(await screen.findByText("PF_DXT1, 256x256, 2 mip(s)")).toBeTruthy();
+    expect(screen.getByText("not installed")).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Export…" }));
+    await waitFor(() => expect(mock.callsTo("export_texture")).toHaveLength(1));
+    expect(mock.callsTo("export_texture")[0]).toEqual({
+      gameRoot: GAME,
+      container: CONTAINER,
+      entry: ENTRY,
+      export: 0,
+      mip: null,
+      path: "C:\\Out\\T_Test.dds",
+    });
+    expect(await screen.findByText(/Saved mip 1, 128x128/)).toBeTruthy();
+  });
+
+  it("queues an image as the texture's new pixels, and the save sends it", async () => {
+    mock = textureTauri();
+    installTauri(mock);
+    dialogStub.open.mockResolvedValueOnce("C:\\In\\T_New.png");
+    mount();
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Replace…" }));
+    expect(await screen.findByText("C:\\In\\T_New.png")).toBeTruthy();
+
+    await user.click(await screen.findByRole("button", { name: /Save as mod/ }));
+    await waitFor(() =>
+      expect(lastSave().textures).toEqual([
+        { export: 0, image: "C:\\In\\T_New.png", quality: "default" },
+      ])
+    );
+    expect(lastSave().values).toEqual([]);
+  });
+});
+
+/** A lone colour curve, two RGBA samples, which opens on the Colour view. */
+function curvePackage() {
+  const lut = [2, 0.5, 0.25, 1, 1, 1, 1, 0].map((value) => ({ kind: "float", value }));
+  return {
+    ...blueprint(),
+    exports: [
+      exp(0, "NiagaraDataInterfaceColorCurve_0", "NiagaraDataInterfaceColorCurve", [
+        { name: "ShaderLUT", value: { kind: "array", items: lut }, span: [100, 140] },
+      ]),
+    ],
+  };
+}
+
+const CURVE_REPORT = {
+  sources: [
+    {
+      kind: "lut",
+      export: 0,
+      object_name: "NiagaraDataInterfaceColorCurve_0",
+      class_name: "NiagaraDataInterfaceColorCurve",
+      peak: 2,
+      grey: false,
+      enemy: false,
+      samples: [
+        [2, 0.5, 0.25, 1],
+        [1, 1, 1, 0],
+      ],
+      min_time: 0,
+      max_time: 1,
+      use_lut: true,
+      keys: 0,
+    },
+  ],
+  gpu_scripts: [],
+  renderers: [],
+};
+
+const PLANNED = [
+  { export: "0", path: "ShaderLUT[0]", op: "set", text: "1", was: "2" },
+  { export: "0", path: "ShaderLUT[2]", op: "set", text: "0.5", was: "0.25" },
+];
+
+function curveTauri(): TauriMock {
+  return tauri(curvePackage())
+    .on("niagara_colors", () => CURVE_REPORT)
+    .on("recolor_colors", ({ colors }) =>
+      (colors as number[][]).map(([r, g, b, a]) => [r * 0.5, g, b * 2, a])
+    )
+    .on("plan_recolor", () => ({ paths: PLANNED, sources: 1, scripts: 0, notes: [] }));
+}
+
+describe("AssetInspector colours", () => {
+  it("opens a colour curve on the Colour view and saves a tool's change as element edits", async () => {
+    mock = curveTauri();
+    installTauri(mock);
+    mount();
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Apply to this curve" }));
+    await user.click(await screen.findByRole("button", { name: /Save as mod/ }));
+    await waitFor(() =>
+      expect(lastSave().values).toEqual([
+        { offset: 100, name: "ShaderLUT", kind: "array", op: "set_element", index: 0, text: "1" },
+        { offset: 100, name: "ShaderLUT", kind: "array", op: "set_element", index: 2, text: "0.5" },
+        { offset: 100, name: "ShaderLUT", kind: "array", op: "set_element", index: 4, text: "0.5" },
+        { offset: 100, name: "ShaderLUT", kind: "array", op: "set_element", index: 6, text: "2" },
+      ])
+    );
+  });
+
+  it("recolours the whole effect as the planned path edits in one save", async () => {
+    mock = curveTauri();
+    installTauri(mock);
+    mount();
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Recolour effect" }));
+    await user.click(screen.getByRole("button", { name: "Recolour and save" }));
+    await waitFor(() => expect(mock.callsTo("save_asset_edits")).toHaveLength(1));
+    expect(mock.callsTo("plan_recolor")[0]).toMatchObject({
+      container: CONTAINER,
+      entry: ENTRY,
+      pick: {},
+      tool: { tool: "paint", rgb: [0.6, 0.2, 1] },
+    });
+    expect(lastSave().paths).toEqual(PLANNED);
+    expect(lastSave().values).toEqual([]);
   });
 });

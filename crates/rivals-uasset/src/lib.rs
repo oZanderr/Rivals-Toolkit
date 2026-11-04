@@ -148,11 +148,11 @@ pub use niagara_vm::{
     VmAttribute, VmCensus, VmComponentKind, VmConst, VmConstLayout, VmDataSet, VmFunction,
     VmInstruction, VmLeaf, VmLine, VmLoc, VmOperand, VmParam, VmProgram, VmRole, VmScript, VmShape,
     VmStop, VmTable, VmTrace, VmType, const_layout, decode_vm, encode_vm, read_vm_script,
-    show_bits, trace_outputs, vm_census, vm_lines, vm_op_name, vm_shape,
+    show_bits, store_params, trace_outputs, vm_census, vm_lines, vm_op_name, vm_shape,
 };
 pub use niagara_vm_edit::{
-    LoweredVm, VmConstEdit, VmEditPlan, lower_vm_consts, parse_vm_value, verify_vm_edits,
-    vm_edit_refusal,
+    ColorTransform, LoweredVm, VmColorTransform, VmConstEdit, VmEditPlan, lower_vm_edits,
+    parse_vm_value, verify_vm_edits, vm_edit_refusal,
 };
 pub use package::{
     AppliedFixup, AssetBundle, ExportRow, ExportStatus, ImportInfo, PackageInfo, ParseOptions,
@@ -175,10 +175,11 @@ pub use stock::{StockGap, StockGapKind, StockRender};
 pub use stringtable::{StringEntrySpan, StringTable, StringTableEntry, StringTableLayout};
 pub use struct_field::{AddField, fields_held, member_shown_as, new_field_names, struct_of};
 pub use structs::stored_whole;
+pub use texture::VIRTUAL as VIRTUAL_TEXTURE;
 pub use texture::{
-    NewMip, TextureEdit, TextureImage, TextureLayout, TextureMip, TexturePlatform, encode_texture,
-    is_texture_class, patch_textures_alone, read_texture, read_texture_export, texture_lock,
-    texture_save_lock, verify_texture_save,
+    NewMip, TEXTURE_CLASSES, TextureEdit, TextureImage, TextureLayout, TextureMip, TexturePlatform,
+    encode_texture, is_texture_class, patch_textures_alone, read_texture, read_texture_export,
+    texture_lock, texture_save_lock, verify_texture_save,
 };
 pub use unversion::{Unversioned, unversion_package};
 pub use ustruct::type_text as property_type_text;

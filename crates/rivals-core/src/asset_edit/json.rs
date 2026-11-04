@@ -61,6 +61,10 @@ pub struct EditList {
     /// what it read when written. See [`rivals_uasset::VmConstEdit`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub vm_consts: Vec<rivals_uasset::VmConstEdit>,
+    /// Colours a Niagara script writes, transformed just before they are written. See
+    /// [`rivals_uasset::VmColorTransform`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vm_colors: Vec<rivals_uasset::VmColorTransform>,
     /// Drop the names nothing in the package uses. A save of its own.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub compact_names: bool,
@@ -194,6 +198,7 @@ impl EditList {
             && self.field_sets.is_empty()
             && self.paths.is_empty()
             && self.vm_consts.is_empty()
+            && self.vm_colors.is_empty()
             && !self.compact_names
             && self.add_exports.is_empty()
             && self.add_variables.is_empty()
@@ -344,6 +349,7 @@ impl EditList {
             field_sets: self.field_sets,
             paths: self.paths,
             vm_consts: self.vm_consts,
+            vm_colors: self.vm_colors,
             compact_names: self.compact_names,
             // A member is renamed across its whole mod, which `rename_member` plans; one package's
             // edit file does not carry it.

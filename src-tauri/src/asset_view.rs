@@ -8,6 +8,7 @@ use rivals_core::asset_edit::{self, AssetEditRequest};
 use rivals_core::inherit;
 use rivals_core::localization;
 use rivals_core::mappings;
+use rivals_core::niagara_colors::{self, ColorReport, Recolor, RecolorPick, RecolorPlan};
 use rivals_core::schema_synth::{self, PackageSource};
 use rivals_uasset::{AssetBundle, HexRow, PackageEdits, ParsedPackage, RemovalPlan};
 
@@ -471,6 +472,73 @@ pub(crate) async fn export_vm_view(
     .map_err(|e| e.to_string())?
 }
 
+/// Where the inspected Niagara package's colours come from.
+#[tauri::command]
+pub(crate) async fn niagara_colors(
+    state: State<'_, SettingsState>,
+    game_root: String,
+    container: String,
+    entry: String,
+) -> Result<ColorReport, String> {
+    let usmap = configured_usmap(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let schema = mappings::resolve(None, usmap.as_deref())
+            .and_then(|path| mappings::load(&path))
+            .ok();
+        let parsed = parse(&game_root, &container, &entry, usmap)?;
+        Ok(niagara_colors::effect_colors(
+            &parsed,
+            &inherit::ArchetypeSource {
+                game_root: &game_root,
+                container: &container,
+                mappings: schema.as_deref(),
+            },
+        ))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// `colors` with a recolour tool applied, for a draft to hold.
+#[tauri::command]
+pub(crate) fn recolor_colors(colors: Vec<[f32; 4]>, tool: Recolor) -> Vec<[f32; 4]> {
+    colors
+        .into_iter()
+        .map(|color| niagara_colors::recolor(color, tool))
+        .collect()
+}
+
+/// The edits recolouring the colours `pick` names in the inspected package makes, each held to
+/// the value it read.
+#[tauri::command]
+pub(crate) async fn plan_recolor(
+    state: State<'_, SettingsState>,
+    game_root: String,
+    container: String,
+    entry: String,
+    pick: RecolorPick,
+    tool: Recolor,
+) -> Result<RecolorPlan, String> {
+    let usmap = configured_usmap(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let schema = mappings::resolve(None, usmap.as_deref())
+            .and_then(|path| mappings::load(&path))
+            .ok();
+        let parsed = parse(&game_root, &container, &entry, usmap)?;
+        let report = niagara_colors::effect_colors(
+            &parsed,
+            &inherit::ArchetypeSource {
+                game_root: &game_root,
+                container: &container,
+                mappings: schema.as_deref(),
+            },
+        );
+        niagara_colors::recolor_edits(&parsed, &report, &pick, tool, schema.as_deref())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 pub(crate) async fn export_script_view(
     state: State<'_, SettingsState>,
@@ -710,7 +778,7 @@ pub(crate) async fn search_mod(
 }
 
 /// A request that reads the package without changing it.
-fn read_request<'a>(
+pub(crate) fn read_request<'a>(
     game_root: &'a str,
     container: &'a str,
     entry: &'a str,

@@ -21,6 +21,7 @@ mod paths;
 mod plugins;
 mod settings;
 mod sounds;
+mod textures;
 mod translations;
 mod tweaks;
 mod update_check;
@@ -202,6 +203,9 @@ pub fn run() {
             asset_view::value_bytes,
             asset_view::export_script_view,
             asset_view::export_vm_view,
+            asset_view::niagara_colors,
+            asset_view::recolor_colors,
+            asset_view::plan_recolor,
             asset_view::script_call_preview,
             asset_view::assemble_preview,
             asset_view::new_function_preview,
@@ -228,6 +232,12 @@ pub fn run() {
             asset_view::save_export_copy,
             game_search::search_game,
             game_search::cancel_game_search,
+            textures::texture_info,
+            textures::texture_preview,
+            textures::export_texture,
+            textures::export_textures,
+            textures::import_textures,
+            textures::cancel_texture_batch,
             import_index::import_index_status,
             import_index::build_import_index,
             import_index::importers_of,

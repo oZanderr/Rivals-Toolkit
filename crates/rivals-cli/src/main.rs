@@ -157,12 +157,24 @@ enum AssetCmd {
     /// a mod pak: the literal itself where the operand is its only reader, or else a literal of
     /// the operand's own, so other readers of the old one keep it.
     EditVm(EditVmArgs),
+    /// List where a Niagara effect's colours come from, by emitter: each colour curve's baked
+    /// samples, which are what the game reads, its colour arrays and parameters, the colours its
+    /// CPU scripts write with the constants `asset edit-vm` changes, and the colours its
+    /// renderers' materials draw with.
+    Colors(ColorsArgs),
+    /// Tint, paint or turn the hue of a Niagara effect's colour curves, arrays and parameters,
+    /// every one or those picked, and with `--scripts` and `--materials` the colours its scripts
+    /// write and its renderers' materials draw with, and write the result into a mod pak.
+    Recolor(RecolorArgs),
     /// List a Blueprint's variables and functions with what references each, in the package and
     /// the rest of its mod, and which nothing does.
     Members(MembersArgs),
-    /// Show a texture's pixel format, size and mips, save one of its mips as a PNG or an OpenEXR
-    /// file, or give it new pixels from one.
+    /// Show a texture's pixel format, size and mips, save one of its mips as an image file (PNG,
+    /// TGA, BMP, DDS or OpenEXR), or give it new pixels from one (those or a JPEG).
     Texture(TextureArgs),
+    /// Save the textures of every package a filter matches as image files, or give them new pixels
+    /// from a folder of images, written into a mod in one rewrite.
+    Textures(TexturesArgs),
     /// Rename a Blueprint's variable, function, event or widget, or a function's parameter or
     /// local, along with every use of it in the package and the rest of the mod it is saved into.
     RenameMember(RenameMemberArgs),
@@ -627,6 +639,85 @@ struct EditVmArgs {
 
     #[command(flatten)]
     write: AssetWriteArgs,
+}
+
+#[derive(Args)]
+struct ColorsArgs {
+    #[command(flatten)]
+    asset: AssetArgs,
+
+    /// Print every sample of each curve, not only its first, middle and last.
+    #[arg(long)]
+    samples: bool,
+}
+
+#[derive(Args)]
+#[command(group(clap::ArgGroup::new("tool").required(true).args(["tint", "paint", "hue"])))]
+struct RecolorArgs {
+    #[command(flatten)]
+    asset: AssetArgs,
+
+    /// Only this export's colours: its index, as `asset info` prints it, or its name or path.
+    /// Repeatable. Each of an emitter's scripts keeps its own copy of a curve, so recolouring one
+    /// copy leaves the others.
+    #[arg(long = "export", value_name = "EXPORT")]
+    exports: Vec<String>,
+
+    /// Only the colour of this name: a parameter such as `User.Color`, a script colour such as
+    /// `Particles.Color` or `<emitter>.Color02` (with `--scripts`), or a material colour (with
+    /// `--materials`). A script colour's name is the one `asset colors` lists, and the pick takes
+    /// every script that writes it, so `--export` narrows it to one.
+    #[arg(long, value_name = "NAME")]
+    param: Option<String>,
+
+    /// Only the colours whose names mention enemies, as the colours the game shows for the other
+    /// team do.
+    #[arg(long)]
+    enemy: bool,
+
+    /// Also change the colours CPU scripts write for a renderer to draw, such as the
+    /// `Initial * (1.0, 0.26, 0.0)` an update script gives each particle, just before each is
+    /// written. Most effects keep their colours there rather than in curves.
+    #[arg(long)]
+    scripts: bool,
+
+    /// Also change the colour parameters the renderers' materials draw with, such as a tracer's
+    /// `Enemy1Color01`, each set on the renderer, which the engine applies over the material. Only
+    /// this effect changes, whatever else draws with the material.
+    #[arg(long)]
+    materials: bool,
+
+    /// Multiply red, green and blue by these, past 1 to brighten.
+    #[arg(long, value_name = "R,G,B", value_parser = parse_rgb)]
+    tint: Option<[f32; 3]>,
+
+    /// Give every colour this one's hue and saturation at its own brightness, so fades and HDR
+    /// glows keep their shape.
+    #[arg(long, value_name = "R,G,B", value_parser = parse_rgb)]
+    paint: Option<[f32; 3]>,
+
+    /// Turn every colour's hue by this many degrees, leaving greys grey.
+    #[arg(long, value_name = "DEGREES", allow_hyphen_values = true)]
+    hue: Option<f32>,
+
+    #[command(flatten)]
+    write: AssetWriteArgs,
+}
+
+fn parse_rgb(text: &str) -> Result<[f32; 3], String> {
+    let parts: Vec<f32> = text
+        .split(',')
+        .map(|part| {
+            part.trim()
+                .parse::<f32>()
+                .map_err(|e| format!("{part}: {e}"))
+        })
+        .collect::<Result<_, _>>()?;
+    match parts.as_slice() {
+        [r, g, b] if parts.iter().all(|c| c.is_finite() && *c >= 0.0) => Ok([*r, *g, *b]),
+        [_, _, _] => Err("each channel is a number 0 or more".to_string()),
+        _ => Err("give three numbers, as R,G,B".to_string()),
+    }
 }
 
 #[derive(Args)]
@@ -3842,6 +3933,8 @@ fn run(cli: &Cli) -> Result<(), String> {
         Command::Asset(AssetCmd::Script(a)) => asset_script(cli, &app, a),
         Command::Asset(AssetCmd::Vm(a)) => asset_vm(cli, &app, a),
         Command::Asset(AssetCmd::EditVm(a)) => asset_edit_vm(cli, &app, a),
+        Command::Asset(AssetCmd::Colors(a)) => asset_colors(cli, &app, a),
+        Command::Asset(AssetCmd::Recolor(a)) => asset_recolor(cli, &app, a),
         Command::Asset(AssetCmd::EditScript(a)) => asset_edit_script(cli, &app, a),
         Command::Asset(AssetCmd::WidenScript(a)) => asset_widen_script(cli, &app, a),
         Command::Asset(AssetCmd::AssembleScript(a)) => asset_assemble_script(cli, &app, a),
@@ -3871,6 +3964,7 @@ fn run(cli: &Cli) -> Result<(), String> {
         Command::Asset(AssetCmd::Imports(a)) => asset_imports_table(cli, &app, a),
         Command::Asset(AssetCmd::Members(a)) => asset_members(cli, &app, a),
         Command::Asset(AssetCmd::Texture(a)) => asset_texture(cli, &app, a),
+        Command::Asset(AssetCmd::Textures(a)) => asset_textures(cli, &app, a),
         Command::Asset(AssetCmd::RenameMember(a)) => asset_rename_member(cli, &app, a),
         Command::Asset(AssetCmd::RemoveMember(a)) => asset_remove_member(cli, &app, a),
         Command::Asset(AssetCmd::Names(a)) => asset_names(cli, &app, a),
@@ -6945,15 +7039,19 @@ struct TextureArgs {
     #[arg(long, value_name = "EXPORT")]
     export: Vec<String>,
 
-    /// Save a mip as this PNG file, or as an OpenEXR (.exr) file for a texture holding high dynamic
-    /// range values. A cube's faces and an array's or a volume's slices are stacked top to bottom.
+    /// Save a mip as this image file, of the kind its extension names: a PNG, TGA or BMP for an
+    /// 8-bit texture, an OpenEXR (.exr) file for one holding high dynamic range values, or for
+    /// either a DDS of the texture's own bytes for that mip and every one below it. A cube's faces
+    /// and an array's or a volume's slices are stacked top to bottom; a DDS keeps them as its own.
     #[arg(long, value_name = "FILE", conflicts_with = "input")]
     out: Option<String>,
 
     /// Give the texture this image's pixels, at the image's size, encoded in the texture's own pixel
-    /// format with its mips rebuilt from them, and save it into the mod: a PNG, or an OpenEXR (.exr)
-    /// file for a texture holding high dynamic range values. A cube's six faces and an array's or a
-    /// volume's slices are stacked top to bottom, as `--out` writes them.
+    /// format with its mips rebuilt from them, and save it into the mod: a PNG, TGA, BMP or JPEG for
+    /// an 8-bit texture, an OpenEXR (.exr) file for one holding high dynamic range values. A cube's
+    /// six faces and an array's or a volume's slices are stacked top to bottom, as `--out` writes
+    /// them. A DDS in the texture's own format gives its mips as they are, the ones it lacks built
+    /// from its smallest; one in another format is encoded again from its largest mip.
     #[arg(long = "in", value_name = "FILE")]
     input: Vec<String>,
 
@@ -6968,6 +7066,103 @@ struct TextureArgs {
 
     #[command(flatten)]
     write: AssetWriteArgs,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum ImageArg {
+    Png,
+    Dds,
+    Tga,
+    Bmp,
+    Exr,
+}
+
+impl From<ImageArg> for rivals_core::image_file::ImageKind {
+    fn from(kind: ImageArg) -> Self {
+        match kind {
+            ImageArg::Png => Self::Png,
+            ImageArg::Dds => Self::Dds,
+            ImageArg::Tga => Self::Tga,
+            ImageArg::Bmp => Self::Bmp,
+            ImageArg::Exr => Self::Exr,
+        }
+    }
+}
+
+impl From<QualityArg> for rivals_core::texture::Quality {
+    fn from(quality: QualityArg) -> Self {
+        match quality {
+            QualityArg::Fast => Self::Fast,
+            QualityArg::Default => Self::Default,
+            QualityArg::Best => Self::Best,
+        }
+    }
+}
+
+#[derive(Args)]
+struct TexturesArgs {
+    /// What to read: `game` for every package the game ships, an installed IoStore mod by its whole
+    /// name or a path, or a game container such as `pakchunk0-Windows`.
+    #[arg(value_name = "SOURCE")]
+    source: String,
+
+    /// Keep only packages whose path contains this text, case insensitive: a piece of the container
+    /// path (`Characters/1014`) or of the package name (`/Game/Marvel/Characters/1014`), with
+    /// either slash. Repeatable: a package any of them matches is kept.
+    #[arg(long, value_name = "TEXT")]
+    filter: Vec<String>,
+
+    /// Save every texture the packages hold under this folder, each at its package's path, with
+    /// the texture's name after it when the package is not named for it.
+    #[arg(
+        long,
+        value_name = "DIR",
+        conflicts_with = "input",
+        required_unless_present = "input"
+    )]
+    out: Option<String>,
+
+    /// The kind of image `--out` saves. A texture holding high dynamic range values goes out as
+    /// OpenEXR when asked for an 8-bit kind, and an 8-bit one as a PNG when asked for OpenEXR; a
+    /// DDS holds either as the texture's own bytes.
+    #[arg(long, value_enum, default_value = "png", requires = "out")]
+    image: ImageArg,
+
+    /// The mip `--out` saves, 0 being the largest. Defaults to the largest each package has.
+    #[arg(long, value_name = "N", requires = "out")]
+    mip: Option<usize>,
+
+    /// Give each texture the image named for it in this folder, as `--out` names them, or named as
+    /// its package is anywhere in it when no other package has that name, and save every package
+    /// they change into the mod in one rewrite. Images of any kind `asset texture --in` takes.
+    #[arg(long = "in", value_name = "DIR")]
+    input: Option<String>,
+
+    /// How hard `--in` works at BC7 and BC6H, the formats that take long.
+    #[arg(long, value_enum, default_value = "default", requires = "input")]
+    quality: QualityArg,
+
+    /// The mod to save into, named as a save's `--into` is. Defaults to the one the desktop app
+    /// last saved into, then to `AssetEdits`.
+    #[arg(long, value_name = "MOD", requires = "input")]
+    into: Option<String>,
+
+    /// Start each package the mod already holds again from SOURCE. Without this a package the mod
+    /// holds is read from the mod, so its other edits stay.
+    #[arg(long, requires = "input")]
+    overwrite: bool,
+
+    /// Encode, patch and check everything, and write nothing.
+    #[arg(long, requires = "input")]
+    dry_run: bool,
+
+    /// What the save leaves behind. A batch writes an IoStore container, which is what the game
+    /// loads packages from. Defaults to the desktop app's setting.
+    #[arg(long, value_enum, requires = "input")]
+    format: Option<FormatArg>,
+
+    #[command(flatten)]
+    write: WriteArgs,
 }
 
 #[derive(Args)]
@@ -7164,11 +7359,7 @@ fn asset_texture(cli: &Cli, app: &settings::AppSettings, args: &TextureArgs) -> 
         let dry_run = args.write.save.dry_run;
         block_for_game(cli, dry_run)?;
         let (request, mod_name) = write_request(cli, app, &args.asset, &args.write, &root)?;
-        let quality = match args.quality {
-            QualityArg::Fast => rivals_core::texture::Quality::Fast,
-            QualityArg::Default => rivals_core::texture::Quality::Default,
-            QualityArg::Best => rivals_core::texture::Quality::Best,
-        };
+        let quality = args.quality.into();
         if args.input.len() == 1 && args.export.len() <= 1 {
             let report = asset::import_texture_image(
                 &request,
@@ -7246,8 +7437,8 @@ fn asset_texture(cli: &Cli, app: &settings::AppSettings, args: &TextureArgs) -> 
         let saved = asset::save_texture_image(&request, export, args.mip, Path::new(out))?;
         return emit(cli, &saved, || {
             outln!(
-                "saved mip {} of export {}, {} at {}x{}, to {}",
-                saved.mip,
+                "saved {} of export {}, {} from {}x{}, to {}",
+                asset::mip_range(saved.mip, saved.mips),
                 saved.export,
                 saved.format,
                 saved.width,
@@ -7271,15 +7462,85 @@ fn imported(report: &rivals_core::texture::ImportReport, written: bool) -> Strin
         String::new()
     };
     format!(
-        "{verb} {} ({}) the image's pixels: {}x{} to {}x{}{layers}, {} mip(s)",
+        "{verb} {} ({}) the image's pixels: {}x{} to {}x{}{layers}, {} mip(s){}",
         report.name,
         report.format,
         report.from.0,
         report.from.1,
         report.to.0,
         report.to.1,
-        report.mips
+        report.mips,
+        asset::dds_note(report)
     )
+}
+
+fn asset_textures(
+    cli: &Cli,
+    app: &settings::AppSettings,
+    args: &TexturesArgs,
+) -> Result<(), String> {
+    let root = resolve::game_root(cli.game_root.as_deref(), app)?;
+    let container = resolve::source(&args.source, &root)?;
+    let source = rivals_core::texture_batch::TextureSource {
+        game_root: &root,
+        container: &container,
+        whole_game: resolve::is_game(&args.source),
+        filters: &args.filter,
+    };
+    let started = std::time::Instant::now();
+    if let Some(out) = &args.out {
+        let report = asset::export_textures(
+            cli.usmap.as_deref(),
+            app.usmap_path.as_deref(),
+            &source,
+            Path::new(out),
+            args.image.into(),
+            args.mip,
+        )?;
+        let failed = report.failed.len();
+        emit(cli, &report, || {
+            asset::print_textures_out(&report, started.elapsed(), &mut |line| outln!("{line}"))
+        })?;
+        if failed > 0 {
+            return Err(format!("{failed} texture(s) failed"));
+        }
+        return Ok(());
+    }
+    let input = args
+        .input
+        .as_deref()
+        .ok_or("give --out DIR to save textures, or --in DIR to replace them")?;
+    block_for_game(cli, args.dry_run)?;
+    let mod_name = into_mod(app, args.into.as_deref(), &root, true)?;
+    let report = asset::import_textures(
+        cli.usmap.as_deref(),
+        app.usmap_path.as_deref(),
+        &rivals_core::texture_batch::TextureImports {
+            source,
+            images: Path::new(input),
+            mod_name: &mod_name,
+            quality: args.quality.into(),
+            dry_run: args.dry_run,
+        },
+        &rivals_core::asset_edit::SaveOptions {
+            replace: args.overwrite,
+            target: args
+                .format
+                .map(Into::into)
+                .or(app.asset_save_target)
+                .unwrap_or_default(),
+            iostore: args.write.io(app, None),
+            ..Default::default()
+        },
+    )?;
+    let failed = report.failed.len();
+    emit(cli, &report, || {
+        asset::print_textures_in(&report, started.elapsed(), &mut |line| outln!("{line}"))
+    })?;
+    if failed > 0 {
+        return Err(format!("{failed} image(s) failed"));
+    }
+    Ok(())
 }
 
 fn asset_imports_table(
@@ -7428,6 +7689,57 @@ fn asset_vm(cli: &Cli, app: &settings::AppSettings, args: &VmArgs) -> Result<(),
             &mut |line| outln!("{line}"),
         )
     })
+}
+
+fn asset_colors(cli: &Cli, app: &settings::AppSettings, args: &ColorsArgs) -> Result<(), String> {
+    let root = resolve::game_root(cli.game_root.as_deref(), app)?;
+    let request = asset_request(cli, app, &args.asset, &root)?;
+    let report = asset::colors(&request)?;
+    emit(cli, &report, || {
+        asset::print_colors(&report, args.samples, &mut |line| outln!("{line}"))
+    })
+}
+
+fn asset_recolor(cli: &Cli, app: &settings::AppSettings, args: &RecolorArgs) -> Result<(), String> {
+    use rivals_core::niagara_colors::{Recolor, RecolorPick};
+    let root = resolve::game_root(cli.game_root.as_deref(), app)?;
+    let (request, mod_name) = write_request(cli, app, &args.asset, &args.write, &root)?;
+    let tool = match (args.tint, args.paint, args.hue) {
+        (Some(rgb), _, _) => Recolor::Tint { rgb },
+        (_, Some(rgb), _) => Recolor::Paint { rgb },
+        (_, _, Some(degrees)) => Recolor::Hue { degrees },
+        // The `tool` group holds to one of them.
+        _ => return Err("name a change: --tint, --paint or --hue".to_string()),
+    };
+    let given: Vec<&str> = args.exports.iter().map(String::as_str).collect();
+    let pick = RecolorPick {
+        exports: asset::export_indices(&request, &given)?,
+        param: args.param.clone(),
+        enemy: args.enemy,
+        scripts: args.scripts,
+        materials: args.materials,
+    };
+    let plan = asset::recolor_plan(&request, &pick, tool)?;
+    if plan.paths.is_empty() && plan.vm_colors.is_empty() {
+        return Err("the colours picked already read that way".to_string());
+    }
+    let changes = rivals_uasset::PackageEdits {
+        paths: plan.paths.clone(),
+        vm_colors: plan.vm_colors.clone(),
+        ..Default::default()
+    };
+    if args.write.save.dry_run {
+        let preview = asset::preview_edits(&request, &mod_name, args.write.save.overwrite, changes);
+        return preview_planned(cli, preview, &plan, || {
+            asset::print_recolor_plan(&plan, args.scripts, &mut |line| outln!("{line}"))
+        });
+    }
+    block_for_game(cli, false)?;
+    let message = asset::save_changes(&request, changes, &mod_name, args.write.save.overwrite)?;
+    if !cli.json {
+        asset::print_recolor_plan(&plan, args.scripts, &mut |line| outln!("{line}"));
+    }
+    emit(cli, &message, || outln!("{message}"))
 }
 
 fn asset_edit_vm(cli: &Cli, app: &settings::AppSettings, args: &EditVmArgs) -> Result<(), String> {
@@ -9631,6 +9943,48 @@ mod parse_tests {
             ]),
             AssetCmd::EditVm(args) if args.at == 0xBD && args.value == "-0.5" && !args.retarget
         ));
+        assert!(matches!(
+            asset(&["colors", "/Game/NS_T", "--samples"]),
+            AssetCmd::Colors(args) if args.samples
+        ));
+        assert!(matches!(
+            asset(&[
+                "recolor", "/Game/NS_T", "--export", "0", "--export", "Curve_1", "--tint",
+                "1,0.5,2", "--into", "M"
+            ]),
+            AssetCmd::Recolor(args) if args.exports.len() == 2 && args.tint == Some([1.0, 0.5, 2.0])
+        ));
+        assert!(matches!(
+            asset(&["recolor", "/Game/NS_T", "--enemy", "--hue", "-90", "--into", "M"]),
+            AssetCmd::Recolor(args) if args.enemy && args.hue == Some(-90.0) && !args.scripts
+        ));
+        assert!(matches!(
+            asset(&["recolor", "/Game/NS_T", "--scripts", "--paint", "0,1,0", "--into", "M"]),
+            AssetCmd::Recolor(args) if args.scripts && !args.materials
+        ));
+        assert!(matches!(
+            asset(&["recolor", "/Game/NS_T", "--enemy", "--materials", "--paint", "0,0.3,1"]),
+            AssetCmd::Recolor(args) if args.materials && args.enemy
+        ));
+        for refused in [
+            vec!["recolor", "/Game/NS_T", "--into", "M"],
+            vec![
+                "recolor",
+                "/Game/NS_T",
+                "--tint",
+                "1,1,1",
+                "--hue",
+                "9",
+                "--into",
+                "M",
+            ],
+            vec!["recolor", "/Game/NS_T", "--paint", "1,1", "--into", "M"],
+            vec!["recolor", "/Game/NS_T", "--tint", "1,-1,1", "--into", "M"],
+        ] {
+            let mut argv = vec!["rivals-cli", "asset"];
+            argv.extend(&refused);
+            assert!(Cli::try_parse_from(argv).is_err(), "{refused:?}");
+        }
         match asset(&[
             "edit-script",
             "/Game/T",

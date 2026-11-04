@@ -544,17 +544,22 @@ rivals-cli asset rename-member /Game/Mods/MyMod/BP_Loader --member "Msg UI" --to
 `asset texture` shows a texture's pixel format, size and mips, and where each mip's pixels are:
 inline in the export, or in the package's `.ubulk` or `.uptnl`. The game does not install the
 optional `.uptnl` data, so a texture keeping its largest mips there has only the smaller ones, and
-a cook can leave out a texture's largest mips altogether. `--out FILE.png` saves the largest mip the
-package has, or `--mip N`, decoded from 8-bit color or grey, DXT1, DXT3, DXT5, BC4, BC5 or BC7; a
-cube's six faces and an array's or a volume's slices come out stacked top to bottom. A texture
-holding high dynamic range values, half or float color or red, or BC6H, saves with `--out
-FILE.exr` as OpenEXR instead, in halves or floats as the texture holds them, negative values and
-values above 1 kept; a one-channel texture comes out grey.
+a cook can leave out a texture's largest mips altogether. `--out FILE` saves the largest mip the
+package has, or `--mip N`, as the kind of image the file is named for: a PNG, TGA or BMP decoded
+from 8-bit color or grey, DXT1, DXT3, DXT5, BC4, BC5 or BC7, a cube's six faces and an array's or a
+volume's slices stacked top to bottom. A texture holding high dynamic range values, half or float
+color or red, or BC6H, saves as OpenEXR (`.exr`) instead, in halves or floats as the texture holds
+them, negative values and values above 1 kept; a one-channel texture comes out grey. A `.dds` file
+takes either kind as the texture's own bytes, nothing decoded: that mip and every one below it, a
+cube as a cube and an array as an array. A volume goes out stacked in an image.
 
 `--in FILE` gives a texture an image's pixels at the image's size, encoded in the texture's own
-format, and saves it into the mod: a PNG for an 8-bit texture, an OpenEXR file for a high dynamic
-range one, which a one-channel texture takes the red of. The other kind is refused, naming the kind
-the texture takes. A cube takes its six faces stacked top to bottom as `--out` writes them (+X, -X,
+format, and saves it into the mod: a PNG, TGA, BMP or JPEG for an 8-bit texture, an OpenEXR file
+for a high dynamic range one, which a one-channel texture takes the red of. The other kind is
+refused, naming the kinds the texture takes. A DDS file in the texture's own format gives its mips
+as they are, its blocks never encoded again, and the mips it lacks are built from its smallest; an
+sRGB variant counts as its plain format. A DDS in another format is read as its largest mip's
+pixels and encoded like an image, and a volume DDS is refused. A cube takes its six faces stacked top to bottom as `--out` writes them (+X, -X,
 +Y, -Y, +Z, -Z), each face square, and an array or a volume takes its slices the same way, as many
 as it has. Its mips are rebuilt by halving: one if it had one, else a chain as long as it had at
 the old size, the smallest as many inline as before and the rest in its `.ubulk`, which the game
@@ -583,8 +588,35 @@ too.
 rivals-cli asset texture /Game/Mods/MyMod/T_Logo
 rivals-cli asset texture /Game/Marvel/UI/Textures/T_Logo --from game --out logo.png --mip 0
 rivals-cli asset texture /Game/Marvel/UI/Textures/T_Logo --in logo.png --into MyMod_9999999_P
+rivals-cli asset texture /Game/Marvel/Characters/1014/1014001/Textures/T_1014001_Body_D --from game --out body.dds
+rivals-cli asset texture /Game/Marvel/Characters/1014/1014001/Textures/T_1014001_Body_D --in body.dds --into MyMod_9999999_P
 rivals-cli asset texture Marvel/Content/Marvel/Maps/KrakoaC/KrakoaC01/KrakoaC01_Art.umap --export Weightmap_120 --in w120.png --export Heightmap_0 --in height.png --into MyMod_9999999_P
 rivals-cli asset texture /Game/Marvel/Environment/Common/LightingRes/X20_Hdri/T_Lighthdr_002 --from game --out sky.exr
+```
+
+`asset textures SOURCE` does the same for every texture of the packages SOURCE holds that `--filter`
+keeps (repeatable, matched as `asset list` matches), on every core, and writes the mod once. A
+package's header says whether it holds a texture, so no other package is converted. `--out DIR`
+saves each texture at its package's path under DIR, `Marvel/Content/.../T_Body_D.png`, with the
+texture's name after the package's when the package is not named for it (`Lobby.Weightmap_120.png`),
+or its path below the package when another texture there shares its name, as a Niagara system's
+do. `--image png|tga|bmp|dds|exr` picks the kind, PNG by default; a texture holding high dynamic
+range values goes out as OpenEXR when an 8-bit kind is asked for, and an 8-bit one as a PNG when
+OpenEXR is. `--in DIR --into MOD` gives each texture the image named for it there, as `--out` names
+them, or named as its package anywhere under DIR when no other package has that name, and writes
+every package it changes in one rewrite of the mod: the packages are read, their images encoded
+and the packages patched, checked and converted on every core while one thread writes them, a
+handful at a time waiting, so memory follows the cores and not the batch. A package the mod holds
+is built on unless `--overwrite`, and `--dry-run` encodes and checks everything and writes nothing.
+An image or a texture that fails is listed with why and the rest go in, and the command fails.
+The summary times each part, the writer's wait included: a batch of BC7 waits on encoding, one of
+DDS files in their textures' own formats on writing.
+
+```bash
+rivals-cli asset textures game --filter Characters/1014/1014001/Textures --out punisher
+rivals-cli asset textures game --filter Characters/1014/1014001/Textures --out punisher-dds --image dds
+rivals-cli asset textures game --filter Characters/1014/1014001/Textures --in punisher --into MyMod_9999999_P --dry-run
+rivals-cli asset textures MyMod_9999999_P --in punisher --into MyMod_9999999_P --quality best
 ```
 
 `asset mesh` shows a mesh's material slots: each slot's material, its gameplay tags (which the game
@@ -1177,8 +1209,8 @@ what it read there. An import retarget or removal names its import by the path i
 ```
 
 A texture takes an image the same way: `textures` names each texture by `object` (or `export`)
-and its `image`, a file beside the edit file, with an optional `quality` of `fast`, `default` or
-`best`. Each image is encoded in its texture's own format against the package as the save reads
+and its `image`, a file beside the edit file of any kind `asset texture --in` takes, with an
+optional `quality` of `fast`, `default` or `best`. Each image is encoded in its texture's own format against the package as the save reads
 it, so it fits whatever copy the save builds on, and the textures of one package go in one save,
 from one edit file or from several a manifest merges, as `asset texture --in` saves them:
 
@@ -1338,6 +1370,77 @@ holding what the operand read, as the trace keys it (`lit+48=0x3F400000`):
 The save reads every script it changed back and holds it to the planned bytes. A script that
 carries data for the experimental VM, which fixes where its constants are when it is compiled, or
 whose bytecode is stored compressed, is refused; no shipped script has either.
+
+### Niagara colours
+
+`asset colors` lists where an effect's colours come from, grouped by emitter. A colour curve is
+read by its baked samples (its `ShaderLUT`, RGBA over the curve's time range): the cooked curve
+keeps no keys, and the game never bakes the samples again, so the samples are what it draws. Each
+of an emitter's scripts keeps its own copy of a curve, so a curve is listed once per script that
+holds it. A curve that also keeps its samples as a texture says so; a material reads that only
+where a renderer binds it, which no shipped effect does, so the samples are what draws. Colour arrays follow, then colour parameters: a user parameter's default (its copies
+in `ExposedParameters` and the system's compiled store), a script's own constant, and the colours
+the game swaps in for the other team, which the hit effects keep in `LocalizationParametersDefault`
+under names like `L10n.Muzzle_light_IsEnemyColor`. A parameter in a script's own store is otherwise
+a placeholder the run time fills, and is left out. Then the colours a CPU script writes, channel
+by channel, each saying when no renderer draws it: a channel written from a literal shows the
+`asset edit-vm` operand that changes it, and a computed one points at `asset vm --trace`. A GPU
+script's colours are shader code, so only the curves it samples are listed. A three- or
+four-component vector a renderer binds to a colour parameter is listed as a colour too, its X, Y and
+Z as red, green and blue; one kept in a parameter store is not. Last come each renderer's materials,
+with the colour parameters they draw with (a name holding `color`, `colour`, `tint` or `颜色`, but not
+`offset` or `softness`): the renderer's own values first, then each material's and its parents' in
+turn, nearest first, down to the base material's defaults, which its cook saves beside its shaders
+(`asset dump` shows them as its `CachedExpressionData`; its shaders keep their own copy, so changing
+them there is not known to change what the game draws). A parameter the renderer binds to a variable
+says so, since that variable sets it every frame. A source whose name mentions enemies is marked, as
+is one past 1 (HDR) or grey.
+
+`asset recolor` changes every curve, array and parameter in the package, or those `--export`
+(repeatable), `--param` or `--enemy` pick (`--param` also names a script colour, as `asset colors`
+lists it, or a material colour): `--tint R,G,B` multiplies each colour, `--paint R,G,B`
+gives each that hue and saturation at its own brightness, so fades and HDR glows keep their shape,
+and `--hue DEGREES` turns each hue, leaving greys grey. Alpha is never changed. Each edit is held
+to the value it read. Most effects keep their colours in their scripts, such as an update script
+giving each particle `Initial * (1.0, 0.26, 0.0)`, and `--scripts` changes those too. Each colour
+a renderer draws (its colour binding, a decal's `DecalColorBinding` among them, `Particles.Color`
+unless it binds another, or a colour or vector one of its colour parameters is bound to) is
+transformed just before the script writes it: the tool's sum goes in ahead of the outputs, on temp
+registers of its own, so every channel changes however the script worked it out, and the colours the
+drawn ones are worked out from stay as they were. A tint or a hue turn skips a colour worked out
+from its own last value, which would take it again every frame, and names it; a paint never builds
+up, so it goes on those too. An enemy pick changes no script colour, since a script works both
+teams' colours out in one value. A script the transform cannot go into safely is named and left as
+it is; none of Punisher's effects has one. `--materials` changes the renderers' material colours
+too, each set as the renderer's own value (its `MaterialParameters.VectorParameters`), which the
+engine applies over the material: only this effect changes, whatever else draws with the material. A
+colour the renderer binds to a variable is that variable's to set, so it is named and left, and
+changes with `--scripts` where a script writes it; so is a material layer's, which the renderer's
+values do not reach, and one the renderer's materials give different values. In an edit file a
+`vm_colors` entry makes a script's change, `"transform": "paint"` with the scale `k` each channel
+takes of the brightest, or `"linear"` with a `matrix` of rows:
+
+```json
+{"edits": {"vm_colors": [{"export": "47", "attribute": "Particles.Color", "transform": "paint", "k": [0.0, 1.0, 0.0]}]}}
+```
+
+```bash
+rivals-cli asset colors  /Game/VFX/NS_Thing                                   # every colour source
+rivals-cli asset colors  /Game/VFX/NS_Thing --samples                         # every curve sample
+rivals-cli asset recolor /Game/VFX/NS_Thing --paint 0.6,0.1,1 --into MyMod    # the whole effect purple
+rivals-cli asset recolor /Game/VFX/NS_Thing --enemy --hue 120 --into MyMod    # the other team's colours
+rivals-cli asset recolor /Game/VFX/NS_Thing --scripts --paint 0,1,0 --into MyMod  # scripts' colours too
+rivals-cli asset recolor /Game/VFX/NS_Thing --enemy --materials --paint 0,0.3,1 --into MyMod  # and the materials'
+rivals-cli asset recolor /Game/VFX/NS_Thing --export 0 --export 2 --tint 1,1,2 --dry-run --into MyMod
+rivals-cli asset recolor /Game/VFX/NS_Thing --scripts --param Emitter01.Color02 --paint 0,1,0 --into MyMod  # one script colour
+```
+
+In the app, a Niagara package's Colour view lists the same sources. A curve shows its samples as a
+gradient and a table, a colour array its swatches, and a parameter its colour, each edited in place
+or with the same tint, paint and hue tools, saved like any other edit. Recolour effect applies a
+tool to every curve, array and parameter (or the enemy ones) in one save, and with the material
+colours, each renderer's too. A script colour shows its channels with what each is computed from,
+and opens in the VM view. A renderer lists its materials' colours and where each comes from.
 
 `ini` and `tweaks` take `--pak`, a pak path or a mod's whole name in `~mods`. `--json` makes every
 command emit machine-readable output, and failures exit non-zero. `--dry-run` reports what a write command

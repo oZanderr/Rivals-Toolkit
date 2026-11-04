@@ -170,7 +170,7 @@ pub fn preview_read_edits(
             return table_last(request, mappings, loaded, parsed);
         }
     }
-    if !changes.vm_consts.is_empty() {
+    if !changes.vm_consts.is_empty() || !changes.vm_colors.is_empty() {
         return vm_stage(request, mappings, loaded, parsed);
     }
     if !changes.paths.is_empty() {
@@ -274,9 +274,9 @@ fn table_last(
     Ok((last, loaded))
 }
 
-/// Plans the constants a save gives Niagara scripts' VM programs against the package as it reads,
-/// makes them as path edits with the rest of the save, and reads each script back to hold it to
-/// the plan.
+/// Plans the constants a save gives Niagara scripts' VM programs and the colours it transforms in
+/// them against the package as it reads, makes them as path edits with the rest of the save, and
+/// reads each script back to hold it to the plan.
 fn vm_stage(
     request: &AssetEditRequest<'_>,
     mappings: Option<&Mappings>,
@@ -284,10 +284,20 @@ fn vm_stage(
     parsed: &rivals_uasset::ParsedPackage,
 ) -> Result<(PatchedBundle, FSerializedAssetBundle), String> {
     let changes = &request.changes;
-    let lowered =
-        rivals_uasset::lower_vm_consts(parsed, &changes.vm_consts, mappings, changes.allow_drift)?;
+    let lowered = rivals_uasset::lower_vm_edits(
+        parsed,
+        &changes.vm_consts,
+        &changes.vm_colors,
+        mappings,
+        changes.allow_drift,
+    )?;
+    let rewrites_bytecode = lowered
+        .paths
+        .iter()
+        .any(|edit| edit.path == "CachedScriptVM.ByteCode.Data");
     let next = PackageEdits {
         vm_consts: Vec::new(),
+        vm_colors: Vec::new(),
         paths: [changes.paths.clone(), lowered.paths].concat(),
         ..changes.clone()
     };
@@ -309,14 +319,13 @@ fn vm_stage(
         rivals_uasset::verify_vm_edits(&after, &lowered.plans, mappings)?;
     }
     let mut notes = lowered.notes;
-    // The literals are numbers, so the raw rewrite's caution about objects named in its bytes
-    // does not apply to them.
-    notes.extend(
-        patched
-            .notes
-            .drain(..)
-            .filter(|note| !note.starts_with("ScriptLiterals is written as the bytes typed")),
-    );
+    // The literals are numbers and the bytecode names no object, so the raw rewrite's caution
+    // about objects named in its bytes does not apply to them.
+    let numbers_only = |note: &String| {
+        note.starts_with("ScriptLiterals is written as the bytes typed")
+            || (rewrites_bytecode && note.starts_with("Data is written as the bytes typed"))
+    };
+    notes.extend(patched.notes.drain(..).filter(|note| !numbers_only(note)));
     patched.notes = notes;
     Ok((patched, loaded))
 }
@@ -5495,6 +5504,22 @@ fn prepare(
         read_from.entry,
         read_from.kind,
     )?;
+    let (patched, loaded) = patch_loaded(read_from, mappings, loaded, options)?;
+    Ok(Prepared::Ready {
+        entry,
+        patched: Box::new(patched),
+        loaded: Box::new(loaded),
+    })
+}
+
+/// The package `loaded`, read where `read_from` says, with `read_from`'s edits patched in and
+/// checked as a save checks them, with what a patch leaves to it: the sidecars it did not touch.
+pub(crate) fn patch_loaded(
+    read_from: AssetEditRequest<'_>,
+    mappings: Option<&Mappings>,
+    loaded: FSerializedAssetBundle,
+    options: &SaveOptions,
+) -> Result<(PatchedBundle, FSerializedAssetBundle), String> {
     // Images become their textures' new pixels against the package as this save reads it.
     let read_from = if read_from.changes.texture_images.is_empty() {
         read_from
@@ -5518,11 +5543,7 @@ fn prepare(
             mappings,
             &read_from.changes,
         )? {
-            return Ok(Prepared::Ready {
-                entry,
-                patched: Box::new(patched),
-                loaded: Box::new(loaded),
-            });
+            return Ok((patched, loaded));
         }
     }
     // Each stage reads back what it wrote, which is what the stage after it reads.
@@ -5548,12 +5569,8 @@ fn prepare(
         None => (patched, loaded),
     };
     let after = reparse(&read_from, mappings, &patched.asset, &patched.exports)?;
-    check_load_order(&request.changes, &parsed, &after)?;
-    Ok(Prepared::Ready {
-        entry,
-        patched: Box::new(patched),
-        loaded: Box::new(loaded),
-    })
+    check_load_order(&read_from.changes, &parsed, &after)?;
+    Ok((patched, loaded))
 }
 
 #[cfg(test)]
@@ -8133,6 +8150,10 @@ mod game_data_tests {
         "Marvel/Content/Marvel/Characters/1021/1021001/Meshes/SK_1021_1021001.uasset";
     /// A material instance with a Nanite override, cooked as a flag and a hard reference.
     const NANITE_MATERIAL: &str = "Marvel/Content/Marvel/VFX/Materials/Characters/1034/Materials/1034503/MI_1034503_Line_84_003.uasset";
+    /// A base material whose cached parameters hold nine vector defaults.
+    const BEAM_MATERIAL: &str = "Marvel/Content/Marvel/VFX/Materials/Characters/1014/MasterMaterials/M_101431_Beam_3_005.uasset";
+    /// An instance of it with no static permutation, so no shaders of its own.
+    const BEAM_INSTANCE: &str = "Marvel/Content/Marvel/VFX/Materials/Characters/1014/Materials/MI_101431_Beam_3_005_21.uasset";
     /// A pose asset: an animation asset that closes with its skeleton guid and nothing after.
     const POSE_ASSET: &str = "Marvel/Content/Marvel/Characters/1063/1063500/AnimationDataAssets/RBF/PA_Thigh_L_UERBFSolver.uasset";
     /// A sound cue whose wave players name their waves after two strip bytes.
@@ -8271,6 +8292,8 @@ mod game_data_tests {
         ("CLOTH_MESH", CLOTH_MESH),
         ("SAMPLED_MESH", SAMPLED_MESH),
         ("NANITE_MATERIAL", NANITE_MATERIAL),
+        ("BEAM_MATERIAL", BEAM_MATERIAL),
+        ("BEAM_INSTANCE", BEAM_INSTANCE),
         ("POSE_ASSET", POSE_ASSET),
         ("SOUND_CUE", SOUND_CUE),
         ("RIG", RIG),
@@ -8340,6 +8363,14 @@ mod game_data_tests {
             "Marvel/Content/Marvel/VFX/VAT/Characters/1032/BAT/SquirrelAssist_Loop/T_SquirrelAssist_Loop_BAT_Pos.uasset",
         ),
         (
+            "TEXTURE_OPTIONAL_TOP",
+            "Marvel/Content/Marvel/Characters/1014/1014001/Textures/T_1014001_Body_D.uasset",
+        ),
+        (
+            "TEXTURE_TOP_LEFT_OUT",
+            "Marvel/Content/Marvel/Characters/1014/1014001/Textures/T_1014001_Body_N.uasset",
+        ),
+        (
             "MAP_KRAKOA_ART",
             "Marvel/Content/Marvel/Maps/KrakoaC/KrakoaC01/KrakoaC01_Art.umap",
         ),
@@ -8373,6 +8404,11 @@ mod game_data_tests {
         "Marvel/Content/Mods/ToolkitTest/RetargetRenamed.uasset",
         "Marvel/Content/Mods/X/DA_Thing.uasset",
         "Marvel/Plugins/MarvelGAS/Content/Mods/X/DA_Thing.uasset",
+        // What the texture batch's naming tests name.
+        "Marvel/Content/Marvel/Maps/Lobby/Lobby.umap",
+        "Marvel/Content/A/T_Twice.uasset",
+        "Marvel/Content/B/T_Twice.uasset",
+        "Marvel/Content/VFX/NS_Glow.uasset",
     ];
 
     /// The files that pin a real game asset. A source scan cannot tell a fixture from an example,
@@ -8385,6 +8421,7 @@ mod game_data_tests {
         ("pak/iostore_out.rs", include_str!("pak/iostore_out.rs")),
         ("schema_synth.rs", include_str!("schema_synth.rs")),
         ("texture.rs", include_str!("texture.rs")),
+        ("texture_batch.rs", include_str!("texture_batch.rs")),
     ];
 
     /// Every path the shipped game holds, mount-relative, the way a fixture constant spells it.
@@ -14765,35 +14802,39 @@ mod game_data_tests {
             .count();
         assert_eq!(unchanged, 0, "every export still reads whole");
         // Made again, the edits find their values there already.
-        let again = rivals_uasset::lower_vm_consts(&after, &edits, Some(&fixture.schema), false)
-            .expect("lowers");
+        let again =
+            rivals_uasset::lower_vm_edits(&after, &edits, &[], Some(&fixture.schema), false)
+                .expect("lowers");
         assert!(
             again.paths.is_empty() && again.plans.is_empty(),
             "{:?}",
             again.notes
         );
         // Setting a literal to the value it holds changes nothing either.
-        let same = rivals_uasset::lower_vm_consts(
+        let same = rivals_uasset::lower_vm_edits(
             &before,
             &[edit(0xBD, 1, "10.0", "lit+48=0x41200000")],
+            &[],
             Some(&fixture.schema),
             false,
         )
         .expect("lowers");
         assert!(same.paths.is_empty());
         // Written against a value the operand no longer reads, the edit is refused.
-        let stale = rivals_uasset::lower_vm_consts(
+        let stale = rivals_uasset::lower_vm_edits(
             &before,
             &[edit(0xBD, 0, "1.0", "lit+44=0x3F800000")],
+            &[],
             Some(&fixture.schema),
             false,
         )
         .expect_err("drift");
         assert!(stale.starts_with(rivals_uasset::DRIFT), "{stale}");
         // A register is not a constant to give a value.
-        let register = rivals_uasset::lower_vm_consts(
+        let register = rivals_uasset::lower_vm_edits(
             &before,
             &[edit(0xBD, 2, "1.0", "")],
+            &[],
             Some(&fixture.schema),
             false,
         )
@@ -17122,6 +17163,41 @@ mod game_data_tests {
             Some(sequence.serial_offset as u64 + consumed),
             "the payload starts where the guid ends"
         );
+    }
+
+    /// A base material's cook saves the parameters it declares ahead of its shaders, so only the
+    /// shader maps stay a payload; an instance with no static permutation of its own reads to its
+    /// end.
+    #[test]
+    fn a_material_s_cached_parameters_read_ahead_of_its_shader_maps() {
+        let Some(fixture) = Fixture::open(BEAM_MATERIAL) else {
+            return;
+        };
+        let parsed = fixture.parse();
+        let material = export_of_class(&parsed, "Material");
+        let ExportStatus::Payload { consumed, kind, .. } = material.status else {
+            panic!("{:?} {:?}", material.status, material.note);
+        };
+        assert_eq!(kind, "shader maps");
+        let cached = find_field(&material.properties, &|f| f.name == "CachedExpressionData")
+            .expect("the cached expression data");
+        assert_eq!(
+            cached.span.map(|(_, end)| end),
+            Some(material.serial_offset as u64 + consumed),
+            "the shader maps start where the cached data ends"
+        );
+        let Some(fixture) = Fixture::open(BEAM_INSTANCE) else {
+            return;
+        };
+        let parsed = fixture.parse();
+        let instance = export_of_class(&parsed, "MaterialInstanceConstant");
+        assert!(
+            matches!(instance.status, ExportStatus::Complete),
+            "{:?} {:?}",
+            instance.status,
+            instance.note
+        );
+        find_field(&instance.properties, &|f| f.name == "CachedData").expect("its cached data");
     }
 
     /// The four native layouts that failed across the containers, each read to its end: cloth

@@ -40,6 +40,7 @@ export type Draft =
   | { op: "key_remove"; index: number }
   | { op: "payload_replace"; file: string }
   | { op: "bulk_replace"; file: string }
+  | { op: "texture_image"; file: string; quality: TextureQuality }
   | { op: "script_set"; text: string }
   | { op: "script_text"; text: string }
   | { op: "row_add"; at: number }
@@ -53,6 +54,9 @@ export type Draft =
   | { op: "string_meta_remove"; id: string }
   | { op: "string_add"; source: string }
   | { op: "string_remove" };
+
+/** How hard BC7 and BC6H encode a texture's new pixels. */
+export type TextureQuality = "fast" | "default" | "best";
 
 /**
  * Where an edit lands, in the terms the backend resolves it by: the value's offset, its name and
@@ -79,6 +83,8 @@ export interface EditTarget {
   payload?: { export: number };
   /** One bulk data resource's bytes rather than a value. */
   bulk?: { resource: number };
+  /** A texture's pixels, given an image's. */
+  texture?: { export: number };
   /** A constant inside a function's bytecode: the export, the statement's offset, and which
    *  literal in that statement. */
   /** An expression in an export's bytecode: by the offset it starts at when `at` is set, and
@@ -173,6 +179,7 @@ export function draftKey(target: EditTarget): string {
   if (target.payload) return ["payload", target.payload.export].join(SEP);
   if (target.scriptText) return ["script_text", target.scriptText.export].join(SEP);
   if (target.bulk) return ["bulk", target.bulk.resource].join(SEP);
+  if (target.texture) return ["texture", target.texture.export].join(SEP);
   if (target.script) {
     const { export: exportIndex, statement, constant, at } = target.script;
     return ["script", exportIndex, statement, at === undefined ? constant : `@${at}`].join(SEP);
@@ -237,6 +244,11 @@ export function payloadTarget(exportIndex: number): EditTarget {
 /** Bulk data resource `resource` of the package. */
 export function bulkTarget(resource: number): EditTarget {
   return { offset: 0, name: "bulk", kind: "bulk", bulk: { resource } };
+}
+
+/** The pixels of texture export `exportIndex`. */
+export function textureTarget(exportIndex: number): EditTarget {
+  return { offset: 0, name: "texture", kind: "texture", texture: { export: exportIndex } };
 }
 
 /** The whole script of export `exportIndex`, which printed as `was` when the text was taken. */
@@ -573,6 +585,7 @@ interface EditList {
   keys?: KeyEdit[];
   payloads?: PayloadEdit[];
   bulk?: BulkEdit[];
+  textures?: TextureImageEdit[];
   scripts?: ScriptEdit[];
   script_texts?: ScriptTextEdit[];
   remove_exports?: number[];
@@ -581,6 +594,7 @@ interface EditList {
   export_edits?: ExportEdit[];
   dependencies?: DependencyEdit[];
   field_sets?: FieldSet[];
+  paths?: PathEdit[];
   compact_names?: boolean;
   add_exports?: { class: string; outer?: number; name: string }[];
   add_variables?: NewVariable[];
@@ -732,6 +746,18 @@ function toBulkEdit({ target, draft }: DraftRecord): BulkEdit | null {
   return { resource: target.bulk.resource, file: draft.file };
 }
 
+/** An image whose pixels a texture takes, encoded in its own format when the save reads it. */
+interface TextureImageEdit {
+  export: number;
+  image: string;
+  quality: TextureQuality;
+}
+
+function toTextureImage({ target, draft }: DraftRecord): TextureImageEdit | null {
+  if (!target.texture || draft.op !== "texture_image") return null;
+  return { export: target.texture.export, image: draft.file, quality: draft.quality };
+}
+
 export interface Notice {
   msg: string;
   type: "ok" | "err";
@@ -740,7 +766,19 @@ export interface Notice {
 }
 
 /** A change to a header table. Saved on its own: value drafts address bytes it moves or deletes. */
+/** A value edit addressed by its export and path, each held to what it read, as an edit file's
+ *  `paths` take one. */
+export interface PathEdit {
+  export: string;
+  path: string;
+  op: "set";
+  text: string;
+  was?: string;
+}
+
 export interface Structural {
+  /** Value edits a tool planned in the backend, such as a recolour of a whole effect. */
+  paths?: PathEdit[];
   remove?: number[];
   /** Exports to empty: on their own, or alongside a retype whose values do not survive it. */
   reset?: number[];
@@ -1149,6 +1187,7 @@ export function useAssetEdits({
           !record.target.string &&
           !record.target.payload &&
           !record.target.bulk &&
+          !record.target.texture &&
           !record.target.script &&
           !record.target.scriptText &&
           !record.target.path &&
@@ -1162,6 +1201,7 @@ export function useAssetEdits({
       const keys = records.flatMap((record) => toKeyEdit(record) ?? []);
       const payloads = records.flatMap((record) => toPayloadEdit(record) ?? []);
       const bulk = records.flatMap((record) => toBulkEdit(record) ?? []);
+      const textures = records.flatMap((record) => toTextureImage(record) ?? []);
       const scripts = records.flatMap((record) => toScriptEdit(record) ?? []);
       const scriptTexts = records.flatMap((record) => toScriptTextEdit(record) ?? []);
       const imports = structural ? [] : Object.values(importDrafts);
@@ -1181,6 +1221,7 @@ export function useAssetEdits({
           keys,
           payloads,
           bulk,
+          textures,
           scripts,
           script_texts: [
             ...scriptTexts,
@@ -1199,6 +1240,7 @@ export function useAssetEdits({
           export_edits: structural?.exports ?? [],
           dependencies: structural?.dependencies ?? [],
           field_sets: fieldSets,
+          paths: structural?.paths ?? [],
           compact_names: structural?.compactNames ?? false,
           add_exports: structural?.addExports ?? [],
           add_variables: structural?.addVariables ?? [],

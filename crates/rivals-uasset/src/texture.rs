@@ -30,7 +30,7 @@ const HAS_OPT_DATA: u32 = 1 << 30;
 const SLICES: u32 = HAS_OPT_DATA - 1;
 
 /// Why a virtual texture's platform data is not read: its tiles follow in a layout of their own.
-pub(crate) const VIRTUAL: &str = "the texture is virtual, whose tile data this does not read; \
+pub const VIRTUAL: &str = "the texture is virtual, whose tile data this does not read; \
                                   the game ships only the engine's placeholder ones";
 
 #[derive(Debug, Clone, Serialize)]
@@ -116,11 +116,17 @@ impl TextureLayout {
 
 /// Whether `class` is one whose exports carry texture platform data.
 pub fn is_texture_class(class: &str) -> bool {
-    matches!(
-        class,
-        "Texture2D" | "TextureCube" | "Texture2DArray" | "VolumeTexture" | "TextureCubeArray"
-    )
+    TEXTURE_CLASSES.contains(&class)
 }
+
+/// The classes whose exports hold a texture's platform data.
+pub const TEXTURE_CLASSES: [&str; 5] = [
+    "Texture2D",
+    "TextureCube",
+    "Texture2DArray",
+    "VolumeTexture",
+    "TextureCubeArray",
+];
 
 /// The platform data of texture `export`, read from the bytes after its properties.
 pub fn read_texture(
@@ -417,8 +423,9 @@ pub struct TextureImage {
     /// The texture by path rather than by index, as `asset info` prints it or below the package.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub object: Option<String>,
-    /// The image: a PNG, or an OpenEXR (`.exr`) file for a texture holding high dynamic range
-    /// values, a cube's faces and an array's or a volume's slices stacked top to bottom.
+    /// The image: a PNG, TGA, BMP or JPEG, or an OpenEXR (`.exr`) file for a texture holding high
+    /// dynamic range values, a cube's faces and an array's or a volume's slices stacked top to
+    /// bottom; or for either a DDS, whose mips go in as they are when it is in the texture's format.
     pub image: String,
     /// How hard BC7 and BC6H encode: `fast`, `default` or `best`.
     #[serde(default, skip_serializing_if = "Option::is_none")]

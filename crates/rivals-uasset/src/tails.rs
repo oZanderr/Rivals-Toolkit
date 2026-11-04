@@ -386,6 +386,9 @@ pub(crate) fn tail_steps(chain: &[&str]) -> Vec<&'static str> {
         "AkAudioDeviceShareSet",
         "AkInitBank",
         "AnimTimeline",
+        "MaterialInterface",
+        "Material",
+        "MaterialInstance",
     ];
     chain
         .iter()
@@ -523,6 +526,41 @@ pub(crate) fn read_class_tail(
                 crate::timeline::read_timeline(cursor, ctx, diagnostics, fields)?;
                 TailOutcome::Consumed
             }
+            // The parameters the material and its expressions declare, with a base material's
+            // defaults, which its shaders keep their own copy of.
+            "MaterialInterface" => {
+                read_cached_data(
+                    cursor,
+                    ctx,
+                    diagnostics,
+                    fields,
+                    "CachedExpressionData",
+                    "MaterialCachedExpressionData",
+                )?;
+                TailOutcome::Consumed
+            }
+            "Material" => TailOutcome::Payload("shader maps"),
+            // An instance compiles shaders of its own only for a permutation its static switches
+            // make.
+            "MaterialInstance" => {
+                read_cached_data(
+                    cursor,
+                    ctx,
+                    diagnostics,
+                    fields,
+                    "CachedData",
+                    "MaterialInstanceCachedData",
+                )?;
+                let permutation = fields.iter().any(|entry| {
+                    entry.name == "bHasStaticPermutationResource"
+                        && matches!(entry.value, PropertyValue::Bool { value: true })
+                });
+                if permutation {
+                    TailOutcome::Payload("shader maps")
+                } else {
+                    TailOutcome::Consumed
+                }
+            }
             class if WWISE_COOKED.iter().any(|(held, ..)| *held == class) => {
                 read_wwise_cooked(class, cursor, ctx, diagnostics, fields)?;
                 TailOutcome::Consumed
@@ -620,6 +658,37 @@ fn read_wwise_cooked(
     for &(name, word) in trailer {
         fields.push(word_entry(cursor, name, word)?);
     }
+    Ok(())
+}
+
+/// A material's cached data, the struct its serializer writes after a word saying whether the cook
+/// saved it, shown as the member it fills.
+fn read_cached_data(
+    cursor: &mut Cursor<'_>,
+    ctx: &Ctx<'_>,
+    diagnostics: &mut Diagnostics,
+    fields: &mut Vec<PropertyEntry>,
+    property: &str,
+    structure: &str,
+) -> Result<(), String> {
+    match cursor.read_u32()? {
+        0 => return Ok(()),
+        1 => {}
+        other => {
+            return Err(cursor.err(format!(
+                "{property} is marked saved with {other:#X} rather than 0 or 1"
+            )));
+        }
+    }
+    let start = cursor.file_offset();
+    let value = crate::props::read_struct(structure, cursor, ctx, diagnostics, 0)?;
+    fields.push(PropertyEntry {
+        name: property.to_string(),
+        element: None,
+        value,
+        span: Some((start, cursor.file_offset())),
+        slot: None,
+    });
     Ok(())
 }
 

@@ -10,6 +10,7 @@ use rivals_core::asset_edit::{self, AssetEditRequest};
 use rivals_core::inherit;
 use rivals_core::localization;
 use rivals_core::mappings;
+use rivals_core::niagara_colors;
 use rivals_core::schema_synth::{self, LayoutReader, PackageSource};
 use rivals_uasset::{
     AssetBundle, ExportStatus, Mappings, PackageEdits, PackageInfo, ParseOptions, ParsedPackage,
@@ -1127,7 +1128,7 @@ pub fn texture_info(
     )
 }
 
-/// Saves one of a texture's mips as a PNG, or as OpenEXR for a high dynamic range one.
+/// Saves one of a texture's mips as an image file of the kind `out` is named for.
 pub fn save_texture_image(
     request: &Request<'_>,
     export: Option<u32>,
@@ -1144,7 +1145,7 @@ pub fn save_texture_image(
     )
 }
 
-/// Gives a texture an image's pixels, a PNG's or an OpenEXR file's, in its own format, saved into
+/// Gives a texture an image file's pixels, or a DDS file's mips, in its own format, saved into
 /// the mod.
 #[allow(clippy::too_many_arguments)]
 pub fn import_texture_image(
@@ -1245,8 +1246,185 @@ pub fn print_texture(info: &rivals_core::texture::TextureInfo, out: &mut dyn FnM
     if let Some(why) = &info.undecodable {
         out(format!("cannot save its pixels: {why}"));
     } else if info.hdr {
-        out("high dynamic range: --out saves and --in takes an OpenEXR (.exr) file".into());
+        out("high dynamic range: --out saves and --in takes an OpenEXR (.exr) or DDS file".into());
     }
+}
+
+/// Saves the textures of every package `source` keeps under `out`.
+pub fn export_textures(
+    usmap: Option<&str>,
+    configured_usmap: Option<&str>,
+    source: &rivals_core::texture_batch::TextureSource<'_>,
+    out: &Path,
+    kind: rivals_core::image_file::ImageKind,
+    mip: Option<usize>,
+) -> Result<rivals_core::texture_batch::TexturesOut, String> {
+    let schema = schema(usmap, configured_usmap);
+    rivals_core::texture_batch::export_textures(
+        source,
+        schema.as_deref(),
+        out,
+        kind,
+        mip,
+        &std::sync::atomic::AtomicBool::new(false),
+        &|_, _, _| {},
+    )
+}
+
+/// Gives textures the images of a folder, in one rewrite of the mod.
+pub fn import_textures(
+    usmap: Option<&str>,
+    configured_usmap: Option<&str>,
+    imports: &rivals_core::texture_batch::TextureImports<'_>,
+    options: &asset_edit::SaveOptions,
+) -> Result<rivals_core::texture_batch::TexturesIn, String> {
+    let schema = schema(usmap, configured_usmap);
+    rivals_core::texture_batch::import_textures(
+        imports,
+        schema.as_deref(),
+        options,
+        &std::sync::atomic::AtomicBool::new(false),
+        &|_, _, _| {},
+    )
+}
+
+/// `mip 3`, or `mips 3 to 11` for a file holding several.
+pub fn mip_range(mip: usize, mips: usize) -> String {
+    if mips > 1 {
+        format!("mips {mip} to {}", mip + mips - 1)
+    } else {
+        format!("mip {mip}")
+    }
+}
+
+/// How many of a texture's new mips a DDS in its own format gave as they are, after the count.
+pub fn dds_note(report: &rivals_core::texture::ImportReport) -> String {
+    match report.given_mips {
+        Some(given) if given == report.mips => ", all as the DDS holds them".to_string(),
+        Some(given) => format!(", {given} as the DDS holds them"),
+        None => String::new(),
+    }
+}
+
+fn print_texture_failures(
+    failed: &[rivals_core::texture_batch::TextureFailure],
+    out: &mut dyn FnMut(String),
+) {
+    for failure in failed {
+        let what = match (&failure.export, &failure.image) {
+            (Some(export), _) => format!("{} ({export})", failure.entry),
+            (None, Some(image)) => format!("{} ({image})", failure.entry),
+            (None, None) => failure.entry.clone(),
+        };
+        out(format!("!! {what}: {}", failure.reason));
+    }
+}
+
+/// What `asset textures --out` prints.
+pub fn print_textures_out(
+    report: &rivals_core::texture_batch::TexturesOut,
+    took: std::time::Duration,
+    out: &mut dyn FnMut(String),
+) {
+    for saved in &report.saved {
+        out(format!(
+            "{} ({}, {} from {}x{}): {}",
+            saved.export,
+            saved.format,
+            mip_range(saved.mip, saved.mips),
+            saved.width,
+            saved.height,
+            saved.path
+        ));
+        if let Some(note) = &saved.note {
+            out(format!("    {note}"));
+        }
+    }
+    print_texture_failures(&report.failed, out);
+    if !report.skipped.is_empty() {
+        out(format!(
+            "skipped {} virtual texture(s), whose tiles this does not read: the game ships only \
+             the engine's placeholders",
+            report.skipped.len()
+        ));
+    }
+    let timings = &report.timings;
+    out(format!(
+        "{}saved {} texture(s) of {} package(s), of {} the filter kept, in {:.1}s (listing {:.1}s, \
+         headers {:.1}s, textures {:.1}s)",
+        if report.cancelled { "cancelled: " } else { "" },
+        report.saved.len(),
+        report.packages,
+        report.matched,
+        took.as_secs_f64(),
+        timings.listing,
+        timings.headers,
+        timings.textures
+    ));
+}
+
+/// What `asset textures --in` prints.
+pub fn print_textures_in(
+    report: &rivals_core::texture_batch::TexturesIn,
+    took: std::time::Duration,
+    out: &mut dyn FnMut(String),
+) {
+    let verb = if report.written.is_some() {
+        "gave"
+    } else {
+        "would give"
+    };
+    for given in &report.given {
+        let texture = &given.report;
+        out(format!(
+            "{verb} {} ({}) {}: {}x{} to {}x{}, {} mip(s){}",
+            texture.name,
+            texture.format,
+            given.image,
+            texture.from.0,
+            texture.from.1,
+            texture.to.0,
+            texture.to.1,
+            texture.mips,
+            dds_note(texture)
+        ));
+        for warning in &texture.warnings {
+            out(format!("    warning: {warning}"));
+        }
+    }
+    print_texture_failures(&report.failed, out);
+    for brush in &report.brushes {
+        out(format!("  drawn at a size its brush stores: {brush}"));
+    }
+    let timings = &report.timings;
+    let into = match &report.written {
+        Some(utoc) => format!("wrote {}", utoc.display()),
+        None if report.cancelled => "cancelled, wrote nothing".to_string(),
+        None if report.dry_run => "a dry run, wrote nothing".to_string(),
+        None => "wrote nothing".to_string(),
+    };
+    let replaced = if report.replaced > 0 {
+        let how = if report.layered {
+            "built on"
+        } else {
+            "started again"
+        };
+        format!(", {} the mod held {how}", report.replaced)
+    } else {
+        String::new()
+    };
+    out(format!(
+        "{into}: {} texture(s) from {} image(s) in {} package(s){replaced}, in {:.1}s (listing \
+         {:.1}s, textures {:.1}s with the writer waiting {:.1}s, writing {:.1}s)",
+        report.given.len(),
+        report.images,
+        report.packages,
+        took.as_secs_f64(),
+        timings.listing,
+        timings.textures,
+        timings.writer_waiting,
+        timings.writing
+    ));
 }
 
 /// Takes members nothing uses out of a class or a function, across the mod it is saved into.
@@ -2621,6 +2799,322 @@ fn print_vm_traces(traces: &[rivals_uasset::VmTrace], prefix: &str, out: &mut im
                 VmLeaf::Unwritten { register } => format!("    r{register} read before written"),
             });
         }
+    }
+}
+
+/// Where a Niagara package's colours come from, its renderers' materials read from the store its
+/// container opens.
+pub fn colors(request: &Request<'_>) -> Result<niagara_colors::ColorReport, String> {
+    let parsed = parse(request)?;
+    let schema = schema(request.usmap, request.configured_usmap);
+    Ok(niagara_colors::effect_colors(
+        &parsed,
+        &inherit::ArchetypeSource {
+            game_root: request.game_root,
+            container: &request.container,
+            mappings: schema.as_deref(),
+        },
+    ))
+}
+
+/// The edits a recolour makes to the package as the save reads it.
+pub fn recolor_plan(
+    request: &Request<'_>,
+    pick: &niagara_colors::RecolorPick,
+    tool: niagara_colors::Recolor,
+) -> Result<niagara_colors::RecolorPlan, String> {
+    let parsed = parse(request)?;
+    let schema = schema(request.usmap, request.configured_usmap);
+    let report = niagara_colors::effect_colors(
+        &parsed,
+        &inherit::ArchetypeSource {
+            game_root: request.game_root,
+            container: &request.container,
+            mappings: schema.as_deref(),
+        },
+    );
+    niagara_colors::recolor_edits(&parsed, &report, pick, tool, schema.as_deref())
+}
+
+/// A colour as `(r, g, b, a)`, each to three places.
+fn rgba(color: &[f32; 4]) -> String {
+    let parts: Vec<String> = color.iter().map(|c| short_float(*c)).collect();
+    format!("({})", parts.join(", "))
+}
+
+fn short_float(value: f32) -> String {
+    let text = format!("{value:.3}");
+    let text = text.trim_end_matches('0').trim_end_matches('.');
+    if text == "-0" {
+        "0".to_string()
+    } else {
+        text.to_string()
+    }
+}
+
+/// Each source under its emitter, the system's own last: a curve by its first, middle and last
+/// samples (every one with `samples`), a script colour channel by channel with the constants
+/// `asset edit-vm` changes.
+pub fn print_colors(
+    report: &niagara_colors::ColorReport,
+    samples: bool,
+    out: &mut impl FnMut(String),
+) {
+    use niagara_colors::ColorBody;
+    let count =
+        |kind: fn(&ColorBody) -> bool| report.sources.iter().filter(|s| kind(&s.body)).count();
+    out(format!(
+        "{} colour source(s): {} curve(s), {} array(s), {} parameter(s), {} script colour(s), and {} material colour(s) on {} renderer(s)",
+        report.sources.len(),
+        count(|b| matches!(b, ColorBody::Lut { .. })),
+        count(|b| matches!(b, ColorBody::Array { .. })),
+        count(|b| matches!(b, ColorBody::Parameter { .. })),
+        count(|b| matches!(b, ColorBody::Script { .. })),
+        report
+            .renderers
+            .iter()
+            .map(|r| r.colors.len())
+            .sum::<usize>(),
+        report.renderers.len(),
+    ));
+    if !report.gpu_scripts.is_empty() {
+        out(format!(
+            "{} GPU script(s), whose own colours are shader code: {}",
+            report.gpu_scripts.len(),
+            report.gpu_scripts.join(", ")
+        ));
+    }
+    let mut emitters: Vec<Option<&str>> = Vec::new();
+    for source in &report.sources {
+        if !emitters.contains(&source.emitter.as_deref()) {
+            emitters.push(source.emitter.as_deref());
+        }
+    }
+    emitters.sort_by_key(Option::is_none);
+    for emitter in emitters {
+        out(emitter.unwrap_or("system").to_string());
+        for source in report
+            .sources
+            .iter()
+            .filter(|s| s.emitter.as_deref() == emitter)
+        {
+            let owner = source
+                .owner
+                .as_deref()
+                .map_or_else(String::new, |owner| format!("{owner}: "));
+            let mut tags = Vec::new();
+            if let Some(peak) = source.peak.filter(|peak| *peak > 1.0) {
+                tags.push(format!("HDR {}", short_float(peak)));
+            }
+            if source.grey {
+                tags.push("grey".to_string());
+            }
+            if source.enemy {
+                tags.push("enemy".to_string());
+            }
+            let tags = if tags.is_empty() {
+                String::new()
+            } else {
+                format!("  [{}]", tags.join(", "))
+            };
+            let head = format!("  [{}] {owner}{}", source.export, source.object_name);
+            match &source.body {
+                ColorBody::Lut {
+                    samples: held,
+                    min_time,
+                    max_time,
+                    use_lut,
+                    keys,
+                    exposed_texture,
+                } => {
+                    out(format!(
+                        "{head}  curve, {} sample(s) over {}..{}{tags}",
+                        held.len(),
+                        short_float(*min_time),
+                        short_float(*max_time)
+                    ));
+                    let last = held.len().saturating_sub(1);
+                    let shown: Vec<usize> = if samples || held.len() <= 3 {
+                        (0..held.len()).collect()
+                    } else {
+                        vec![0, last / 2, last]
+                    };
+                    let at = |index: usize| {
+                        let t = if last == 0 {
+                            0.0
+                        } else {
+                            index as f32 / last as f32
+                        };
+                        min_time + (max_time - min_time) * t
+                    };
+                    let line: Vec<String> = shown
+                        .iter()
+                        .map(|&index| {
+                            format!("t={} {}", short_float(at(index)), rgba(&held[index]))
+                        })
+                        .collect();
+                    out(format!("      {}", line.join("  ")));
+                    if !use_lut {
+                        out(format!(
+                            "      reads its {keys} curve key(s), not these samples"
+                        ));
+                    }
+                    if let Some(texture) = exposed_texture {
+                        out(format!(
+                            "      also kept as {texture}, which a material reads only where a renderer binds it"
+                        ));
+                    }
+                }
+                ColorBody::Array { field, colors } => {
+                    out(format!("{head}  {field}, {} colour(s){tags}", colors.len()));
+                    let line: Vec<String> = colors.iter().map(rgba).collect();
+                    out(format!("      {}", line.join("  ")));
+                }
+                ColorBody::Parameter {
+                    name,
+                    color,
+                    copies,
+                } => {
+                    let stores: Vec<&str> = copies.iter().map(|c| c.store.as_str()).collect();
+                    out(format!(
+                        "{head}  {name} {}  in {}{tags}",
+                        rgba(color),
+                        stores.join(", ")
+                    ));
+                }
+                ColorBody::Script {
+                    usage,
+                    attribute,
+                    drawn,
+                    channels,
+                } => {
+                    let undrawn = if *drawn {
+                        ""
+                    } else {
+                        ", which no renderer draws"
+                    };
+                    out(format!("{head}  {usage} writes {attribute}{undrawn}{tags}"));
+                    for channel in channels {
+                        let mut expression = match channel.value {
+                            Some(value) => short_float(value),
+                            None => channel.trace.expression.clone(),
+                        };
+                        if expression.chars().count() > 72 {
+                            expression = expression.chars().take(71).collect::<String>() + "…";
+                        }
+                        // A baked channel's literals are its colour; a computed one's are its maths.
+                        let constants: Vec<String> = if channel.trace.baked {
+                            channel
+                                .trace
+                                .leaves
+                                .iter()
+                                .filter_map(|leaf| match leaf {
+                                    rivals_uasset::VmLeaf::Constant {
+                                        at,
+                                        operand,
+                                        constant,
+                                        ..
+                                    } => Some(format!(
+                                        "--at 0x{at:04X} --operand {operand}  ({})",
+                                        constant.key
+                                    )),
+                                    _ => None,
+                                })
+                                .collect()
+                        } else {
+                            Vec::new()
+                        };
+                        out(format!(
+                            "      {}  {expression:<12}  {}",
+                            channel.channel,
+                            constants.join(", ")
+                        )
+                        .trim_end()
+                        .to_string());
+                    }
+                    if channels.iter().any(|channel| !channel.trace.baked) {
+                        out(format!(
+                            "      computed: asset vm --export {} --trace {attribute} follows each to what it reads",
+                            source.export
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    if !report.renderers.is_empty() {
+        out("materials".to_string());
+    }
+    let object = |path: &str| path.rsplit(['.', ':']).next().unwrap_or(path).to_string();
+    for renderer in &report.renderers {
+        let materials: Vec<String> = renderer.materials.iter().map(|m| object(m)).collect();
+        out(format!(
+            "  [{}] {}{}  {}",
+            renderer.export,
+            renderer.object_name,
+            renderer
+                .emitter
+                .as_deref()
+                .map_or_else(String::new, |emitter| format!(" ({emitter})")),
+            materials.join(", ")
+        ));
+        for color in &renderer.colors {
+            let mut tags = Vec::new();
+            if color.enemy {
+                tags.push("enemy".to_string());
+            }
+            if let Some(variable) = &color.bound {
+                tags.push(format!("set from {variable}"));
+            }
+            if color.layered {
+                tags.push("a layer's".to_string());
+            }
+            let tags = if tags.is_empty() {
+                String::new()
+            } else {
+                format!("  [{}]", tags.join(", "))
+            };
+            let from = color
+                .from
+                .as_deref()
+                .map_or_else(|| "the renderer's own".to_string(), object);
+            out(format!(
+                "      {}  {}  {from}{tags}",
+                color.name,
+                rgba(&color.color)
+            ));
+        }
+        for why in &renderer.unread {
+            out(format!("      unread: {why}"));
+        }
+    }
+}
+
+/// What a recolour changes. `scripts` is whether it was asked to change script colours.
+pub fn print_recolor_plan(
+    plan: &niagara_colors::RecolorPlan,
+    scripts: bool,
+    out: &mut impl FnMut(String),
+) {
+    out(format!(
+        "recolours {} source(s) with {} value edit(s) and {} script colour(s) transformed where written",
+        plan.sources,
+        plan.paths.len(),
+        plan.vm_colors.len()
+    ));
+    if plan.scripts > 0 {
+        out(format!(
+            "leaves {} script colour(s) as they are{}",
+            plan.scripts,
+            if scripts {
+                ""
+            } else {
+                ": --scripts changes the ones a renderer draws"
+            }
+        ));
+    }
+    for note in &plan.notes {
+        out(format!("note: {note}"));
     }
 }
 

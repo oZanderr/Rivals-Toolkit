@@ -69,7 +69,8 @@ export const windowStub = {
 };
 
 export const dialogStub = {
-  open: vi.fn(async () => null),
+  open: vi.fn(async (): Promise<string | string[] | null> => null),
+  save: vi.fn(async (): Promise<string | null> => null),
 };
 
 type Listener = (event: { payload: unknown }) => void;

@@ -47,7 +47,9 @@ import {
   X,
 } from "lucide-react";
 
+import { ColourPane } from "@/components/ColourPane";
 import { ScriptTextEditor } from "@/components/ScriptTextEditor";
+import { TexturePane } from "@/components/TexturePane";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -103,6 +105,7 @@ import {
   type EditTarget,
   type NewFunction,
   type NewVariable,
+  type PathEdit,
   type Structural,
   pathCheckText,
   referenceText,
@@ -112,6 +115,7 @@ import {
 } from "@/hooks/useAssetEdits";
 import { useExportClipboard, type ExportClipboard } from "@/hooks/useExportClipboard";
 import { useSaveHotkeys } from "@/hooks/useSaveHotkeys";
+import { type Recolor, type RecolorPick } from "@/lib/niagaraColors";
 import {
   type ModEntry,
   previewContainerFilename,
@@ -444,7 +448,29 @@ interface MappingsStatus {
   warning?: string | null;
 }
 
-type ViewMode = "table" | "strings" | "slots" | "tree" | "json" | "bytes" | "script" | "vm";
+type ViewMode =
+  | "table"
+  | "strings"
+  | "slots"
+  | "texture"
+  | "tree"
+  | "json"
+  | "bytes"
+  | "script"
+  | "vm"
+  | "colour";
+
+/** The classes whose exports are a colour source of their own, and rest on the Colour view. */
+const COLOR_CLASSES = new Set(["NiagaraDataInterfaceColorCurve", "NiagaraDataInterfaceArrayColor"]);
+
+/** The classes whose exports hold a texture's pixels. */
+const TEXTURE_CLASSES = new Set([
+  "Texture2D",
+  "TextureCube",
+  "Texture2DArray",
+  "VolumeTexture",
+  "TextureCubeArray",
+]);
 
 const INHERITED_KEY = "assetInspector.showInherited";
 
@@ -8834,6 +8860,8 @@ export default function AssetInspector({
   };
   const [mappings, setMappings] = useState<MappingsStatus | null>(null);
   const [view, setView] = useState<ViewMode>("table");
+  /** The colour source last chosen in the Colour view, kept here so a save's re-read lands on it. */
+  const [colourChoice, setColourChoice] = useState<string | null>(null);
   // The default export is picked when an asset is opened, not again when a save re-reads it:
   // that would pull the user off the export they were editing.
   const pickDefault = useRef(true);
@@ -9258,6 +9286,51 @@ export default function AssetInspector({
     : edits.dirty
       ? "Save or discard your edits first."
       : null;
+  const recolorBlocked =
+    structuralLock ??
+    (edits.saving
+      ? "A save is under way."
+      : previewContainerFilename(edits.modName, edits.saveTarget)
+        ? null
+        : "Name the mod to save into first.");
+  /** Recolours every colour `pick` names in one save of its own, planned against this read. */
+  const recolorEffect = async (pick: RecolorPick, tool: Recolor) => {
+    let paths: PathEdit[];
+    try {
+      const plan = await invoke<{ paths: PathEdit[] }>("plan_recolor", {
+        gameRoot: gamePath,
+        container,
+        entry,
+        pick,
+        tool,
+      });
+      paths = plan.paths;
+    } catch (e) {
+      edits.report(String(e), "err");
+      return;
+    }
+    if (paths.length === 0) {
+      edits.report("Those colours already read that way.", "ok");
+      return;
+    }
+    await edits.save({ structural: { paths } });
+  };
+  /** Moves to another export, asking first when this one has unsaved edits. */
+  const selectExport = (exportIndex: number, then?: () => void) => {
+    const at = pkg?.exports.findIndex((e) => e.index === exportIndex) ?? -1;
+    if (at < 0) return;
+    const go = () => {
+      setSelected(at);
+      setShowPackage(false);
+      then?.();
+    };
+    if (at === selected) go();
+    else
+      guarded(() => {
+        discard();
+        go();
+      });
+  };
 
   // A DataTable reads best as a grid, but the rows are still just properties, so the tree and
   // JSON views work on the same data rather than being a separate code path.
@@ -9337,6 +9410,8 @@ export default function AssetInspector({
 
   // A function stores no property values, so a tree of it could only ever be empty.
   const codeOnly = Boolean(active?.script) && (active?.properties.length ?? 0) === 0;
+  const texture = TEXTURE_CLASSES.has(active?.class_name ?? "");
+  const niagara = pkg?.exports.some((e) => e.class_name.startsWith("Niagara")) ?? false;
   // Only the views that can show something for this export are offered at all.
   const views: { id: ViewMode; label: string }[] = [
     { id: "table" as const, label: "Table", shown: Boolean(active?.data_table) },
@@ -9346,7 +9421,9 @@ export default function AssetInspector({
       label: "Slots",
       shown: active ? meshSlots(active.properties) !== null : false,
     },
+    { id: "texture" as const, label: "Texture", shown: texture },
     { id: "script" as const, label: "Script", shown: Boolean(active?.script) },
+    { id: "colour" as const, label: "Colour", shown: niagara },
     { id: "vm" as const, label: "VM", shown: active?.class_name === "NiagaraScript" },
     { id: "tree" as const, label: "Tree", shown: !codeOnly },
     { id: "json" as const, label: "JSON", shown: true },
@@ -9363,9 +9440,13 @@ export default function AssetInspector({
     ? "table"
     : active?.string_table
       ? "strings"
-      : codeOnly
-        ? "script"
-        : "tree";
+      : texture
+        ? "texture"
+        : COLOR_CLASSES.has(active?.class_name ?? "")
+          ? "colour"
+          : codeOnly
+            ? "script"
+            : "tree";
   const effectiveView: ViewMode =
     view !== "table" && views.some((option) => option.id === view) ? view : restingView;
 
@@ -9800,6 +9881,15 @@ export default function AssetInspector({
                       <StringTableView table={active.string_table} exportIndex={active.index} />
                     ) : active && effectiveView === "slots" ? (
                       <MeshSlotsView properties={active.properties} />
+                    ) : active && effectiveView === "texture" ? (
+                      <TexturePane
+                        key={`${epoch}:${active.index}`}
+                        gamePath={gamePath}
+                        container={container}
+                        entry={entry}
+                        exportIndex={active.index}
+                        onReport={edits.report}
+                      />
                     ) : active && effectiveView === "json" ? (
                       <JsonView export={active} />
                     ) : active && effectiveView === "bytes" ? (
@@ -9809,6 +9899,23 @@ export default function AssetInspector({
                         container={container}
                         entry={entry}
                         exportIndex={active.index}
+                      />
+                    ) : active && effectiveView === "colour" ? (
+                      <ColourPane
+                        key={epoch}
+                        gamePath={gamePath}
+                        container={container}
+                        entry={entry}
+                        activeExport={active.index}
+                        properties={active.properties}
+                        chosen={colourChoice}
+                        onChoose={(exportIndex, key) => {
+                          setColourChoice(key);
+                          selectExport(exportIndex);
+                        }}
+                        onOpenVm={(exportIndex) => selectExport(exportIndex, () => setView("vm"))}
+                        recolorBlocked={recolorBlocked}
+                        onRecolorAll={(pick, tool) => void recolorEffect(pick, tool)}
                       />
                     ) : active && effectiveView === "vm" ? (
                       <VmPane
