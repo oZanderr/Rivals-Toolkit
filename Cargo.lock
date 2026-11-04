@@ -3698,7 +3698,7 @@ dependencies = [
 
 [[package]]
 name = "rivals-cli"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "clap",
  "dirs 5.0.1",
@@ -3712,7 +3712,7 @@ dependencies = [
 
 [[package]]
 name = "rivals-core"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "aes",
  "anyhow",
@@ -3746,7 +3746,7 @@ dependencies = [
 
 [[package]]
 name = "rivals-toolkit"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "aes",
  "blake3",
@@ -3776,7 +3776,7 @@ dependencies = [
 
 [[package]]
 name = "rivals-uasset"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "retoc",
  "serde",
