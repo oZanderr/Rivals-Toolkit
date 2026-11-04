@@ -41,7 +41,6 @@ jobs:
           workspaces: |
             . -> target
           shared-key: tauri-release
-          cache-on-failure: true
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
