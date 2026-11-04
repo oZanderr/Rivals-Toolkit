@@ -22,6 +22,7 @@ import {
   XCircle,
 } from "lucide-react";
 
+import { TabsSettings } from "@/components/TabsSettings";
 import {
   AlertDialog,
   AlertDialogCancel,
@@ -48,6 +49,7 @@ import type { UpdateInfo } from "@/hooks/useUpdateCheck";
 import type { KeyCheck } from "@/lib/gameLogs";
 import { emitModsChanged, normalizeFolderPath, onModsChanged } from "@/lib/modsEvents";
 import { setShowHeroIcons } from "@/lib/showHeroIcons";
+import type { TabLayout } from "@/lib/tabs";
 import { emitTweakProfilesChanged, onTweakProfilesChanged } from "@/lib/tweakProfileEvents";
 import { cn } from "@/lib/utils";
 
@@ -154,6 +156,9 @@ function formatRelativeTime(unixSecs: number): string {
   return `${Math.floor(diff / 86400)}d ago`;
 }
 
+/** A section another tab can open Settings at. */
+export type SettingsSection = "tabs";
+
 interface Props {
   gamePath: string;
   setGamePath: (p: string) => void;
@@ -162,6 +167,10 @@ interface Props {
   detecting: boolean;
   showDetectBadge: boolean;
   onManualUpdateFound: (info: UpdateInfo) => void;
+  tabLayout: TabLayout | null;
+  onTabLayoutChange: (layout: TabLayout) => void;
+  pendingSection: SettingsSection | null;
+  onPendingSectionConsumed: () => void;
 }
 
 export function Settings({
@@ -172,6 +181,10 @@ export function Settings({
   detecting,
   showDetectBadge,
   onManualUpdateFound,
+  tabLayout,
+  onTabLayoutChange,
+  pendingSection,
+  onPendingSectionConsumed,
 }: Props) {
   const [draftGamePath, setDraftGamePath] = useState(gamePath);
 
@@ -197,6 +210,8 @@ export function Settings({
   const [savedGameRunningCheck, setSavedGameRunningCheck] = useState<boolean | null>(null);
   const [draftConflictCheck, setDraftConflictCheck] = useState<boolean | null>(null);
   const [savedConflictCheck, setSavedConflictCheck] = useState<boolean | null>(null);
+  const [draftConform, setDraftConform] = useState<boolean | null>(null);
+  const [savedConform, setSavedConform] = useState<boolean | null>(null);
   const [draftLogKey, setDraftLogKey] = useState<LogKeyOverride | null>(null);
   const [savedLogKey, setSavedLogKey] = useState<LogKeyOverride | null>(null);
   const [logKeyError, setLogKeyError] = useState<string | null>(null);
@@ -431,6 +446,19 @@ export function Settings({
         console.error(e);
         setDraftConflictCheck(true);
         setSavedConflictCheck(true);
+      });
+  }, []);
+
+  useEffect(() => {
+    invoke<boolean>("get_conform_mods")
+      .then((v) => {
+        setDraftConform(v);
+        setSavedConform(v);
+      })
+      .catch((e) => {
+        console.error(e);
+        setDraftConform(true);
+        setSavedConform(true);
       });
   }, []);
 
@@ -718,6 +746,8 @@ export function Settings({
     draftConflictCheck !== null &&
     savedConflictCheck !== null &&
     draftConflictCheck !== savedConflictCheck;
+  const conformDirty =
+    draftConform !== null && savedConform !== null && draftConform !== savedConform;
   const logKeyDirty =
     draftLogKey !== null &&
     savedLogKey !== null &&
@@ -733,7 +763,8 @@ export function Settings({
     modLevelDirty ||
     vanillaLevelDirty ||
     gameRunningCheckDirty ||
-    conflictCheckDirty;
+    conflictCheckDirty ||
+    conformDirty;
 
   async function save() {
     setSaving(true);
@@ -833,6 +864,14 @@ export function Settings({
           console.error(e);
         }
       }
+      if (conformDirty && draftConform !== null) {
+        try {
+          await invoke("set_conform_mods", { enabled: draftConform });
+          setSavedConform(draftConform);
+        } catch (e) {
+          console.error(e);
+        }
+      }
       if (logKeyDirty && draftLogKey !== null) {
         try {
           await invoke("set_log_key_override", { key: draftLogKey.key, iv: draftLogKey.iv });
@@ -868,6 +907,13 @@ export function Settings({
   }
 
   const { atBottom, scrollRef, sentinelRef } = useScrollAtBottom();
+
+  const tabsSectionRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (pendingSection !== "tabs") return;
+    tabsSectionRef.current?.scrollIntoView({ block: "start" });
+    onPendingSectionConsumed();
+  }, [pendingSection, onPendingSectionConsumed]);
   useSaveHotkeys({ dirty, saving, onSave: save, onDiscard: discard });
 
   return (
@@ -967,7 +1013,8 @@ export function Settings({
               <div className="flex flex-1 flex-col gap-0.5">
                 <span className="text-[13px] font-medium">Scan ~mods subfolders</span>
                 <span className="text-[11px] text-muted-foreground">
-                  Include mods nested in subfolders. This matches the game's native load behavior.
+                  List mods nested in subfolders, which the game loads too, as a folder tree. Off
+                  hides them here, and the folders with them.
                 </span>
               </div>
               <Switch
@@ -1157,6 +1204,21 @@ export function Settings({
                 disabled={draftConflictCheck === null}
               />
             </label>
+            <label className="flex items-center gap-3 rounded-sm px-3 py-3 hover:bg-secondary/50">
+              <div className="flex flex-1 flex-col gap-0.5">
+                <span className="text-[13px] font-medium">Convert editor-made mods</span>
+                <span className="text-[11px] text-muted-foreground">
+                  When a mod cooked in the Unreal editor is installed or repacked, give its skeletal
+                  mesh material slots, static mesh screen sizes and string table entries the layout
+                  the game reads, and apply the material tag plugin's tags and hidden slots.
+                </span>
+              </div>
+              <Switch
+                checked={draftConform ?? true}
+                onCheckedChange={setDraftConform}
+                disabled={draftConform === null}
+              />
+            </label>
           </div>
 
           {/* ── Asset Mappings ── */}
@@ -1173,14 +1235,13 @@ export function Settings({
                   game patch.
                 </span>
                 {mappings?.loaded ? (
-                  <span
-                    className="truncate text-[11px] text-emerald-400"
-                    title={mappings.path ?? ""}
-                  >
-                    {mappings.struct_count.toLocaleString()} structs,{" "}
-                    {mappings.enum_count.toLocaleString()} enums loaded from{" "}
-                    {fileNameOf(mappings.path)}
-                  </span>
+                  <Tip content={mappings.path}>
+                    <span className="truncate text-[11px] text-emerald-400">
+                      {mappings.struct_count.toLocaleString()} structs,{" "}
+                      {mappings.enum_count.toLocaleString()} enums loaded from{" "}
+                      {fileNameOf(mappings.path)}
+                    </span>
+                  </Tip>
                 ) : (
                   <span className="text-[11px] text-amber-400">
                     {mappings?.error ?? "Not set. Asset contents cannot be read."}
@@ -1294,7 +1355,7 @@ export function Settings({
                 </span>
               </div>
               <Select
-                value={draftModLevel ?? undefined}
+                value={draftModLevel ?? ""}
                 onValueChange={(v) => setDraftModLevel(v as CompressionLevel)}
                 disabled={draftModLevel === null}
               >
@@ -1324,7 +1385,7 @@ export function Settings({
                 )}
               </div>
               <Select
-                value={draftVanillaLevel ?? undefined}
+                value={draftVanillaLevel ?? ""}
                 onValueChange={(v) => setDraftVanillaLevel(v as CompressionLevel)}
                 disabled={draftVanillaLevel === null}
               >
@@ -1478,6 +1539,11 @@ export function Settings({
             )}
           </div>
 
+          {/* ── Tabs ── */}
+          <div ref={tabsSectionRef}>
+            <TabsSettings layout={tabLayout} onChange={onTabLayoutChange} />
+          </div>
+
           {/* ── Updates ── */}
           <div className="flex flex-col overflow-hidden rounded-md border border-border">
             <div className="border-b border-border bg-card px-3 py-2">
@@ -1595,9 +1661,11 @@ export function Settings({
                   className="flex items-center gap-2 px-3 py-2 hover:bg-secondary/40"
                 >
                   <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                    <span className="truncate text-[12px]" title={m.name}>
-                      {m.label} · {m.changelist.toLocaleString()}
-                    </span>
+                    <Tip content={m.name}>
+                      <span className="truncate text-[12px]">
+                        {m.label} · {m.changelist.toLocaleString()}
+                      </span>
+                    </Tip>
                     <span className="truncate text-[11px] text-muted-foreground">{m.name}</span>
                   </div>
                   <span className="shrink-0 text-[11px] text-muted-foreground">

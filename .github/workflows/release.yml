@@ -106,83 +106,85 @@ jobs:
             }
           }
 
-      - name: Package release zip
+      # The app's zip keeps its name: the in-app updater downloads it by that name. The CLI ships
+      # apart, so a CLI copied from an older app zip is never mistaken for the current one.
+      - name: Package release zips
         shell: pwsh
         run: |
           $tag = "${{ steps.vars.outputs.tag }}"
-          $assetBase = "rivals-toolkit-$tag-windows-x64"
           $repoRoot = $env:GITHUB_WORKSPACE
           $releaseDir = Join-Path $repoRoot "target/release"
-          $zipPath = Join-Path $releaseDir "$assetBase.zip"
           $stagingRoot = Join-Path $releaseDir "_package"
-          $stagingDir = Join-Path $stagingRoot $assetBase
-
-          $exePath = Join-Path $releaseDir "rivals-toolkit.exe"
-          $cliPath = Join-Path $releaseDir "rivals-cli.exe"
           $oo2corePath = Join-Path $repoRoot "src-tauri/resources/oo2core_9_win64.dll"
-
-          foreach ($required in @($exePath, $cliPath, $oo2corePath)) {
-            if (-not (Test-Path $required)) {
-              throw "Required release file not found: $required"
-            }
-          }
 
           if (Test-Path $stagingRoot) {
             Remove-Item $stagingRoot -Recurse -Force
           }
-          if (Test-Path $zipPath) {
-            Remove-Item $zipPath -Force
+
+          # Each zip holds its executable and the Oodle DLL it reads compressed paks with.
+          foreach ($package in @(
+            @{ Base = "rivals-toolkit-$tag-windows-x64"; Exe = "rivals-toolkit.exe" },
+            @{ Base = "rivals-cli-$tag-windows-x64"; Exe = "rivals-cli.exe" }
+          )) {
+            $exePath = Join-Path $releaseDir $package.Exe
+            foreach ($required in @($exePath, $oo2corePath)) {
+              if (-not (Test-Path $required)) {
+                throw "Required release file not found: $required"
+              }
+            }
+
+            $zipPath = Join-Path $releaseDir "$($package.Base).zip"
+            if (Test-Path $zipPath) {
+              Remove-Item $zipPath -Force
+            }
+            $stagingDir = Join-Path $stagingRoot $package.Base
+            New-Item -ItemType Directory -Path $stagingDir -Force | Out-Null
+
+            Copy-Item $exePath (Join-Path $stagingDir $package.Exe) -Force
+            Copy-Item $oo2corePath (Join-Path $stagingDir "oo2core_9_win64.dll") -Force
+
+            Compress-Archive -Path "$stagingDir/*" -DestinationPath $zipPath -CompressionLevel Optimal
           }
 
-          New-Item -ItemType Directory -Path $stagingDir -Force | Out-Null
-
-          # Keep executable name clean while versioning the archive itself.
-          Copy-Item $exePath "$stagingDir/rivals-toolkit.exe" -Force
-          # Shares the Oodle DLL staged alongside it, so no second copy is needed.
-          Copy-Item $cliPath "$stagingDir/rivals-cli.exe" -Force
-          Copy-Item $oo2corePath "$stagingDir/oo2core_9_win64.dll" -Force
-
-          Compress-Archive -Path "$stagingDir/*" -DestinationPath $zipPath -CompressionLevel Optimal
-
-      - name: Create or update GitHub Release with zip package
+      - name: Create or update GitHub Release with zip packages
         shell: pwsh
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CHANGELOG: ${{ steps.changelog.outputs.text }}
         run: |
           $tag = "${{ steps.vars.outputs.tag }}"
-          $assetName = "rivals-toolkit-$tag-windows-x64.zip"
-          $assetPath = Join-Path $env:GITHUB_WORKSPACE "target/release/$assetName"
-          $notesPath = Join-Path $env:RUNNER_TEMP "release-notes.md"
-
-          if (-not (Test-Path $assetPath)) {
-            throw "Expected release asset not found at $assetPath"
-          }
-
-          $checksum = (Get-FileHash -Algorithm SHA256 $assetPath).Hash.ToLower()
-
-          # Write standalone checksum file
-          $checksumFileName = "$assetName.sha256"
-          $checksumFilePath = Join-Path $env:RUNNER_TEMP $checksumFileName
-          "$checksum  $assetName" | Set-Content -Path $checksumFilePath -Encoding utf8 -NoNewline
-
           $repo = "${{ github.repository }}"
-          $downloadUrl = "https://github.com/$repo/releases/download/$tag/$assetName"
-          $checksumUrl = "https://github.com/$repo/releases/download/$tag/$checksumFileName"
+          $notesPath = Join-Path $env:RUNNER_TEMP "release-notes.md"
+          $downloads = @(
+            @{ Name = "rivals-toolkit-$tag-windows-x64.zip"; What = "Desktop app" },
+            @{ Name = "rivals-cli-$tag-windows-x64.zip"; What = "Command-line tool" }
+          )
+
+          $rows = @()
+          $uploads = @()
+          foreach ($download in $downloads) {
+            $assetName = $download.Name
+            $assetPath = Join-Path $env:GITHUB_WORKSPACE "target/release/$assetName"
+            if (-not (Test-Path $assetPath)) {
+              throw "Expected release asset not found at $assetPath"
+            }
+
+            $checksum = (Get-FileHash -Algorithm SHA256 $assetPath).Hash.ToLower()
+            $checksumFileName = "$assetName.sha256"
+            $checksumFilePath = Join-Path $env:RUNNER_TEMP $checksumFileName
+            "$checksum  $assetName" | Set-Content -Path $checksumFilePath -Encoding utf8 -NoNewline
+
+            $downloadUrl = "https://github.com/$repo/releases/download/$tag/$assetName"
+            $checksumUrl = "https://github.com/$repo/releases/download/$tag/$checksumFileName"
+            $rows += "| $($download.What) | [$assetName]($downloadUrl) | [checksum]($checksumUrl) |"
+            $uploads += $assetPath, $checksumFilePath
+          }
 
           $changelog = $env:CHANGELOG
 
-          @(
-            "## Downloads",
-            "",
-            "| File | |",
-            "| ---- | - |",
-            "| [$assetName]($downloadUrl) | [checksum]($checksumUrl) |",
-            "",
-            "## Changelog",
-            "",
-            $changelog
-          ) -join "`n" | Set-Content -Path $notesPath -Encoding utf8
+          $lines = @("## Downloads", "", "| | File | |", "| - | ---- | - |") + $rows +
+            @("", "## Changelog", "", $changelog)
+          ($lines -join "`n") | Set-Content -Path $notesPath -Encoding utf8
 
           gh release view "$tag" *> $null
           if ($LASTEXITCODE -ne 0) {
@@ -197,8 +199,9 @@ jobs:
               --notes-file "$notesPath"
           }
 
-          gh release upload "$tag" "$assetPath" --clobber
-          gh release upload "$tag" "$checksumFilePath" --clobber
+          foreach ($upload in $uploads) {
+            gh release upload "$tag" "$upload" --clobber
+          }
 
       - name: Notify Discord on release success
         if: ${{ success() }}
@@ -213,10 +216,13 @@ jobs:
           }
 
           $tag = "${{ steps.vars.outputs.tag }}"
-          $assetName = "rivals-toolkit-$tag-windows-x64.zip"
           $repo = "${{ github.repository }}"
           $releaseUrl = "https://github.com/$repo/releases/tag/$tag"
-          $downloadUrl = "https://github.com/$repo/releases/download/$tag/$assetName"
+          $appAsset = "rivals-toolkit-$tag-windows-x64.zip"
+          $cliAsset = "rivals-cli-$tag-windows-x64.zip"
+          $appUrl = "https://github.com/$repo/releases/download/$tag/$appAsset"
+          $cliUrl = "https://github.com/$repo/releases/download/$tag/$cliAsset"
+          $downloads = "[App]($appUrl), [CLI]($cliUrl)"
 
           $changelog = $env:CHANGELOG
 
@@ -234,7 +240,7 @@ jobs:
                 color = 5763719
                 fields = @(
                   @{ name = "Release"; value = "[View release]($releaseUrl)"; inline = $true },
-                  @{ name = "Download"; value = "[$assetName]($downloadUrl)"; inline = $true },
+                  @{ name = "Download"; value = $downloads; inline = $true },
                   @{ name = "Changelog"; value = $changelog; inline = $false }
                 )
                 timestamp = (Get-Date).ToUniversalTime().ToString("o")

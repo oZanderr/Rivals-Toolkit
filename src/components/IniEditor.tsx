@@ -342,6 +342,8 @@ export function IniEditor({
   const [openedFiles, setOpenedFiles] = useState<string[]>([]);
   const [selectedSource, setSelectedSource] = useState<IniSource | null>(null);
   const [scanning, setScanning] = useState(false);
+  // Whether a scan has finished, so an empty pak list means none rather than not looked yet.
+  const [scanned, setScanned] = useState(false);
   // Which entry is being read, if any. There is no whole-pak load to wait for any more: selecting
   // a pak reads its index only, and the tab strip is drawn from that while a file arrives behind it.
   const [entryLoading, setEntryLoading] = useState<string | null>(null);
@@ -604,6 +606,7 @@ export function IniEditor({
         if (!silent) showNotice("Scan failed", "err");
       } finally {
         setScanning(false);
+        setScanned(true);
       }
     },
     [gamePath, paks, selectedSource]
@@ -1453,13 +1456,16 @@ export function IniEditor({
   const allSources = [...(pluginsEntry ? [pluginsEntry] : []), ...pakSources, ...fileSources];
   const isPak = selectedSource?.kind === "pak";
 
-  // Auto-select when exactly one pak is found
+  // Opens the only thing there is to open: a lone pak, or the plugins' configs when no pak has INI.
   useEffect(() => {
-    if (paks.length === 1 && !selectedSource) {
+    if (selectedSource) return;
+    if (paks.length === 1) {
       loadSource(pakSource(paks[0]));
+    } else if (paks.length === 0 && scanned && pluginInis.length > 0) {
+      loadSource(pluginsSource(pluginInis));
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- fire-once after scan populates paks
-  }, [paks, selectedSource]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- loadSource is redefined every render
+  }, [paks, pluginInis, scanned, selectedSource]);
 
   return (
     <div className="relative flex flex-1 min-h-0 w-full flex-col gap-4">
@@ -1604,32 +1610,35 @@ export function IniEditor({
                         isActive ? "bg-background shadow-sm" : "hover:bg-background/40"
                       )}
                     >
-                      <button
-                        onClick={() => setActiveEntry(entry)}
-                        title={entry}
-                        className={cn(
-                          "flex items-center gap-1.5 pl-3 py-1 text-[12px] font-medium transition-colors",
-                          isPak && displayedEntries.length > 1 ? "pr-2" : "pr-3",
-                          isActive
-                            ? "text-foreground"
-                            : "text-muted-foreground hover:text-foreground"
-                        )}
-                      >
-                        <FileText size={12} />
-                        {entryBasename(entry)}
-                        {entryDirty && <span className="size-1.5 rounded-full bg-warn" />}
-                      </button>
-                      {isPak && displayedEntries.length > 1 && (
+                      <Tip content={entry}>
                         <button
-                          onClick={() => setDeleteConfirm(entry)}
-                          title={`Delete ${entryBasename(entry)}`}
+                          onClick={() => setActiveEntry(entry)}
                           className={cn(
-                            "mr-1 rounded-sm p-0.5 transition-opacity hover:bg-destructive/15 hover:text-destructive",
-                            isActive ? "opacity-60" : "opacity-0 group-hover:opacity-60"
+                            "flex items-center gap-1.5 pl-3 py-1 text-[12px] font-medium transition-colors",
+                            isPak && displayedEntries.length > 1 ? "pr-2" : "pr-3",
+                            isActive
+                              ? "text-foreground"
+                              : "text-muted-foreground hover:text-foreground"
                           )}
                         >
-                          <X size={11} />
+                          <FileText size={12} />
+                          {entryBasename(entry)}
+                          {entryDirty && <span className="size-1.5 rounded-full bg-warn" />}
                         </button>
+                      </Tip>
+                      {isPak && displayedEntries.length > 1 && (
+                        <Tip content={`Delete ${entryBasename(entry)}`}>
+                          <button
+                            onClick={() => setDeleteConfirm(entry)}
+                            aria-label={`Delete ${entryBasename(entry)}`}
+                            className={cn(
+                              "mr-1 rounded-sm p-0.5 transition-opacity hover:bg-destructive/15 hover:text-destructive",
+                              isActive ? "opacity-60" : "opacity-0 group-hover:opacity-60"
+                            )}
+                          >
+                            <X size={11} />
+                          </button>
+                        </Tip>
                       )}
                     </div>
                   );
@@ -1641,14 +1650,16 @@ export function IniEditor({
                       if (!adding) setAddOpen(open);
                     }}
                   >
-                    <PopoverTrigger asChild>
-                      <button
-                        title="Add INI file"
-                        className="ml-0.5 rounded-sm p-1 text-muted-foreground transition-colors hover:bg-background/40 hover:text-foreground"
-                      >
-                        <Plus size={13} />
-                      </button>
-                    </PopoverTrigger>
+                    <Tip content="Add INI file">
+                      <PopoverTrigger asChild>
+                        <button
+                          aria-label="Add INI file"
+                          className="ml-0.5 rounded-sm p-1 text-muted-foreground transition-colors hover:bg-background/40 hover:text-foreground"
+                        >
+                          <Plus size={13} />
+                        </button>
+                      </PopoverTrigger>
+                    </Tip>
                     <PopoverContent align="start" className="w-80 p-3">
                       <AddIniPopover
                         existingEntries={displayedEntries}
@@ -1963,20 +1974,26 @@ function AddIniPopover({
             const already = existingBasenames.has(name.toLowerCase());
             const disabled = already || adding;
             return (
-              <button
+              <Tip
                 key={name}
-                disabled={disabled}
-                onClick={() => onAdd(targetPath)}
-                title={already ? `${name} is already in this pak` : `Add ${targetPath}`}
-                className={cn(
-                  "rounded border border-border px-2 py-1 text-[11px] font-medium transition-colors",
-                  disabled
-                    ? "cursor-not-allowed text-muted-foreground/40"
-                    : "hover:border-foreground/40 hover:bg-muted"
-                )}
+                content={already ? `${name} is already in this pak` : `Add ${targetPath}`}
               >
-                {name}
-              </button>
+                {/* A disabled button fires no hover, so the span carries the hint. */}
+                <span>
+                  <button
+                    disabled={disabled}
+                    onClick={() => onAdd(targetPath)}
+                    className={cn(
+                      "rounded border border-border px-2 py-1 text-[11px] font-medium transition-colors",
+                      disabled
+                        ? "cursor-not-allowed text-muted-foreground/40"
+                        : "hover:border-foreground/40 hover:bg-muted"
+                    )}
+                  >
+                    {name}
+                  </button>
+                </span>
+              </Tip>
             );
           })}
         </div>

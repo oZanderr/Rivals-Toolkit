@@ -18,6 +18,8 @@ import {
   Folder,
   FolderOpen,
   Hammer,
+  ImageDown,
+  ImageUp,
   Layers,
   ListTree,
   Loader2,
@@ -31,14 +33,14 @@ import {
   RotateCcw,
   Search,
   Square,
+  Terminal,
   Users,
   XCircle,
 } from "lucide-react";
 
-import AssetInspector from "@/components/AssetInspector";
 import { GameSearch } from "@/components/GameSearchDialog";
 import { HeroIcon } from "@/components/HeroIcon";
-import { ModReportDialog, type SearchHit } from "@/components/ModReportDialog";
+import { ModReportDialog } from "@/components/ModReportDialog";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -79,6 +81,7 @@ import {
   CATEGORY_TEXT_COLOR,
   classifyAssetPath,
 } from "@/lib/assetCategory";
+import { dumpCommand } from "@/lib/cliCommand";
 import { detectHeroIdsInPath } from "@/lib/heroIcons";
 import { emitModsChanged, normalizeFolderPath, onModsChanged } from "@/lib/modsEvents";
 import { useShowHeroIcons } from "@/lib/showHeroIcons";
@@ -106,7 +109,25 @@ type PackCompression = "oodle" | "zlib";
 // a matter of adding the control back.
 const REPACK_COMPRESSION: PackCompression = "oodle";
 
-// Only packages carry properties; every other extension is opaque payload.
+/** What packing did to packages an editor cooked: given the layout the game reads, or left. */
+interface Conformance {
+  conformed?: { package: string; changes: string[] }[];
+  unconformed?: { package: string; reason: string }[];
+}
+
+function conformanceNote(report: Conformance): string {
+  const done = report.conformed?.length ?? 0;
+  return done > 0 ? `; gave ${done} package${done !== 1 ? "s" : ""} the layout the game reads` : "";
+}
+
+function conformanceWarning(report: Conformance): string {
+  const left = report.unconformed ?? [];
+  if (left.length === 0) return "";
+  const more = left.length > 1 ? ` (and ${left.length - 1} more)` : "";
+  return `; left as the editor cooked it: ${left[0].package}: ${left[0].reason}${more}`;
+}
+
+// Only packages carry properties and textures; every other extension is opaque payload.
 const INSPECTABLE = /[.](uasset|umap)$/i;
 type StatusType = "ok" | "err" | "info";
 
@@ -130,7 +151,60 @@ const PROGRESS_EVENTS: [string, string][] = [
   ["repack-iostore-progress", "packing"],
   ["vanilla-extract-progress", "extracting"],
   ["vanilla-rebuild-progress", "rebuilding"],
+  ["texture-batch-progress", "textures"],
 ];
+
+/** The image files a batch saves textures as. One holding high dynamic range values goes out as
+ *  OpenEXR whichever is asked for, but a DDS, which holds its own bytes. */
+const TEXTURE_KINDS = [
+  { id: "png", label: "As PNG" },
+  { id: "tga", label: "As TGA" },
+  { id: "dds", label: "As DDS, Blocks and Mips as Stored" },
+] as const;
+
+interface TextureFailure {
+  entry: string;
+  export?: string;
+  image?: string;
+  reason: string;
+}
+
+interface TexturesOut {
+  packages: number;
+  /** `note` says why one went out as another kind than asked for. */
+  saved: { path: string; note?: string }[];
+  failed: TextureFailure[];
+  /** Virtual textures, the engine's placeholders, whose tiles are not read. */
+  skipped: TextureFailure[];
+  cancelled: boolean;
+}
+
+interface TexturesIn {
+  images: number;
+  packages: number;
+  given: unknown[];
+  failed: TextureFailure[];
+  written: string | null;
+  cancelled: boolean;
+}
+
+const GAME_STILL_RUNNING =
+  "Marvel Rivals is running, or still closing, and holds the mods open. Repack once it has exited.";
+
+/** How often Repack All asks whether the game started while one mod repacks. */
+const GAME_WATCH_MS = 2000;
+
+/** What the backend's own guard says now, rather than the state polled a few seconds ago. */
+function gameBlocks(): Promise<boolean> {
+  return invoke<boolean>("get_should_block_for_game").catch(() => false);
+}
+
+function textureFailures(failed: TextureFailure[]): string[] {
+  return failed.map(
+    (failure) =>
+      `${failure.entry}${failure.export ? ` (${failure.export})` : ""}: ${failure.reason}`
+  );
+}
 
 // The three things a repack can produce. Obfuscation is a property of an IoStore container rather
 // than a format of its own, so it rides along here instead of as a separate toggle that would be
@@ -195,10 +269,13 @@ interface Props {
   gamePath: string;
   gameRunning: boolean;
   pendingPak?: string | null;
-  /** Whether this tab is the one on screen; hidden tabs stay mounted. */
-  isActive?: boolean;
   onPendingPakConsumed?: () => void;
-  onOpenSettings?: () => void;
+}
+
+/** How the CLI's `--from` names a container: one of the game's by its name, any other by its path. */
+function cliSource(pak: string): string {
+  const name = pak.split(/[/\\]/).pop() ?? pak;
+  return /[/\\]Paks[/\\][^/\\]+$/i.test(pak) ? name.replace(/[.](pak|utoc|ucas)$/i, "") : pak;
 }
 
 /** The package name a container entry is the package of: the project's content is `/Game/`, and a
@@ -211,29 +288,17 @@ function packageOfEntry(entry: string): string {
   return plugin ? `/${plugin[1]}/${plugin[2]}` : `/${stem}`;
 }
 
-export function AssetManager({
-  gamePath,
-  gameRunning,
-  pendingPak,
-  isActive = true,
-  onPendingPakConsumed,
-  onOpenSettings,
-}: Props) {
-  const [inspecting, setInspecting] = useState<ContentEntry | null>(null);
-  /// Where in the inspected package to land, when it was opened from a mod search hit.
-  const [inspectTarget, setInspectTarget] = useState<{
-    exportIndex: number;
-    offset?: number;
-  } | null>(null);
+export function AssetManager({ gamePath, gameRunning, pendingPak, onPendingPakConsumed }: Props) {
   const [overviewOpen, setOverviewOpen] = useState(false);
   /// A package the user asked to take back out of the selected mod, awaiting confirmation.
   const [revertPrompt, setRevertPrompt] = useState<string | null>(null);
   const [renamePrompt, setRenamePrompt] = useState<{ path: string; to: string } | null>(null);
-  /// A container to read the inspected entry from instead of the selected one: the copy a save
-  /// just wrote, or the container a game-wide search found it in.
-  const [inspectFrom, setInspectFrom] = useState<string | null>(null);
-  // A loose asset is addressed by path alone, so it carries no container.
-  const [looseAsset, setLooseAsset] = useState<string | null>(null);
+  // Images for a game container's textures go into a mod, named here.
+  const [textureInto, setTextureInto] = useState<{
+    utoc: string;
+    images: string;
+    modName: string;
+  } | null>(null);
   const [pakList, setPakList] = useState<PakFileInfo[]>([]);
   const [selectedPak, setSelectedPak] = useState<string>("");
   const [pakContents, setPakContents] = useState<ContentEntry[]>([]);
@@ -242,6 +307,7 @@ export function AssetManager({
     msg: string;
     type: StatusType;
     revealPath?: string;
+    details?: string[];
   } | null>(null);
   const [busy, setBusy] = useState(false);
   const [manualPaks, setManualPaks] = useState<Set<string>>(new Set());
@@ -348,13 +414,13 @@ export function AssetManager({
   const showNotice = (
     msg: string,
     type: StatusType,
-    opts?: { duration?: number; revealPath?: string }
+    opts?: { duration?: number; revealPath?: string; details?: string[] }
   ) => {
     // Strip any trailing path from error messages
     const clean =
       type === "err" ? msg.replace(/:\s*[A-Za-z]:\\[^\r\n]*|:\s*\/[^\r\n]*/g, "").trim() : msg;
     if (noticeTimer.current) clearTimeout(noticeTimer.current);
-    setNotice({ msg: clean, type, revealPath: opts?.revealPath });
+    setNotice({ msg: clean, type, revealPath: opts?.revealPath, details: opts?.details });
     // "info" notices persist until replaced by another notice (no auto-dismiss)
     const ms = opts?.duration ?? (type === "info" ? 0 : 6000);
     if (ms > 0) {
@@ -510,7 +576,7 @@ export function AssetManager({
         modsFolder: selectedPak.replace(/[\\/][^\\/]+$/, ""),
         source: "AssetManager",
       });
-      await listPaks();
+      await listPaks(true);
     } catch (e: unknown) {
       showNotice(String(e), "err");
     }
@@ -532,7 +598,7 @@ export function AssetManager({
         modsFolder: selectedPak.replace(/[\\/][^\\/]+$/, ""),
         source: "AssetManager",
       });
-      await listPaks();
+      await listPaks(true);
     } catch (e: unknown) {
       showNotice(String(e), "err");
     }
@@ -718,17 +784,6 @@ export function AssetManager({
       showNotice(String(e), "err");
     } finally {
       if (gen === loadGenRef.current) setBusy(false);
-    }
-  }
-
-  // Extracted assets live outside any container, so they are inspected straight from disk.
-  async function openLooseAsset() {
-    const picked = await open({
-      multiple: false,
-      filters: [{ name: "Unreal asset", extensions: ["uasset", "umap"] }],
-    });
-    if (typeof picked === "string") {
-      setLooseAsset(picked);
     }
   }
 
@@ -1005,13 +1060,16 @@ export function AssetManager({
 
   // Claims the progress row for one operation. `cancel` stops whatever the operation is currently
   // doing, which for a composite job means every backend it can reach.
-  function startOperation(label: string, cancels: string[]) {
+  /** `onCancel` is for a batch of several commands, each of which clears the backend's flag as it
+   *  starts, so the batch has to stop itself between them. */
+  function startOperation(label: string, cancels: string[], onCancel?: () => void) {
     setOperation({
       label,
       phase: "starting",
       current: 0,
       total: 0,
       cancel: () => {
+        onCancel?.();
         // Best-effort: each backend resets its own flag when it next starts, and a command for a
         // step that is not running is a no-op.
         for (const command of cancels) {
@@ -1217,6 +1275,112 @@ export function AssetManager({
     }
   }
 
+  /** Saves the textures of `pak`'s packages the filters keep, or every one with none, under a
+   *  folder chosen here. */
+  async function exportTextures(pak: string, filters: string[], kind: string) {
+    if (!gamePath) return showNotice("Set the game path first.", "err");
+    const out = await open({
+      directory: true,
+      multiple: false,
+      title: "Choose a folder for the textures",
+    });
+    if (typeof out !== "string") return;
+    setBusy(true);
+    startOperation("Exporting textures", ["cancel_texture_batch"]);
+    try {
+      const report = await invoke<TexturesOut>("export_textures", {
+        gameRoot: gamePath,
+        container: pak.replace(/\.pak$/i, ".utoc"),
+        filters,
+        out,
+        kind,
+        mip: null,
+      });
+      const failures = textureFailures(report.failed);
+      const asExr = report.saved.filter((t) => t.note && /\.exr$/i.test(t.path)).length;
+      const notes = [
+        asExr > 0 &&
+          `${asExr} with high dynamic range went out as OpenEXR, which ${kind.toUpperCase()} cannot hold`,
+        report.skipped.length > 0 &&
+          `skipped ${report.skipped.length} virtual texture(s), the engine's placeholders`,
+      ].filter(Boolean);
+      const saved = `${report.cancelled ? "Cancelled after saving" : "Saved"} ${report.saved.length} texture(s) of ${report.packages} package(s) to ${out}${notes.map((note) => `; ${note}`).join("")}`;
+      if (failures.length > 0)
+        showNotice(`${saved}; ${failures.length} failed (hover for why)`, "err", {
+          duration: 0,
+          details: failures,
+        });
+      else showNotice(saved, "ok", { revealPath: out });
+    } catch (e: unknown) {
+      showNotice(String(e), "err");
+    } finally {
+      setOperation(null);
+      setBusy(false);
+    }
+  }
+
+  /** Gives `pak`'s textures the images of a folder chosen here: into the mod itself, or for a game
+   *  container into a mod named next. */
+  async function replaceTextures(pak: string, isMod: boolean) {
+    if (!gamePath) return showNotice("Set the game path first.", "err");
+    const images = await open({
+      directory: true,
+      multiple: false,
+      title: "Choose the folder of images, each named for its texture as an export names them",
+    });
+    if (typeof images !== "string") return;
+    const utoc = pak.replace(/\.pak$/i, ".utoc");
+    if (isMod) return runTextureImport(utoc, images, utoc);
+    const modName = await invoke<string>("get_asset_mod_name").catch(() => "");
+    setTextureInto({ utoc, images, modName });
+  }
+
+  async function runTextureImport(utoc: string, images: string, modName: string) {
+    setBusy(true);
+    startOperation("Replacing textures", ["cancel_texture_batch"]);
+    try {
+      const report = await invoke<TexturesIn>("import_textures", {
+        gameRoot: gamePath,
+        container: utoc,
+        filters: [],
+        images,
+        modName,
+        quality: "default",
+        replace: false,
+      });
+      const failures = textureFailures(report.failed);
+      const failed = failures.length > 0 ? `; ${failures.length} failed (hover for why)` : "";
+      const details = failures.length > 0 ? { duration: 0, details: failures } : undefined;
+      if (report.cancelled) {
+        showNotice("Cancelled; the mod was left as it was", "info");
+      } else if (!report.written) {
+        showNotice(
+          report.images === 0 ? `${images} holds no image` : `No texture took an image${failed}`,
+          "err",
+          details
+        );
+      } else {
+        const written = report.written;
+        showNotice(
+          `Gave ${report.given.length} texture(s) in ${report.packages} package(s) new pixels in ${written.split(/[\\/]/).pop()}${failed}`,
+          failed ? "err" : "ok",
+          details ?? { revealPath: written }
+        );
+        pakContentsCacheRef.current.delete(written.replace(/\.utoc$/i, ".pak"));
+        emitModsChanged({
+          modsFolder: written.replace(/[\\/][^\\/]+$/, ""),
+          source: "AssetManager",
+        });
+        await listPaks(true);
+      }
+    } catch (e: unknown) {
+      showNotice(String(e), "err");
+    } finally {
+      setOperation(null);
+      setBusy(false);
+    }
+  }
+
   async function exportLegacySelected() {
     if (selectedUtocEntries.length === 0 || !selectedPak) return;
     const dir = await open({ directory: true, multiple: false });
@@ -1270,6 +1434,7 @@ export function AssetManager({
   }
 
   function promptRepackInPlace(pak: string) {
+    if (gameRunning) return showNotice(GAME_STILL_RUNNING, "err");
     const info = pakList.find((p) => p.path === pak);
     const isIoStore = !!(info?.has_utoc && info?.has_ucas);
     setRepackPrompt({
@@ -1283,6 +1448,7 @@ export function AssetManager({
   }
 
   function promptRepackAll() {
+    if (gameRunning) return showNotice(GAME_STILL_RUNNING, "err");
     const mods = pakList.filter((p) => /[/\\]~mods[/\\]/i.test(p.path));
     if (mods.length === 0) return showNotice("No mods installed to repack.", "info");
     // With a single mod there is nothing to batch, and the per-mod prompt is strictly better: it
@@ -1300,12 +1466,14 @@ export function AssetManager({
   }
 
   async function repackOneInPlace(modPak: string, prompt: RepackPrompt) {
-    return invoke<{
-      container_name: string;
-      assets_in: number;
-      assets_out: number;
-      carried_pak_entries: number;
-    }>("repack_mod_in_place", {
+    return invoke<
+      {
+        container_name: string;
+        assets_in: number;
+        assets_out: number;
+        carried_pak_entries: number;
+      } & Conformance
+    >("repack_mod_in_place", {
       gameRoot: gamePath,
       modPak,
       toIostore: prompt.toIoStore,
@@ -1323,41 +1491,82 @@ export function AssetManager({
 
     if (prompt.kind === "all-mods") {
       if (!gamePath) return showNotice("Set the game path first.", "err");
+      // The polled state can be a few seconds old, and a game still closing holds the mods open.
+      if (await gameBlocks()) return showNotice(GAME_STILL_RUNNING, "err");
       const mods = pakList.filter((p) => /[/\\]~mods[/\\]/i.test(p.path));
       setBusy(true);
-      startOperation(`Repacking ${prompt.label} to ${label}`, [
-        "cancel_legacy_extraction",
-        "cancel_repack_iostore",
-      ]);
+      // Held in an object so the checks below read what the cancel set, not a narrowed false.
+      const stop = { cancelled: false };
+      startOperation(
+        `Repacking ${prompt.label} to ${label}`,
+        ["cancel_legacy_extraction", "cancel_repack_iostore"],
+        () => {
+          stop.cancelled = true;
+        }
+      );
       let done = 0;
+      let gameStarted = false;
+      // The mod being repacked when the game started, which the backend leaves as it was.
+      let interrupted: string | null = null;
       const failures: string[] = [];
-      for (const mod of mods) {
+      for (const [at, mod] of mods.entries()) {
+        if (stop.cancelled) break;
+        if (await gameBlocks()) {
+          gameStarted = true;
+          break;
+        }
         const name = mod.path.split(/[/\\]/).pop() ?? mod.path;
-        setOperation((op) => op && { ...op, scope: `${done + 1} of ${mods.length}` });
+        setOperation((op) => op && { ...op, scope: `${at + 1} of ${mods.length}` });
+        // A mod takes a while; stop it early if the game starts meanwhile, rather than at its swap.
+        const watch = setInterval(() => {
+          void gameBlocks().then((running) => {
+            if (!running || interrupted) return;
+            interrupted = name;
+            void invoke("cancel_repack_iostore").catch(() => undefined);
+          });
+        }, GAME_WATCH_MS);
         try {
           await repackOneInPlace(mod.path, prompt);
           pakContentsCacheRef.current.delete(mod.path);
           done++;
+          // It finished before the cancel reached it.
+          if (interrupted === name) interrupted = null;
         } catch (e: unknown) {
+          if (interrupted || (await gameBlocks())) {
+            interrupted = name;
+            gameStarted = true;
+            break;
+          }
           // Each mod is verified and swapped on its own, so one failure leaves the rest alone.
-          failures.push(`${name}: ${String(e)}`);
+          failures.push(`${name}: ${String(e).replace(/[A-Za-z]:\\(?:[^\\\r\n:]+\\)+/g, "")}`);
+        } finally {
+          clearInterval(watch);
         }
       }
       setOperation(null);
       setBusy(false);
-      if (failures.length > 0) {
-        console.error("Batch repack failures:", failures);
+      // Stays up until replaced, so there is time to hover for the reasons.
+      const details = failures.length > 0 ? { duration: 0, details: failures } : undefined;
+      const failed = failures.length > 0 ? `; ${failures.length} failed (hover for why)` : "";
+      if (gameStarted) {
+        const left = interrupted
+          ? `Marvel Rivals started while repacking ${interrupted}, which was left as it was`
+          : "Marvel Rivals is running";
         showNotice(
-          `Repacked ${done} of ${mods.length}; ${failures.length} failed, see the console.`,
+          `Stopped after repacking ${done} of ${mods.length}${failed}: ${left}. Repack the rest once it has closed.`,
           "err",
-          { duration: 8000 }
+          { duration: 0, details: failures }
         );
+      } else if (stop.cancelled) {
+        showNotice(`Cancelled after repacking ${done} of ${mods.length}${failed}`, "info", details);
+      } else if (failures.length > 0) {
+        showNotice(`Repacked ${done} of ${mods.length}${failed}`, "err", details);
       } else {
         showNotice(`Repacked ${done} mod${done === 1 ? "" : "s"} to ${label}`, "ok");
       }
       const modsFolder = mods[0]?.path.replace(/[\\/][^\\/]+$/, "");
       if (modsFolder) emitModsChanged({ modsFolder, source: "AssetManager" });
-      await listPaks();
+      await listPaks(true);
       return;
     }
 
@@ -1374,9 +1583,10 @@ export function AssetManager({
         const carried = report.carried_pak_entries
           ? `, ${report.carried_pak_entries} pak file(s) carried over`
           : "";
+        const left = conformanceWarning(report);
         showNotice(
-          `Repacked ${report.container_name} to ${label}: ${report.assets_in} item(s)${carried}`,
-          "ok",
+          `Repacked ${report.container_name} to ${label}: ${report.assets_in} item(s)${carried}${conformanceNote(report)}${left}`,
+          left ? "err" : "ok",
           { revealPath: prompt.source }
         );
         pakContentsCacheRef.current.delete(prompt.source);
@@ -1384,7 +1594,7 @@ export function AssetManager({
           modsFolder: prompt.source.replace(/[\\/][^\\/]+$/, ""),
           source: "AssetManager",
         });
-        await listPaks();
+        await listPaks(true);
       } catch (e: unknown) {
         showNotice(String(e), "err");
       } finally {
@@ -1411,8 +1621,9 @@ export function AssetManager({
     startOperation(`Repacking ${baseName}`, ["cancel_repack_iostore"]);
     showNotice(`Repacking to ${label}\u2026`, "info");
     try {
+      let packed: Conformance = {};
       if (prompt.toIoStore) {
-        await invoke("repack_iostore", {
+        packed = await invoke<Conformance>("repack_iostore", {
           inputDir: prompt.source,
           outputUtoc: output,
           obfuscate: prompt.obfuscate,
@@ -1425,7 +1636,12 @@ export function AssetManager({
           compression: REPACK_COMPRESSION,
         });
       }
-      showNotice(`Repacked ${label} to: ${output}`, "ok", { revealPath: output });
+      const left = conformanceWarning(packed);
+      showNotice(
+        `Repacked ${label} to: ${output}${conformanceNote(packed)}${left}`,
+        left ? "err" : "ok",
+        { revealPath: output }
+      );
       emitModsChanged({
         modsFolder: output.replace(/[\\/][^\\/]+$/, ""),
         source: "AssetManager",
@@ -1556,7 +1772,20 @@ export function AssetManager({
       <div className="flex min-h-8 shrink-0 items-center gap-3">
         <h2 className="shrink-0 text-xl font-bold">Asset Manager</h2>
         {notice && !operation && (
-          <Tip content="Click to reveal in explorer" disabled={!notice.revealPath}>
+          <Tip
+            content={
+              notice.details ? (
+                <ul className="space-y-1">
+                  {notice.details.map((line) => (
+                    <li key={line}>{line}</li>
+                  ))}
+                </ul>
+              ) : (
+                "Click to reveal in explorer"
+              )
+            }
+            disabled={!notice.revealPath && !notice.details}
+          >
             <span
               className={cn(
                 "flex min-w-0 items-center gap-1.5 truncate text-[12px] font-medium",
@@ -1608,15 +1837,7 @@ export function AssetManager({
           </div>
         )}
         <div className="ml-auto flex shrink-0 items-center gap-2">
-          <GameSearch
-            gamePath={gamePath}
-            disabled={!gamePath}
-            onOpenHit={(hit: SearchHit) => {
-              setInspectFrom(hit.container ?? null);
-              setInspectTarget({ exportIndex: hit.export_index, offset: hit.offset });
-              setInspecting({ path: hit.package, source: "utoc" });
-            }}
-          />
+          <GameSearch gamePath={gamePath} disabled={!gamePath} />
           <Tip content="Repack every installed mod in place, with one set of options">
             <Button variant="outline" size="sm" onClick={promptRepackAll} disabled={busy}>
               <Layers size={15} />
@@ -1639,11 +1860,6 @@ export function AssetManager({
                 <Tip content="Browse for a pak file">
                   <Button variant="ghost" size="icon-sm" onClick={openPak} disabled={busy}>
                     <FolderOpen size={15} />
-                  </Button>
-                </Tip>
-                <Tip content="Inspect an already-extracted .uasset from disk">
-                  <Button variant="ghost" size="icon-sm" onClick={openLooseAsset} disabled={busy}>
-                    <Search size={15} />
                   </Button>
                 </Tip>
                 <Tip content="Refresh game paks">
@@ -1732,6 +1948,30 @@ export function AssetManager({
                               <Hammer size={14} />
                               Repack in place…
                             </ContextMenuItem>
+                          )}
+                          {isIoStore && (
+                            <>
+                              <ContextMenuSub>
+                                <ContextMenuSubTrigger>
+                                  <ImageDown size={14} />
+                                  Export Textures
+                                </ContextMenuSubTrigger>
+                                <ContextMenuSubContent>
+                                  {TEXTURE_KINDS.map((kind) => (
+                                    <ContextMenuItem
+                                      key={kind.id}
+                                      onSelect={() => void exportTextures(p, [], kind.id)}
+                                    >
+                                      {kind.label}…
+                                    </ContextMenuItem>
+                                  ))}
+                                </ContextMenuSubContent>
+                              </ContextMenuSub>
+                              <ContextMenuItem onSelect={() => void replaceTextures(p, isMod)}>
+                                <ImageUp size={14} />
+                                Replace Textures from Folder…
+                              </ContextMenuItem>
+                            </>
                           )}
                           <ContextMenuSeparator />
                           <ContextMenuItem onSelect={() => copyToClipboard(p, "path")}>
@@ -2008,20 +2248,20 @@ export function AssetManager({
                 {ALL_CATEGORIES.filter((c) => categoryCounts[c] > 0).map((cat) => {
                   const active = categoryFilter.has(cat);
                   return (
-                    <button
-                      key={cat}
-                      onClick={() => toggleCategory(cat)}
-                      className={cn(
-                        "flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase transition-opacity",
-                        CATEGORY_BG_COLOR[cat],
-                        CATEGORY_TEXT_COLOR[cat],
-                        active ? "opacity-100" : "opacity-30 hover:opacity-60"
-                      )}
-                      title={`${CATEGORY_LABEL[cat]} (${categoryCounts[cat]})`}
-                    >
-                      <span>{CATEGORY_LABEL[cat]}</span>
-                      <span className="text-[9px] opacity-70">{categoryCounts[cat]}</span>
-                    </button>
+                    <Tip key={cat} content={`${CATEGORY_LABEL[cat]} (${categoryCounts[cat]})`}>
+                      <button
+                        onClick={() => toggleCategory(cat)}
+                        className={cn(
+                          "flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase transition-opacity",
+                          CATEGORY_BG_COLOR[cat],
+                          CATEGORY_TEXT_COLOR[cat],
+                          active ? "opacity-100" : "opacity-30 hover:opacity-60"
+                        )}
+                      >
+                        <span>{CATEGORY_LABEL[cat]}</span>
+                        <span className="text-[9px] opacity-70">{categoryCounts[cat]}</span>
+                      </button>
+                    </Tip>
                   );
                 })}
               </div>
@@ -2071,7 +2311,6 @@ export function AssetManager({
                           }}
                           onClick={(e) => handleEntryClick(vRow.index, e)}
                           onDoubleClick={() => extractSingleEntry(entry)}
-                          title={entry.path}
                         >
                           {isChecked ? (
                             <CheckSquare2 size={13} className="shrink-0 text-foreground" />
@@ -2104,20 +2343,23 @@ export function AssetManager({
                               </Tip>
                             );
                           })()}
-                          <span className="truncate font-mono text-[11px]">{entry.path}</span>
+                          <Tip content={entry.path} side="top" align="start">
+                            <span className="truncate font-mono text-[11px]">{entry.path}</span>
+                          </Tip>
                         </div>
                       </ContextMenuTrigger>
                       <ContextMenuContent>
                         {INSPECTABLE.test(entry.path) && (
                           <ContextMenuItem
-                            onSelect={() => {
-                              setInspectFrom(null);
-                              setInspectTarget(null);
-                              setInspecting(entry);
-                            }}
+                            onSelect={() =>
+                              void copyToClipboard(
+                                dumpCommand(entry.path, cliSource(selectedPak)),
+                                "the CLI command"
+                              )
+                            }
                           >
-                            <Search />
-                            Inspect Contents
+                            <Terminal />
+                            Copy CLI Command
                           </ContextMenuItem>
                         )}
                         {!selectedIsVanilla &&
@@ -2221,6 +2463,36 @@ export function AssetManager({
                                   WAVs from BNK…
                                 </ContextMenuItem>
                               )}
+                            </ContextMenuSubContent>
+                          </ContextMenuSub>
+                        )}
+                        {entry.source === "utoc" && INSPECTABLE.test(entry.path) && (
+                          <ContextMenuSub>
+                            <ContextMenuSubTrigger>
+                              <ImageDown />
+                              {showExtractSelected
+                                ? `Export Textures of ${selectedEntries.size} Selected`
+                                : "Export Textures"}
+                            </ContextMenuSubTrigger>
+                            <ContextMenuSubContent>
+                              {TEXTURE_KINDS.map((kind) => (
+                                <ContextMenuItem
+                                  key={kind.id}
+                                  onSelect={() =>
+                                    void exportTextures(
+                                      selectedPak,
+                                      showExtractSelected
+                                        ? selectedUtocEntries
+                                            .map((e) => e.path)
+                                            .filter((path) => INSPECTABLE.test(path))
+                                        : [entry.path],
+                                      kind.id
+                                    )
+                                  }
+                                >
+                                  {kind.label}…
+                                </ContextMenuItem>
+                              ))}
                             </ContextMenuSubContent>
                           </ContextMenuSub>
                         )}
@@ -2439,22 +2711,6 @@ export function AssetManager({
         </AlertDialogContent>
       </AlertDialog>
 
-      {looseAsset && (
-        <AssetInspector
-          key={looseAsset}
-          gamePath={gamePath}
-          gameRunning={gameRunning}
-          isActive={isActive}
-          container=""
-          entry={looseAsset}
-          onClose={() => setLooseAsset(null)}
-          onOpenSettings={() => {
-            setLooseAsset(null);
-            onOpenSettings?.();
-          }}
-        />
-      )}
-
       <AlertDialog
         open={revertPrompt !== null}
         onOpenChange={(open) => !open && setRevertPrompt(null)}
@@ -2524,6 +2780,47 @@ export function AssetManager({
         </AlertDialogContent>
       </AlertDialog>
 
+      <AlertDialog
+        open={textureInto !== null}
+        onOpenChange={(open) => !open && setTextureInto(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Replace textures into a mod</AlertDialogTitle>
+            <AlertDialogDescription>
+              Gives the textures of {textureInto?.utoc.split(/[\\/]/).pop()} the images in{" "}
+              <span className="font-mono">{textureInto?.images}</span>, each named for its texture
+              as an export names them, in one rewrite of the mod named here. A texture the mod
+              already holds is built on.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <Input
+            aria-label="Mod"
+            value={textureInto?.modName ?? ""}
+            onChange={(e) =>
+              setTextureInto((held) => (held ? { ...held, modName: e.target.value } : held))
+            }
+            className="h-8 font-mono text-xs"
+          />
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={!textureInto?.modName.trim()}
+              onClick={() => {
+                const held = textureInto;
+                setTextureInto(null);
+                if (!held) return;
+                // The CLI saves into the mod the app last saved into when given none.
+                void invoke("set_asset_mod_name", { name: held.modName }).catch(() => undefined);
+                void runTextureImport(held.utoc, held.images, held.modName.trim());
+              }}
+            >
+              Replace
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       {overviewOpen && selectedPak && (
         <ModReportDialog
           key={selectedPak}
@@ -2534,39 +2831,6 @@ export function AssetManager({
             setOverviewOpen(false);
             setRevertPrompt(path);
           }}
-          onOpenHit={(hit: SearchHit) => {
-            setOverviewOpen(false);
-            setInspectFrom(null);
-            setInspectTarget({ exportIndex: hit.export_index, offset: hit.offset });
-            setInspecting({ path: hit.package, source: "utoc" });
-          }}
-        />
-      )}
-
-      {inspecting && (
-        <AssetInspector
-          key={`${inspectFrom ?? selectedPak}\u0000${inspecting.path}\u0000${inspectTarget?.exportIndex ?? ""}:${inspectTarget?.offset ?? ""}`}
-          initialTarget={inspectTarget ?? undefined}
-          gamePath={gamePath}
-          gameRunning={gameRunning}
-          isActive={isActive}
-          container={
-            inspectFrom ??
-            (inspecting.source === "utoc" ? selectedPak.replace(/[.]pak$/i, ".utoc") : selectedPak)
-          }
-          entry={inspecting.path}
-          onClose={() => {
-            setInspectFrom(null);
-            setInspectTarget(null);
-            setInspecting(null);
-          }}
-          onOpenSettings={() => {
-            setInspectFrom(null);
-            setInspectTarget(null);
-            setInspecting(null);
-            onOpenSettings?.();
-          }}
-          onOpenCopy={setInspectFrom}
         />
       )}
     </div>

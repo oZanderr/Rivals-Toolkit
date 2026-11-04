@@ -1055,6 +1055,46 @@ fn attribute_of(value: &PropertyValue, mappings: Option<&Mappings>) -> VmAttribu
     }
 }
 
+/// The values a parameter store (its fields, such as a script's `ScriptExecutionParamStore` or a
+/// system's `ExposedParameters`) keeps in its own `ParameterData`, by offset, and those bytes.
+/// Data interfaces and objects index lists of their own, so they are left out.
+pub fn store_params(
+    store: &[PropertyEntry],
+    mappings: Option<&Mappings>,
+) -> (Vec<VmParam>, Vec<u8>) {
+    let mut params: Vec<VmParam> = items_of(field(store, "SortedParameterOffsets"))
+        .iter()
+        .filter_map(|item| {
+            let fields = fields_of(item);
+            let (type_name, underlying) = type_of(field(fields, "TypeDefHandle"));
+            if underlying == 1 {
+                return None;
+            }
+            Some(VmParam {
+                name: name_of(field(fields, "Name")),
+                offset: int_of(field(fields, "Offset"))?.max(0) as u32,
+                size: 0,
+                components: components_of(&type_name, underlying, mappings),
+                type_name,
+            })
+        })
+        .collect();
+    params.sort_by_key(|param| param.offset);
+    let data = bytes_of(field(store, "ParameterData"));
+    let param_size = int_of(field(store, "ParameterSize")).unwrap_or(0).max(0) as u32;
+    // The store is packed, so each value runs up to the next.
+    let ends: Vec<u32> = params
+        .iter()
+        .skip(1)
+        .map(|param| param.offset)
+        .chain([(data.len() as u32).max(param_size)])
+        .collect();
+    for (param, end) in params.iter_mut().zip(ends) {
+        param.size = end.saturating_sub(param.offset);
+    }
+    (params, data)
+}
+
 /// Reads the VM program `export` (a `NiagaraScript`) carries, with what names its constants and
 /// outputs. Values the export does not store read as empty, zero or false. `mappings` lets a
 /// struct type the known list leaves out be counted from its schema.
@@ -1116,36 +1156,8 @@ pub fn read_vm_script(export: &ParsedExport, mappings: Option<&Mappings>) -> VmS
             &variables,
         ));
     }
-    let mut params: Vec<VmParam> = items_of(field(store, "SortedParameterOffsets"))
-        .iter()
-        .filter_map(|item| {
-            let fields = fields_of(item);
-            let (type_name, underlying) = type_of(field(fields, "TypeDefHandle"));
-            // A data interface or object parameter indexes its own list, not these bytes.
-            if underlying == 1 {
-                return None;
-            }
-            Some(VmParam {
-                name: name_of(field(fields, "Name")),
-                offset: int_of(field(fields, "Offset"))?.max(0) as u32,
-                size: 0,
-                components: components_of(&type_name, underlying, mappings),
-                type_name,
-            })
-        })
-        .collect();
-    params.sort_by_key(|param| param.offset);
-    // The store is packed, so each value runs up to the next.
-    let data_len = bytes_of(field(store, "ParameterData")).len() as u32;
-    let ends: Vec<u32> = params
-        .iter()
-        .skip(1)
-        .map(|param| param.offset)
-        .chain([data_len.max(param_size)])
-        .collect();
-    for (param, end) in params.iter_mut().zip(ends) {
-        param.size = end.saturating_sub(param.offset);
-    }
+    let (params, data) = store_params(store, mappings);
+    let data_len = data.len() as u32;
     let calls: Vec<(u16, u16)> = functions.iter().map(|f| (f.inputs, f.outputs)).collect();
     let program = if compressed {
         VmProgram {
@@ -1766,6 +1778,19 @@ pub fn vm_census(parsed: &ParsedPackage, mappings: Option<&Mappings>) -> VmCensu
     census
 }
 
+/// What in `script` breaks what the run time expects of a program, as [`vm_census`] counts it
+/// under `bad:`.
+pub(crate) fn script_problems(script: &VmScript) -> Vec<String> {
+    let mut census = VmCensus::default();
+    census_of(script, &script.object_name, &mut census);
+    census
+        .examples
+        .into_iter()
+        .filter(|(line, _)| line.starts_with("bad:"))
+        .map(|(line, detail)| format!("{line} ({detail})"))
+        .collect()
+}
+
 fn census_of(script: &VmScript, path: &str, census: &mut VmCensus) {
     let at = |offset: u32, detail: &str| format!("{path} at 0x{offset:04X}: {detail}");
     if script.bytecode_len == 0 {
@@ -1931,14 +1956,14 @@ fn census_of(script: &VmScript, path: &str, census: &mut VmCensus) {
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    fn le(words: &[u16]) -> Vec<u8> {
+    pub(crate) fn le(words: &[u16]) -> Vec<u8> {
         words.iter().flat_map(|w| w.to_le_bytes()).collect()
     }
 
-    fn program(parts: &[&[u8]]) -> Vec<u8> {
+    pub(crate) fn program(parts: &[&[u8]]) -> Vec<u8> {
         parts.concat()
     }
 
@@ -2093,7 +2118,12 @@ mod tests {
     }
 
     /// An output's component counts its own kind only, over the sorted attributes.
-    fn script_of(bytes: Vec<u8>, literals: &[f32]) -> VmScript {
+    pub(crate) fn script_of(bytes: Vec<u8>, literals: &[f32]) -> VmScript {
+        script_with_color(bytes, literals, "LinearColor")
+    }
+
+    /// A spawn script writing `Particles.Age` and a `Particles.Color` of type `color`.
+    pub(crate) fn script_with_color(bytes: Vec<u8>, literals: &[f32], color: &str) -> VmScript {
         let literals: Vec<u8> = literals.iter().flat_map(|v| v.to_le_bytes()).collect();
         let program = decode_vm(&bytes, &[(1, 1)]);
         assert!(program.complete(), "{:?}", program.stop);
@@ -2121,10 +2151,7 @@ mod tests {
             data_sets: vec![VmDataSet::from_attributes(
                 "Particles",
                 "Particles.",
-                &[
-                    attribute("Age", "NiagaraFloat"),
-                    attribute("Color", "LinearColor"),
-                ],
+                &[attribute("Age", "NiagaraFloat"), attribute("Color", color)],
             )],
             params: vec![VmParam {
                 name: "User.IsEnemy".to_string(),

@@ -13,11 +13,12 @@ use super::plain::from_game_root;
 use super::profile::strip_mount_prefix;
 use crate::paths::paks_dir;
 
-/// One opened pak and its entries, each as it names itself and as a path from the game root.
+/// One opened pak and its entries, by their path from the game root in lower case: each as it
+/// names itself, and that path as the pak spells it.
 struct OpenPak {
     path: PathBuf,
     reader: repak::PakReader,
-    entries: HashMap<String, String>,
+    entries: HashMap<String, (String, String)>,
 }
 
 /// What the paks were when they were opened, so a game update opens them again.
@@ -63,7 +64,10 @@ fn base_paks(game_root: &str) -> Result<Arc<Vec<OpenPak>>, String> {
         let entries = reader
             .files()
             .into_iter()
-            .map(|name| (from_game_root(&mount, &name).to_ascii_lowercase(), name))
+            .map(|name| {
+                let cased = from_game_root(&mount, &name);
+                (cased.to_ascii_lowercase(), (name, cased))
+            })
             .collect();
         paks.push(OpenPak {
             path: path.clone(),
@@ -91,7 +95,7 @@ pub fn read(game_root: &str, path: &str) -> Result<Option<Vec<u8>>, String> {
     else {
         return Ok(None);
     };
-    let name = &pak.entries[&wanted];
+    let (name, _) = &pak.entries[&wanted];
     let mut file = BufReader::new(
         fs::File::open(&pak.path).map_err(|e| format!("open {}: {e}", pak.path.display()))?,
     );
@@ -99,6 +103,17 @@ pub fn read(game_root: &str, path: &str) -> Result<Option<Vec<u8>>, String> {
         .get(name, &mut file)
         .map(Some)
         .map_err(|e| format!("read {name} from {}: {e}", pak.path.display()))
+}
+
+/// `path` as the last base pak holding it spells it, from the game root. `None` when no base pak
+/// does.
+pub fn cased(game_root: &str, path: &str) -> Result<Option<String>, String> {
+    let wanted = strip_mount_prefix(path).to_ascii_lowercase();
+    Ok(base_paks(game_root)?
+        .iter()
+        .rev()
+        .find_map(|pak| pak.entries.get(&wanted))
+        .map(|(_, cased)| cased.clone()))
 }
 
 /// Every path the base paks hold that ends with `suffix`, compared without case, as paths from

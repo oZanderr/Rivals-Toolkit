@@ -1,15 +1,16 @@
 //! Finds where the game's scripts, and when asked its stored values, name something, reading each
 //! package from the copy the game loads, an enabled mod's included.
 //!
-//! Nothing is kept between searches. A script search reads every package's IoStore header first,
-//! which says whether it holds any functions, and converts and parses only the ones that do, on
-//! every thread the caller's rayon pool has. A value search has no such shortcut: it reads every
-//! package the path filter keeps.
+//! A script search converts and parses only the packages holding functions, which the import index
+//! records from each package's header once, and again only for a container that changed. A value
+//! search has no such shortcut: it reads every package the path filter keeps. Either reads on
+//! every thread the caller's rayon pool has.
 
 use std::collections::HashSet;
 use std::io::Cursor;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
 use retoc::container_header::EIoContainerHeaderVersion;
@@ -18,10 +19,14 @@ use retoc::script_objects::FPackageObjectIndex;
 use retoc::version::EngineVersion;
 use retoc::zen::FZenPackageHeader;
 use retoc::{EIoChunkType, EIoStoreTocVersion, FIoChunkId, FPackageId};
-use rivals_uasset::{AssetBundle, Mappings, ParseOptions};
+use rivals_uasset::{AssetBundle, ExportStatus, Mappings, ParseOptions};
 use serde::Serialize;
 
 use crate::asset::{AssetSource, PACKAGES_PER_CONVERTER, PackageConverter, PathFilter};
+
+/// Most packages a script search reads through one converter every thread shares: about what the
+/// runs in flight at once would hold between them with one each, so sharing costs no more.
+const SHARED_CONVERTER_LIMIT: usize = 8192;
 use crate::mod_search::{Query, SearchHit, search_package};
 use crate::pak::containers::MOUNT_POINT;
 use crate::pak::load_order::{self, LoadOrder};
@@ -33,7 +38,8 @@ use crate::schema_synth::{self, LayoutReader, PackageSource};
 pub enum SearchPhase {
     /// Opening the containers and listing their packages.
     Listing,
-    /// Reading each package's header to find the ones holding functions.
+    /// Bringing the import index up to date, which says which packages hold functions: how many
+    /// packages it reads again out of how many.
     Headers,
     /// Parsing the packages that hold functions.
     Scripts,
@@ -72,6 +78,50 @@ pub struct GameSearchResult {
     pub truncated: bool,
     /// The search was cancelled, and the hits are the ones found before it stopped.
     pub cancelled: bool,
+    #[serde(skip)]
+    pub timings: SearchTimings,
+}
+
+/// How long each part of a search took, in seconds: the steps before the walk by the clock, and
+/// the walk's parts summed over every thread that ran them.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SearchTimings {
+    pub open: f64,
+    pub listing: f64,
+    /// Finding the packages that hold functions, for a script search.
+    pub functions: f64,
+    pub walk: f64,
+    pub convert: f64,
+    /// Parsing, `layouts` included.
+    pub parse: f64,
+    /// Recovering the Blueprint layouts a value search reads through.
+    pub layouts: f64,
+    pub matching: f64,
+    pub threads: usize,
+    pub converters: usize,
+}
+
+/// The walk's parts, summed over the threads running them, in nanoseconds.
+#[derive(Default)]
+struct Clock {
+    convert: AtomicU64,
+    parse: AtomicU64,
+    layouts: AtomicU64,
+    matching: AtomicU64,
+    converters: AtomicUsize,
+}
+
+impl Clock {
+    fn add(counter: &AtomicU64, spent: Duration) {
+        counter.fetch_add(
+            u64::try_from(spent.as_nanos()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+    }
+
+    fn seconds(counter: &AtomicU64) -> f64 {
+        Duration::from_nanos(counter.load(Ordering::Relaxed)).as_secs_f64()
+    }
 }
 
 const ENGINE_VERSION: EngineVersion = EngineVersion::UE5_3;
@@ -81,10 +131,8 @@ struct Candidate {
     id: FPackageId,
     path: String,
     layer: usize,
-    /// The container it was read from, which is where the inspector opens it.
+    /// The container it was read from.
     container: Arc<str>,
-    /// That container's versions, which its header is read by.
-    versions: Option<(EIoStoreTocVersion, EIoContainerHeaderVersion)>,
 }
 
 enum Outcome {
@@ -154,18 +202,39 @@ pub fn game_search(
     progress: &(dyn Fn(SearchPhase, usize, usize) + Sync),
 ) -> Result<GameSearchResult, String> {
     progress(SearchPhase::Listing, 0, 0);
+    let started = Instant::now();
     let order = load_order::open(game_root, search.mods, false)?;
+    let open = started.elapsed().as_secs_f64();
+    let started = Instant::now();
     let filter = PathFilter::any(search.filter.iter().map(String::as_str));
     let candidates = winning_copies(&order, &filter);
     let listed = candidates.len();
+    let listing = started.elapsed().as_secs_f64();
     progress(SearchPhase::Listing, listed, listed);
 
     let values = search.query.values;
+    let started = Instant::now();
     let candidates = if values {
         candidates
     } else {
-        holding_functions(&order, candidates, cancel, progress)
+        progress(SearchPhase::Headers, 0, 0);
+        let index = crate::import_index::current_with(game_root, &|done, total| {
+            progress(SearchPhase::Headers, done, total);
+        })
+        .map_err(|e| {
+            format!("finding the packages that hold functions needs the import index: {e}")
+        })?;
+        candidates
+            .into_iter()
+            .filter(|candidate| {
+                index.may_hold_functions(
+                    order.layers[candidate.layer].mod_name.as_deref(),
+                    candidate.id.0,
+                )
+            })
+            .collect()
     };
+    let functions = started.elapsed().as_secs_f64();
     let phase = if values {
         SearchPhase::Packages
     } else {
@@ -174,19 +243,44 @@ pub fn game_search(
     let total = candidates.len();
     let done = AtomicUsize::new(0);
     let cap = search.max_hits.unwrap_or(usize::MAX);
-    let frontier = Frontier::new(total.div_ceil(PACKAGES_PER_CONVERTER), cap);
+    let clock = Clock::default();
+    // A script search is short enough to share one converter, so its runs only spread the work:
+    // a few per thread, small enough that no thread is left with a folder of heavy packages. A
+    // longer walk gives each run a converter of its own, so what each keeps stays bounded, every
+    // one of them sharing the template's script object table.
+    let threads = rayon::current_num_threads();
+    let template = PackageConverter::new(&order);
+    template.prepare();
+    let shared = !values && total <= SHARED_CONVERTER_LIMIT;
+    let run = if shared {
+        clock.converters.fetch_add(1, Ordering::Relaxed);
+        total.div_ceil(threads * 8).clamp(1, 32)
+    } else {
+        total
+            .div_ceil(threads * 4)
+            .clamp(64, PACKAGES_PER_CONVERTER)
+    };
+    let frontier = Frontier::new(total.div_ceil(run), cap);
+    let started = Instant::now();
     let outcomes: Vec<Outcome> = candidates
-        .par_chunks(PACKAGES_PER_CONVERTER)
+        .par_chunks(run)
         // Each run of packages is a job of its own: neighbours by path cost alike, so a thread
         // handed several at once can be left with all of a folder of maps while the rest wait.
         .with_max_len(1)
         .enumerate()
         .flat_map_iter(|(index, chunk)| {
-            let converter = PackageConverter::new(&order);
-            // A value search reads values the way the inspector shows them, which can take layouts
+            let own;
+            let converter = if shared {
+                &template
+            } else {
+                clock.converters.fetch_add(1, Ordering::Relaxed);
+                own = template.sibling();
+                &own
+            };
+            // A value search reads values the way `asset dump` shows them, which can take layouts
             // recovered from the Blueprints that define them: the copies the game loads, read
             // through the same converter, which already holds the headers they import.
-            let layouts = values.then(|| LayoutReader::through(&order, &converter));
+            let layouts = values.then(|| LayoutReader::through(&order, converter));
             let mut found = 0;
             let outcomes: Vec<Outcome> = chunk
                 .iter()
@@ -195,13 +289,15 @@ pub fn game_search(
                         return Outcome::Skipped;
                     }
                     let mut outcome = search_one(
-                        &converter,
+                        converter,
+                        shared.then_some(&order),
                         candidate,
                         &order,
                         mappings,
                         search.query,
                         game_root,
                         layouts.as_ref(),
+                        Some(&clock),
                     );
                     if let Outcome::Hits { hits, found: here } = &mut outcome {
                         found += *here;
@@ -216,40 +312,64 @@ pub fn game_search(
                     outcome
                 })
                 .collect();
+            if let Some(layouts) = &layouts {
+                Clock::add(&clock.layouts, layouts.spent());
+            }
             frontier.finished(index, found);
             outcomes
         })
         .collect();
+    let walk = started.elapsed().as_secs_f64();
     let mut result = gather(outcomes, cap);
     result.listed = listed;
     result.cancelled = cancel.load(Ordering::Relaxed);
+    result.timings = SearchTimings {
+        open,
+        listing,
+        functions,
+        walk,
+        convert: Clock::seconds(&clock.convert),
+        parse: Clock::seconds(&clock.parse),
+        layouts: Clock::seconds(&clock.layouts),
+        matching: Clock::seconds(&clock.matching),
+        threads: rayon::current_num_threads(),
+        converters: clock.converters.load(Ordering::Relaxed),
+    };
     Ok(result)
 }
 
 /// Each package once, from the first layer holding it, in the order the walk reports them: the
 /// mods in the order the game prefers them, then the base game, each by path.
 fn winning_copies(order: &LoadOrder, filter: &PathFilter) -> Vec<Candidate> {
+    // A package counts from the first layer listing it, whether or not that layer gives it a path.
+    let single = order.layers.len() == 1;
     let mut seen = HashSet::new();
-    let mut containers: Vec<Arc<str>> = Vec::new();
-    let mut out = Vec::new();
+    let mut listed = Vec::new();
     for (layer, held) in order.layers.iter().enumerate() {
         for pkg in held.store.packages_all() {
-            if !seen.insert(pkg.id().0) {
-                continue;
+            if single || seen.insert(pkg.id().0) {
+                listed.push((layer, pkg));
             }
+        }
+    }
+    // Finding a chunk's path searches the layer's containers, so it is the part worth spreading.
+    let mut kept: Vec<_> = listed
+        .into_par_iter()
+        .filter_map(|(layer, pkg)| {
             let chunk = FIoChunkId::from_package_id(pkg.id(), 0, EIoChunkType::ExportBundleData);
-            let Some(path) = held.store.chunk_path(chunk) else {
-                continue;
+            let path = order.layers[layer].store.chunk_path(chunk)?;
+            let path = match path.strip_prefix(MOUNT_POINT) {
+                Some(rest) => rest.to_string(),
+                None => path,
             };
-            let path = path.strip_prefix(MOUNT_POINT).unwrap_or(&path).to_string();
-            if !filter.matches(&path) {
-                continue;
-            }
-            let held_in = pkg.container();
-            let versions = held_in
-                .container_file_version()
-                .zip(held_in.container_header_version());
-            let file = held_in.container_path().to_string_lossy();
+            filter.matches(&path).then_some((layer, pkg, path))
+        })
+        .collect();
+    kept.par_sort_by(|a, b| (a.0, &a.2).cmp(&(b.0, &b.2)));
+    let mut containers: Vec<Arc<str>> = Vec::new();
+    kept.into_iter()
+        .map(|(layer, pkg, path)| {
+            let file = pkg.container().container_path().to_string_lossy();
             let container = match containers
                 .iter()
                 .find(|held| held.as_ref() == file.as_ref())
@@ -261,81 +381,77 @@ fn winning_copies(order: &LoadOrder, filter: &PathFilter) -> Vec<Candidate> {
                     fresh
                 }
             };
-            out.push(Candidate {
+            Candidate {
                 id: pkg.id(),
                 path,
                 layer,
                 container,
-                versions,
-            });
-        }
-    }
-    out.sort_by(|a, b| (a.layer, &a.path).cmp(&(b.layer, &b.path)));
-    out
-}
-
-/// The packages whose header says one of their exports is a function, in the order given. A
-/// header that does not read keeps its package, so the parse reports it rather than the search
-/// dropping it in silence.
-fn holding_functions(
-    order: &LoadOrder,
-    candidates: Vec<Candidate>,
-    cancel: &AtomicBool,
-    progress: &(dyn Fn(SearchPhase, usize, usize) + Sync),
-) -> Vec<Candidate> {
-    let function = FPackageObjectIndex::create_script_import("/Script/CoreUObject.Function");
-    let total = candidates.len();
-    let done = AtomicUsize::new(0);
-    candidates
-        .into_par_iter()
-        .filter(|candidate| {
-            if cancel.load(Ordering::Relaxed) {
-                return false;
             }
-            let store = order.layers[candidate.layer].store.as_ref();
-            let keep = header_of(store, candidate).is_none_or(|header| {
-                header
-                    .export_map
-                    .iter()
-                    .any(|export| export.class_index == function)
-            });
-            let now = done.fetch_add(1, Ordering::Relaxed) + 1;
-            if now.is_multiple_of(1024) || now == total {
-                progress(SearchPhase::Headers, now, total);
-            }
-            keep
         })
         .collect()
 }
 
-/// A package's IoStore header, read from the store holding it.
-fn header_of(store: &dyn IoStoreTrait, candidate: &Candidate) -> Option<FZenPackageHeader> {
-    let (toc_version, header_version) = candidate.versions?;
-    let chunk = FIoChunkId::from_package_id(candidate.id, 0, EIoChunkType::ExportBundleData);
+/// Whether package `id`'s IoStore header, read from `store` by its container's `versions`, gives
+/// one of its exports one of `classes`, a native class as a script import names it. `None` when
+/// the header does not read, which a caller takes as a reason to read the package whole.
+pub(crate) fn header_names_class(
+    store: &dyn IoStoreTrait,
+    id: FPackageId,
+    versions: (EIoStoreTocVersion, EIoContainerHeaderVersion),
+    classes: &[FPackageObjectIndex],
+) -> Option<bool> {
+    let held = export_classes(store, id, versions)?;
+    Some(held.iter().any(|class| classes.contains(class)))
+}
+
+/// The class of each of package `id`'s exports, as its IoStore header gives them, read from
+/// `store` by its container's `versions`. `None` when the header does not read.
+pub(crate) fn export_classes(
+    store: &dyn IoStoreTrait,
+    id: FPackageId,
+    (toc_version, header_version): (EIoStoreTocVersion, EIoContainerHeaderVersion),
+) -> Option<Vec<FPackageObjectIndex>> {
+    let chunk = FIoChunkId::from_package_id(id, 0, EIoChunkType::ExportBundleData);
     let data = store.read(chunk).ok()?;
-    FZenPackageHeader::deserialize(
+    let header = FZenPackageHeader::deserialize(
         &mut Cursor::new(&data),
-        store.package_store_entry(candidate.id),
+        store.package_store_entry(id),
         toc_version,
         header_version,
         Some(ENGINE_VERSION.package_file_version()),
     )
-    .ok()
+    .ok()?;
+    Some(
+        header
+            .export_map
+            .iter()
+            .map(|export| export.class_index)
+            .collect(),
+    )
 }
 
+/// `retry` is the store a converter other threads share reads, for a package that fails to convert
+/// through it: the failure is converted again on a fresh converter, so what it says never depends on
+/// which thread met a broken import first.
+#[allow(clippy::too_many_arguments)]
 fn search_one(
     converter: &PackageConverter<'_>,
+    retry: Option<&LoadOrder>,
     candidate: &Candidate,
     order: &LoadOrder,
     mappings: &Mappings,
     query: &Query,
     game_root: &str,
     layouts: Option<&LayoutReader<'_>>,
+    clock: Option<&Clock>,
 ) -> Outcome {
-    let parsed = match parse_candidate(converter, candidate, mappings, game_root, layouts) {
+    let parsed = match parse_candidate(
+        converter, retry, candidate, mappings, game_root, layouts, clock,
+    ) {
         Ok(parsed) => parsed,
         Err(reason) => return Outcome::Unreadable(candidate.path.clone(), reason),
     };
+    let started = Instant::now();
     let mut hits = Vec::new();
     search_package(&candidate.path, &parsed, query, &mut hits);
     let mod_name = &order.layers[candidate.layer].mod_name;
@@ -353,28 +469,44 @@ fn search_one(
         };
         hit.place = place.hero.is_some().then_some(place);
     }
+    if let Some(clock) = clock {
+        Clock::add(&clock.matching, started.elapsed());
+    }
     Outcome::Hits {
         found: hits.len(),
         hits,
     }
 }
 
-/// One package read the way a search reads it: through `layouts` the way the inspector shows its
+/// One package read the way a search reads it: through `layouts` the way `asset dump` shows its
 /// values, or with the plain parse bytecode needs.
 fn parse_candidate(
     converter: &PackageConverter<'_>,
+    retry: Option<&LoadOrder>,
     candidate: &Candidate,
     mappings: &Mappings,
     game_root: &str,
     layouts: Option<&LayoutReader<'_>>,
+    clock: Option<&Clock>,
 ) -> Result<rivals_uasset::ParsedPackage, String> {
-    let bundle = converter.convert(candidate.id, &candidate.path)?;
+    let started = Instant::now();
+    let bundle = converter
+        .convert(candidate.id, &candidate.path)
+        .or_else(|failed| match retry {
+            Some(order) => PackageConverter::new(order).convert(candidate.id, &candidate.path),
+            None => Err(failed),
+        });
+    if let Some(clock) = clock {
+        Clock::add(&clock.convert, started.elapsed());
+    }
+    let bundle = bundle?;
     let bundle = AssetBundle {
         asset: &bundle.asset_file_buffer,
         exports: &bundle.exports_file_buffer,
     };
-    match layouts {
-        // Values read the way the inspector shows them.
+    let started = Instant::now();
+    let parsed = match layouts {
+        // Values read the way `asset dump` shows them.
         Some(layouts) => schema_synth::parse_package_through(
             &bundle,
             Some(mappings),
@@ -388,23 +520,48 @@ fn parse_candidate(
             layouts,
             ParseOptions::default(),
         ),
-        // Bytecode needs no layout recovered from another Blueprint, so the plain parse does.
-        None => rivals_uasset::parse_package_opts(
-            &bundle,
-            Some(mappings),
-            None,
-            ParseOptions {
-                skip_twins: true,
-                ..Default::default()
-            },
-        ),
+        // Bytecode needs no layout recovered from another Blueprint, nor the exports that hold
+        // none. An export read that fails could have taken a repair a whole read makes, which can
+        // reach the exports holding bytecode, so that package is read whole.
+        None => script_parse(&bundle, mappings, true).and_then(|parsed| {
+            match parsed
+                .exports
+                .iter()
+                .any(|export| matches!(export.status, ExportStatus::Failed { .. }))
+            {
+                true => script_parse(&bundle, mappings, false),
+                false => Ok(parsed),
+            }
+        }),
+    };
+    if let Some(clock) = clock {
+        Clock::add(&clock.parse, started.elapsed());
     }
+    parsed
+}
+
+/// The parse a script search reads bytecode from, of the exports holding it alone or of all.
+fn script_parse(
+    bundle: &AssetBundle<'_>,
+    mappings: &Mappings,
+    scripts_only: bool,
+) -> Result<rivals_uasset::ParsedPackage, String> {
+    rivals_uasset::parse_package_opts(
+        bundle,
+        Some(mappings),
+        None,
+        ParseOptions {
+            skip_twins: true,
+            scripts_only,
+            ..Default::default()
+        },
+    )
 }
 
 /// A package the game loads, read whole.
 pub(crate) struct ReadPackage {
     pub path: String,
-    /// The container it was read from, which is where the inspector opens it.
+    /// The container it was read from.
     pub container: String,
     /// The enabled mod whose copy the game loads.
     pub in_mod: Option<String>,
@@ -437,7 +594,15 @@ pub(crate) fn read_packages(
             path: candidate.path.clone(),
             container: candidate.container.to_string(),
             in_mod: order.layers[candidate.layer].mod_name.clone(),
-            parsed: parse_candidate(&converter, candidate, mappings, game_root, Some(&layouts)),
+            parsed: parse_candidate(
+                &converter,
+                None,
+                candidate,
+                mappings,
+                game_root,
+                Some(&layouts),
+                None,
+            ),
         })
         .collect())
 }
@@ -569,51 +734,72 @@ mod game_data_tests {
         AtomicBool::new(false)
     }
 
-    /// What the header says agrees with what the parse finds: a package is kept exactly when one of
-    /// its exports is a function.
+    /// A script search reads each script export, its bytecode, signature and layout, exactly as a
+    /// read of the whole package gives it, over a spread of the packages holding functions, or all
+    /// of them with `RIVALS_EVERY_HOLDER` set.
     #[test]
-    fn the_header_filter_keeps_exactly_the_packages_whose_exports_are_functions() {
+    fn a_script_only_read_gives_every_script_export_as_the_whole_read_does() {
         let Some((root, mappings)) = install() else {
             return;
         };
         let order = load_order::open(&root, false, false).expect("containers");
-        let filter = PathFilter::new(Some(SETTINGS));
-        let listed = winning_copies(&order, &filter);
-        assert!(listed.len() > 50, "{}", listed.len());
-        let kept: HashSet<u64> = holding_functions(
-            &order,
-            winning_copies(&order, &filter),
-            &never(),
-            &|_, _, _| {},
-        )
-        .iter()
-        .map(|candidate| candidate.id.0)
-        .collect();
-        assert!(!kept.is_empty());
+        let index = crate::import_index::current(&root).expect("import index");
+        let holders: Vec<Candidate> = winning_copies(&order, &PathFilter::new(None))
+            .into_iter()
+            .filter(|candidate| index.may_hold_functions(None, candidate.id.0))
+            .collect();
+        drop(index);
+        let stride = if std::env::var("RIVALS_EVERY_HOLDER").is_ok() {
+            1
+        } else {
+            13
+        };
         let converter = PackageConverter::new(&order);
-        for candidate in &listed {
-            let bundle = converter
-                .convert(candidate.id, &candidate.path)
-                .expect("converts");
-            let parsed = rivals_uasset::parse_package(
-                &AssetBundle {
-                    asset: &bundle.asset_file_buffer,
-                    exports: &bundle.exports_file_buffer,
-                },
-                Some(&mappings),
-            )
-            .expect("parses");
-            let functions = parsed
+        let shown = |parsed: &rivals_uasset::ParsedPackage| -> Vec<String> {
+            parsed
                 .exports
                 .iter()
-                .any(|export| export.class_name == "Function");
-            assert_eq!(
-                kept.contains(&candidate.id.0),
-                functions,
-                "{}",
-                candidate.path
-            );
-        }
+                .filter(|export| export.script.is_some() || export.struct_definition.is_some())
+                .map(|export| {
+                    format!(
+                        "{} {} {:?} {:?} {:?} {:?}",
+                        export.object_name,
+                        export.outer_index,
+                        export.script,
+                        export.signature,
+                        export.struct_definition,
+                        export.layout
+                    )
+                })
+                .collect()
+        };
+        let compared: Vec<bool> = holders
+            .par_iter()
+            .step_by(stride)
+            .filter_map(|candidate| {
+                let bundle = converter.convert(candidate.id, &candidate.path).ok()?;
+                let bundle = AssetBundle {
+                    asset: &bundle.asset_file_buffer,
+                    exports: &bundle.exports_file_buffer,
+                };
+                let whole = script_parse(&bundle, &mappings, false).ok()?;
+                let scripts = script_parse(&bundle, &mappings, true).expect("a script-only read");
+                let reread = scripts
+                    .exports
+                    .iter()
+                    .any(|export| matches!(export.status, ExportStatus::Failed { .. }));
+                if !reread {
+                    assert_eq!(shown(&scripts), shown(&whole), "{}", candidate.path);
+                }
+                Some(reread)
+            })
+            .collect();
+        let reread = compared.iter().filter(|reread| **reread).count();
+        assert!(compared.len() > 300, "{}", compared.len());
+        eprintln!(
+            "{} holder(s) compared, {reread} read whole for a failing export",
+            compared.len()
+        );
     }
 
     /// A search narrowed to a folder and to calls finds them only there, each at a statement of a

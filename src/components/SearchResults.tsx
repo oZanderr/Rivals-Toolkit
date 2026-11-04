@@ -1,3 +1,6 @@
+import { useState } from "react";
+
+import { Tip } from "@/components/ui/tooltip";
 import { variantLabel, type AbilityPlace } from "@/lib/abilityPlace";
 import { shortPath } from "@/lib/contentPath";
 
@@ -23,7 +26,7 @@ export interface SearchHit {
   line: string;
   /** The call a call hit is found by, with its arguments. */
   call?: string;
-  /** The container a game-wide search read the package from, which is where it opens. */
+  /** The container a game-wide search read the package from. */
   container?: string;
   /** The enabled mod whose copy of the package the game loads. */
   in_mod?: string;
@@ -79,12 +82,22 @@ function byOrder(a: Group, b: Group): number {
   return 0;
 }
 
-function HitRow({ hit, onOpen }: { hit: SearchHit; onOpen: (hit: SearchHit) => void }) {
+/** How long a row says it was copied. */
+const COPIED_MS = 1500;
+
+function HitRow({ hit, commandOf }: { hit: SearchHit; commandOf: (hit: SearchHit) => string }) {
   const shown = hit.call ?? hit.line;
+  const [copied, setCopied] = useState(false);
+  const copy = () => {
+    void navigator.clipboard.writeText(commandOf(hit)).then(() => {
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), COPIED_MS);
+    });
+  };
   return (
     <button
       className="flex w-full items-baseline gap-2 rounded-sm pl-3 text-left font-mono text-[11px] hover:bg-muted/50"
-      onClick={() => onOpen(hit)}
+      onClick={copy}
     >
       <span className="w-16 shrink-0 font-sans text-[10px] uppercase text-muted-foreground">
         {hit.kind}
@@ -98,9 +111,12 @@ function HitRow({ hit, onOpen }: { hit: SearchHit; onOpen: (hit: SearchHit) => v
           {hit.id}
         </span>
       )}
-      <span className="truncate" title={hit.line}>
-        {shown}
-      </span>
+      <Tip content={hit.line}>
+        <span className="truncate">{shown}</span>
+      </Tip>
+      {copied && (
+        <span className="ml-auto shrink-0 pr-1 font-sans text-[10px] text-ok">copied</span>
+      )}
     </button>
   );
 }
@@ -108,11 +124,11 @@ function HitRow({ hit, onOpen }: { hit: SearchHit; onOpen: (hit: SearchHit) => v
 function PackageHits({
   pkg,
   hits,
-  onOpen,
+  commandOf,
 }: {
   pkg: string;
   hits: SearchHit[];
-  onOpen: (hit: SearchHit) => void;
+  commandOf: (hit: SearchHit) => string;
 }) {
   return (
     <div>
@@ -125,7 +141,7 @@ function PackageHits({
         )}
       </p>
       {hits.map((hit, i) => (
-        <HitRow key={i} hit={hit} onOpen={onOpen} />
+        <HitRow key={i} hit={hit} commandOf={commandOf} />
       ))}
     </div>
   );
@@ -137,12 +153,12 @@ function byPackage(hits: SearchHit[]): Map<string, SearchHit[]> {
   return out;
 }
 
-/** The places a search found, grouped by package, under each hero or ability when asked; each
- *  opens where it is. */
+/** The places a search found, grouped by package, under each hero or ability when asked; a click
+ *  on one copies the CLI command that shows it. */
 export function SearchResults({
   query,
   result,
-  onOpen,
+  commandOf,
   note,
   found = result.hits.length,
   packages,
@@ -150,7 +166,8 @@ export function SearchResults({
 }: {
   query: string;
   result: SearchResult;
-  onOpen: (hit: SearchHit) => void;
+  /** The `rivals-cli` command that shows a hit. */
+  commandOf: (hit: SearchHit) => string;
   /** How many places were found in all, when that is more than are listed. */
   found?: number;
   /** How many packages hold them, listed or not. */
@@ -175,10 +192,13 @@ export function SearchResults({
         {found} place{found === 1 ? "" : "s"}
         {where} name “{query}”
       </p>
+      <p className="-mt-2 text-[11px] text-muted-foreground">
+        Click one to copy the CLI command that shows it.
+      </p>
       {note && <p className="text-warn">{note}</p>}
       {groupBy === "package"
         ? [...byPackage(result.hits)].map(([pkg, hits]) => (
-            <PackageHits key={pkg} pkg={pkg} hits={hits} onOpen={onOpen} />
+            <PackageHits key={pkg} pkg={pkg} hits={hits} commandOf={commandOf} />
           ))
         : [...groups.values()].sort(byOrder).map((group) => (
             <div key={group.key} className="flex flex-col gap-1">
@@ -191,7 +211,7 @@ export function SearchResults({
                 )}
               </p>
               {[...byPackage(group.hits)].map(([pkg, hits]) => (
-                <PackageHits key={pkg} pkg={pkg} hits={hits} onOpen={onOpen} />
+                <PackageHits key={pkg} pkg={pkg} hits={hits} commandOf={commandOf} />
               ))}
             </div>
           ))}

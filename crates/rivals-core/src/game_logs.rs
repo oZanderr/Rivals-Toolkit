@@ -10,6 +10,8 @@ pub mod share;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
+
+use rayon::prelude::*;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -285,11 +287,11 @@ fn probe_file(path: &Path, meta: &std::fs::Metadata, key: &LogKey) -> Probe {
 }
 
 /// Every session, the newest first. `running` holds the game processes' ids, whose sessions are
-/// still being written.
+/// still being written. Each log is probed on the caller's rayon pool.
 pub fn list_sessions(running: &[u32], key: &LogKey) -> Vec<Session> {
     let refs = session_refs();
     let crashes: Vec<Option<CrashReport>> = refs
-        .iter()
+        .par_iter()
         .map(|r| r.crash_dir.as_deref().and_then(|d| crash::read(d).ok()))
         .collect();
     let mut repeats: HashMap<&str, u32> = HashMap::new();
@@ -298,8 +300,8 @@ pub fn list_sessions(running: &[u32], key: &LogKey) -> Vec<Session> {
     }
 
     let mut sessions: Vec<Session> = refs
-        .iter()
-        .zip(&crashes)
+        .par_iter()
+        .zip(crashes.par_iter())
         .map(|(r, report)| {
             let meta = r
                 .log_path
@@ -569,7 +571,7 @@ fn problem_keys_of(path: &Path, meta: &std::fs::Metadata, key: &LogKey) -> Arc<H
 /// out the session named `exclude`.
 pub fn baseline(build: &str, exclude: &str, key: &LogKey) -> Baseline {
     let mut candidates: Vec<(Option<SystemTime>, PathBuf, std::fs::Metadata)> = session_refs()
-        .into_iter()
+        .into_par_iter()
         .filter(|s| !s.name.eq_ignore_ascii_case(exclude))
         .filter_map(|s| {
             let path = s.log_path?;
@@ -586,10 +588,11 @@ pub fn baseline(build: &str, exclude: &str, key: &LogKey) -> Baseline {
         .collect();
     candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.0));
     candidates.truncate(BASELINE_SESSIONS);
-    let mut keys = HashSet::new();
-    for (_, path, meta) in &candidates {
-        keys.extend(problem_keys_of(path, meta, key).iter().cloned());
-    }
+    let read: Vec<Arc<HashSet<String>>> = candidates
+        .par_iter()
+        .map(|(_, path, meta)| problem_keys_of(path, meta, key))
+        .collect();
+    let keys: HashSet<String> = read.iter().flat_map(|held| held.iter().cloned()).collect();
     Baseline {
         sessions: candidates.len() as u32,
         keys,

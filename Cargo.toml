@@ -42,6 +42,9 @@ png = "0.18"
 # High dynamic range textures go out and come back in as OpenEXR, as halves or floats.
 exr = "1.74"
 half = "2"
+# Textures also go out to and come in from DDS, TGA and BMP, and come in from JPEG.
+image = { version = "0.25", default-features = false, features = ["tga", "bmp", "jpeg"] }
+ddsfile = "0.6"
 # The line diff `mods diff` shows scripts with; the text helpers are not needed.
 similar = { version = "2", default-features = false }
 clap = { version = "4", features = ["derive"] }

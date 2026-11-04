@@ -63,7 +63,7 @@ pub struct InlinePayload {
     pub size: i64,
 }
 
-/// One bulk data resource as the inspector shows it: where its payload sits and whether the
+/// One bulk data resource as `asset bulk` lists it: where its payload sits and whether the
 /// bytes can be replaced.
 #[derive(Debug, Clone, Serialize)]
 pub struct ResourceInfo {
@@ -117,7 +117,7 @@ pub fn bulk_lock(resource: &FObjectDataResource) -> Option<String> {
     None
 }
 
-/// The bulk data table as the inspector shows it.
+/// The bulk data table as `asset bulk` lists it.
 pub fn resource_infos(header: &FLegacyPackageHeader, exports: &[u8]) -> Vec<ResourceInfo> {
     header
         .data_resources
@@ -457,6 +457,34 @@ pub fn rewrite(
     }
     let asset = serialize_header(&header, total)?;
     Ok(RewrittenPackage { asset, exports })
+}
+
+/// The package with no engine versions stamped in its header, as a cook given `-unversioned`
+/// writes it. The export data is the same either way, and the game reads a stamped package under
+/// the stamp's versions rather than its own.
+pub fn unstamp(bundle: &AssetBundle<'_>) -> Result<RewrittenPackage, String> {
+    reheader(bundle, |header| {
+        let versions = &mut header.summary.versioning_info;
+        versions.is_unversioned = true;
+        versions.licensee_version = 0;
+        versions.custom_versions.clear();
+    })
+}
+
+/// The package with its header changed by `edit` and laid out again at whatever size it comes to,
+/// the export data as it was.
+pub(crate) fn reheader(
+    bundle: &AssetBundle<'_>,
+    edit: impl FnOnce(&mut FLegacyPackageHeader),
+) -> Result<RewrittenPackage, String> {
+    let mut header = read_header(bundle)?;
+    let total = header_size(&header)?;
+    edit(&mut header);
+    to_relative(&mut header, total);
+    Ok(RewrittenPackage {
+        asset: serialize_header(&header, 0)?,
+        exports: bundle.exports.to_vec(),
+    })
 }
 
 /// Splices the export data, keeping whatever trails the last export exactly where it is.

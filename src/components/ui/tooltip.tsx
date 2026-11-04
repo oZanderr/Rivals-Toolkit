@@ -5,6 +5,8 @@ import { Tooltip as TooltipPrimitive } from "radix-ui";
 import { cn } from "@/lib/utils";
 
 const TooltipProvider = TooltipPrimitive.Provider;
+/** How long a pointer rests on something before its hint shows. */
+const TIP_DELAY = 600;
 const Tooltip = TooltipPrimitive.Root;
 const TooltipTrigger = TooltipPrimitive.Trigger;
 
@@ -49,16 +51,15 @@ function Tip({
   if (disabled || content === null || content === undefined || content === false) {
     return <>{children}</>;
   }
+  // The app's one provider holds the delay, so a long list does not mount a provider per row.
   return (
-    <TooltipProvider delayDuration={delayDuration ?? 600}>
-      <Tooltip disableHoverableContent>
-        <TooltipTrigger asChild={asChild}>{children}</TooltipTrigger>
-        <TooltipContent side={side} align={align}>
-          {content}
-        </TooltipContent>
-      </Tooltip>
-    </TooltipProvider>
+    <Tooltip disableHoverableContent delayDuration={delayDuration}>
+      <TooltipTrigger asChild={asChild}>{children}</TooltipTrigger>
+      <TooltipContent side={side} align={align}>
+        {content}
+      </TooltipContent>
+    </Tooltip>
   );
 }
 
-export { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider, Tip };
+export { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider, Tip, TIP_DELAY };

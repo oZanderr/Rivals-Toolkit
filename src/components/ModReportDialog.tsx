@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 
 import { invoke } from "@tauri-apps/api/core";
+import { AlertTriangle } from "lucide-react";
 
-import { SearchResults, type SearchHit, type SearchResult } from "@/components/SearchResults";
+import { SearchResults, type SearchResult } from "@/components/SearchResults";
 import {
   AlertDialog,
   AlertDialogCancel,
@@ -14,16 +15,18 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Tip } from "@/components/ui/tooltip";
+import { hitCommand } from "@/lib/cliCommand";
 import { shortPath } from "@/lib/contentPath";
 import { cn } from "@/lib/utils";
-
-export type { SearchHit } from "@/components/SearchResults";
 
 interface PackageReport {
   path: string;
   kind: string;
   overrides_game: boolean;
   error?: string;
+  /** Collision a static mesh brings that the game's copy does not have. */
+  collision?: string;
 }
 
 type ByPackage = Record<string, string[]>;
@@ -46,8 +49,6 @@ interface Props {
   onClose: () => void;
   /** Asks to take a package back out of the mod. */
   onRevert?: (path: string) => void;
-  /** Opens a search hit in the inspector, at its statement when it has one. */
-  onOpenHit: (hit: SearchHit) => void;
 }
 
 /** The patch number nearly every mod ships with, which says nothing about this one. */
@@ -74,7 +75,7 @@ const SECTIONS: { key: keyof ModReport; title: string; hint: string }[] = [
 ];
 
 /** Mount with `key={container}` so each mod starts from an empty report. */
-export function ModReportDialog({ gamePath, container, onClose, onRevert, onOpenHit }: Props) {
+export function ModReportDialog({ gamePath, container, onClose, onRevert }: Props) {
   const modName = container.split(/[\\/]/).pop() ?? container;
   const [report, setReport] = useState<ModReport | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -150,7 +151,11 @@ export function ModReportDialog({ gamePath, container, onClose, onRevert, onOpen
         <div className="flex-1 overflow-y-auto -mx-6 px-6 text-[12px]">
           {searchError && <p className="text-err">{searchError}</p>}
           {search && (
-            <SearchResults query={search.query} result={search.result} onOpen={onOpenHit} />
+            <SearchResults
+              query={search.query}
+              result={search.result}
+              commandOf={(hit) => hitCommand(hit, container)}
+            />
           )}
           {error && <p className="text-err">{error}</p>}
           {!error && !report && <p className="text-muted-foreground">Reading the mod…</p>}
@@ -214,28 +219,36 @@ function PackageList({
     <section>
       <h3 className="mb-1 font-semibold">{title}</h3>
       {packages.map((p) => (
-        <div key={p.path} className="flex items-center gap-2">
-          <span
-            className={cn(
-              "w-32 shrink-0 truncate text-[11px]",
-              p.error ? "text-warn" : "text-muted-foreground"
+        <div key={p.path}>
+          <div className="flex items-center gap-2">
+            <Tip content={p.error}>
+              <span
+                className={cn(
+                  "w-32 shrink-0 truncate text-[11px]",
+                  p.error ? "text-warn" : "text-muted-foreground"
+                )}
+              >
+                {p.kind}
+              </span>
+            </Tip>
+            <Tip content={p.path}>
+              <span className="truncate font-mono text-[11px]">{shortPath(p.path)}</span>
+            </Tip>
+            {action && (
+              <Button
+                size="sm"
+                variant="ghost"
+                className="ml-auto h-6 shrink-0 px-2 text-[11px]"
+                onClick={() => action.run(p.path)}
+              >
+                {action.label}
+              </Button>
             )}
-            title={p.error}
-          >
-            {p.kind}
-          </span>
-          <span className="truncate font-mono text-[11px]" title={p.path}>
-            {shortPath(p.path)}
-          </span>
-          {action && (
-            <Button
-              size="sm"
-              variant="ghost"
-              className="ml-auto h-6 shrink-0 px-2 text-[11px]"
-              onClick={() => action.run(p.path)}
-            >
-              {action.label}
-            </Button>
+          </div>
+          {p.collision && (
+            <p className="flex items-start gap-1 pl-34 text-[11px] text-warn">
+              <AlertTriangle size={11} className="mt-0.5 shrink-0" /> {p.collision}
+            </p>
           )}
         </div>
       ))}

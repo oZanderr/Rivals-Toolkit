@@ -2,7 +2,6 @@ export type ModsEventSource =
   | "Mods"
   | "Sounds"
   | "AssetManager"
-  | "AssetInspector"
   | "Settings"
   | "IniEditor"
   | "Plugins";

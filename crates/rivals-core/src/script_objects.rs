@@ -72,7 +72,9 @@ fn check_path(line: &str) -> Result<(), String> {
 /// The bundled entries plus the user list, for a conversion context. A user list that fails to
 /// read here was validated when it was set, so it is dropped rather than failing the read.
 pub fn current() -> Vec<String> {
-    let mut paths = parse_list(BUNDLED).unwrap_or_default();
+    static PARSED: std::sync::LazyLock<Vec<String>> =
+        std::sync::LazyLock::new(|| parse_list(BUNDLED).unwrap_or_default());
+    let mut paths = PARSED.clone();
     let user = USER_LIST.lock().ok().and_then(|slot| slot.clone());
     if let Some(path) = user {
         paths.extend(load(&path).unwrap_or_default());

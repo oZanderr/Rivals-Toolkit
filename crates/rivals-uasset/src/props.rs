@@ -439,6 +439,8 @@ pub struct Diagnostics {
     pub channels: Vec<ChannelLayout>,
     /// Where each [`NativeLeaf`] value starts.
     pub native_leaves: Vec<(u64, NativeLeaf)>,
+    /// Where a stock cook lacks bytes this game reads, each stamped with its export once read.
+    pub stock_gaps: Vec<crate::stock::StockGap>,
     /// Where each tagged property's whole tag sits, for removing one.
     pub tag_bounds: Vec<TagBounds>,
     /// Properties a tagged block's owner declares that the block does not hold.
@@ -455,6 +457,8 @@ pub struct Diagnostics {
     /// Emit an entry for every declared slot the header skips, so a value that inherits its
     /// parent's can be shown and stored. Off for corpus statistics, which count stored values.
     pub declared_slots: bool,
+    /// Leave an export that holds no script unread, as `ParseOptions::scripts_only` asks.
+    pub scripts_only: bool,
     pub headers_checked: usize,
     pub headers_differing: usize,
     /// How many headers took each shape the audit counts, recorded with `check_headers`.
@@ -483,6 +487,7 @@ pub(crate) struct Marks {
     tagged_absent: usize,
     odd_headers: usize,
     undecoded: usize,
+    stock_gaps: usize,
 }
 
 impl Diagnostics {
@@ -498,6 +503,7 @@ impl Diagnostics {
             tagged_absent: self.tagged_absent.len(),
             odd_headers: self.odd_headers.len(),
             undecoded: self.undecoded.len(),
+            stock_gaps: self.stock_gaps.len(),
         }
     }
 
@@ -515,6 +521,7 @@ impl Diagnostics {
         self.tagged_absent.truncate(marks.tagged_absent);
         self.odd_headers.truncate(marks.odd_headers);
         self.undecoded.truncate(marks.undecoded);
+        self.stock_gaps.truncate(marks.stock_gaps);
     }
 }
 

@@ -21,20 +21,9 @@ pub(super) fn cancel() {
     CONVERT_CANCEL.store(true, Ordering::Relaxed);
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn repack_mod_in_place(
-    game_root: &str,
-    mod_pak: &str,
-    to_iostore: bool,
-    obfuscate: bool,
-    recompress: bool,
-    oodle_level: Option<retoc::OodleCompressionLevel>,
-    compression: super::profile::PackCompression,
-    app: AppHandle,
-) -> Result<InPlaceReport, String> {
-    CONVERT_CANCEL.store(false, Ordering::Relaxed);
-    let files = ModFiles::of(Path::new(mod_pak))?;
-    let progress = |phase: ConvertPhase, current: usize, total: usize| {
+/// The app's progress events for a conversion's two halves.
+fn progress_to(app: &AppHandle) -> impl Fn(ConvertPhase, usize, usize) + Sync + '_ {
+    move |phase, current, total| {
         let _ = match phase {
             ConvertPhase::Extracting => app.emit(
                 "legacy-extraction-progress",
@@ -49,7 +38,24 @@ pub(crate) fn repack_mod_in_place(
                 },
             ),
         };
-    };
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn repack_mod_in_place(
+    game_root: &str,
+    mod_pak: &str,
+    to_iostore: bool,
+    obfuscate: bool,
+    recompress: bool,
+    oodle_level: Option<retoc::OodleCompressionLevel>,
+    compression: super::profile::PackCompression,
+    conform: bool,
+    mappings: Option<std::sync::Arc<rivals_uasset::Mappings>>,
+    app: AppHandle,
+) -> Result<InPlaceReport, String> {
+    CONVERT_CANCEL.store(false, Ordering::Relaxed);
+    let files = ModFiles::of(Path::new(mod_pak))?;
     let report = mod_convert::convert_mod(
         game_root,
         &files,
@@ -63,12 +69,45 @@ pub(crate) fn repack_mod_in_place(
             oodle_level,
             obfuscate: Some(obfuscate),
             reencode: recompress,
+            conform,
+            mappings,
         },
         false,
         Some(&concurrency::POOL),
         &CONVERT_CANCEL,
-        &progress,
+        &progress_to(&app),
     )?;
     super::invalidate_list_caches(&[&files.part("pak"), &files.part("utoc")]);
+    Ok(report)
+}
+
+/// Brings an installed IoStore mod a stock editor cooked to this game's layout where it is. A mod
+/// with nothing to convert is left as it was.
+pub(crate) fn conform_mod_in_place(
+    game_root: &str,
+    mod_pak: &str,
+    oodle_level: Option<retoc::OodleCompressionLevel>,
+    compression: super::profile::PackCompression,
+    mappings: Option<std::sync::Arc<rivals_uasset::Mappings>>,
+    app: AppHandle,
+) -> Result<InPlaceReport, String> {
+    CONVERT_CANCEL.store(false, Ordering::Relaxed);
+    let files = ModFiles::of(Path::new(mod_pak))?;
+    let report = mod_convert::conform_mod(
+        game_root,
+        &files,
+        &IoStoreOptions {
+            compression,
+            oodle_level,
+            mappings,
+            ..Default::default()
+        },
+        false,
+        &CONVERT_CANCEL,
+        &progress_to(&app),
+    )?;
+    if report.written {
+        super::invalidate_list_caches(&[&files.part("pak"), &files.part("utoc")]);
+    }
     Ok(report)
 }

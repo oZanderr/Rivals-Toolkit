@@ -100,7 +100,7 @@ impl ModFiles {
     }
 
     /// Every file of its name, switched on or off, which another mod would be written over.
-    fn any_files(&self) -> Vec<PathBuf> {
+    pub(crate) fn any_files(&self) -> Vec<PathBuf> {
         PARTS
             .iter()
             .flat_map(|extension| {
@@ -594,6 +594,12 @@ pub struct IntoReport {
     pub needed: Vec<Needed>,
     pub warnings: Vec<String>,
     pub written: bool,
+    /// Packages a stock editor cooked, brought to this game's layout as they went in.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub conformed: Vec<crate::pak::pack::ConformedPackage>,
+    /// Packages a stock editor cooked that could not be brought to it, written as they were.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unconformed: Vec<crate::pak::pack::UnconformedPackage>,
 }
 
 impl IntoReport {
@@ -606,6 +612,8 @@ impl IntoReport {
             needed: Vec::new(),
             warnings: Vec::new(),
             written: false,
+            conformed: Vec::new(),
+            unconformed: Vec::new(),
         }
     }
 }
@@ -804,11 +812,20 @@ pub fn pack_into_mod(
         return Ok(report);
     }
     let mut failed = None;
+    let (mut conformed, mut unconformed) = (Vec::new(), Vec::new());
     let staged = iostore_out::stage_batch_into_iostore(
         &into.part("utoc"),
         entries.len(),
-        |at| match crate::pak::pack::read_loose_package(&source, &entries[at]) {
-            Ok(package) => Some(package),
+        |at| match crate::pak::pack::read_loose_package(
+            &source,
+            &entries[at],
+            io.conform,
+            io.mappings.as_deref(),
+        ) {
+            Ok((package, conformance)) => {
+                conformance.file(&mut conformed, &mut unconformed);
+                Some(package)
+            }
             Err(e) => {
                 failed.get_or_insert(e);
                 None
@@ -816,6 +833,8 @@ pub fn pack_into_mod(
         },
         io,
     )?;
+    report.conformed = conformed;
+    report.unconformed = unconformed;
     if let Some(e) = failed {
         return Err(e);
     }
@@ -858,7 +877,7 @@ pub fn rename_mod(from: &ModFiles, to: &str, io: &IoStoreOptions) -> Result<Rena
             .filter(|(old, _)| old.is_file())
             .collect();
         crate::mods::rename_all(&moves)?;
-        return Ok(report);
+        return Ok(moved_text(from, &dest, report));
     }
 
     rebuild(&from.part("utoc"), &dest, &HashSet::new(), io)?;
@@ -880,7 +899,17 @@ pub fn rename_mod(from: &ModFiles, to: &str, io: &IoStoreOptions) -> Result<Rena
     for (_, backup) in &aside {
         let _ = std::fs::remove_file(backup);
     }
-    Ok(report)
+    Ok(moved_text(from, &dest, report))
+}
+
+/// Keeps the wordings the toolkit holds for the mod under its new name.
+fn moved_text(from: &ModFiles, dest: &ModFiles, mut report: RenameReport) -> RenameReport {
+    if let Err(e) = crate::text_mod::rename_record(&from.stem, &dest.stem) {
+        report
+            .warnings
+            .push(format!("its text edits stay under its old name: {e}"));
+    }
+    report
 }
 
 /// What renaming the mod `from` to `to` would do, refused where the rename would be, and nothing
@@ -1051,6 +1080,12 @@ pub struct PackModReport {
     /// Shader archives written into the container as libraries.
     pub shader_libraries: Vec<String>,
     pub warnings: Vec<String>,
+    /// Packages a stock editor cooked, brought to this game's layout as they went in.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub conformed: Vec<crate::pak::pack::ConformedPackage>,
+    /// Packages a stock editor cooked that could not be brought to it, packed as they were.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unconformed: Vec<crate::pak::pack::UnconformedPackage>,
 }
 
 /// Packs the loose packages under `input`, of the files `take` takes, into the IoStore mod `to`, a
@@ -1101,6 +1136,8 @@ pub fn pack_mod(
         loose: packed.loose,
         shader_libraries: packed.shader_libraries,
         warnings,
+        conformed: packed.conformed,
+        unconformed: packed.unconformed,
     })
 }
 
@@ -1172,6 +1209,8 @@ pub fn pack_plain_mod(
         loose,
         shader_libraries: Vec::new(),
         warnings,
+        conformed: Vec::new(),
+        unconformed: Vec::new(),
     })
 }
 

@@ -1,9 +1,10 @@
 //! Recovers a struct's layout from the package that defines it when the mappings file has no entry.
 
-use std::cell::{OnceCell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use retoc::iostore::IoStoreTrait;
 use retoc::legacy_asset::FSerializedAssetBundle;
@@ -27,6 +28,9 @@ type Load<'a> = Box<dyn Fn(&str) -> Result<FSerializedAssetBundle, String> + 'a>
 pub struct LayoutReader<'a> {
     load: Load<'a>,
     recovered: RefCell<HashMap<String, Arc<Mappings>>>,
+    spent: Cell<Duration>,
+    /// A recovery is under way, so one it starts for a parent is not timed again.
+    timing: Cell<bool>,
 }
 
 impl<'a> LayoutReader<'a> {
@@ -40,7 +44,37 @@ impl<'a> LayoutReader<'a> {
                 converter.convert(asset::package_id(name), &path)
             }),
             recovered: RefCell::new(HashMap::new()),
+            spent: Cell::new(Duration::ZERO),
+            timing: Cell::new(false),
         }
+    }
+
+    /// How long recovering layouts through this reader has taken.
+    pub fn spent(&self) -> Duration {
+        self.spent.get()
+    }
+}
+
+/// Adds the time until it drops to a reader's total, for the outermost recovery alone.
+struct Spending<'r> {
+    reader: &'r LayoutReader<'r>,
+    since: Instant,
+}
+
+impl<'r> Spending<'r> {
+    fn start(reader: &'r LayoutReader<'r>) -> Option<Self> {
+        (!reader.timing.replace(true)).then(|| Self {
+            reader,
+            since: Instant::now(),
+        })
+    }
+}
+
+impl Drop for Spending<'_> {
+    fn drop(&mut self) {
+        let reader = self.reader;
+        reader.spent.set(reader.spent.get() + self.since.elapsed());
+        reader.timing.set(false);
     }
 }
 
@@ -392,6 +426,7 @@ fn synthesise(
     if cached.is_some() {
         return cached;
     }
+    let _spending = layouts.and_then(Spending::start);
 
     // A Blueprint class names a Blueprint parent by path, and that parent's package has to join
     // too, up the chain until a native class the mappings know, or the chain never roots at Object.

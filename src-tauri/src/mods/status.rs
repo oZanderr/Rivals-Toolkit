@@ -34,6 +34,9 @@ pub(crate) struct ModsStatus {
     pub mod_entries: Vec<ModEntry>,
     /// Number of disabled duplicates auto-removed because an enabled version of the same mod existed.
     pub conflicts_resolved: u32,
+    /// Every folder below `~mods`, or none while subfolders are not scanned, which shows no mod in
+    /// one either.
+    pub folders: Option<Vec<String>>,
 }
 
 pub(crate) fn get_mods_status(game_root: &str, recursive: bool) -> ModsStatus {
@@ -41,6 +44,8 @@ pub(crate) fn get_mods_status(game_root: &str, recursive: bool) -> ModsStatus {
     // A switched-off copy of a mod that is also switched on is stale: the switched-on one
     // supersedes it, so the app deletes it rather than list the mod twice.
     let conflicts_resolved = remove_stale_copies(game_root, &mut library);
+    let folders = (recursive && library.mods_folder_exists)
+        .then(|| mod_library::list_folders(&crate::paths::mods_dir(game_root)));
     ModsStatus {
         mods_folder_exists: library.mods_folder_exists,
         mods_folder_path: library.mods_folder_path,
@@ -59,5 +64,6 @@ pub(crate) fn get_mods_status(game_root: &str, recursive: bool) -> ModsStatus {
             })
             .collect(),
         conflicts_resolved,
+        folders,
     }
 }

@@ -1692,6 +1692,77 @@ impl ScriptCensus {
     }
 }
 
+/// The census line for a call whose object cannot be a function. A package whose imports moved
+/// without its bytecode, as a repack that loses an import leaves it, calls a package in place of
+/// the function, and the game crashes when the call runs.
+pub const MISAIMED_CALLS: &str = "calls aimed at something that is not a function";
+
+/// The call `expr` makes by object, and why that object cannot be a function: the call's token
+/// and the reason. `None` for any other expression and for a call that can reach a function.
+fn misaimed_call(
+    parsed: &crate::package::ParsedPackage,
+    expr: &Expr,
+) -> Option<(&'static str, String)> {
+    let (token, target, signature) = match expr {
+        Expr::FinalCall { name, function, .. } => (*name, function, false),
+        Expr::CallMulticastDelegate { signature, .. } => ("CallMulticastDelegate", signature, true),
+        _ => return None,
+    };
+    call_fault(parsed, target, signature).map(|reason| (token, reason))
+}
+
+/// Why `target` cannot be the function a call names, or `None` when it can be. A function import
+/// reads as an object whose outer is a class, so only what is plainly something else is refused:
+/// a package, an object at the top of its package, or a type. `signature` allows a delegate
+/// signature declared outside any class, which a multicast call names by its package.
+fn call_fault(
+    parsed: &crate::package::ParsedPackage,
+    target: &ObjectRef,
+    signature: bool,
+) -> Option<String> {
+    let index = target.index;
+    if index > 0 {
+        let Some(export) = parsed.exports.get(index as usize - 1) else {
+            return Some(format!(
+                "calls export {index}, which the package does not have"
+            ));
+        };
+        return (!export.class_name.ends_with("Function"))
+            .then(|| format!("calls {}, a {}", export.path, export.class_name));
+    }
+    if index == 0 {
+        return Some("calls nothing".to_string());
+    }
+    let Some(import) = parsed.imports.get((-index - 1) as usize) else {
+        return Some(format!(
+            "calls import {index}, which the package does not have"
+        ));
+    };
+    if import.outer_index == 0 || import.class_name == "Package" {
+        return Some(format!("calls the package {}", import.path));
+    }
+    if import.unresolved {
+        return Some(format!("calls {}, which could not be named", import.path));
+    }
+    let class = import.class_name.as_str();
+    if class.ends_with("Class")
+        || matches!(
+            class,
+            "ScriptStruct" | "UserDefinedStruct" | "Enum" | "UserDefinedEnum"
+        )
+    {
+        return Some(format!("calls {}, a {class}", import.path));
+    }
+    let outer_is_package = import.outer_index < 0
+        && parsed
+            .imports
+            .get((-import.outer_index - 1) as usize)
+            .is_some_and(|outer| outer.outer_index == 0);
+    let package_delegate = signature && import.object_name.ends_with("__DelegateSignature");
+    (outer_is_package && !package_delegate)
+        .then(|| format!("calls {}, which is not inside a class", import.path))
+}
+
 /// Counts what relocation relies on across one package's scripts.
 pub fn census(parsed: &crate::package::ParsedPackage) -> ScriptCensus {
     let mut out = ScriptCensus::default();
@@ -1755,45 +1826,57 @@ pub fn census(parsed: &crate::package::ParsedPackage) -> ScriptCensus {
                 _ => {}
             }
         }
-        let mut visit = |expr: &Expr, span: &Span, _: Option<&Expr>| match expr {
-            Expr::TextConst { .. } => out.note(
-                "text constants",
-                function.export,
-                format!("at 0x{:04X} {}", span.offset, render(expr)),
-            ),
-            Expr::StringConst { value, .. } if value.chars().any(|c| u32::from(c) > 0x7F) => {
+        let mut visit = |expr: &Expr, span: &Span, _: Option<&Expr>| {
+            if let Some((token, reason)) = misaimed_call(parsed, expr) {
                 out.note(
-                    "StringConsts holding a byte above 0x7F",
+                    MISAIMED_CALLS,
                     function.export,
-                    format!("{value:?}"),
+                    format!(
+                        "{} at 0x{:04X}: {token} {reason}",
+                        function.name, span.offset
+                    ),
                 );
             }
-            Expr::FinalCall {
-                function: callee, ..
-            } if callee.index < 0
-                && callee
-                    .path
-                    .as_deref()
-                    .is_some_and(|path| callee_name(path).starts_with("ExecuteUbergraph")) =>
-            {
-                out.note(
-                    "calls into another package's event graph",
+            match expr {
+                Expr::TextConst { .. } => out.note(
+                    "text constants",
                     function.export,
-                    render(expr),
-                );
+                    format!("at 0x{:04X} {}", span.offset, render(expr)),
+                ),
+                Expr::StringConst { value, .. } if value.chars().any(|c| u32::from(c) > 0x7F) => {
+                    out.note(
+                        "StringConsts holding a byte above 0x7F",
+                        function.export,
+                        format!("{value:?}"),
+                    );
+                }
+                Expr::FinalCall {
+                    function: callee, ..
+                } if callee.index < 0
+                    && callee
+                        .path
+                        .as_deref()
+                        .is_some_and(|path| callee_name(path).starts_with("ExecuteUbergraph")) =>
+                {
+                    out.note(
+                        "calls into another package's event graph",
+                        function.export,
+                        render(expr),
+                    );
+                }
+                Expr::VirtualCall {
+                    function: callee, ..
+                } if callee.starts_with("ExecuteUbergraph")
+                    && !local_names.contains(callee.as_str()) =>
+                {
+                    out.note(
+                        "calls into another package's event graph",
+                        function.export,
+                        render(expr),
+                    );
+                }
+                _ => {}
             }
-            Expr::VirtualCall {
-                function: callee, ..
-            } if callee.starts_with("ExecuteUbergraph")
-                && !local_names.contains(callee.as_str()) =>
-            {
-                out.note(
-                    "calls into another package's event graph",
-                    function.export,
-                    render(expr),
-                );
-            }
-            _ => {}
         };
         visit_spans(script, &mut visit);
         script_import_edges(parsed, function, &mut out);
@@ -4209,6 +4292,69 @@ mod tests {
             items: vec![var("LocalVariable", "First")],
         };
         assert_eq!(terms_of(&built), ["Write Names", "Read First"]);
+    }
+
+    /// The census names a call whose object cannot be a function: a package, a type, an object at
+    /// the top of its package, or an export that is not a function. The event graph's own calls,
+    /// to an imported function and to one of its own, are not named.
+    #[test]
+    fn a_call_aimed_at_something_not_a_function_is_counted() {
+        let parsed = crate::script_fixture::event_graph().build().parsed();
+        let misaimed = |parsed: &crate::package::ParsedPackage| -> Vec<String> {
+            census(parsed)
+                .examples
+                .into_iter()
+                .filter(|(line, _)| line == MISAIMED_CALLS)
+                .map(|(_, detail)| detail)
+                .collect()
+        };
+        assert!(misaimed(&parsed).is_empty(), "{:?}", misaimed(&parsed));
+        let delay = parsed
+            .imports
+            .iter()
+            .position(|import| import.object_name == "Delay")
+            .expect("the Delay import");
+        let library = parsed.imports[delay].outer_index;
+        let engine = parsed.imports[(-library - 1) as usize].outer_index;
+
+        let mut package = parsed.clone();
+        package.imports[delay].outer_index = 0;
+        package.imports[delay].class_name = "Package".to_string();
+        let found = misaimed(&package);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0].contains("FinalFunction calls the package"),
+            "{found:?}"
+        );
+
+        let mut class = parsed.clone();
+        class.imports[delay].class_name = "BlueprintGeneratedClass".to_string();
+        let found = misaimed(&class);
+        assert!(
+            found[0].ends_with(", a BlueprintGeneratedClass"),
+            "{found:?}"
+        );
+
+        let mut top = parsed.clone();
+        top.imports[delay].outer_index = engine;
+        let found = misaimed(&top);
+        assert!(
+            found[0].ends_with("which is not inside a class"),
+            "{found:?}"
+        );
+
+        let mut export = parsed.clone();
+        export
+            .exports
+            .iter_mut()
+            .find(|export| export.object_name == "ReceiveBeginPlay")
+            .expect("ReceiveBeginPlay")
+            .class_name = "BP_Test_C".to_string();
+        let found = misaimed(&export);
+        assert!(
+            !found.is_empty() && found.iter().all(|d| d.contains("LocalFinalFunction calls")),
+            "{found:?}"
+        );
     }
 
     /// An event graph is the function its flags mark, whatever it is named: its stub's entry is

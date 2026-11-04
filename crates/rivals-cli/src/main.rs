@@ -121,6 +121,11 @@ enum Command {
     /// session went.
     #[command(subcommand)]
     Logs(LogsCmd),
+
+    /// The game's translations: read what a text says in a language, and give a mod its own
+    /// wording.
+    #[command(subcommand)]
+    Text(TextCmd),
 }
 
 #[derive(Subcommand)]
@@ -139,6 +144,10 @@ enum AssetCmd {
     Hex(HexArgs),
     /// Print the field records a class or struct export declares
     Fields(FieldsArgs),
+    /// Show a mesh's material slots with their materials, gameplay tags and the LODs that hide each
+    /// by default, its LOD screen sizes and its bones. Each is edited with `asset set`, a static
+    /// mesh's material in both the copies it keeps
+    Mesh(MeshArgs),
     /// Disassemble the bytecode a function or class export stores.
     Script(ScriptArgs),
     /// Disassemble the VM bytecode a Niagara script runs on the CPU, naming what each constant
@@ -148,12 +157,24 @@ enum AssetCmd {
     /// a mod pak: the literal itself where the operand is its only reader, or else a literal of
     /// the operand's own, so other readers of the old one keep it.
     EditVm(EditVmArgs),
+    /// List where a Niagara effect's colours come from, by emitter: each colour curve's baked
+    /// samples, which are what the game reads, its colour arrays and parameters, the colours its
+    /// CPU scripts write with the constants `asset edit-vm` changes, and the colours its
+    /// renderers' materials draw with.
+    Colors(ColorsArgs),
+    /// Tint, paint or turn the hue of a Niagara effect's colour curves, arrays and parameters,
+    /// every one or those picked, and with `--scripts` and `--materials` the colours its scripts
+    /// write and its renderers' materials draw with, and write the result into a mod pak.
+    Recolor(RecolorArgs),
     /// List a Blueprint's variables and functions with what references each, in the package and
     /// the rest of its mod, and which nothing does.
     Members(MembersArgs),
-    /// Show a texture's pixel format, size and mips, save one of its mips as a PNG or an OpenEXR
-    /// file, or give it new pixels from one.
+    /// Show a texture's pixel format, size and mips, save one of its mips as an image file (PNG,
+    /// TGA, BMP, DDS or OpenEXR), or give it new pixels from one (those or a JPEG).
     Texture(TextureArgs),
+    /// Save the textures of every package a filter matches as image files, or give them new pixels
+    /// from a folder of images, written into a mod in one rewrite.
+    Textures(TexturesArgs),
     /// Rename a Blueprint's variable, function, event or widget, or a function's parameter or
     /// local, along with every use of it in the package and the rest of the mod it is saved into.
     RenameMember(RenameMemberArgs),
@@ -552,6 +573,21 @@ struct ScriptArgs {
     /// header, labels where code is jumped to.
     #[arg(long)]
     as_text: bool,
+
+    /// Print the function as pseudo-code: conditions, loops and branches nested, sequences as the
+    /// pushes and pops that run them, each statement once, and a `goto` for a jump that does not
+    /// nest. Read only; `asset assemble-script` takes the assembler text.
+    #[arg(long, conflicts_with_all = ["as_text", "expressions", "flow", "dot"])]
+    pseudo: bool,
+
+    /// List the function's blocks, where execution enters it and the edges between the blocks,
+    /// following its flow stack so a pop leads where its push said.
+    #[arg(long, conflicts_with_all = ["as_text", "expressions", "dot"])]
+    flow: bool,
+
+    /// Print the blocks and edges in Graphviz's language, for `dot -Tsvg`.
+    #[arg(long, conflicts_with_all = ["as_text", "expressions"])]
+    dot: bool,
 }
 
 #[derive(Args)]
@@ -606,6 +642,85 @@ struct EditVmArgs {
 }
 
 #[derive(Args)]
+struct ColorsArgs {
+    #[command(flatten)]
+    asset: AssetArgs,
+
+    /// Print every sample of each curve, not only its first, middle and last.
+    #[arg(long)]
+    samples: bool,
+}
+
+#[derive(Args)]
+#[command(group(clap::ArgGroup::new("tool").required(true).args(["tint", "paint", "hue"])))]
+struct RecolorArgs {
+    #[command(flatten)]
+    asset: AssetArgs,
+
+    /// Only this export's colours: its index, as `asset info` prints it, or its name or path.
+    /// Repeatable. Each of an emitter's scripts keeps its own copy of a curve, so recolouring one
+    /// copy leaves the others.
+    #[arg(long = "export", value_name = "EXPORT")]
+    exports: Vec<String>,
+
+    /// Only the colour of this name: a parameter such as `User.Color`, a script colour such as
+    /// `Particles.Color` or `<emitter>.Color02` (with `--scripts`), or a material colour (with
+    /// `--materials`). A script colour's name is the one `asset colors` lists, and the pick takes
+    /// every script that writes it, so `--export` narrows it to one.
+    #[arg(long, value_name = "NAME")]
+    param: Option<String>,
+
+    /// Only the colours whose names mention enemies, as the colours the game shows for the other
+    /// team do.
+    #[arg(long)]
+    enemy: bool,
+
+    /// Also change the colours CPU scripts write for a renderer to draw, such as the
+    /// `Initial * (1.0, 0.26, 0.0)` an update script gives each particle, just before each is
+    /// written. Most effects keep their colours there rather than in curves.
+    #[arg(long)]
+    scripts: bool,
+
+    /// Also change the colour parameters the renderers' materials draw with, such as a tracer's
+    /// `Enemy1Color01`, each set on the renderer, which the engine applies over the material. Only
+    /// this effect changes, whatever else draws with the material.
+    #[arg(long)]
+    materials: bool,
+
+    /// Multiply red, green and blue by these, past 1 to brighten.
+    #[arg(long, value_name = "R,G,B", value_parser = parse_rgb)]
+    tint: Option<[f32; 3]>,
+
+    /// Give every colour this one's hue and saturation at its own brightness, so fades and HDR
+    /// glows keep their shape.
+    #[arg(long, value_name = "R,G,B", value_parser = parse_rgb)]
+    paint: Option<[f32; 3]>,
+
+    /// Turn every colour's hue by this many degrees, leaving greys grey.
+    #[arg(long, value_name = "DEGREES", allow_hyphen_values = true)]
+    hue: Option<f32>,
+
+    #[command(flatten)]
+    write: AssetWriteArgs,
+}
+
+fn parse_rgb(text: &str) -> Result<[f32; 3], String> {
+    let parts: Vec<f32> = text
+        .split(',')
+        .map(|part| {
+            part.trim()
+                .parse::<f32>()
+                .map_err(|e| format!("{part}: {e}"))
+        })
+        .collect::<Result<_, _>>()?;
+    match parts.as_slice() {
+        [r, g, b] if parts.iter().all(|c| c.is_finite() && *c >= 0.0) => Ok([*r, *g, *b]),
+        [_, _, _] => Err("each channel is a number 0 or more".to_string()),
+        _ => Err("give three numbers, as R,G,B".to_string()),
+    }
+}
+
+#[derive(Args)]
 struct TableArgs {
     #[command(flatten)]
     asset: AssetArgs,
@@ -614,6 +729,21 @@ struct TableArgs {
     /// output holds the nested values for every row either way.
     #[arg(long, value_name = "NAME")]
     row: Option<String>,
+}
+
+#[derive(Args)]
+struct MeshArgs {
+    #[command(flatten)]
+    asset: AssetArgs,
+
+    /// The mesh: its export index, as `asset info` prints it, or its name. Defaults to the
+    /// package's first skeletal or static mesh.
+    #[arg(long, value_name = "EXPORT")]
+    export: Option<String>,
+
+    /// List every bone with the one it hangs from.
+    #[arg(long)]
+    bones: bool,
 }
 
 #[derive(Args)]
@@ -919,6 +1049,10 @@ struct AssetSearchArgs {
     /// them all.
     #[arg(long, value_name = "N", default_value_t = 5000)]
     limit: usize,
+
+    /// Print how long each part of the search took, to stderr.
+    #[arg(long)]
+    timings: bool,
 }
 
 /// What `asset set` does to the value it names.
@@ -1071,7 +1205,9 @@ struct ImportersArgs {
     #[arg(value_name = "PATH")]
     path: String,
 
-    /// Build the index first, or rebuild it after the game updated. Reads every package once.
+    /// Read every package again. Without this the index is built the first time it is needed and
+    /// then brought up to date by reading again only what changed: a mod saved, switched on or
+    /// off, or the game after an update.
     #[arg(long)]
     build: bool,
 }
@@ -1491,6 +1627,11 @@ struct AuditArgs {
     /// back the package's own bytes: the check that a script's text says all its bytes do.
     #[arg(long)]
     text_check: bool,
+
+    /// Read every whole script as control flow and print it as pseudo-code, which has to print
+    /// each statement exactly once, and count the jumps it leaves as `goto`.
+    #[arg(long)]
+    flow_check: bool,
 }
 
 #[derive(Args)]
@@ -1590,6 +1731,11 @@ enum ModsCmd {
     /// Convert mods where they are between a plain pak and IoStore. What the mod held is checked to
     /// be in what it becomes before that is swapped in.
     Convert(ModsConvertArgs),
+    /// Bring mods a stock editor cooked to this game's layout where they are: each skeletal mesh
+    /// material slot gains its gameplay tags, each static mesh screen size the second value this
+    /// game reads, each string table entry its marker, and the material tag plugins' classes are
+    /// named as the engine class the game has. A mod with nothing to convert is left as it was.
+    Conform(ModsConformArgs),
     /// Install mods into `~mods`: a .pak with its .utoc and .ucas, either of those for the .pak
     /// beside it, a .zip, .7z or .rar, or a folder holding any mix of them and mods' loose files,
     /// at any depth. A folder of loose files, and a plain pak holding packages, which the game
@@ -1599,6 +1745,110 @@ enum ModsCmd {
     /// Show what each package of a mod imports and names, what imports it, and which ones the
     /// game reaches from the packages the mod overrides.
     Deps(ModsDepsArgs),
+}
+
+#[derive(Subcommand)]
+enum TextCmd {
+    /// List the texts in the `--culture` language whose name or wording holds FILTER.
+    List(TextListArgs),
+    /// Print what a text says in the `--culture` language.
+    Get(TextGetArgs),
+    /// Give a text a mod's own wording in the `--culture` language.
+    Set(TextSetArgs),
+    /// Give a text back the game's wording in the `--culture` language.
+    Unset(TextUnsetArgs),
+    /// Write a mod's translations again over the game's current ones, which a patch that changed
+    /// them needs.
+    Rebuild(TextRebuildArgs),
+}
+
+#[derive(Args)]
+struct TextFromArgs {
+    /// Where the wording is read: `game` for the game's own translations, or a mod, by a path to
+    /// one of its files or its whole name in `~mods`. Defaults to what the game shows with the
+    /// switched-on mods.
+    #[arg(long, value_name = "SOURCE")]
+    from: Option<String>,
+}
+
+#[derive(Args)]
+struct TextListArgs {
+    /// Part of a text's NAMESPACE/KEY or of its wording, in any case. Without it every text is
+    /// listed; with `--from` a mod, only the texts the mod words its own way.
+    filter: Option<String>,
+
+    #[command(flatten)]
+    from: TextFromArgs,
+}
+
+#[derive(Args)]
+struct TextGetArgs {
+    /// The text: NAMESPACE/KEY, or a string table entry as /Game/.../Table.Table:KEY.
+    text: String,
+
+    #[command(flatten)]
+    from: TextFromArgs,
+}
+
+#[derive(Args)]
+struct TextWriteArgs {
+    /// The mod to write into: an installed mod by a path to one of its files or its whole name, an
+    /// IoStore mod anywhere else by a path to one of its files, or a name no installed mod has,
+    /// which is made in `~mods`, saying so. Defaults to the one the desktop app last saved into,
+    /// then to `AssetEdits`.
+    #[arg(long, value_name = "MOD")]
+    into: Option<String>,
+
+    /// Write over a translation file the mod ships even though it holds texts the game's
+    /// translations no longer have, which are left out.
+    #[arg(long)]
+    overwrite: bool,
+
+    /// Say which mod would be written and what it would hold, and write nothing.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Args)]
+struct TextSetArgs {
+    /// The text: NAMESPACE/KEY, or a string table entry as /Game/.../Table.Table:KEY.
+    text: String,
+
+    /// What it says.
+    wording: String,
+
+    #[command(flatten)]
+    write: TextWriteArgs,
+}
+
+#[derive(Args)]
+struct TextUnsetArgs {
+    /// The text: NAMESPACE/KEY, or a string table entry as /Game/.../Table.Table:KEY.
+    text: String,
+
+    #[command(flatten)]
+    write: TextWriteArgs,
+}
+
+#[derive(Args)]
+struct TextRebuildArgs {
+    /// The mod: a path to one of its files, or its whole name in `~mods` with or without the
+    /// extension, in any case, switched on or off.
+    #[arg(value_name = "MOD", required_unless_present = "all")]
+    target_mod: Option<String>,
+
+    /// Every installed mod the toolkit keeps text edits for.
+    #[arg(long, conflicts_with = "target_mod")]
+    all: bool,
+
+    /// Write over a translation file the mod ships even though it holds texts the game's
+    /// translations no longer have, which are left out.
+    #[arg(long)]
+    overwrite: bool,
+
+    /// Say what each mod would hold, and write nothing.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Subcommand)]
@@ -1934,6 +2184,43 @@ impl ModsArgs {
     }
 }
 
+#[derive(Args)]
+struct ConformArgs {
+    /// Pack what a stock editor cooked as it is, without bringing its meshes and string tables to
+    /// this game's layout.
+    #[arg(long)]
+    no_conform: bool,
+}
+
+impl ConformArgs {
+    fn apply(
+        &self,
+        cli: &Cli,
+        app: &settings::AppSettings,
+        io: rivals_core::pak::iostore_out::IoStoreOptions,
+    ) -> rivals_core::pak::iostore_out::IoStoreOptions {
+        let conform = !self.no_conform;
+        rivals_core::pak::iostore_out::IoStoreOptions {
+            conform,
+            mappings: if conform {
+                conform_mappings(cli, app)
+            } else {
+                None
+            },
+            ..io
+        }
+    }
+}
+
+/// The game's schema, which bringing an editor-made static mesh to the game's layout writes its
+/// properties against. Without one that conversion is refused and the rest goes ahead.
+fn conform_mappings(
+    cli: &Cli,
+    app: &settings::AppSettings,
+) -> Option<std::sync::Arc<rivals_uasset::Mappings>> {
+    asset::schema(cli.usmap.as_deref(), app.usmap_path.as_deref())
+}
+
 #[derive(Clone, Copy, ValueEnum)]
 enum CompressionArg {
     /// What the game's own files use.
@@ -2012,6 +2299,8 @@ impl CompressArgs {
             oodle_level: Some(self.level(app).to_oodle()),
             obfuscate,
             reencode: false,
+            conform: true,
+            mappings: None,
         }
     }
 
@@ -2148,6 +2437,9 @@ struct ModsPackArgs {
     /// `--oodle-level`. Without this, its other packages keep their blocks as they were stored.
     #[arg(long, conflicts_with = "to")]
     recompress: bool,
+
+    #[command(flatten)]
+    conform: ConformArgs,
 }
 
 #[derive(Args)]
@@ -2175,6 +2467,9 @@ struct ModsInstallArgs {
     /// it, are compressed.
     #[command(flatten)]
     compress: CompressArgs,
+
+    #[command(flatten)]
+    conform: ConformArgs,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -2217,6 +2512,22 @@ struct ModsConvertArgs {
 
     #[command(flatten)]
     write: WriteArgs,
+
+    #[command(flatten)]
+    conform: ConformArgs,
+}
+
+#[derive(Args)]
+struct ModsConformArgs {
+    #[command(flatten)]
+    mods: ModsArgs,
+
+    /// Convert each mod and check what it becomes, and leave the mod as it was.
+    #[arg(long)]
+    dry_run: bool,
+
+    #[command(flatten)]
+    write: WriteArgs,
 }
 
 #[derive(Args)]
@@ -2234,16 +2545,31 @@ fn mods_pack(cli: &Cli, app: &settings::AppSettings, args: &ModsPackArgs) -> Res
     if plain && args.obfuscate {
         return Err("a plain pak has no container to obfuscate".into());
     }
-    block_for_game(cli, args.dry_run)?;
-    if let Some(into) = &args.into {
-        let into = mod_files(cli, app, into)?;
+    let into = args
+        .into
+        .as_deref()
+        .map(|into| mod_files(cli, app, into))
+        .transpose()?;
+    let lands = into
+        .as_ref()
+        .map(|into| into.dir.clone())
+        .or_else(|| args.to.as_deref().map(PathBuf::from));
+    // The game holds only its own install's files open, so a mod written elsewhere waits for nothing.
+    if lands.is_none_or(|lands| writes_into_game(cli, app, &lands)) {
+        block_for_game(cli, args.dry_run)?;
+    }
+    if let Some(into) = &into {
         let report = rivals_core::mod_ops::pack_into_mod(
             Path::new(&args.dir),
-            &into,
-            &rivals_core::pak::iostore_out::IoStoreOptions {
-                reencode: args.recompress,
-                ..args.compress.io(app, None)
-            },
+            into,
+            &args.conform.apply(
+                cli,
+                app,
+                rivals_core::pak::iostore_out::IoStoreOptions {
+                    reencode: args.recompress,
+                    ..args.compress.io(app, None)
+                },
+            ),
             args.dry_run,
         )?;
         return emit(cli, &report, || print_into(&report, "packed", "would pack"));
@@ -2281,7 +2607,9 @@ fn mods_pack(cli: &Cli, app: &settings::AppSettings, args: &ModsPackArgs) -> Res
             to_name,
             &mods,
             args.overwrite,
-            &args.compress.io(app, Some(args.obfuscate)),
+            &args
+                .conform
+                .apply(cli, app, args.compress.io(app, Some(args.obfuscate))),
             &game_libraries,
             args.dry_run,
         )?
@@ -2306,11 +2634,33 @@ fn mods_pack(cli: &Cli, app: &settings::AppSettings, args: &ModsPackArgs) -> Res
             for loose in &report.loose {
                 outln!("  in its pak: {loose}");
             }
+            print_conformance(&report.conformed, &report.unconformed);
         }
         for warning in &report.warnings {
             outln!("warning: {warning}");
         }
     })
+}
+
+/// What bringing a stock editor's packages to this game's layout did, under the line saying what
+/// was packed.
+fn print_conformance(
+    conformed: &[rivals_core::pak::pack::ConformedPackage],
+    unconformed: &[rivals_core::pak::pack::UnconformedPackage],
+) {
+    for package in conformed {
+        outln!("  brought to this game's layout: {}", package.package);
+        for change in &package.changes {
+            outln!("    {change}");
+        }
+    }
+    for package in unconformed {
+        outln!(
+            "  warning: left as a stock editor cooked it: {}: {}",
+            package.package,
+            package.reason
+        );
+    }
 }
 
 /// Ends a command that worked through several mods, some of which failed: the results said which
@@ -2350,7 +2700,7 @@ fn mods_install(
     let options = rivals_core::mod_library::InstallOptions {
         replace: args.overwrite,
         dry_run: args.dry_run,
-        io: args.compress.io(app, None),
+        io: args.conform.apply(cli, app, args.compress.io(app, None)),
         game_libraries: &game_libraries,
     };
     // A mod named by several of its files installs once.
@@ -2439,6 +2789,7 @@ fn mods_install(
             for warning in &packed.warnings {
                 outln!("  warning: {warning}");
             }
+            print_conformance(&packed.conformed, &packed.unconformed);
         }
     };
     emit(cli, &serde_json::json!({ "results": json }), || {
@@ -2502,7 +2853,7 @@ fn mods_convert(
         (_, true) => Some(false),
         _ => None,
     };
-    let io = args.write.io(app, obfuscate);
+    let io = args.conform.apply(cli, app, args.write.io(app, obfuscate));
     let quiet = cli.json;
 
     let mut results = Vec::new();
@@ -2571,6 +2922,7 @@ fn mods_convert(
                 for library in report["shader_libraries"].as_array().into_iter().flatten() {
                     outln!("  shader library: {}", library.as_str().unwrap_or_default());
                 }
+                print_conformance_json(report);
                 for warning in report["warnings"].as_array().into_iter().flatten() {
                     outln!("  warning: {}", warning.as_str().unwrap_or_default());
                 }
@@ -2583,6 +2935,100 @@ fn mods_convert(
         }
     })?;
     some_failed(cli, failed, results.len(), "mod(s) did not convert")
+}
+
+/// [`print_conformance`] for a report already turned into JSON.
+fn print_conformance_json(report: &serde_json::Value) {
+    let parse = |key: &str| report.get(key).cloned().unwrap_or_default();
+    let conformed: Vec<rivals_core::pak::pack::ConformedPackage> =
+        serde_json::from_value(parse("conformed")).unwrap_or_default();
+    let unconformed: Vec<rivals_core::pak::pack::UnconformedPackage> =
+        serde_json::from_value(parse("unconformed")).unwrap_or_default();
+    print_conformance(&conformed, &unconformed);
+}
+
+fn mods_conform(
+    cli: &Cli,
+    app: &settings::AppSettings,
+    args: &ModsConformArgs,
+) -> Result<(), String> {
+    use rivals_core::mod_convert::ConvertPhase;
+
+    block_for_game(cli, args.dry_run)?;
+    let root = resolve::game_root(cli.game_root.as_deref(), app)?;
+    let targets: Vec<rivals_core::mod_ops::ModFiles> = args
+        .mods
+        .all()
+        .iter()
+        .map(|pak| mod_files(cli, app, pak))
+        .collect::<Result<_, _>>()?;
+    if targets.is_empty() {
+        return Err("name the mods to bring to this game's layout".into());
+    }
+    let io = rivals_core::pak::iostore_out::IoStoreOptions {
+        mappings: conform_mappings(cli, app),
+        ..args.write.io(app, None)
+    };
+    let quiet = cli.json;
+    let mut results = Vec::new();
+    for files in &targets {
+        let shown = std::sync::atomic::AtomicBool::new(false);
+        let progress = |phase: ConvertPhase, done: usize, total: usize| {
+            if !quiet {
+                let doing = match phase {
+                    ConvertPhase::Extracting => "extracting",
+                    ConvertPhase::Repacking => "repacking",
+                };
+                eprint!("\r{}: {doing} {done}/{total}   ", files.stem);
+                shown.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        };
+        let outcome = rivals_core::mod_convert::conform_mod(
+            &root,
+            files,
+            &io,
+            args.dry_run,
+            &std::sync::atomic::AtomicBool::new(false),
+            &progress,
+        );
+        if shown.load(std::sync::atomic::Ordering::Relaxed) {
+            eprintln!();
+        }
+        results.push(match outcome {
+            Ok(report) => serde_json::json!({ "mod": files.stem, "ok": true, "report": report }),
+            Err(error) => serde_json::json!({ "mod": files.stem, "ok": false, "error": error }),
+        });
+    }
+    let failed = results
+        .iter()
+        .filter(|result| result["ok"] == false)
+        .count();
+    emit(cli, &serde_json::json!({ "results": results }), || {
+        for result in &results {
+            let name = result["mod"].as_str().unwrap_or_default();
+            if result["ok"] != true {
+                outln!(
+                    "{name}: not converted: {}",
+                    result["error"].as_str().unwrap_or_default()
+                );
+                continue;
+            }
+            let report = &result["report"];
+            let changed = report["conformed"]
+                .as_array()
+                .is_some_and(|packages| !packages.is_empty());
+            outln!(
+                "{name}: {}",
+                match (changed, args.dry_run) {
+                    (false, _) => "nothing a stock editor cooked, left as it was",
+                    (true, true) => "would be brought to this game's layout",
+                    (true, false) => "brought to this game's layout",
+                }
+            );
+            print_conformance_json(report);
+        }
+    })?;
+    some_failed(cli, failed, results.len(), "mod(s) were not converted")
 }
 
 fn mods_deps(cli: &Cli, app: &settings::AppSettings, args: &ModsDepsArgs) -> Result<(), String> {
@@ -2681,6 +3127,27 @@ fn mod_utoc(
     Ok(files.part("utoc"))
 }
 
+/// Whether `path` lies inside the game's install, a name alone meaning a mod in `~mods`. With no
+/// game folder set it is taken to, so the running game still holds the write back.
+fn writes_into_game(cli: &Cli, app: &settings::AppSettings, path: &Path) -> bool {
+    if !path.is_absolute() && path.components().count() <= 1 {
+        return true;
+    }
+    let Ok(root) = resolve::game_root(cli.game_root.as_deref(), app) else {
+        return true;
+    };
+    let plain = |path: &Path| {
+        std::path::absolute(path)
+            .unwrap_or_else(|_| path.to_path_buf())
+            .to_string_lossy()
+            .replace('/', "\\")
+            .trim_end_matches('\\')
+            .to_ascii_lowercase()
+    };
+    let (path, root) = (plain(path), plain(Path::new(&root)));
+    path == root || path.starts_with(&format!("{root}\\"))
+}
+
 fn block_for_game(cli: &Cli, dry_run: bool) -> Result<(), String> {
     if !dry_run && !cli.force && rivals_core::game_status::should_block_for_game() {
         return Err(rivals_core::game_status::game_running_error());
@@ -2720,6 +3187,7 @@ fn print_into(report: &rivals_core::mod_ops::IntoReport, done: &str, would: &str
         outln!("  {copied}{over}");
     }
     print_needed(&report.needed);
+    print_conformance(&report.conformed, &report.unconformed);
     for warning in &report.warnings {
         outln!("warning: {warning}");
     }
@@ -3019,7 +3487,7 @@ fn mods_delete(
                 );
                 let going = rivals_core::mods::files_to_delete(&files.dir, &pak)?;
                 if !args.dry_run {
-                    rivals_core::mods::delete_mod(&files.dir, &pak)?;
+                    rivals_core::mod_library::delete_one(&files.dir, &pak)?;
                 }
                 Ok((files.stem, going))
             });
@@ -3148,9 +3616,7 @@ fn mods_move(cli: &Cli, app: &settings::AppSettings, args: &ModsMoveArgs) -> Res
     }
     let root = resolve::game_root(cli.game_root.as_deref(), app)?;
     let utoc = mod_utoc(cli, app, args.target.get(), true)?;
-    let schema = rivals_core::mappings::resolve(cli.usmap.as_deref(), app.usmap_path.as_deref())
-        .and_then(|path| rivals_core::mappings::load(&path))
-        .ok();
+    let schema = asset::schema(cli.usmap.as_deref(), app.usmap_path.as_deref());
     let options = rivals_core::mod_move::MoveOptions {
         folders: args
             .folders
@@ -3257,9 +3723,7 @@ fn mods_replace(
     }
     let root = resolve::game_root(cli.game_root.as_deref(), app)?;
     let utoc = mod_utoc(cli, app, args.target.get(), false)?;
-    let schema = rivals_core::mappings::resolve(cli.usmap.as_deref(), app.usmap_path.as_deref())
-        .and_then(|path| rivals_core::mappings::load(&path))
-        .ok();
+    let schema = asset::schema(cli.usmap.as_deref(), app.usmap_path.as_deref());
     let container = utoc.to_string_lossy().into_owned();
     let report = rivals_core::mod_replace::replace_in_mod(
         &rivals_core::asset_edit::AssetEditRequest {
@@ -3461,6 +3925,7 @@ fn run(cli: &Cli) -> Result<(), String> {
         Command::Mods(ModsCmd::ExportArchive(a)) => mods_export_archive(cli, &app, a),
         Command::Mods(ModsCmd::Pack(a)) => mods_pack(cli, &app, a),
         Command::Mods(ModsCmd::Convert(a)) => mods_convert(cli, &app, a),
+        Command::Mods(ModsCmd::Conform(a)) => mods_conform(cli, &app, a),
         Command::Mods(ModsCmd::Install(a)) => mods_install(cli, &app, a),
         Command::Mods(ModsCmd::Deps(a)) => mods_deps(cli, &app, a),
         Command::Asset(AssetCmd::List(a)) => asset_list(cli, &app, a),
@@ -3470,9 +3935,12 @@ fn run(cli: &Cli) -> Result<(), String> {
         Command::Asset(AssetCmd::Trace(a)) => asset_trace(cli, &app, a),
         Command::Asset(AssetCmd::Hex(a)) => asset_hex(cli, &app, a),
         Command::Asset(AssetCmd::Fields(a)) => asset_fields(cli, &app, a),
+        Command::Asset(AssetCmd::Mesh(a)) => asset_mesh(cli, &app, a),
         Command::Asset(AssetCmd::Script(a)) => asset_script(cli, &app, a),
         Command::Asset(AssetCmd::Vm(a)) => asset_vm(cli, &app, a),
         Command::Asset(AssetCmd::EditVm(a)) => asset_edit_vm(cli, &app, a),
+        Command::Asset(AssetCmd::Colors(a)) => asset_colors(cli, &app, a),
+        Command::Asset(AssetCmd::Recolor(a)) => asset_recolor(cli, &app, a),
         Command::Asset(AssetCmd::EditScript(a)) => asset_edit_script(cli, &app, a),
         Command::Asset(AssetCmd::WidenScript(a)) => asset_widen_script(cli, &app, a),
         Command::Asset(AssetCmd::AssembleScript(a)) => asset_assemble_script(cli, &app, a),
@@ -3502,6 +3970,7 @@ fn run(cli: &Cli) -> Result<(), String> {
         Command::Asset(AssetCmd::Imports(a)) => asset_imports_table(cli, &app, a),
         Command::Asset(AssetCmd::Members(a)) => asset_members(cli, &app, a),
         Command::Asset(AssetCmd::Texture(a)) => asset_texture(cli, &app, a),
+        Command::Asset(AssetCmd::Textures(a)) => asset_textures(cli, &app, a),
         Command::Asset(AssetCmd::RenameMember(a)) => asset_rename_member(cli, &app, a),
         Command::Asset(AssetCmd::RemoveMember(a)) => asset_remove_member(cli, &app, a),
         Command::Asset(AssetCmd::Names(a)) => asset_names(cli, &app, a),
@@ -3516,6 +3985,11 @@ fn run(cli: &Cli) -> Result<(), String> {
         Command::Logs(LogsCmd::Decode(a)) => logs_decode(cli, &app, a),
         Command::Logs(LogsCmd::Analyze(a)) => logs_analyze(cli, &app, a),
         Command::Logs(LogsCmd::Key) => logs_key(cli, &app),
+        Command::Text(TextCmd::List(a)) => text_list(cli, &app, a),
+        Command::Text(TextCmd::Get(a)) => text_get(cli, &app, a),
+        Command::Text(TextCmd::Set(a)) => text_set(cli, &app, a),
+        Command::Text(TextCmd::Unset(a)) => text_unset(cli, &app, a),
+        Command::Text(TextCmd::Rebuild(a)) => text_rebuild(cli, &app, a),
     }
 }
 
@@ -4317,9 +4791,7 @@ fn mods_search(
 ) -> Result<(), String> {
     let root = resolve::game_root(cli.game_root.as_deref(), app)?;
     let utoc = mod_utoc(cli, app, args.target.get(), false)?;
-    let schema = rivals_core::mappings::resolve(cli.usmap.as_deref(), app.usmap_path.as_deref())
-        .and_then(|path| rivals_core::mappings::load(&path))
-        .ok();
+    let schema = asset::schema(cli.usmap.as_deref(), app.usmap_path.as_deref());
     let result = rivals_core::mod_search::mod_search_with(
         &root,
         &utoc,
@@ -4353,9 +4825,7 @@ fn mods_report(
 ) -> Result<(), String> {
     let root = resolve::game_root(cli.game_root.as_deref(), app)?;
     let utoc = mod_utoc(cli, app, args.target.get(), false)?;
-    let schema = rivals_core::mappings::resolve(cli.usmap.as_deref(), app.usmap_path.as_deref())
-        .and_then(|path| rivals_core::mappings::load(&path))
-        .ok();
+    let schema = asset::schema(cli.usmap.as_deref(), app.usmap_path.as_deref());
     let report = rivals_core::mod_report::mod_report(&root, &utoc, schema.as_deref())?;
     let shown = rivals_core::mod_ops::ModFiles::of(&utoc).map_or_else(
         |_| report.container.clone(),
@@ -4501,9 +4971,7 @@ fn mods_tidy(cli: &Cli, app: &settings::AppSettings, args: &ModsTidyArgs) -> Res
     let root = resolve::game_root(cli.game_root.as_deref(), app)?;
     let target = args.target_mod.as_deref().ok_or("name the mod to tidy")?;
     let utoc = mod_utoc(cli, app, target, false)?;
-    let schema = rivals_core::mappings::resolve(cli.usmap.as_deref(), app.usmap_path.as_deref())
-        .and_then(|path| rivals_core::mappings::load(&path))
-        .ok();
+    let schema = asset::schema(cli.usmap.as_deref(), app.usmap_path.as_deref());
     let report = rivals_core::mod_tidy::tidy_mod(
         &root,
         &utoc,
@@ -4654,9 +5122,7 @@ fn mods_check(cli: &Cli, app: &settings::AppSettings, args: &ModsCheckArgs) -> R
     }
     let utoc = files.part("utoc");
     let container = utoc.to_string_lossy().into_owned();
-    let schema = rivals_core::mappings::resolve(cli.usmap.as_deref(), app.usmap_path.as_deref())
-        .and_then(|path| rivals_core::mappings::load(&path))
-        .ok();
+    let schema = asset::schema(cli.usmap.as_deref(), app.usmap_path.as_deref());
     let mut steps = Vec::new();
 
     if !args.skip_audit {
@@ -4670,6 +5136,7 @@ fn mods_check(cli: &Cli, app: &settings::AppSettings, args: &ModsCheckArgs) -> R
             false,
             false,
             true,
+            false,
             |_, _| {},
         )?;
         let mut failing: Vec<String> = [
@@ -4693,6 +5160,25 @@ fn mods_check(cli: &Cli, app: &settings::AppSettings, args: &ModsCheckArgs) -> R
         };
         for count in audit.relocation.iter().filter(|c| text_failed(&c.name)) {
             failing.push(format!("{} ({})", count.name, count.count));
+            if let Some(seen) = audit
+                .relocation_examples
+                .iter()
+                .find(|examples| examples.name == count.name)
+            {
+                failing.extend(seen.examples.iter().map(|example| format!("  {example}")));
+            }
+        }
+        // A call whose object cannot be a function crashes the game when it runs, though the
+        // script still reads and writes back whole.
+        if let Some(count) = audit
+            .relocation
+            .iter()
+            .find(|c| c.name == rivals_uasset::MISAIMED_CALLS)
+        {
+            failing.push(format!(
+                "{} script call(s) aimed at something that is not a function",
+                count.count
+            ));
             if let Some(seen) = audit
                 .relocation_examples
                 .iter()
@@ -4816,6 +5302,64 @@ fn mods_check(cli: &Cli, app: &settings::AppSettings, args: &ModsCheckArgs) -> R
         Vec::new(),
         [unread, unused].concat(),
         "no package holds an import or a name nothing uses".into(),
+    ));
+
+    let mut stock: Vec<String> = capped(
+        report
+            .packages
+            .iter()
+            .flat_map(|p| {
+                p.stock_layout
+                    .iter()
+                    .map(move |line| format!("{}: {line}", p.path))
+            })
+            .collect(),
+        SHOWN,
+    );
+    if !stock.is_empty() {
+        stock.push(format!(
+            "`mods conform {shown}` brings a package cooked with tagged properties to the \
+             game's layout; one cooked with unversioned properties has to be cooked again"
+        ));
+    }
+    steps.push(CheckStep::of(
+        "game layouts",
+        stock,
+        Vec::new(),
+        "every package matches the layout the game reads".into(),
+    ));
+
+    let collision = capped(
+        report
+            .packages
+            .iter()
+            .filter_map(|p| p.collision.as_ref().map(|why| format!("{}: {why}", p.path)))
+            .collect(),
+        SHOWN,
+    );
+    steps.push(CheckStep::of(
+        "collision",
+        Vec::new(),
+        collision,
+        "no static mesh collides where the game's copy does not".into(),
+    ));
+
+    let pak = files.part("pak");
+    let mut stale = if pak.is_file() {
+        rivals_core::text_mod::stale_text(&root, &pak)?
+    } else {
+        Vec::new()
+    };
+    if !stale.is_empty() {
+        stale.push(format!(
+            "`text rebuild {shown}` writes the mod's translations again over the game's current ones"
+        ));
+    }
+    steps.push(CheckStep::of(
+        "translations",
+        Vec::new(),
+        stale,
+        "no translation the mod ships is behind the game's".into(),
     ));
 
     // Inside the Blueprints: locals, which only their function can name, and class members, which
@@ -5070,10 +5614,7 @@ fn mods_diff(cli: &Cli, app: &settings::AppSettings, args: &ModsDiffArgs) -> Res
         rivals_core::mod_diff::pair_mods(&a, &b)?
     } else {
         let root = resolve::game_root(cli.game_root.as_deref(), app)?;
-        let schema =
-            rivals_core::mappings::resolve(cli.usmap.as_deref(), app.usmap_path.as_deref())
-                .and_then(|path| rivals_core::mappings::load(&path))
-                .ok();
+        let schema = asset::schema(cli.usmap.as_deref(), app.usmap_path.as_deref());
         rivals_core::mod_diff::mod_diff(&root, &a, &b, schema.as_deref())?
     };
     emit(cli, &diff, || print_mod_diff(&diff))
@@ -5695,6 +6236,320 @@ fn logs_key(cli: &Cli, app: &settings::AppSettings) -> Result<(), String> {
     })
 }
 
+// ---- text ----
+
+/// Where texts are read: what the game shows with the switched-on mods, the game's own
+/// translations, or a mod's.
+enum TextSource {
+    Shown(std::sync::Arc<rivals_core::localization::Localizer>),
+    Game,
+    Mod(PathBuf),
+}
+
+fn text_source(
+    cli: &Cli,
+    app: &settings::AppSettings,
+    root: &str,
+    from: Option<&str>,
+    culture: &str,
+) -> Result<TextSource, String> {
+    match from {
+        None => Ok(TextSource::Shown(
+            rivals_core::localization::Localizer::for_culture(root, culture)?,
+        )),
+        Some(given) if resolve::is_game(given) => Ok(TextSource::Game),
+        Some(given) => Ok(TextSource::Mod(mod_files(cli, app, given)?.part("pak"))),
+    }
+}
+
+/// The namespace and key the text `given` names, reading a string table's namespace from the game.
+fn text_key(
+    cli: &Cli,
+    app: &settings::AppSettings,
+    root: &str,
+    given: &str,
+) -> Result<(String, String), String> {
+    use rivals_core::text_mod::TextName;
+
+    let name = TextName::parse(given)?;
+    let schema = match name {
+        TextName::Table { .. } => asset::schema(cli.usmap.as_deref(), app.usmap_path.as_deref()),
+        TextName::Filed { .. } => None,
+    };
+    name.resolve(root, schema.as_deref())
+}
+
+#[derive(Serialize)]
+struct TextRow {
+    namespace: String,
+    key: String,
+    text: String,
+    /// The game's own wording, where it differs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    game: Option<String>,
+}
+
+fn print_text_row(row: &TextRow) {
+    outln!("{}/{} = {:?}", row.namespace, row.key, row.text);
+    if let Some(game) = &row.game {
+        outln!("  the game's: {game:?}");
+    }
+}
+
+fn text_list(cli: &Cli, app: &settings::AppSettings, args: &TextListArgs) -> Result<(), String> {
+    let root = resolve::game_root(cli.game_root.as_deref(), app)?;
+    let culture = culture(cli, app).name;
+    let (_, game) = rivals_core::text_mod::game_translations(&root, &culture)?;
+    let filter = args.filter.as_deref().map(str::to_lowercase);
+    let holds = |row: &TextRow| {
+        filter.as_ref().is_none_or(|filter| {
+            format!("{}/{}", row.namespace, row.key)
+                .to_lowercase()
+                .contains(filter)
+                || row.text.to_lowercase().contains(filter)
+        })
+    };
+    let source = text_source(cli, app, &root, args.from.from.as_deref(), &culture)?;
+    let rows: Vec<TextRow> = match &source {
+        TextSource::Mod(pak) => {
+            let (_, file) = rivals_core::text_mod::mod_translations(pak, &culture)?
+                .ok_or_else(|| format!("{} ships no {culture} translations", pak.display()))?;
+            file.namespaces
+                .iter()
+                .flat_map(|ns| ns.entries.iter().map(move |entry| (ns, entry)))
+                .filter_map(|(ns, entry)| {
+                    let theirs = game.get(&ns.name, &entry.key).map(|e| e.text.clone());
+                    (theirs.as_ref() != Some(&entry.text)).then(|| TextRow {
+                        namespace: ns.name.clone(),
+                        key: entry.key.clone(),
+                        text: entry.text.clone(),
+                        game: theirs,
+                    })
+                })
+                .filter(|row| holds(row))
+                .collect()
+        }
+        TextSource::Shown(_) | TextSource::Game => game
+            .namespaces
+            .iter()
+            .flat_map(|ns| ns.entries.iter().map(move |entry| (ns, entry)))
+            .map(|(ns, entry)| {
+                let text = match &source {
+                    TextSource::Shown(shown) => shown
+                        .lookup(&ns.name, &entry.key, None)
+                        .unwrap_or(&entry.text)
+                        .to_string(),
+                    _ => entry.text.clone(),
+                };
+                TextRow {
+                    game: (text != entry.text).then(|| entry.text.clone()),
+                    namespace: ns.name.clone(),
+                    key: entry.key.clone(),
+                    text,
+                }
+            })
+            .filter(|row| holds(row))
+            .collect(),
+    };
+    emit(cli, &rows, || {
+        for row in &rows {
+            print_text_row(row);
+        }
+        if rows.is_empty() {
+            outln!("no {culture} text matches");
+        }
+    })
+}
+
+fn text_get(cli: &Cli, app: &settings::AppSettings, args: &TextGetArgs) -> Result<(), String> {
+    let root = resolve::game_root(cli.game_root.as_deref(), app)?;
+    let culture = culture(cli, app).name;
+    let (namespace, key) = text_key(cli, app, &root, &args.text)?;
+    let (_, game) = rivals_core::text_mod::game_translations(&root, &culture)?;
+    let theirs = game.get(&namespace, &key).map(|entry| entry.text.clone());
+    let text = match text_source(cli, app, &root, args.from.from.as_deref(), &culture)? {
+        TextSource::Shown(shown) => shown.lookup(&namespace, &key, None).map(str::to_string),
+        TextSource::Game => theirs.clone(),
+        TextSource::Mod(pak) => rivals_core::text_mod::mod_translations(&pak, &culture)?
+            .and_then(|(_, file)| file.get(&namespace, &key).map(|entry| entry.text.clone())),
+    };
+    let text =
+        text.ok_or_else(|| format!("{namespace}/{key} has no {culture} translation there"))?;
+    let row = TextRow {
+        game: theirs.filter(|theirs| *theirs != text),
+        namespace,
+        key,
+        text,
+    };
+    emit(cli, &row, || print_text_row(&row))
+}
+
+fn text_set(cli: &Cli, app: &settings::AppSettings, args: &TextSetArgs) -> Result<(), String> {
+    let root = resolve::game_root(cli.game_root.as_deref(), app)?;
+    let (namespace, key) = text_key(cli, app, &root, &args.text)?;
+    let change = rivals_core::text_mod::TextChange {
+        culture: culture(cli, app).name,
+        namespace,
+        key,
+        text: Some(args.wording.clone()),
+    };
+    write_text(cli, app, &root, &args.write, change, true)
+}
+
+fn text_unset(cli: &Cli, app: &settings::AppSettings, args: &TextUnsetArgs) -> Result<(), String> {
+    let root = resolve::game_root(cli.game_root.as_deref(), app)?;
+    let (namespace, key) = text_key(cli, app, &root, &args.text)?;
+    let change = rivals_core::text_mod::TextChange {
+        culture: culture(cli, app).name,
+        namespace,
+        key,
+        text: None,
+    };
+    write_text(cli, app, &root, &args.write, change, false)
+}
+
+fn write_text(
+    cli: &Cli,
+    app: &settings::AppSettings,
+    root: &str,
+    write: &TextWriteArgs,
+    change: rivals_core::text_mod::TextChange,
+    make: bool,
+) -> Result<(), String> {
+    let mod_name = into_mod(app, write.into.as_deref(), root, make)?;
+    let pak = rivals_core::asset_edit::mod_pak(root, &mod_name)?;
+    if write.dry_run {
+        eprintln!("would write into {mod_name}");
+    } else {
+        guard_running_game()?;
+    }
+    let report =
+        rivals_core::text_mod::apply_text(root, &pak, &[change], write.overwrite, write.dry_run)?;
+    emit(cli, &report, || print_text_report(&report))
+}
+
+fn print_text_report(report: &rivals_core::text_mod::TextReport) {
+    for file in &report.files {
+        match (file.removed, report.written) {
+            (true, true) => outln!(
+                "{}: took {} out of {}, as the mod words no {} text its own way",
+                file.culture,
+                file.path,
+                report.pak,
+                file.culture
+            ),
+            (true, false) => outln!(
+                "{}: would take {} out of {}, as the mod would word no {} text its own way",
+                file.culture,
+                file.path,
+                report.pak,
+                file.culture
+            ),
+            (false, written) => outln!(
+                "{}: {} {} with {} text(s) worded the mod's way into {}",
+                file.culture,
+                if written { "wrote" } else { "would write" },
+                file.path,
+                file.edits,
+                report.pak
+            ),
+        }
+        if file.adopted > 0 {
+            outln!(
+                "  kept {} wording(s) from the translation file the mod already shipped",
+                file.adopted
+            );
+        }
+        if file.dropped > 0 {
+            outln!(
+                "  left out {} text(s) the game's translations no longer have",
+                file.dropped
+            );
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct RebuiltText {
+    #[serde(rename = "mod")]
+    name: String,
+    #[serde(flatten)]
+    report: Option<rivals_core::text_mod::TextReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    skipped: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+fn text_rebuild(
+    cli: &Cli,
+    app: &settings::AppSettings,
+    args: &TextRebuildArgs,
+) -> Result<(), String> {
+    let root = resolve::game_root(cli.game_root.as_deref(), app)?;
+    if !args.dry_run {
+        guard_running_game()?;
+    }
+    let names = match &args.target_mod {
+        Some(name) => vec![name.clone()],
+        None => rivals_core::text_mod::recorded_mods()?,
+    };
+    let mut done = Vec::new();
+    for name in names {
+        let files = match mod_files(cli, app, &name) {
+            Ok(files) => files,
+            Err(e) if args.all => {
+                done.push(RebuiltText {
+                    name,
+                    report: None,
+                    skipped: Some(format!("not installed, so its text edits are kept: {e}")),
+                    error: None,
+                });
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        let (report, error) = match rivals_core::text_mod::rebuild_text(
+            &root,
+            &files.part("pak"),
+            args.overwrite,
+            args.dry_run,
+        ) {
+            Ok(report) => (Some(report), None),
+            Err(e) => (None, Some(e)),
+        };
+        done.push(RebuiltText {
+            name: files.stem,
+            report,
+            skipped: None,
+            error,
+        });
+    }
+    let failed = done.iter().filter(|mod_| mod_.error.is_some()).count();
+    emit(cli, &done, || {
+        for mod_ in &done {
+            outln!("{}", mod_.name);
+            if let Some(report) = &mod_.report {
+                print_text_report(report);
+            }
+            if let Some(why) = &mod_.skipped {
+                outln!("  skipped: {why}");
+            }
+            if let Some(e) = &mod_.error {
+                outln!("  failed: {e}");
+            }
+        }
+        if done.is_empty() {
+            outln!("the toolkit keeps no text edits for any mod");
+        }
+    })?;
+    match failed {
+        0 => Ok(()),
+        _ if done.len() == 1 => Err(done[0].error.clone().unwrap_or_default()),
+        n => Err(format!("{n} of {} mods failed", done.len())),
+    }
+}
+
 // ---- asset ----
 
 /// A read of the asset `args` names: from `--from`, a file on disk as it is, or the copy the game
@@ -5947,6 +6802,19 @@ fn asset_hex(cli: &Cli, app: &settings::AppSettings, args: &HexArgs) -> Result<(
     })
 }
 
+fn asset_mesh(cli: &Cli, app: &settings::AppSettings, args: &MeshArgs) -> Result<(), String> {
+    let root = resolve::game_root(cli.game_root.as_deref(), app)?;
+    let request = asset_request(cli, app, &args.asset, &root)?;
+    let export = match &args.export {
+        Some(given) => Some(export_of(&request, given)?),
+        None => None,
+    };
+    let report = asset::mesh(&request, export)?;
+    emit(cli, &report, || {
+        asset::print_mesh(&report, args.bones, &mut |line| outln!("{line}"));
+    })
+}
+
 fn asset_fields(cli: &Cli, app: &settings::AppSettings, args: &FieldsArgs) -> Result<(), String> {
     let root = resolve::game_root(cli.game_root.as_deref(), app)?;
     let request = asset_request(cli, app, &args.asset, &root)?;
@@ -6177,15 +7045,19 @@ struct TextureArgs {
     #[arg(long, value_name = "EXPORT")]
     export: Vec<String>,
 
-    /// Save a mip as this PNG file, or as an OpenEXR (.exr) file for a texture holding high dynamic
-    /// range values. A cube's faces and an array's or a volume's slices are stacked top to bottom.
+    /// Save a mip as this image file, of the kind its extension names: a PNG, TGA or BMP for an
+    /// 8-bit texture, an OpenEXR (.exr) file for one holding high dynamic range values, or for
+    /// either a DDS of the texture's own bytes for that mip and every one below it. A cube's faces
+    /// and an array's or a volume's slices are stacked top to bottom; a DDS keeps them as its own.
     #[arg(long, value_name = "FILE", conflicts_with = "input")]
     out: Option<String>,
 
     /// Give the texture this image's pixels, at the image's size, encoded in the texture's own pixel
-    /// format with its mips rebuilt from them, and save it into the mod: a PNG, or an OpenEXR (.exr)
-    /// file for a texture holding high dynamic range values. A cube's six faces and an array's or a
-    /// volume's slices are stacked top to bottom, as `--out` writes them.
+    /// format with its mips rebuilt from them, and save it into the mod: a PNG, TGA, BMP or JPEG for
+    /// an 8-bit texture, an OpenEXR (.exr) file for one holding high dynamic range values. A cube's
+    /// six faces and an array's or a volume's slices are stacked top to bottom, as `--out` writes
+    /// them. A DDS in the texture's own format gives its mips as they are, the ones it lacks built
+    /// from its smallest; one in another format is encoded again from its largest mip.
     #[arg(long = "in", value_name = "FILE")]
     input: Vec<String>,
 
@@ -6200,6 +7072,103 @@ struct TextureArgs {
 
     #[command(flatten)]
     write: AssetWriteArgs,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum ImageArg {
+    Png,
+    Dds,
+    Tga,
+    Bmp,
+    Exr,
+}
+
+impl From<ImageArg> for rivals_core::image_file::ImageKind {
+    fn from(kind: ImageArg) -> Self {
+        match kind {
+            ImageArg::Png => Self::Png,
+            ImageArg::Dds => Self::Dds,
+            ImageArg::Tga => Self::Tga,
+            ImageArg::Bmp => Self::Bmp,
+            ImageArg::Exr => Self::Exr,
+        }
+    }
+}
+
+impl From<QualityArg> for rivals_core::texture::Quality {
+    fn from(quality: QualityArg) -> Self {
+        match quality {
+            QualityArg::Fast => Self::Fast,
+            QualityArg::Default => Self::Default,
+            QualityArg::Best => Self::Best,
+        }
+    }
+}
+
+#[derive(Args)]
+struct TexturesArgs {
+    /// What to read: `game` for every package the game ships, an installed IoStore mod by its whole
+    /// name or a path, or a game container such as `pakchunk0-Windows`.
+    #[arg(value_name = "SOURCE")]
+    source: String,
+
+    /// Keep only packages whose path contains this text, case insensitive: a piece of the container
+    /// path (`Characters/1014`) or of the package name (`/Game/Marvel/Characters/1014`), with
+    /// either slash. Repeatable: a package any of them matches is kept.
+    #[arg(long, value_name = "TEXT")]
+    filter: Vec<String>,
+
+    /// Save every texture the packages hold under this folder, each at its package's path, with
+    /// the texture's name after it when the package is not named for it.
+    #[arg(
+        long,
+        value_name = "DIR",
+        conflicts_with = "input",
+        required_unless_present = "input"
+    )]
+    out: Option<String>,
+
+    /// The kind of image `--out` saves. A texture holding high dynamic range values goes out as
+    /// OpenEXR when asked for an 8-bit kind, and an 8-bit one as a PNG when asked for OpenEXR; a
+    /// DDS holds either as the texture's own bytes.
+    #[arg(long, value_enum, default_value = "png", requires = "out")]
+    image: ImageArg,
+
+    /// The mip `--out` saves, 0 being the largest. Defaults to the largest each package has.
+    #[arg(long, value_name = "N", requires = "out")]
+    mip: Option<usize>,
+
+    /// Give each texture the image named for it in this folder, as `--out` names them, or named as
+    /// its package is anywhere in it when no other package has that name, and save every package
+    /// they change into the mod in one rewrite. Images of any kind `asset texture --in` takes.
+    #[arg(long = "in", value_name = "DIR")]
+    input: Option<String>,
+
+    /// How hard `--in` works at BC7 and BC6H, the formats that take long.
+    #[arg(long, value_enum, default_value = "default", requires = "input")]
+    quality: QualityArg,
+
+    /// The mod to save into, named as a save's `--into` is. Defaults to the one the desktop app
+    /// last saved into, then to `AssetEdits`.
+    #[arg(long, value_name = "MOD", requires = "input")]
+    into: Option<String>,
+
+    /// Start each package the mod already holds again from SOURCE. Without this a package the mod
+    /// holds is read from the mod, so its other edits stay.
+    #[arg(long, requires = "input")]
+    overwrite: bool,
+
+    /// Encode, patch and check everything, and write nothing.
+    #[arg(long, requires = "input")]
+    dry_run: bool,
+
+    /// What the save leaves behind. A batch writes an IoStore container, which is what the game
+    /// loads packages from. Defaults to the desktop app's setting.
+    #[arg(long, value_enum, requires = "input")]
+    format: Option<FormatArg>,
+
+    #[command(flatten)]
+    write: WriteArgs,
 }
 
 #[derive(Args)]
@@ -6396,11 +7365,7 @@ fn asset_texture(cli: &Cli, app: &settings::AppSettings, args: &TextureArgs) -> 
         let dry_run = args.write.save.dry_run;
         block_for_game(cli, dry_run)?;
         let (request, mod_name) = write_request(cli, app, &args.asset, &args.write, &root)?;
-        let quality = match args.quality {
-            QualityArg::Fast => rivals_core::texture::Quality::Fast,
-            QualityArg::Default => rivals_core::texture::Quality::Default,
-            QualityArg::Best => rivals_core::texture::Quality::Best,
-        };
+        let quality = args.quality.into();
         if args.input.len() == 1 && args.export.len() <= 1 {
             let report = asset::import_texture_image(
                 &request,
@@ -6478,8 +7443,8 @@ fn asset_texture(cli: &Cli, app: &settings::AppSettings, args: &TextureArgs) -> 
         let saved = asset::save_texture_image(&request, export, args.mip, Path::new(out))?;
         return emit(cli, &saved, || {
             outln!(
-                "saved mip {} of export {}, {} at {}x{}, to {}",
-                saved.mip,
+                "saved {} of export {}, {} from {}x{}, to {}",
+                asset::mip_range(saved.mip, saved.mips),
                 saved.export,
                 saved.format,
                 saved.width,
@@ -6503,15 +7468,85 @@ fn imported(report: &rivals_core::texture::ImportReport, written: bool) -> Strin
         String::new()
     };
     format!(
-        "{verb} {} ({}) the image's pixels: {}x{} to {}x{}{layers}, {} mip(s)",
+        "{verb} {} ({}) the image's pixels: {}x{} to {}x{}{layers}, {} mip(s){}",
         report.name,
         report.format,
         report.from.0,
         report.from.1,
         report.to.0,
         report.to.1,
-        report.mips
+        report.mips,
+        asset::dds_note(report)
     )
+}
+
+fn asset_textures(
+    cli: &Cli,
+    app: &settings::AppSettings,
+    args: &TexturesArgs,
+) -> Result<(), String> {
+    let root = resolve::game_root(cli.game_root.as_deref(), app)?;
+    let container = resolve::source(&args.source, &root)?;
+    let source = rivals_core::texture_batch::TextureSource {
+        game_root: &root,
+        container: &container,
+        whole_game: resolve::is_game(&args.source),
+        filters: &args.filter,
+    };
+    let started = std::time::Instant::now();
+    if let Some(out) = &args.out {
+        let report = asset::export_textures(
+            cli.usmap.as_deref(),
+            app.usmap_path.as_deref(),
+            &source,
+            Path::new(out),
+            args.image.into(),
+            args.mip,
+        )?;
+        let failed = report.failed.len();
+        emit(cli, &report, || {
+            asset::print_textures_out(&report, started.elapsed(), &mut |line| outln!("{line}"))
+        })?;
+        if failed > 0 {
+            return Err(format!("{failed} texture(s) failed"));
+        }
+        return Ok(());
+    }
+    let input = args
+        .input
+        .as_deref()
+        .ok_or("give --out DIR to save textures, or --in DIR to replace them")?;
+    block_for_game(cli, args.dry_run)?;
+    let mod_name = into_mod(app, args.into.as_deref(), &root, true)?;
+    let report = asset::import_textures(
+        cli.usmap.as_deref(),
+        app.usmap_path.as_deref(),
+        &rivals_core::texture_batch::TextureImports {
+            source,
+            images: Path::new(input),
+            mod_name: &mod_name,
+            quality: args.quality.into(),
+            dry_run: args.dry_run,
+        },
+        &rivals_core::asset_edit::SaveOptions {
+            replace: args.overwrite,
+            target: args
+                .format
+                .map(Into::into)
+                .or(app.asset_save_target)
+                .unwrap_or_default(),
+            iostore: args.write.io(app, None),
+            ..Default::default()
+        },
+    )?;
+    let failed = report.failed.len();
+    emit(cli, &report, || {
+        asset::print_textures_in(&report, started.elapsed(), &mut |line| outln!("{line}"))
+    })?;
+    if failed > 0 {
+        return Err(format!("{failed} image(s) failed"));
+    }
+    Ok(())
 }
 
 fn asset_imports_table(
@@ -6626,6 +7661,18 @@ fn asset_add_variable(
 fn asset_script(cli: &Cli, app: &settings::AppSettings, args: &ScriptArgs) -> Result<(), String> {
     let root = resolve::game_root(cli.game_root.as_deref(), app)?;
     let request = asset_request(cli, app, &args.asset, &root)?;
+    if args.pseudo || args.flow || args.dot {
+        let (name, flow) = asset::script_flow(&request, export_of(&request, &args.export)?)?;
+        if args.dot {
+            return emit(cli, &flow, || out!("{}", flow.dot(&name)));
+        }
+        if args.pseudo {
+            return emit(cli, &flow, || out!("{}", flow.pseudo()));
+        }
+        return emit(cli, &flow, || {
+            asset::print_flow(&flow, &mut |line| outln!("{line}"))
+        });
+    }
     let report = asset::script(&request, export_of(&request, &args.export)?)?;
     if args.as_text {
         // Exactly the text, so `> fn.txt` saves what `assemble-script` reads.
@@ -6648,6 +7695,57 @@ fn asset_vm(cli: &Cli, app: &settings::AppSettings, args: &VmArgs) -> Result<(),
             &mut |line| outln!("{line}"),
         )
     })
+}
+
+fn asset_colors(cli: &Cli, app: &settings::AppSettings, args: &ColorsArgs) -> Result<(), String> {
+    let root = resolve::game_root(cli.game_root.as_deref(), app)?;
+    let request = asset_request(cli, app, &args.asset, &root)?;
+    let report = asset::colors(&request)?;
+    emit(cli, &report, || {
+        asset::print_colors(&report, args.samples, &mut |line| outln!("{line}"))
+    })
+}
+
+fn asset_recolor(cli: &Cli, app: &settings::AppSettings, args: &RecolorArgs) -> Result<(), String> {
+    use rivals_core::niagara_colors::{Recolor, RecolorPick};
+    let root = resolve::game_root(cli.game_root.as_deref(), app)?;
+    let (request, mod_name) = write_request(cli, app, &args.asset, &args.write, &root)?;
+    let tool = match (args.tint, args.paint, args.hue) {
+        (Some(rgb), _, _) => Recolor::Tint { rgb },
+        (_, Some(rgb), _) => Recolor::Paint { rgb },
+        (_, _, Some(degrees)) => Recolor::Hue { degrees },
+        // The `tool` group holds to one of them.
+        _ => return Err("name a change: --tint, --paint or --hue".to_string()),
+    };
+    let given: Vec<&str> = args.exports.iter().map(String::as_str).collect();
+    let pick = RecolorPick {
+        exports: asset::export_indices(&request, &given)?,
+        param: args.param.clone(),
+        enemy: args.enemy,
+        scripts: args.scripts,
+        materials: args.materials,
+    };
+    let plan = asset::recolor_plan(&request, &pick, tool)?;
+    if plan.paths.is_empty() && plan.vm_colors.is_empty() {
+        return Err("the colours picked already read that way".to_string());
+    }
+    let changes = rivals_uasset::PackageEdits {
+        paths: plan.paths.clone(),
+        vm_colors: plan.vm_colors.clone(),
+        ..Default::default()
+    };
+    if args.write.save.dry_run {
+        let preview = asset::preview_edits(&request, &mod_name, args.write.save.overwrite, changes);
+        return preview_planned(cli, preview, &plan, || {
+            asset::print_recolor_plan(&plan, args.scripts, &mut |line| outln!("{line}"))
+        });
+    }
+    block_for_game(cli, false)?;
+    let message = asset::save_changes(&request, changes, &mod_name, args.write.save.overwrite)?;
+    if !cli.json {
+        asset::print_recolor_plan(&plan, args.scripts, &mut |line| outln!("{line}"));
+    }
+    emit(cli, &message, || outln!("{message}"))
 }
 
 fn asset_edit_vm(cli: &Cli, app: &settings::AppSettings, args: &EditVmArgs) -> Result<(), String> {
@@ -7834,8 +8932,10 @@ fn asset_search(
     use std::io::IsTerminal;
     use std::sync::atomic::AtomicBool;
 
+    let started = std::time::Instant::now();
     let root = resolve::game_root(cli.game_root.as_deref(), app)?;
     let mappings = game_mappings(cli, app)?;
+    let read_mappings = started.elapsed().as_secs_f64();
     let values = args.values
         || args
             .kind
@@ -7884,6 +8984,25 @@ fn asset_search(
     )?;
     if shown {
         eprintln!();
+    }
+    if args.timings {
+        let t = &result.timings;
+        eprintln!(
+            "took {:.1}s: mappings {read_mappings:.2}s, open {:.2}s, listing {:.2}s, functions {:.2}s, \
+             walk {:.2}s on {} threads, {} converters (summed: convert {:.1}s, parse {:.1}s with \
+             layouts {:.1}s, matching {:.1}s)",
+            started.elapsed().as_secs_f64(),
+            t.open,
+            t.listing,
+            t.functions,
+            t.walk,
+            t.threads,
+            t.converters,
+            t.convert,
+            t.parse,
+            t.layouts,
+            t.matching
+        );
     }
     emit(cli, &result, || {
         match args.by {
@@ -8279,6 +9398,7 @@ fn asset_audit(cli: &Cli, app: &settings::AppSettings, args: &AuditArgs) -> Resu
             args.skip_blueprint,
             args.relocation_check,
             args.text_check,
+            args.flow_check,
             tick,
         )?,
         _ => return Err("name a SOURCE, or pass --all or --dir".into()),
@@ -8850,6 +9970,48 @@ mod parse_tests {
             ]),
             AssetCmd::EditVm(args) if args.at == 0xBD && args.value == "-0.5" && !args.retarget
         ));
+        assert!(matches!(
+            asset(&["colors", "/Game/NS_T", "--samples"]),
+            AssetCmd::Colors(args) if args.samples
+        ));
+        assert!(matches!(
+            asset(&[
+                "recolor", "/Game/NS_T", "--export", "0", "--export", "Curve_1", "--tint",
+                "1,0.5,2", "--into", "M"
+            ]),
+            AssetCmd::Recolor(args) if args.exports.len() == 2 && args.tint == Some([1.0, 0.5, 2.0])
+        ));
+        assert!(matches!(
+            asset(&["recolor", "/Game/NS_T", "--enemy", "--hue", "-90", "--into", "M"]),
+            AssetCmd::Recolor(args) if args.enemy && args.hue == Some(-90.0) && !args.scripts
+        ));
+        assert!(matches!(
+            asset(&["recolor", "/Game/NS_T", "--scripts", "--paint", "0,1,0", "--into", "M"]),
+            AssetCmd::Recolor(args) if args.scripts && !args.materials
+        ));
+        assert!(matches!(
+            asset(&["recolor", "/Game/NS_T", "--enemy", "--materials", "--paint", "0,0.3,1"]),
+            AssetCmd::Recolor(args) if args.materials && args.enemy
+        ));
+        for refused in [
+            vec!["recolor", "/Game/NS_T", "--into", "M"],
+            vec![
+                "recolor",
+                "/Game/NS_T",
+                "--tint",
+                "1,1,1",
+                "--hue",
+                "9",
+                "--into",
+                "M",
+            ],
+            vec!["recolor", "/Game/NS_T", "--paint", "1,1", "--into", "M"],
+            vec!["recolor", "/Game/NS_T", "--tint", "1,-1,1", "--into", "M"],
+        ] {
+            let mut argv = vec!["rivals-cli", "asset"];
+            argv.extend(&refused);
+            assert!(Cli::try_parse_from(argv).is_err(), "{refused:?}");
+        }
         match asset(&[
             "edit-script",
             "/Game/T",
@@ -9341,6 +10503,47 @@ mod readme_tests {
 }
 
 /// What v0.14.1 shipped parses as it did: `tweaks`, `ini` and the global flags.
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod text_parse_tests {
+    use super::*;
+
+    fn cli(args: &[&str]) -> Result<Cli, clap::Error> {
+        Cli::try_parse_from([&["rivals-cli"][..], args].concat())
+    }
+
+    #[test]
+    fn text_commands_take_the_text_first() {
+        match cli(&["text", "get", "NS/KEY", "--from", "game", "--culture", "ja"])
+            .unwrap()
+            .command
+        {
+            Command::Text(TextCmd::Get(args)) => {
+                assert_eq!(args.text, "NS/KEY");
+                assert_eq!(args.from.from.as_deref(), Some("game"));
+            }
+            _ => panic!("not text get"),
+        }
+        match cli(&["text", "set", "NS/KEY", "Hi", "--into", "M", "--dry-run"])
+            .unwrap()
+            .command
+        {
+            Command::Text(TextCmd::Set(args)) => {
+                assert_eq!(args.wording, "Hi");
+                assert_eq!(args.write.into.as_deref(), Some("M"));
+                assert!(args.write.dry_run);
+            }
+            _ => panic!("not text set"),
+        }
+        assert!(cli(&["text", "rebuild"]).is_err());
+        assert!(cli(&["text", "rebuild", "M", "--all"]).is_err());
+        assert!(matches!(
+            cli(&["text", "rebuild", "--all"]).unwrap().command,
+            Command::Text(TextCmd::Rebuild(TextRebuildArgs { all: true, .. }))
+        ));
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod shipped_parse_tests {

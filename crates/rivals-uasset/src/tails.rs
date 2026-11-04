@@ -94,7 +94,8 @@ const PAYLOADS: &[Payload] = &[
         class: "NiagaraEmitter",
         kind: "particle system data",
     },
-    // This game's ability timelines carry their tracks in a serializer of their own.
+    // This game's ability timelines carry a second copy of their tracks in a serializer of their
+    // own, measured whole when that copy does not read.
     Payload {
         class: "AnimTimeline",
         kind: "animation timeline data",
@@ -143,7 +144,8 @@ const PAYLOADS: &[Payload] = &[
         class: "MapBuildDataRegistry",
         kind: "map build data",
     },
-    // Wwise events keep everything but an all-skipped property header in their cooked data.
+    // A Wwise event whose cooked data `read_wwise_cooked` cannot read, such as one from an
+    // integration without this game's three extra fields.
     Payload {
         class: "AkAudioEvent",
         kind: "Wwise event data",
@@ -176,7 +178,7 @@ const PAYLOADS: &[Payload] = &[
         class: "GeometryCollection",
         kind: "geometry collection data",
     },
-    // Every other Wwise object keeps cooked data of its own past the properties, as the event does.
+    // Any other Wwise object whose cooked data does not read.
     Payload {
         class: "AkAudioType",
         kind: "Wwise audio data",
@@ -204,6 +206,65 @@ const CUTOUT_VERTEX_BYTES: usize = 8;
 
 /// `TPair<FName, int64>`: an enumerator's name and value.
 const ENUMERATOR_BYTES: usize = 8 + 8;
+
+/// The cooked data each Wwise object serializes after its properties: the class that writes it,
+/// matched in the chain, the property it fills, and that property's struct.
+const WWISE_COOKED: &[(&str, &str, &str)] = &[
+    (
+        "AkAudioEvent",
+        "EventCookedData",
+        "WwiseLocalizedEventCookedData",
+    ),
+    (
+        "AkGroupValue",
+        "GroupValueCookedData",
+        "WwiseGroupValueCookedData",
+    ),
+    (
+        "AkRtpc",
+        "GameParameterCookedData",
+        "WwiseGameParameterCookedData",
+    ),
+    (
+        "AkAuxBus",
+        "AuxBusCookedData",
+        "WwiseLocalizedAuxBusCookedData",
+    ),
+    (
+        "AkEffectShareSet",
+        "ShareSetCookedData",
+        "WwiseLocalizedShareSetCookedData",
+    ),
+    (
+        "AkAudioDeviceShareSet",
+        "AudioDeviceShareSetCookedData",
+        "WwiseAudioDeviceShareSetCookedData",
+    ),
+    (
+        "AkInitBank",
+        "InitBankCookedData",
+        "WwiseInitBankCookedData",
+    ),
+];
+
+/// What an event writes after its cooked data, in order: the integration's four fields, then the
+/// three this game's engine adds.
+const WWISE_EVENT_TRAILER: &[(&str, Word)] = &[
+    ("MaximumDuration", Word::Float),
+    ("MinimumDuration", Word::Float),
+    ("IsInfinite", Word::Bool),
+    ("MaxAttenuationRadius", Word::Float),
+    ("MaxAttenuationRadiusP2", Word::Float),
+    ("MaxAttenuationRadiusP3", Word::Float),
+    ("bHasMotionEvent", Word::Bool),
+];
+
+/// How a four-byte field a class writes after its properties reads.
+#[derive(Clone, Copy)]
+enum Word {
+    Float,
+    Bool,
+}
 
 /// Payload kinds whose serializers write no path, so a save under another path leaves nothing in
 /// them naming the old one: a level's precomputed visibility and distance field, BSP geometry
@@ -268,7 +329,7 @@ pub(crate) fn opaque_kind(
 
 /// An object reference a class writes after its properties, on record for renumbering and shown
 /// like one inside them.
-fn object_entry(
+pub(crate) fn object_entry(
     cursor: &mut Cursor<'_>,
     ctx: &Ctx<'_>,
     diagnostics: &mut Diagnostics,
@@ -315,6 +376,19 @@ pub(crate) fn tail_steps(chain: &[&str]) -> Vec<&'static str> {
         "Level",
         "World",
         "Texture",
+        "SkeletalMesh",
+        "StaticMesh",
+        "AkAudioEvent",
+        "AkGroupValue",
+        "AkRtpc",
+        "AkAuxBus",
+        "AkEffectShareSet",
+        "AkAudioDeviceShareSet",
+        "AkInitBank",
+        "AnimTimeline",
+        "MaterialInterface",
+        "Material",
+        "MaterialInstance",
     ];
     chain
         .iter()
@@ -439,6 +513,58 @@ pub(crate) fn read_class_tail(
                 fields.push(object_list(cursor, ctx, diagnostics, "StreamingLevels")?);
                 TailOutcome::Consumed
             }
+            // The mesh's own data around its render data, which stays a payload.
+            "SkeletalMesh" => {
+                crate::mesh::read_skeletal_head(cursor, ctx, diagnostics, fields)?;
+                TailOutcome::Payload("mesh render data")
+            }
+            "StaticMesh" => {
+                crate::mesh::read_static_mesh(cursor, ctx, diagnostics, fields)?;
+                TailOutcome::Payload("mesh render data")
+            }
+            "AnimTimeline" => {
+                crate::timeline::read_timeline(cursor, ctx, diagnostics, fields)?;
+                TailOutcome::Consumed
+            }
+            // The parameters the material and its expressions declare, with a base material's
+            // defaults, which its shaders keep their own copy of.
+            "MaterialInterface" => {
+                read_cached_data(
+                    cursor,
+                    ctx,
+                    diagnostics,
+                    fields,
+                    "CachedExpressionData",
+                    "MaterialCachedExpressionData",
+                )?;
+                TailOutcome::Consumed
+            }
+            "Material" => TailOutcome::Payload("shader maps"),
+            // An instance compiles shaders of its own only for a permutation its static switches
+            // make.
+            "MaterialInstance" => {
+                read_cached_data(
+                    cursor,
+                    ctx,
+                    diagnostics,
+                    fields,
+                    "CachedData",
+                    "MaterialInstanceCachedData",
+                )?;
+                let permutation = fields.iter().any(|entry| {
+                    entry.name == "bHasStaticPermutationResource"
+                        && matches!(entry.value, PropertyValue::Bool { value: true })
+                });
+                if permutation {
+                    TailOutcome::Payload("shader maps")
+                } else {
+                    TailOutcome::Consumed
+                }
+            }
+            class if WWISE_COOKED.iter().any(|(held, ..)| *held == class) => {
+                read_wwise_cooked(class, cursor, ctx, diagnostics, fields)?;
+                TailOutcome::Consumed
+            }
             // Three words that have read zero in every rig inspected.
             "Rig" => {
                 for _ in 0..3 {
@@ -501,9 +627,94 @@ fn read_level_tail(
     Ok(())
 }
 
+/// A Wwise object's cooked data, the struct its serializer writes outside the property block,
+/// shown as the property it fills. An event closes with seven words and an aux bus with its
+/// attenuation radius, each shown as the property of the same name.
+fn read_wwise_cooked(
+    class: &str,
+    cursor: &mut Cursor<'_>,
+    ctx: &Ctx<'_>,
+    diagnostics: &mut Diagnostics,
+    fields: &mut Vec<PropertyEntry>,
+) -> Result<(), String> {
+    let Some(&(_, property, structure)) = WWISE_COOKED.iter().find(|(held, ..)| *held == class)
+    else {
+        return Ok(());
+    };
+    let start = cursor.file_offset();
+    let value = crate::props::read_struct(structure, cursor, ctx, diagnostics, 0)?;
+    fields.push(PropertyEntry {
+        name: property.to_string(),
+        element: None,
+        value,
+        span: Some((start, cursor.file_offset())),
+        slot: None,
+    });
+    let trailer: &[(&str, Word)] = match class {
+        "AkAudioEvent" => WWISE_EVENT_TRAILER,
+        "AkAuxBus" => &[("MaxAttenuationRadius", Word::Float)],
+        _ => &[],
+    };
+    for &(name, word) in trailer {
+        fields.push(word_entry(cursor, name, word)?);
+    }
+    Ok(())
+}
+
+/// A material's cached data, the struct its serializer writes after a word saying whether the cook
+/// saved it, shown as the member it fills.
+fn read_cached_data(
+    cursor: &mut Cursor<'_>,
+    ctx: &Ctx<'_>,
+    diagnostics: &mut Diagnostics,
+    fields: &mut Vec<PropertyEntry>,
+    property: &str,
+    structure: &str,
+) -> Result<(), String> {
+    match cursor.read_u32()? {
+        0 => return Ok(()),
+        1 => {}
+        other => {
+            return Err(cursor.err(format!(
+                "{property} is marked saved with {other:#X} rather than 0 or 1"
+            )));
+        }
+    }
+    let start = cursor.file_offset();
+    let value = crate::props::read_struct(structure, cursor, ctx, diagnostics, 0)?;
+    fields.push(PropertyEntry {
+        name: property.to_string(),
+        element: None,
+        value,
+        span: Some((start, cursor.file_offset())),
+        slot: None,
+    });
+    Ok(())
+}
+
+/// A four-byte field a class writes after its properties, editable in place.
+fn word_entry(cursor: &mut Cursor<'_>, name: &str, word: Word) -> Result<PropertyEntry, String> {
+    let start = cursor.file_offset();
+    let value = match word {
+        Word::Float => PropertyValue::Float {
+            value: f64::from(cursor.read_f32()?),
+        },
+        Word::Bool => PropertyValue::Bool {
+            value: cursor.read_u32()? != 0,
+        },
+    };
+    Ok(PropertyEntry {
+        name: name.to_string(),
+        element: None,
+        value,
+        span: Some((start, cursor.file_offset())),
+        slot: None,
+    })
+}
+
 /// A counted list of object references, recorded as a container so an element can be added or
 /// dropped, and as references so a renumber follows them.
-fn object_list(
+pub(crate) fn object_list(
     cursor: &mut Cursor<'_>,
     ctx: &Ctx<'_>,
     diagnostics: &mut Diagnostics,
@@ -1225,6 +1436,105 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// A Wwise object's cooked data reads as the property it fills, and an event's trailer as the
+    /// seven properties it writes in its own order rather than the schema's.
+    #[test]
+    fn wwise_cooked_data_reads_as_its_property_and_an_event_closes_with_seven_words() {
+        use usmap::{Property, PropertyInner, Struct};
+        let property = |name: &str, index: u16, inner| Property {
+            name: name.into(),
+            array_dim: 1,
+            index,
+            inner,
+        };
+        let mappings = Mappings::from_structs(vec![
+            Struct {
+                name: "WwiseGroupValueCookedData".into(),
+                super_struct: None,
+                properties: vec![
+                    property("GroupId", 0, PropertyInner::Int),
+                    property("Id", 1, PropertyInner::Int),
+                ],
+            },
+            Struct {
+                name: "WwiseLocalizedEventCookedData".into(),
+                super_struct: None,
+                properties: vec![property("EventId", 0, PropertyInner::Int)],
+            },
+        ]);
+        let header = FLegacyPackageHeader::default();
+        let ctx = Ctx {
+            mappings: Some(&mappings),
+            ..bare_ctx(&header)
+        };
+
+        // Two values, the last fragment: `00 05`.
+        let mut state = vec![0x00, 0x05];
+        state.extend_from_slice(&7i32.to_le_bytes());
+        state.extend_from_slice(&9i32.to_le_bytes());
+        let mut cursor = Cursor::new(&state, 0x100);
+        let mut fields = Vec::new();
+        let outcome = read_class_tail(
+            &chain_of(&["Object", "AkAudioType", "AkGroupValue", "AkStateValue"]),
+            &mut cursor,
+            &ctx,
+            &mut Diagnostics::default(),
+            &mut fields,
+        )
+        .expect("read");
+        assert!(matches!(outcome, TailOutcome::Consumed));
+        assert_eq!(cursor.remaining(), 0);
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].name, "GroupValueCookedData");
+        assert_eq!(fields[0].span, Some((0x100, 0x10A)));
+
+        // One value, then the durations, the flags and the three attenuation radii.
+        let mut event = vec![0x00, 0x03];
+        event.extend_from_slice(&42i32.to_le_bytes());
+        for word in [
+            20.5f32.to_bits(),
+            20.5f32.to_bits(),
+            1,
+            0,
+            (-1.0f32).to_bits(),
+            (-1.0f32).to_bits(),
+            0,
+        ] {
+            event.extend_from_slice(&word.to_le_bytes());
+        }
+        let mut cursor = Cursor::new(&event, 0);
+        let mut fields = Vec::new();
+        read_class_tail(
+            &chain_of(&["Object", "AkAudioType", "AkAudioEvent"]),
+            &mut cursor,
+            &ctx,
+            &mut Diagnostics::default(),
+            &mut fields,
+        )
+        .expect("read");
+        assert_eq!(cursor.remaining(), 0);
+        let names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "EventCookedData",
+                "MaximumDuration",
+                "MinimumDuration",
+                "IsInfinite",
+                "MaxAttenuationRadius",
+                "MaxAttenuationRadiusP2",
+                "MaxAttenuationRadiusP3",
+                "bHasMotionEvent"
+            ]
+        );
+        assert!(matches!(
+            fields[3].value,
+            PropertyValue::Bool { value: true }
+        ));
+        assert!(matches!(fields[5].value, PropertyValue::Float { value } if value == -1.0));
+        assert_eq!(fields[3].span, Some((14, 18)), "a flag is a whole word");
     }
 
     /// An event keeps its own name; every other Wwise object is named by the shared ancestor.

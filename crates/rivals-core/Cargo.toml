@@ -15,6 +15,8 @@ block_compression.workspace = true
 png.workspace = true
 exr.workspace = true
 half.workspace = true
+image.workspace = true
+ddsfile.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 aes.workspace = true
@@ -40,3 +42,5 @@ rar = ["archives", "dep:unrar"]
 
 [dev-dependencies]
 rivals-uasset = { path = "../rivals-uasset", features = ["test-support"] }
+# Writes the small mappings files the cache's tests read.
+usmap.workspace = true

@@ -38,6 +38,8 @@ const MAX_PAGES = 40;
 const ALL = "__all__";
 const NONE = "__none__";
 const SEEK_VERBOSITIES: Verbosity[] = ["fatal", "error"];
+/** Numbers each filter sent, across every viewer, so the backend keeps the newest one's rows. */
+let filterSeq = 0;
 
 interface Props {
   overview: LogOverview;
@@ -66,6 +68,8 @@ export function LogViewer({ overview, jumpTo, onStale }: Props) {
   const pendingJump = useRef<number | null>(null);
   const contextRow = useRef<number | null>(null);
   const nonce = useRef(0);
+  /** The backend still holds every line as the rows, as opening the log left them. */
+  const unfiltered = useRef(true);
 
   useEffect(() => {
     const t = setTimeout(() => setText(search), 250);
@@ -100,6 +104,8 @@ export function LogViewer({ overview, jumpTo, onStale }: Props) {
   );
 
   useEffect(() => {
+    if (unfiltered.current && !filtered) return;
+    unfiltered.current = false;
     let cancelled = false;
     const filter = {
       verbosities,
@@ -107,7 +113,8 @@ export function LogViewer({ overview, jumpTo, onStale }: Props) {
       text,
       case_sensitive: false,
     };
-    invoke<number>("filter_game_log", { snapshot, filter })
+    filterSeq += 1;
+    invoke<number>("filter_game_log", { snapshot, filter, seq: filterSeq })
       .then((count) => {
         if (cancelled) return;
         epochRef.current += 1;
@@ -132,7 +139,7 @@ export function LogViewer({ overview, jumpTo, onStale }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [snapshot, verbosities, category, text, onStale, showLine]);
+  }, [snapshot, verbosities, category, text, filtered, onStale, showLine]);
 
   // A jump from the summary clears the filters first, so the line it names is there to show.
   useEffect(() => {

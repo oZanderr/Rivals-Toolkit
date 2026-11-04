@@ -61,6 +61,10 @@ pub struct EditList {
     /// what it read when written. See [`rivals_uasset::VmConstEdit`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub vm_consts: Vec<rivals_uasset::VmConstEdit>,
+    /// Colours a Niagara script writes, transformed just before they are written. See
+    /// [`rivals_uasset::VmColorTransform`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vm_colors: Vec<rivals_uasset::VmColorTransform>,
     /// Drop the names nothing in the package uses. A save of its own.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub compact_names: bool,
@@ -194,6 +198,7 @@ impl EditList {
             && self.field_sets.is_empty()
             && self.paths.is_empty()
             && self.vm_consts.is_empty()
+            && self.vm_colors.is_empty()
             && !self.compact_names
             && self.add_exports.is_empty()
             && self.add_variables.is_empty()
@@ -344,6 +349,7 @@ impl EditList {
             field_sets: self.field_sets,
             paths: self.paths,
             vm_consts: self.vm_consts,
+            vm_colors: self.vm_colors,
             compact_names: self.compact_names,
             // A member is renamed across its whole mod, which `rename_member` plans; one package's
             // edit file does not carry it.
@@ -533,10 +539,10 @@ mod tests {
         assert!(file.edits.keys.is_empty());
     }
 
-    /// The exact object the inspector sends. The app, the CLI and an edit file share one shape,
-    /// so a field renamed on either side has to break here first.
+    /// An edit list of every kind of edit, as an edit file holds one, so a field renamed on
+    /// either side has to break here first.
     #[test]
-    fn the_shape_the_inspector_sends_is_the_shape_the_engine_reads() {
+    fn an_edit_file_s_shape_is_the_shape_the_engine_reads() {
         let sent = r#"{
             "values": [
                 {"offset": 9496, "name": "HeroID", "kind": "str", "op": "set", "text": "2022"},
@@ -573,7 +579,7 @@ mod tests {
             "reset_exports": [4],
             "duplicate_exports": [{"export": 2, "name": "Copy"}]
         }"#;
-        let list: EditList = serde_json::from_str(sent).expect("the inspector's own shape");
+        let list: EditList = serde_json::from_str(sent).expect("an edit file's shape");
         assert_eq!(list.values.len(), 8);
         assert_eq!(list.imports.len(), 2);
         assert_eq!(list.rows.len(), 3);

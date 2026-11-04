@@ -2,8 +2,8 @@
 //! existing paths.
 
 use std::borrow::Cow;
-use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Component, Path, PathBuf};
 
 use rivals_core::mod_ops::ModFiles;
 use rivals_core::paths::mods_dir;
@@ -40,9 +40,10 @@ fn whole(path: &Path) -> PathBuf {
 /// The suffixes a mod's name takes in `~mods`, in the order a bare name is looked up.
 const SUFFIXES: [&str; 5] = ["", ".pak", ".utoc", ".pak.disabled", ".utoc.disabled"];
 
-/// A file of the mod `arg` names, switched on or off: a path to one of its files, or its exact name
-/// in `~mods`, with or without an extension and in any case, as Windows names files. Nothing short
-/// of the whole name is taken: a near miss is refused with the names it may have meant.
+/// A file of the mod `arg` names, switched on or off: a path to one of its files, its exact name in
+/// whichever folder of `~mods` it is, or its path below `~mods`, with or without an extension and
+/// in any case, as Windows names files. Nothing short of the whole name is taken: a near miss is
+/// refused with the names it may have meant.
 pub fn installed_mod(
     arg: &str,
     root_flag: Option<&str>,
@@ -52,25 +53,26 @@ pub fn installed_mod(
     if direct.is_file() {
         return Ok(whole(&direct));
     }
-    if direct.components().count() > 1 || direct.is_absolute() {
+    if direct.is_absolute() {
         return Err(format!("{arg} does not exist"));
     }
     in_mods(arg, &mods_dir(&game_root(root_flag, app)?))
 }
 
-/// How a hint names a mod so the command it suggests acts on this same copy: by its name when it
-/// sits at the top of `mods`, where a name finds it, and by a path to it anywhere else, where its
-/// name would find the installed mod of that name instead.
+/// How a hint names a mod so the command it suggests acts on this same copy: by its name when that
+/// finds it, by its path below `mods` when it is in a folder there or another folder holds a mod of
+/// its name, and by its whole path anywhere else, where its name would find the installed mod of
+/// that name instead.
 pub fn shown_mod(files: &ModFiles, mods: &Path) -> String {
-    let at_top = matches!(
-        (files.dir.canonicalize(), mods.canonicalize()),
-        (Ok(dir), Ok(mods)) if dir == mods
-    );
-    if at_top {
-        return files.stem.clone();
+    match path_below(files, mods) {
+        Some(below) if !below.starts_with("./") => below,
+        Some(_) if find_in_mods(&files.stem, mods).is_ok() => files.stem.clone(),
+        Some(below) => below,
+        None => {
+            let part = files.part(if files.is_iostore() { "utoc" } else { "pak" });
+            whole(&part).display().to_string()
+        }
     }
-    let part = files.part(if files.is_iostore() { "utoc" } else { "pak" });
-    whole(&part).display().to_string()
 }
 
 /// The container a command names: a path as [`as_container`] reads it, a game container in `Paks/`
@@ -78,14 +80,16 @@ pub fn shown_mod(files: &ModFiles, mods: &Path) -> String {
 /// one and its `.pak` otherwise.
 pub fn container<'a>(given: &'a str, game_root: &str) -> Result<Cow<'a, str>, String> {
     let path = Path::new(given);
-    if given.is_empty() || path.exists() || path.components().count() > 1 || path.is_absolute() {
+    if given.is_empty() || path.exists() || path.is_absolute() {
         return Ok(as_container(given));
     }
-    let paks = rivals_core::paths::paks_dir(game_root);
-    for name in [given.to_string(), format!("{given}.utoc")] {
-        let held = paks.join(name);
-        if held.is_file() {
-            return Ok(Cow::Owned(held.to_string_lossy().into_owned()));
+    if path.components().count() == 1 {
+        let paks = rivals_core::paths::paks_dir(game_root);
+        for name in [given.to_string(), format!("{given}.utoc")] {
+            let held = paks.join(name);
+            if held.is_file() {
+                return Ok(Cow::Owned(held.to_string_lossy().into_owned()));
+            }
         }
     }
     let files = ModFiles::of(&in_mods(given, &mods_dir(game_root))?)?;
@@ -309,12 +313,13 @@ pub struct Into {
 }
 
 /// The mod `given` names for a save, or without it `default`: an installed mod by a path to one of
-/// its files or by its whole name, an IoStore mod anywhere else by a path to one of its files, or
-/// with `make`, a name no installed mod has, which the save makes, said so with the installed names
-/// close to it. A name the save completes, `MyMod` for `MyMod_9999999_P`, finds that mod as the
-/// desktop app does. Saves go into a switched-on mod whose name ends `_9999999_P`, so one named
-/// otherwise is refused with the reason. One at the top of `~mods` is taken by its name, and one
-/// anywhere else by its whole path, since a mod of its name in `~mods` is another mod.
+/// its files, its path below `~mods`, or its whole name in whichever folder of `~mods` it is, an
+/// IoStore mod anywhere else by a path to one of its files, or with `make`, a name no installed mod
+/// has, which the save makes at the top of `~mods`, said so with the installed names close to it.
+/// A name the save completes, `MyMod` for `MyMod_9999999_P`, finds that mod as the desktop app
+/// does. Saves go into a switched-on mod whose name ends `_9999999_P`, so one named otherwise is
+/// refused with the reason. One at the top of `~mods` is taken by its name, and one anywhere else
+/// by its whole path, which no other mod of its name can take.
 pub fn into_mod(
     given: Option<&str>,
     default: &str,
@@ -326,15 +331,31 @@ pub fn into_mod(
     let path = Path::new(named);
     let found = if path.is_file() {
         Some(path.to_path_buf())
-    } else if path.components().count() > 1 || path.is_absolute() {
+    } else if path.is_absolute() {
         return Err(format!("{named} does not exist"));
     } else {
-        in_mods(named, &mods).ok()
+        match find_in_mods(named, &mods)? {
+            Some(file) => Some(file),
+            None if named
+                .to_ascii_lowercase()
+                .ends_with(&SAVE_SUFFIX.to_ascii_lowercase()) =>
+            {
+                None
+            }
+            None => find_in_mods(&format!("{named}{SAVE_SUFFIX}"), &mods)?,
+        }
     };
+    if found.is_none() && path.components().count() > 1 {
+        return Err(format!("no mod at {named} in {}", mods.display()));
+    }
     if let Some(file) = found {
         let files = ModFiles::of(&file)?;
-        let at_top = files.dir.canonicalize().ok() == mods.canonicalize().ok();
-        if !at_top && !files.is_iostore() {
+        let (dir, mods_at) = (files.dir.canonicalize().ok(), mods.canonicalize().ok());
+        let at_top = dir.is_some() && dir == mods_at;
+        let inside = dir
+            .zip(mods_at)
+            .is_some_and(|(dir, mods)| dir.starts_with(mods));
+        if !inside && !files.is_iostore() {
             return Err(format!(
                 "{} is a plain pak mod outside {}; a save goes into an IoStore mod anywhere, or \
                  into a plain pak in {}",
@@ -343,12 +364,7 @@ pub fn into_mod(
                 mods.display()
             ));
         }
-        // How a hint names the mod: by its name in `~mods`, by its path anywhere else.
-        let shown = if at_top {
-            files.stem.clone()
-        } else {
-            file.display().to_string()
-        };
+        let shown = shown_mod(&files, &mods);
         if !files
             .stem
             .to_ascii_lowercase()
@@ -369,7 +385,11 @@ pub fn into_mod(
         let name = if at_top {
             files.stem
         } else {
-            rivals_core::asset_edit::mod_name_of(&files.part("utoc"))?
+            rivals_core::asset_edit::mod_name_of(&files.part(if files.is_iostore() {
+                "utoc"
+            } else {
+                "pak"
+            }))?
         };
         return Ok(Into { name, note: None });
     }
@@ -398,12 +418,14 @@ pub fn into_mod(
     })
 }
 
-/// The files at the top of `mods`.
+/// The mods' files below `mods`, in its folders too.
 fn files_in(mods: &Path) -> Result<Vec<PathBuf>, String> {
-    Ok(std::fs::read_dir(mods)
-        .map_err(|e| format!("could not read {}: {e}", mods.display()))?
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| path.is_file())
+    if !mods.is_dir() {
+        return Err(format!("could not read {}", mods.display()));
+    }
+    Ok(rivals_core::mods::walk_mod_files(mods, true)
+        .into_iter()
+        .map(|relative| mods.join(relative))
         .collect())
 }
 
@@ -421,23 +443,88 @@ fn close_names(name: &str, files: &[PathBuf]) -> Vec<String> {
         .collect()
 }
 
-/// The file of the mod named `name` in `mods`, or why there is none.
+/// The file of the mod named `name` below `mods`, or why there is none.
 fn in_mods(name: &str, mods: &Path) -> Result<PathBuf, String> {
-    let files = files_in(mods)?;
-    let file_name = |path: &PathBuf| {
-        path.file_name()
-            .map(|name| name.to_string_lossy().to_lowercase())
-    };
-    for suffix in SUFFIXES {
-        let wanted = format!("{name}{suffix}").to_lowercase();
-        if let Some(found) = files
+    match find_in_mods(name, mods)? {
+        Some(found) => Ok(found),
+        None if Path::new(name).components().count() > 1 => {
+            Err(format!("no mod at {name} in {}", mods.display()))
+        }
+        None => Err(missed(name, mods, &files_in(mods)?)),
+    }
+}
+
+/// The file of the mod `name` names below `mods`, if any: by its path below `mods`, `./Name` for
+/// one at the top, or by its whole name in whichever folder it is. A name two folders hold is
+/// refused with the path naming each, since either may be meant.
+fn find_in_mods(name: &str, mods: &Path) -> Result<Option<PathBuf>, String> {
+    let given = Path::new(name);
+    if given.components().count() > 1 {
+        let below = given
+            .components()
+            .all(|part| matches!(part, Component::Normal(_) | Component::CurDir));
+        if !below {
+            return Ok(None);
+        }
+        let found = SUFFIXES
             .iter()
-            .find(|file| file_name(file).as_deref() == Some(&wanted))
-        {
-            return Ok(found.clone());
+            .map(|suffix| mods.join(format!("{name}{suffix}")))
+            .find(|file| file.is_file());
+        return Ok(found);
+    }
+    let wanted: Vec<String> = SUFFIXES
+        .iter()
+        .map(|suffix| format!("{name}{suffix}").to_lowercase())
+        .collect();
+    // Each folder's file of the name, the one a name looks up first where it has several.
+    let mut by_folder: BTreeMap<PathBuf, (usize, PathBuf)> = BTreeMap::new();
+    for file in files_in(mods)? {
+        let Some(rank) = file
+            .file_name()
+            .map(|file_name| file_name.to_string_lossy().to_lowercase())
+            .and_then(|file_name| wanted.iter().position(|w| *w == file_name))
+        else {
+            continue;
+        };
+        let folder = file.parent().map(Path::to_path_buf).unwrap_or_default();
+        let held = by_folder.entry(folder).or_insert((rank, file.clone()));
+        if rank < held.0 {
+            *held = (rank, file);
         }
     }
-    Err(missed(name, mods, &files))
+    let found: Vec<PathBuf> = by_folder.into_values().map(|(_, file)| file).collect();
+    match found.as_slice() {
+        [] => Ok(None),
+        [one] => Ok(Some(one.clone())),
+        many => {
+            let named: Vec<String> = many
+                .iter()
+                .filter_map(|file| path_below(&ModFiles::of(file).ok()?, mods))
+                .collect();
+            Err(format!(
+                "{} mods in {} are named {name}; name the one you mean by its path below ~mods: {}",
+                many.len(),
+                mods.display(),
+                named.join(" or ")
+            ))
+        }
+    }
+}
+
+/// The path below `mods` that names this mod and no other of its name, `./Name` at the top, or
+/// none for a mod outside `mods`.
+fn path_below(files: &ModFiles, mods: &Path) -> Option<String> {
+    let (dir, mods) = (files.dir.canonicalize().ok()?, mods.canonicalize().ok()?);
+    let below = dir.strip_prefix(&mods).ok()?;
+    Some(if below.as_os_str().is_empty() {
+        format!("./{}", files.stem)
+    } else {
+        format!(
+            "{}/{}",
+            below.to_string_lossy().replace('\\', "/"),
+            files.stem
+        )
+    })
 }
 
 /// A lookup that found no mod: the installed names holding what was typed, or where to see them all.
@@ -573,6 +660,80 @@ mod tests {
         assert!(
             found("!ProjectGalacta_9999999_P").ends_with("!ProjectGalacta_9999999_P.pak.disabled")
         );
+    }
+
+    /// A mod in a folder of `~mods` is found by its name, or by its path below `~mods`; a name two
+    /// folders hold is refused with both, and a hint names a mod in a folder by that path.
+    #[test]
+    fn a_mod_in_a_folder_is_found_by_its_name_or_its_path_below_mods() {
+        let (_dir, mods) = mods();
+        let skins = mods.join("Skins").join("Venom");
+        std::fs::create_dir_all(&skins).unwrap();
+        for part in ["pak", "utoc", "ucas"] {
+            std::fs::write(skins.join(format!("Red_9999999_P.{part}.disabled")), b"").unwrap();
+            std::fs::write(skins.join(format!("!ProjectSigeon_9999999_P.{part}")), b"").unwrap();
+        }
+        let red = in_mods("red_9999999_p", &mods).expect("by its name");
+        assert_eq!(red, skins.join("Red_9999999_P.pak.disabled"));
+        let by_path = in_mods("Skins/Venom/Red_9999999_P", &mods).expect("by its path");
+        assert!(
+            by_path.ends_with("Red_9999999_P.pak.disabled"),
+            "{}",
+            by_path.display()
+        );
+        assert!(in_mods("Skins/Venom/Blue_9999999_P", &mods).is_err());
+        assert!(in_mods("../mods/Red_9999999_P", &mods).is_err());
+
+        let both = in_mods("!ProjectSigeon_9999999_P", &mods).expect_err("two folders hold it");
+        assert!(
+            both.contains("./!ProjectSigeon_9999999_P or Skins/Venom/!ProjectSigeon_9999999_P"),
+            "{both}"
+        );
+        let top = in_mods("./!ProjectSigeon_9999999_P", &mods).expect("the one at the top");
+        let top = ModFiles::of(&top).unwrap();
+        assert_eq!(
+            top.dir.canonicalize().unwrap(),
+            mods.canonicalize().unwrap()
+        );
+        assert_eq!(shown_mod(&top, &mods), "./!ProjectSigeon_9999999_P");
+        let alone = ModFiles::of(&mods.join("!ProjectGalacta_9999999_P.pak.disabled")).unwrap();
+        assert_eq!(shown_mod(&alone, &mods), "!ProjectGalacta_9999999_P");
+        let nested = in_mods("Skins/Venom/!ProjectSigeon_9999999_P", &mods).expect("by its path");
+        let files = ModFiles::of(&nested).unwrap();
+        assert_eq!(
+            shown_mod(&files, &mods),
+            "Skins/Venom/!ProjectSigeon_9999999_P"
+        );
+        assert_eq!(in_mods(&shown_mod(&files, &mods), &mods).unwrap(), nested);
+    }
+
+    /// A save names a mod in a folder of `~mods` by its whole path, completing a name as the app
+    /// does, so it goes into that mod rather than a new one at the top.
+    #[test]
+    fn a_save_into_a_mod_in_a_folder_goes_into_that_mod() {
+        let (_dir, root) = game();
+        let mods = mods_dir(&root);
+        let art = mods.join("Art");
+        std::fs::create_dir_all(&art).unwrap();
+        for part in ["pak", "utoc", "ucas"] {
+            std::fs::write(art.join(format!("Edits_9999999_P.{part}")), b"").unwrap();
+        }
+        std::fs::write(art.join("Plain_9999999_P.pak"), b"").unwrap();
+        for given in [
+            "Edits",
+            "Edits_9999999_P",
+            "Art/Edits",
+            "Art/Edits_9999999_P",
+        ] {
+            let found = into_mod(Some(given), "AssetEdits", &root, true).expect(given);
+            assert!(found.note.is_none(), "{given} makes no new mod");
+            let pak = rivals_core::asset_edit::mod_pak(&root, &found.name).unwrap();
+            assert_eq!(pak, art.join("Edits_9999999_P.pak"), "{given}");
+        }
+        let plain = into_mod(Some("Plain"), "AssetEdits", &root, true).expect("a plain pak");
+        let pak = rivals_core::asset_edit::mod_pak(&root, &plain.name).unwrap();
+        assert_eq!(pak, art.join("Plain_9999999_P.pak"));
+        assert!(into_mod(Some("Art/Missing"), "AssetEdits", &root, true).is_err());
     }
 
     /// Part of a name is refused, never guessed at, and the refusal names what it may have meant.

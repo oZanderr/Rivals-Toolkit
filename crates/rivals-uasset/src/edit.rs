@@ -269,8 +269,11 @@ pub struct PackageEdits {
     pub paths: Vec<crate::path_edit::PathEdit>,
     /// Constants a Niagara script's VM program reads, given new values. Each is planned against
     /// the package as the save reads it and made as path edits, which the caller does: see
-    /// `rivals_core::asset_edit` and [`crate::lower_vm_consts`].
+    /// `rivals_core::asset_edit` and [`crate::lower_vm_edits`].
     pub vm_consts: Vec<crate::niagara_vm_edit::VmConstEdit>,
+    /// Colours a Niagara script writes, transformed where they are written, planned and made the
+    /// way `vm_consts` are.
+    pub vm_colors: Vec<crate::niagara_vm_edit::VmColorTransform>,
     /// Drop the names nothing in the package uses. A save of its own: it renumbers every name.
     pub compact_names: bool,
     /// Rename a Blueprint class's member and every use of it the package holds. A save of its own:
@@ -929,6 +932,7 @@ impl PackageEdits {
         self.field_sets.extend(other.field_sets);
         self.paths.extend(other.paths);
         self.vm_consts.extend(other.vm_consts);
+        self.vm_colors.extend(other.vm_colors);
         self.compact_names |= other.compact_names;
         self.rename_members.extend(other.rename_members);
         self.remove_records.extend(other.remove_records);
@@ -987,6 +991,7 @@ impl PackageEdits {
             && self.field_sets.is_empty()
             && self.paths.is_empty()
             && self.vm_consts.is_empty()
+            && self.vm_colors.is_empty()
             && !self.compact_names
             && self.rename_members.is_empty()
             && self.remove_records.is_empty()
@@ -1311,6 +1316,9 @@ pub fn patch_package_with(
     edits: &PackageEdits,
     mappings: Option<&Mappings>,
 ) -> Result<PatchedBundle, String> {
+    crate::mirror::refuse_one_sided(parsed, edits)?;
+    let mirrored = crate::mirror::with_mirrors(parsed, edits);
+    let edits = mirrored.as_ref().unwrap_or(edits);
     check_expectations(parsed, edits)?;
     header_round_trips(bundle)?;
     check_inline_bulk(bundle)?;
@@ -4935,7 +4943,7 @@ fn tag_type(inner: &usmap::PropertyInner) -> Result<&'static str, String> {
 /// A whole tag for a property: its name, type, size and array index, the part its type adds, no
 /// property guid, then the value. Returns where the value lands within it, or for a bool, where
 /// its value byte does, since a bool keeps it in the tag.
-fn tag_bytes(
+pub(crate) fn tag_bytes(
     name: &str,
     array_index: u32,
     inner: &usmap::PropertyInner,
@@ -6213,6 +6221,8 @@ pub fn verify_patch(
     edits: &PackageEdits,
     applied: &[AppliedEdit],
 ) -> Result<(), String> {
+    let mirrored = crate::mirror::with_mirrors(before, edits);
+    let edits = mirrored.as_ref().unwrap_or(edits);
     check_header_shapes(before, after)?;
     if !edits.remove_records.is_empty() {
         return crate::member_edit::verify_record_removal(before, after, &edits.remove_records);
@@ -9241,6 +9251,7 @@ mod tests {
             native_leaves: Vec::new(),
             tag_bounds: Vec::new(),
             tagged_absent: Vec::new(),
+            stock_gaps: Vec::new(),
             script_tokens: Default::default(),
             text_histories: Default::default(),
             text_flags: Default::default(),

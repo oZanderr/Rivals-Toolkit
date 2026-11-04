@@ -921,6 +921,7 @@ mod tests {
             native_leaves: Vec::new(),
             tag_bounds: Vec::new(),
             tagged_absent: Vec::new(),
+            stock_gaps: Vec::new(),
             script_tokens: Default::default(),
             text_histories: Default::default(),
             text_flags: Default::default(),

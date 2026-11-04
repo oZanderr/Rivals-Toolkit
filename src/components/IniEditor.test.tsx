@@ -1,7 +1,7 @@
-import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { render, screen, waitFor } from "@/test/render";
 import { createTauri, installTauri, type TauriMock } from "@/test/tauri";
 
 vi.mock("@tauri-apps/api/core", async () => {
@@ -91,14 +91,10 @@ async function mount() {
   return user;
 }
 
-/// Mounts with no paks, then picks the Plugins source from the dropdown.
+/// Mounts with no paks, where the plugins' configs open on their own.
 async function openPlugins(gameRunning = false) {
   const user = userEvent.setup();
   render(<IniEditor gamePath={GAME} isActive gameRunning={gameRunning} />);
-  const picker = screen.getByRole("combobox") as HTMLButtonElement;
-  await waitFor(() => expect(picker.disabled).toBe(false));
-  await user.click(picker);
-  await user.click(await screen.findByRole("option", { name: "Plugin configs" }));
   await waitFor(() => expect(document.querySelector(".cm-content")).not.toBeNull());
   return user;
 }
@@ -121,10 +117,11 @@ async function save(user: ReturnType<typeof userEvent.setup>, nth: number) {
 }
 
 describe("IniEditor with loose files", () => {
-  it("lists the plugins' configs and reads one from disk when its tab opens", async () => {
+  it("opens the plugins' configs when no pak has INI, reading one when its tab opens", async () => {
     mockBackend({ [PIGEON]: "log = 0", [SIGEON]: "x=1" }, { paks: [], plugins: [PIGEON, SIGEON] });
     await openPlugins();
 
+    expect(screen.getByRole("combobox").textContent).toContain("Plugin configs");
     expect(screen.getByText("PigeonPass.ini")).toBeTruthy();
     expect(screen.getByText("SigeonLoader.ini")).toBeTruthy();
     expect(tauri.callsTo("read_ini_file")).toEqual([{ path: PIGEON }]);
@@ -179,6 +176,14 @@ describe("IniEditor with loose files", () => {
 });
 
 describe("IniEditor with paks", () => {
+  it("opens a lone pak rather than the plugins' configs", async () => {
+    mockBackend({ [ENGINE]: "a=1" }, { plugins: [PIGEON] });
+    await mount();
+
+    expect(screen.getByRole("combobox").textContent).toContain("config_P.pak");
+    expect(tauri.callsTo("read_ini_file")).toHaveLength(0);
+  });
+
   it("reads a file when its tab is opened, not when the pak is selected", async () => {
     mockBackend({ [ENGINE]: "a=1\nb=2", [DEVICE]: "c=3" });
     const user = await mount();

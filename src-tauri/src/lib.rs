@@ -10,7 +10,6 @@ mod game_logs;
 mod game_search;
 mod game_status;
 mod game_user_settings;
-mod import_index;
 mod ini_files;
 mod launch_record;
 mod mappings_remote;
@@ -21,6 +20,8 @@ mod paths;
 mod plugins;
 mod settings;
 mod sounds;
+mod textures;
+mod translations;
 mod tweaks;
 mod update_check;
 mod updater;
@@ -63,12 +64,18 @@ pub fn run() {
             settings::set_game_path,
             settings::get_mod_compression_level,
             settings::set_mod_compression_level,
+            settings::get_conform_mods,
+            settings::set_conform_mods,
             settings::get_vanilla_compression_level,
             settings::set_vanilla_compression_level,
             settings::get_game_running_check_enabled,
             settings::set_game_running_check_enabled,
             settings::get_mod_conflict_check_enabled,
             settings::set_mod_conflict_check_enabled,
+            settings::get_tab_layout,
+            settings::set_tab_layout,
+            settings::get_collapsed_mod_folders,
+            settings::set_collapsed_mod_folders,
             // update_check
             update_check::check_for_update,
             update_check::get_auto_check_updates,
@@ -95,6 +102,7 @@ pub fn run() {
             pak::commands::cancel_repack_iostore,
             pak::commands::is_utoc_obfuscated,
             pak::commands::repack_mod_in_place,
+            pak::commands::conform_mod,
             pak::commands::list_utoc_contents,
             pak::commands::extract_utoc,
             pak::commands::extract_utoc_file,
@@ -151,6 +159,10 @@ pub fn run() {
             mods::commands::delete_mod,
             mods::commands::delete_mods,
             mods::commands::install_mods,
+            mods::subfolders::move_mods,
+            mods::subfolders::create_mod_folder,
+            mods::subfolders::rename_mod_folder,
+            mods::subfolders::delete_mod_folder,
             // plugins
             plugins::get_plugins_status,
             plugins::set_plugin_enabled,
@@ -180,10 +192,7 @@ pub fn run() {
             mods::profiles::preview_mod_profile,
             mods::profiles::apply_mod_profile,
             // asset_view
-            asset_view::inspect_asset,
             asset_view::get_mod_report,
-            asset_view::parent_components,
-            asset_view::mod_copy_of,
             asset_view::revert_mod_asset,
             asset_view::search_mod,
             asset_view::get_mappings_status,
@@ -192,37 +201,14 @@ pub fn run() {
             mappings_remote::download_remote_mapping,
             asset_view::get_asset_mod_name,
             asset_view::set_asset_mod_name,
-            asset_view::get_asset_save_target,
-            asset_view::set_asset_save_target,
-            asset_view::export_bytes_view,
-            asset_view::value_bytes,
-            asset_view::export_script_view,
-            asset_view::export_vm_view,
-            asset_view::script_call_preview,
-            asset_view::assemble_preview,
-            asset_view::new_function_preview,
-            asset_view::export_payload,
-            asset_view::export_bulk,
-            asset_view::enum_options,
-            asset_view::text_cultures,
-            asset_view::inherited_values,
-            asset_view::get_text_culture,
-            asset_view::set_text_culture,
-            asset_view::save_asset_edits,
-            asset_view::plan_export_removal,
-            asset_view::plan_import_removal,
-            asset_view::unused_names,
+            translations::text_edited_mods,
+            translations::rebuild_mod_text,
             asset_view::rename_mod_package,
-            asset_view::plan_export_edits,
-            asset_view::plan_dependency_edits,
-            asset_view::plan_export_copy,
-            asset_view::save_export_copy,
             game_search::search_game,
             game_search::cancel_game_search,
-            import_index::import_index_status,
-            import_index::build_import_index,
-            import_index::importers_of,
-            import_index::check_object_path,
+            textures::export_textures,
+            textures::import_textures,
+            textures::cancel_texture_batch,
             // game_logs
             game_logs::list_game_sessions,
             game_logs::open_game_log,

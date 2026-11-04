@@ -64,7 +64,11 @@ impl ArchetypeSource<'_> {
     }
 
     /// The package `name` names, parsed for its stored values, from the cache when it holds it.
-    fn package(&self, name: &str, loaded: &mut usize) -> Result<Arc<ParsedPackage>, String> {
+    pub(crate) fn package(
+        &self,
+        name: &str,
+        loaded: &mut usize,
+    ) -> Result<Arc<ParsedPackage>, String> {
         static CACHE: OnceLock<Mutex<HashMap<String, Arc<ParsedPackage>>>> = OnceLock::new();
         let container = self.container();
         let key = format!("{}\u{1}{container}\u{1}{name}", self.game_root);

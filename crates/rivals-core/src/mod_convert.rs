@@ -69,6 +69,15 @@ pub struct ConvertReport {
     pub copied_blocks: usize,
     /// Blocks compressed again.
     pub recompressed_blocks: usize,
+    /// Packages a stock editor cooked, brought to this game's layout on the way back in.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub conformed: Vec<crate::pak::pack::ConformedPackage>,
+    /// Packages a stock editor cooked that could not be brought to it, packed as they were.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unconformed: Vec<crate::pak::pack::UnconformedPackage>,
+    /// Whether the mod was written: a dry run, or a conversion to this game's layout that found
+    /// nothing to convert, leaves it as it was.
+    pub written: bool,
 }
 
 /// Deletes the staging tree on every way out.
@@ -203,6 +212,57 @@ pub fn convert_mod(
     cancel: &AtomicBool,
     progress: &(dyn Fn(ConvertPhase, usize, usize) + Sync),
 ) -> Result<ConvertReport, String> {
+    convert(
+        game_root, files, to, io, dry_run, false, pool, cancel, progress,
+    )
+}
+
+/// Brings the IoStore mod at `files` to this game's layout where it is: every package goes out to
+/// loose files and back, which is where a stock editor's are converted. A mod with nothing a stock
+/// editor cooked is left as it was, and the report says so.
+pub fn conform_mod(
+    game_root: &str,
+    files: &ModFiles,
+    io: &IoStoreOptions,
+    dry_run: bool,
+    cancel: &AtomicBool,
+    progress: &(dyn Fn(ConvertPhase, usize, usize) + Sync),
+) -> Result<ConvertReport, String> {
+    if !(files.part("utoc").is_file() && files.part("ucas").is_file()) {
+        return Err(format!(
+            "{} is a plain pak, which the game loads no packages from: convert it to IoStore instead, which brings its packages to this game's layout on the way",
+            files.stem
+        ));
+    }
+    let io = IoStoreOptions {
+        conform: true,
+        ..io.clone()
+    };
+    convert(
+        game_root,
+        files,
+        ModFormat::Iostore,
+        &io,
+        dry_run,
+        true,
+        None,
+        cancel,
+        progress,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn convert(
+    game_root: &str,
+    files: &ModFiles,
+    to: ModFormat,
+    io: &IoStoreOptions,
+    dry_run: bool,
+    conforming: bool,
+    pool: Option<&rayon::ThreadPool>,
+    cancel: &AtomicBool,
+    progress: &(dyn Fn(ConvertPhase, usize, usize) + Sync),
+) -> Result<ConvertReport, String> {
     if files.disabled {
         return Err(format!(
             "{} is switched off; switch it on to convert it",
@@ -212,6 +272,16 @@ pub fn convert_mod(
     let live_pak = files.part("pak");
     validate_target(game_root, &live_pak)?;
     let stem = files.stem.clone();
+    // The game can start while the mod is rebuilt, and holds its files open once it runs.
+    let may_swap = || -> Result<(), String> {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("Repack cancelled".to_string());
+        }
+        if crate::game_status::should_block_for_game() {
+            return Err(crate::game_status::game_running_error());
+        }
+        Ok(())
+    };
     let live_utoc = files.part("utoc");
     let from_iostore = live_utoc.is_file() && files.part("ucas").is_file();
     let to_iostore = to == ModFormat::Iostore;
@@ -247,6 +317,7 @@ pub fn convert_mod(
     // compressed, as a rebuild would.
     if to_iostore
         && from_iostore
+        && !conforming
         && let Some(direct) = copies_directly(game_root, &live_utoc)?
     {
         let copied = iostore_out::copy_container(
@@ -256,7 +327,7 @@ pub fn convert_mod(
             &IoStoreOptions {
                 obfuscate: Some(obfuscate),
                 reencode: io.reencode || !direct.compressed,
-                ..*io
+                ..io.clone()
             },
         )?;
         progress(ConvertPhase::Repacking, 1, 1);
@@ -264,7 +335,16 @@ pub fn convert_mod(
             return Err("Repack cancelled".to_string());
         }
         let staged_pak = staged.join(format!("{stem}.pak"));
-        let contents_out = swap_checked(files, &stem, &staged, to, &contents_in, &[], dry_run)?;
+        let contents_out = swap_checked(
+            files,
+            &stem,
+            &staged,
+            to,
+            &contents_in,
+            &[],
+            dry_run,
+            &may_swap,
+        )?;
         return Ok(ConvertReport {
             container_name: stem,
             format: to.name(),
@@ -277,6 +357,9 @@ pub fn convert_mod(
             direct: true,
             copied_blocks: copied.copied_blocks,
             recompressed_blocks: copied.recompressed_blocks,
+            conformed: Vec::new(),
+            unconformed: Vec::new(),
+            written: !dry_run,
         });
     }
 
@@ -336,6 +419,7 @@ pub fn convert_mod(
     let mut shader_libraries = Vec::new();
     let mut left_out = Vec::new();
     let mut warnings = Vec::new();
+    let (mut conformed, mut unconformed) = (Vec::new(), Vec::new());
     for folder in [&assets_dir, &carried_dir] {
         fs::create_dir_all(folder).map_err(|e| format!("create {}: {e}", folder.display()))?;
     }
@@ -353,7 +437,7 @@ pub fn convert_mod(
             &staged.join(format!("{stem}.utoc")),
             &IoStoreOptions {
                 obfuscate: Some(obfuscate),
-                ..*io
+                ..io.clone()
             },
             &carry,
             &|| shader_library::game_library_names(&crate::paths::paks_dir(game_root)),
@@ -371,6 +455,8 @@ pub fn convert_mod(
         shader_libraries = packed.shader_libraries;
         left_out = packed.left_out;
         warnings = packed.warnings;
+        conformed = packed.conformed;
+        unconformed = packed.unconformed;
         if from_iostore && !only_carried && carried_pak_entries > 0 {
             // Fold the carried entries in beside the listing just written.
             let beside = temp.join("beside");
@@ -389,7 +475,18 @@ pub fn convert_mod(
         return Err("Repack cancelled".to_string());
     }
 
-    let contents_out = swap_checked(files, &stem, &staged, to, &contents_in, &left_out, dry_run)?;
+    // Converting to this game's layout writes only when there was something to convert.
+    let dry_run = dry_run || (conforming && conformed.is_empty());
+    let contents_out = swap_checked(
+        files,
+        &stem,
+        &staged,
+        to,
+        &contents_in,
+        &left_out,
+        dry_run,
+        &may_swap,
+    )?;
 
     Ok(ConvertReport {
         container_name: stem,
@@ -403,6 +500,9 @@ pub fn convert_mod(
         direct: false,
         copied_blocks: 0,
         recompressed_blocks: 0,
+        conformed,
+        unconformed,
+        written: !dry_run,
     })
 }
 
@@ -444,7 +544,9 @@ fn copies_directly(game_root: &str, utoc: &Path) -> Result<Option<Direct>, Strin
 }
 
 /// Holds what was staged to everything the mod held, but the shader archives the pack left out and
-/// warned about, then swaps it in unless `dry_run`. Gives what the staged mod holds.
+/// warned about, then swaps it in unless `dry_run` or `may_swap` refuses at the last moment. Gives
+/// what the staged mod holds.
+#[allow(clippy::too_many_arguments)]
 fn swap_checked(
     files: &ModFiles,
     stem: &str,
@@ -453,6 +555,7 @@ fn swap_checked(
     contents_in: &HashSet<String>,
     left_out: &[String],
     dry_run: bool,
+    may_swap: &dyn Fn() -> Result<(), String>,
 ) -> Result<HashSet<String>, String> {
     let staged_pak = staged.join(format!("{stem}.pak"));
     let contents_out = mod_contents(&staged_pak, to == ModFormat::Iostore)?;
@@ -473,6 +576,7 @@ fn swap_checked(
 
     check_staged(staged, stem, to)?;
     if !dry_run {
+        may_swap()?;
         // The shared store may still hold the live container open, which Windows will not let the
         // swap move.
         containers::drop_cached_store();
@@ -513,6 +617,8 @@ mod tests {
         oodle_level: None,
         obfuscate: None,
         reencode: false,
+        conform: true,
+        mappings: None,
     };
 
     /// A game root whose `~mods` holds one plain pak with an INI in it.
@@ -609,6 +715,45 @@ mod tests {
         assert!(err.contains("switched off"), "{err}");
         assert!(off.part("pak").is_file());
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A cancel or the game starting while the mod was rebuilt stops the swap with the rebuild
+    /// done, and the live mod is left as it was.
+    #[test]
+    fn a_refused_swap_leaves_the_live_mod_as_it_was() {
+        let (root, files) = ini_mod("refused");
+        let live = files.part("pak");
+        let before = fs::read(&live).expect("live pak");
+        let staged = scratch("refused-staged");
+        plain::write_files(
+            &staged.join(format!("{}.pak", files.stem)),
+            vec![(
+                "Marvel/Config/DefaultEngine.ini".into(),
+                b"[Core]\nA=2\n".to_vec(),
+            )],
+            &PakOptions {
+                compression: PackCompression::Zlib,
+                oodle_level: None,
+            },
+        )
+        .expect("the rebuilt mod");
+        let contents_in = mod_contents(&live, false).expect("contents");
+        let err = swap_checked(
+            &files,
+            &files.stem,
+            &staged,
+            ModFormat::Pak,
+            &contents_in,
+            &[],
+            false,
+            &|| Err("the game started".to_string()),
+        )
+        .unwrap_err();
+        assert_eq!(err, "the game started");
+        assert_eq!(fs::read(&live).expect("live pak"), before);
+        assert!(!live.with_extension("pak.bak").exists());
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&staged);
     }
 
     /// A rebuild that left out one of the files the format needs stops before the swap.

@@ -9,11 +9,13 @@ It combines a React frontend with a Tauri/Rust backend to provide:
 - ASI plugin management, and a view of the proxy DLL that loads them
 - pak-based INI and game settings tweak tooling
 - an INI editor for the configs inside paks and loose ones such as plugin settings
-- `.uasset` inspection and editing: property trees, data tables, string tables, animation keys
+- textures saved and replaced in bulk, a mod's contents report, and a search of the game, each hit
+  copying the `rivals-cli` command that shows it
 - shader cache cleanup and game launch helpers
 
 It also ships `rivals-cli`, a command-line tool over the same engine for scripting config tweaks and
-pak INI edits. See [Command Line](#command-line).
+pak INI edits, and the only place packages are inspected and edited. See
+[Command Line](#command-line).
 
 Current platform support: Windows only.
 
@@ -122,8 +124,9 @@ cargo test --workspace
 
 ## Command Line
 
-`rivals-cli.exe` ships in the release zip next to the desktop app and scripts the same config-tweak
-and pak INI engine. It reads the game path the app saved, so `--game-root` is only needed when that
+`rivals-cli.exe` ships as its own download, `rivals-cli-<version>-windows-x64.zip`, with the Oodle
+DLL it reads compressed paks with, and scripts the same config-tweak and pak INI engine. The app's
+updater updates only the app, so download a new CLI with each release you want it from. It reads the game path the app saved, so `--game-root` is only needed when that
 is unset or you want a different install. In a dev checkout, run it with
 `cargo run -p rivals-cli -- <args>`.
 
@@ -135,6 +138,9 @@ rivals-cli mods list --all-ini --no-recursive         # any INI, top level of ~m
 
 rivals-cli logs list --crashes                        # game sessions that crashed, the newest first
 rivals-cli logs analyze latest-crash                  # the last crash, and the mods its errors name
+
+rivals-cli text list "Jeff the Land Shark"            # texts that mention him, as the game shows them
+rivals-cli text set 101_Replay_ST/TXT_Replay_Sign_New "[NEWEST] " --into MyText
 
 rivals-cli tweaks list                                # the tweak catalogue
 rivals-cli tweaks status --pak MyMod                  # which tweaks a pak has on
@@ -151,10 +157,12 @@ rivals-cli ini set   --pak MyMod --file Marvel/Config/DefaultEngine.ini=./Engine
 rivals-cli ini unset --pak MyMod r.Foo
 ```
 
-A mod is named the same way everywhere: by a path to its `.pak` or `.utoc`, or by its whole name in
-`~mods`, such as `MyMod_9999999_P`, with or without the extension and in any case, switched on or
-off. Nothing short of the whole name is taken: a part of one is refused, with the installed names it
-may have meant. The `mods` commands take the mod as their first argument, `mods check
+A mod is named the same way everywhere: by a path to its `.pak` or `.utoc`, by its whole name in
+whichever folder of `~mods` it is, such as `MyMod_9999999_P`, or by its path below `~mods`, such as
+`Skins/MyMod_9999999_P`, with or without the extension and in any case, switched on or off. Nothing
+short of the whole name is taken: a part of one is refused, with the installed names it may have
+meant. A name two folders hold is refused with the path below `~mods` naming each, `./MyMod_9999999_P`
+for the one at the top. The `mods` commands take the mod as their first argument, `mods check
 MyMod_9999999_P`, and those working on several take each in turn, `mods disable A B`; `paks`, the
 family's old name, still works, and `ini` and `tweaks` take the mod with `--pak`.
 
@@ -172,8 +180,8 @@ A save goes `--into` a mod named as above. `--into MyMod` also finds `MyMod_9999
 desktop app names the mods it saves into, and a name no installed mod has makes a new mod: the save
 says so, and names any installed mod the name is close to. Without `--into` a save goes into the
 mod the desktop app last saved into, then `AssetEdits`. A save goes only into a switched-on mod
-whose name ends `_9999999_P`, and says why of any other: one in `~mods` by its name or a path, or an
-IoStore mod anywhere else, such as a build kept in its own folder, by a path to one of its files.
+whose name ends `_9999999_P`, and says why of any other: one in `~mods` or a folder of it by its name
+or a path, or an IoStore mod anywhere else, such as a build kept in its own folder, by a path to one of its files.
 That one is written where it is and never made, and the game loads nothing from it, so a mod of its
 name in `~mods` is another mod, which the save neither reads nor writes. A save into a mod
 already holding the asset builds on the mod's copy; with `--from` naming somewhere else it is
@@ -188,7 +196,8 @@ it is whether it is switched on or off, and `mods replace` changes a switched-of
 
 Reading and editing packages needs a `.usmap` mappings file for the game's build, since Marvel
 Rivals ships unversioned properties. Point `--usmap` at the file or at a folder holding one, or set
-it once in the app's settings. A mod saved from the editor with tagged properties names what it
+it once in the app's settings. `--usmap` wins over the setting, and a file named either way that is
+not there or does not read is said on stderr, never swapped for another. A mod saved from the editor with tagged properties names what it
 stores, and every edit works on it as on the game's own packages. Its instanced structs and the
 reflected parts of native structs are tagged blocks too, read as such, and when a value does not
 read, the package is read again with its own classes and the Blueprint ones it imports, which name
@@ -264,9 +273,8 @@ or derives from, itself or through one of its package's own classes below it, is
 those packages: the import index finds them, and is built first when it has not been. A type is written as a `local` line takes it (see below), a Blueprint one
 loading after its type as for a struct's field, and `--class` picks the class when the package
 holds more than one. A package whose classes its own records describe otherwise than the mappings
-file does, as after this, is read with its own records. The app's script view has New variable, for
-the class of the function shown. A function can be added to a Blueprint class, and an existing one
-rewritten whole, as text: see below.
+file does, as after this, is read with its own records. A function can be added to a Blueprint
+class, and an existing one rewritten whole, as text: see below.
 
 `asset add-field --name X --type T` adds a field to a Blueprint struct after its own, named as the
 editor names a member: `X_<n>_<GUID>`, the guid the same each time the same field is added. Each
@@ -293,8 +301,7 @@ constant lists a value for every field, so the save gives each such constant a d
 fields, zero, false, none or empty, and writes that package into the mod with the struct; a script
 that cannot change size, a field type whose constant is not written here (a struct or a
 container), or a package another mod holds is refused instead. `--struct` picks the struct when the
-package holds more than one. In the app, a
-Blueprint struct's export actions offer Add field.
+package holds more than one.
 
 `asset edit-script` changes one thing inside a function's bytecode, addressed by the statement
 offset `asset script` prints: a literal by its place in the statement (`--const`) or by where it
@@ -348,6 +355,8 @@ rivals-cli asset rename-package /Game/Mods/MyThing/DA_Copy --to /Game/Mods/MyThi
 rivals-cli asset deps    /Game/Data/DA_Thing --export 3                                 # load order
 rivals-cli asset script  /Game/Blueprints/BP_Thing --export ExecuteUbergraph_BP_Thing   # disassembly
 rivals-cli asset script  /Game/Blueprints/BP_Thing --export 26 --as-text > fn.txt       # assembler text
+rivals-cli asset script  /Game/Blueprints/BP_Thing --export 26 --pseudo                 # pseudo-code
+rivals-cli asset script  /Game/Blueprints/BP_Thing --export 26 --dot > fn.dot           # control flow graph
 rivals-cli asset vm      /Game/VFX/NS_Thing                                             # its Niagara scripts
 rivals-cli asset vm      /Game/VFX/NS_Thing --export SpawnScript --constants            # VM disassembly
 rivals-cli asset edit-vm /Game/VFX/NS_Thing --export SpawnScript --at 0x00BD --operand 0 --value 0.5 --into MyMod
@@ -358,6 +367,7 @@ rivals-cli asset copy-export /Game/Maps/MyMap --source /Game/Maps/Other --source
 rivals-cli asset audit pakchunk0-Windows --filter Data/DataTable
 rivals-cli asset audit pakchunk0-Windows --skip-blueprint   # native classes only
 rivals-cli asset audit game --text-check                   # every script back byte for byte from its own text
+rivals-cli asset audit game --flow-check                   # every script as pseudo-code, each statement once
 ```
 
 `asset set` names a value two ways. `--export` and `--path` find it by the fields leading to it,
@@ -391,11 +401,21 @@ names, read as a save reads its asset unless `--source-from` says where, under `
 lists it in a level's actors with `--level`. `asset revert` takes one asset back out of a mod, so the
 game's own copy loads again; a mod left holding nothing is deleted, which `--dry-run` says first.
 
+`asset importers` lists the packages that import an object (`/Game/Path/Asset.Object:Sub`) or
+anything in a package, from the import index, which removal and rename plans read too. The index
+keeps the game and each enabled mod apart, so a package a mod ships is answered from the mod's
+copy, as the game loads it. It is built the first time a command needs it, in a few seconds, and
+kept in the user cache folder; after that only what changed is read again: a mod saved, switched
+on or off reads that mod alone, and a game update reads the game. `--build` reads everything
+again. Each write of it deletes an index an older build wrote, one for an install that is gone,
+and one an interrupted build left half written. A package a walk could not read is named as a
+warning wherever the index is used.
+
 ```bash
 rivals-cli asset hex       /Game/Data/DA_Thing --export 3 --offset 0x40      # an export's bytes, from an offset
 rivals-cli asset fields    /Game/Data/S_Thing --export S_Thing               # the fields a struct or class declares
 rivals-cli asset dump      /Game/Data/DA_Thing --export 3 --inherited        # unset values as its archetypes hold them
-rivals-cli asset importers /Game/Data/DA_Thing --build                       # every package importing it, from the import index
+rivals-cli asset importers /Game/Data/DA_Thing                               # every package importing it, from the import index
 rivals-cli asset edit-imports /Game/Data/DA_Thing --import -12 --path /Game/Data/DA_Other.DA_Other --into MyMod
 rivals-cli asset edit-export  /Game/Data/DA_Thing --export 3 --set-flag Public --clear-flag Transactional --into MyMod
 rivals-cli asset deps         /Game/Data/DA_Thing --export 3 --cbs 6,-39 --into MyMod --dry-run
@@ -431,20 +451,21 @@ rivals-cli asset audit --dir D:\Mods\MyMod --limit 200
 `asset search` finds where the game's scripts name something: a call, a bound or broadcast delegate,
 a string, a name constant, an object, or a variable read or written. It reads each package from the
 copy the game loads, enabled mods included and labelled. A script search parses only the packages
-holding functions, which takes under half a minute for the whole game; `--values` searches stored
-values too, at any depth, which means reading every package and takes about a minute, or less with
-`--filter`. `--kind` keeps one kind of term, `--word` matches whole words only, and `--no-mods`
-reads the base game alone. `--kind write` lists only where a variable is assigned or changed in
-place: a call changing a variable it is handed counts only for the engine functions known to, the
-array, map and set functions, timer handles, random streams and gameplay tag containers, since
-nothing in the bytecode says which arguments other calls change. A call shows with its arguments,
-and `--kind bind` and `--kind broadcast` tell where a delegate is bound or unbound from where it is
-fired (`delegate` is both). With `--values` a field is found by its name too, with what it holds,
-and a table's value names its row and the row's id, as `[GamePlayModeId 600]`; `--kind value` and
-`--kind field` keep one or the other. `--no-self` leaves out a package's paths to its own objects
-where its own name is what matched, so an id finds who refers to it. `--by hero` and `--by ability`
-list the places under the hero and ability their path names, a mode's or an event's version of an
-ability flagged and listed after the game's own.
+holding functions, which the import index records (built once in a few seconds, then read again
+only for what changed), so it takes a couple of seconds for the whole game; `--values` searches
+stored values too, at any depth, which means reading every package and takes about a minute, or
+less with `--filter`. `--timings` prints how long each part took. `--kind` keeps one kind of term,
+`--word` matches whole words only, and `--no-mods` reads the base game alone. `--kind write` lists
+only where a variable is assigned or changed in place: a call changing a variable it is handed
+counts only for the engine functions known to, the array, map and set functions, timer handles,
+random streams and gameplay tag containers, since nothing in the bytecode says which arguments other
+calls change. A call shows with its arguments, and `--kind bind` and `--kind broadcast` tell where a
+delegate is bound or unbound from where it is fired (`delegate` is both). With `--values` a field is
+found by its name too, with what it holds, and a table's value names its row and the row's id, as
+`[GamePlayModeId 600]`; `--kind value` and `--kind field` keep one or the other. `--no-self` leaves
+out a package's paths to its own objects where its own name is what matched, so an id finds who
+refers to it. `--by hero` and `--by ability` list the places under the hero and ability their path
+names, a mode's or an event's version of an ability flagged and listed after the game's own.
 
 `asset members` lists a Blueprint class's variables and functions, or with `--function` a
 function's parameters and locals, with what uses each: a field path or a call in a script, a call
@@ -537,17 +558,22 @@ rivals-cli asset rename-member /Game/Mods/MyMod/BP_Loader --member "Msg UI" --to
 `asset texture` shows a texture's pixel format, size and mips, and where each mip's pixels are:
 inline in the export, or in the package's `.ubulk` or `.uptnl`. The game does not install the
 optional `.uptnl` data, so a texture keeping its largest mips there has only the smaller ones, and
-a cook can leave out a texture's largest mips altogether. `--out FILE.png` saves the largest mip the
-package has, or `--mip N`, decoded from 8-bit color or grey, DXT1, DXT3, DXT5, BC4, BC5 or BC7; a
-cube's six faces and an array's or a volume's slices come out stacked top to bottom. A texture
-holding high dynamic range values, half or float color or red, or BC6H, saves with `--out
-FILE.exr` as OpenEXR instead, in halves or floats as the texture holds them, negative values and
-values above 1 kept; a one-channel texture comes out grey.
+a cook can leave out a texture's largest mips altogether. `--out FILE` saves the largest mip the
+package has, or `--mip N`, as the kind of image the file is named for: a PNG, TGA or BMP decoded
+from 8-bit color or grey, DXT1, DXT3, DXT5, BC4, BC5 or BC7, a cube's six faces and an array's or a
+volume's slices stacked top to bottom. A texture holding high dynamic range values, half or float
+color or red, or BC6H, saves as OpenEXR (`.exr`) instead, in halves or floats as the texture holds
+them, negative values and values above 1 kept; a one-channel texture comes out grey. A `.dds` file
+takes either kind as the texture's own bytes, nothing decoded: that mip and every one below it, a
+cube as a cube and an array as an array. A volume goes out stacked in an image.
 
 `--in FILE` gives a texture an image's pixels at the image's size, encoded in the texture's own
-format, and saves it into the mod: a PNG for an 8-bit texture, an OpenEXR file for a high dynamic
-range one, which a one-channel texture takes the red of. The other kind is refused, naming the kind
-the texture takes. A cube takes its six faces stacked top to bottom as `--out` writes them (+X, -X,
+format, and saves it into the mod: a PNG, TGA, BMP or JPEG for an 8-bit texture, an OpenEXR file
+for a high dynamic range one, which a one-channel texture takes the red of. The other kind is
+refused, naming the kinds the texture takes. A DDS file in the texture's own format gives its mips
+as they are, its blocks never encoded again, and the mips it lacks are built from its smallest; an
+sRGB variant counts as its plain format. A DDS in another format is read as its largest mip's
+pixels and encoded like an image, and a volume DDS is refused. A cube takes its six faces stacked top to bottom as `--out` writes them (+X, -X,
 +Y, -Y, +Z, -Z), each face square, and an array or a volume takes its slices the same way, as many
 as it has. Its mips are rebuilt by halving: one if it had one, else a chain as long as it had at
 the old size, the smallest as many inline as before and the rest in its `.ubulk`, which the game
@@ -576,8 +602,60 @@ too.
 rivals-cli asset texture /Game/Mods/MyMod/T_Logo
 rivals-cli asset texture /Game/Marvel/UI/Textures/T_Logo --from game --out logo.png --mip 0
 rivals-cli asset texture /Game/Marvel/UI/Textures/T_Logo --in logo.png --into MyMod_9999999_P
+rivals-cli asset texture /Game/Marvel/Characters/1014/1014001/Textures/T_1014001_Body_D --from game --out body.dds
+rivals-cli asset texture /Game/Marvel/Characters/1014/1014001/Textures/T_1014001_Body_D --in body.dds --into MyMod_9999999_P
 rivals-cli asset texture Marvel/Content/Marvel/Maps/KrakoaC/KrakoaC01/KrakoaC01_Art.umap --export Weightmap_120 --in w120.png --export Heightmap_0 --in height.png --into MyMod_9999999_P
 rivals-cli asset texture /Game/Marvel/Environment/Common/LightingRes/X20_Hdri/T_Lighthdr_002 --from game --out sky.exr
+```
+
+`asset textures SOURCE` does the same for every texture of the packages SOURCE holds that `--filter`
+keeps (repeatable, matched as `asset list` matches), on every core, and writes the mod once. A
+package's header says whether it holds a texture, so no other package is converted. `--out DIR`
+saves each texture at its package's path under DIR, `Marvel/Content/.../T_Body_D.png`, with the
+texture's name after the package's when the package is not named for it (`Lobby.Weightmap_120.png`),
+or its path below the package when another texture there shares its name, as a Niagara system's
+do. `--image png|tga|bmp|dds|exr` picks the kind, PNG by default; a texture holding high dynamic
+range values goes out as OpenEXR when an 8-bit kind is asked for, and an 8-bit one as a PNG when
+OpenEXR is. `--in DIR --into MOD` gives each texture the image named for it there, as `--out` names
+them, or named as its package anywhere under DIR when no other package has that name, and writes
+every package it changes in one rewrite of the mod: the packages are read, their images encoded
+and the packages patched, checked and converted on every core while one thread writes them, a
+handful at a time waiting, so memory follows the cores and not the batch. A package the mod holds
+is built on unless `--overwrite`, and `--dry-run` encodes and checks everything and writes nothing.
+An image or a texture that fails is listed with why and the rest go in, and the command fails.
+The summary times each part, the writer's wait included: a batch of BC7 waits on encoding, one of
+DDS files in their textures' own formats on writing.
+
+```bash
+rivals-cli asset textures game --filter Characters/1014/1014001/Textures --out punisher
+rivals-cli asset textures game --filter Characters/1014/1014001/Textures --out punisher-dds --image dds
+rivals-cli asset textures game --filter Characters/1014/1014001/Textures --in punisher --into MyMod_9999999_P --dry-run
+rivals-cli asset textures MyMod_9999999_P --in punisher --into MyMod_9999999_P --quality best
+```
+
+`asset mesh` shows a mesh's material slots: each slot's material, its gameplay tags (which the game
+uses to hide or swap parts of a skin) and the LODs that hide it by default. It also shows a static
+mesh's LOD screen sizes, and a skeletal mesh's bone count, or with `--bones` every bone and the one
+it hangs from. Each is an ordinary value for `asset set`: `Materials[2].MaterialInterface` points a
+skeletal mesh's slot at another material, `Materials[2].MaterialTags` takes tags with `--op insert`,
+and `ScreenSize[1].Default` sets when a static mesh switches LOD. A static mesh keeps its slots twice,
+among its properties and again after its render data where the engine reads them, so a material set
+on either copy is written to both.
+
+```bash
+rivals-cli asset mesh Marvel/Content/Marvel/Characters/1014/1014001/Meshes/SK_1014_1014001.uasset --bones
+rivals-cli asset set Marvel/Content/Marvel/Characters/1014/1014001/Meshes/SK_1014_1014001.uasset --export SK_1014_1014001 --path Materials[2].MaterialTags --op insert --value MaterialTag.Hidden --into MySkin_9999999_P
+```
+
+An ability timeline (`AnimTimeline`) keeps its notify tracks, sections and montage path twice too:
+the properties `AnimNotifyTracks`, `AnimSections` and `MontagePath`, and the copy its own
+serializer writes after them, shown as `CookedNotifyTracks`, `CookedSections` and
+`CookedMontagePath`, which also names each notify's class. A value set on either copy is written to
+both, a property copy holding its default included. Adding, dropping or moving a track, a notify or
+a section would change one copy only, so it is refused. `--op set-raw` writes one copy alone.
+
+```bash
+rivals-cli asset set Marvel/Content/Marvel/AbilitySystem/1014/101433/Timeline_101433_01.uasset --export Timeline_101433_01 --path "AnimNotifyTracks[2].Notifies[0].StartTime" --value 0.5 --into MyMod_9999999_P
 ```
 
 `asset ability` sums up an ability from its six-digit id: its row in the hero's ability table (name,
@@ -909,6 +987,49 @@ rivals-cli mods convert MyOldMod_9999999_P --format iostore
 rivals-cli mods convert --all --format iostore --no-obfuscate
 ```
 
+### Mods cooked in the Unreal editor
+
+The game's engine writes a few things differently from a stock UE 5.3 editor: each skeletal mesh
+material slot carries a gameplay tag container after its UV densities, each of a static mesh's
+eight LOD screen sizes is followed by a second per-platform value, and each string table entry by a
+marker string. A package a stock editor cooked lacks them, and the game misreads everything after
+the first one. A package cooked without `-unversioned` also stamps the editor's engine versions in
+its header, which the game then reads it under instead of its own, and crashes on a mesh; the
+editor's Cook Content leaves the stamp out, a cook commandlet run by hand does not. Packing, installing and converting bring such packages to the game's layout as they
+go in: the missing parts are written empty, the material tag plugin's tags
+(`MaterialTagAssetUserData`) are written into the slots they name, and its hidden-by-default slots
+(`LODHiddenMaterials`) become each LOD's `DefaultHiddenMaterials`. The plugins' classes, which the
+game does not have, are named as the engine's `AssetUserData`. A 5.3 stamp is taken out of the
+header, which leaves the package as an `-unversioned` cook writes it; a stamp from another engine
+version is refused. A static mesh, which the game crashes on with tagged properties, has every
+export's properties written unversioned against the game's mappings and is refused without them,
+and each LOD screen size gets the distance the game switches to that LOD at, which a stock cook
+does not carry. The game picks a static mesh's LOD by distance at every View Distance quality but
+Cine, whatever the screen sizes say, so LOD 0 gets none, LODs 1 to 3 the 15, 45 and 130 m its own
+meshes switch at (each further LOD three times the one before), and the slots past the last LOD the
+value its meshes give a LOD they reach only through a low View Distance's LOD bias. `asset mesh`
+lists them, and `asset set --path "ScreenSize[1].Extra.Default"` changes one, in centimetres. A static mesh whose render data holds Nanite data, which the game does not
+draw, or the editor's distance field, where the game reads one in its own format, is refused and
+named with the setting to turn off before cooking again (Nanite on the mesh, Generate Mesh Distance
+Fields in the project); one whose render data the conversion cannot read through says it was not
+checked. Each report lists what it converted.
+
+Only a package cooked with tagged properties (`CanUseUnversionedPropertySerialization=False` under
+`[Core.System]`) is converted, since those are read by name and the fields the game inserted into
+its structs are no trouble to them. One cooked with unversioned properties would need every header
+renumbered against a stock schema, so it is left as it was and named, to be cooked again with
+tagged properties. `--no-conform` packs what a stock editor cooked
+as it is. `mods conform` converts mods already installed, going out to loose files and back, and
+leaves a mod with nothing to convert as it was; `mods check` names every package still in a stock
+editor's layout.
+
+```bash
+rivals-cli mods conform MySkin_9999999_P --dry-run
+rivals-cli mods conform MySkin_9999999_P OtherSkin_9999999_P
+rivals-cli mods install D:\Downloads\Skin.zip --no-conform
+rivals-cli mods pack    D:\Mods\MySkin --to MySkin_9999999_P --no-conform
+```
+
 ### Managing the mods folder
 
 `mods list` lists every mod in `~mods` with its rank in the load order (1 is the one whose copy of a
@@ -1008,6 +1129,40 @@ rivals-cli logs decode latest-crash --redact --out D:\crash.txt --overwrite
 rivals-cli logs key
 ```
 
+### Translations
+
+The game reads one translation file a language, `Marvel/Content/Localization/Game/<language>/Game.locres`,
+so a mod that changes what a text says ships its own copy of that whole file. The `text` commands
+read and write those copies. A text is named `NAMESPACE/KEY`, as `text list` prints it, or by the
+string table holding it and its key, `/Game/Marvel/Data/StringTable/101_Replay_ST.101_Replay_ST:KEY`.
+The language is the global `--culture`, which defaults to the app's setting, then English.
+
+`text list FILTER` lists the texts whose name or wording holds FILTER, and `text get TEXT` prints
+one. Both read what the game shows with the switched-on mods, or with `--from game` the game's own
+translations, or with `--from` a mod that mod's copy; `text list --from MOD` lists only the texts
+that mod words its own way.
+
+`text set TEXT WORDING` gives a text a wording in a mod, `--into` it as an asset save goes, and
+`text unset TEXT` gives it back the game's. A mod it makes is a container holding nothing but its
+header, with the translation files in the pak beside it, since the game logs out at login over a
+plain pak in `~mods`. Each writes the game's current translation file with
+every wording the mod gives over it, and keeps the wordings themselves in the toolkit's settings
+folder, so that after a patch changes the game's translations `text rebuild MOD`, or `--all` for
+every mod the toolkit keeps wordings for, writes the mod's copy again over the new one. A
+translation file a mod already ships that the toolkit did not write has its wordings taken in;
+one holding texts the game no longer has is written over only with `--overwrite`, which leaves
+them out. `mods check` warns when a mod's copy has fallen behind the game's.
+
+```bash
+rivals-cli text list "Jeff the Land Shark"
+rivals-cli text get 101_Replay_ST/TXT_Replay_Sign_New --culture ja --from game
+rivals-cli text get /Game/Marvel/Data/StringTable/101_Replay_ST.101_Replay_ST:TXT_Replay_Sign_New
+rivals-cli text set 101_Replay_ST/TXT_Replay_Sign_New "[NEWEST] " --into MyText --dry-run
+rivals-cli text unset 101_Replay_ST/TXT_Replay_Sign_New --into MyText
+rivals-cli text list --from MyText_9999999_P
+rivals-cli text rebuild --all --dry-run
+```
+
 ### Editing a package as JSON
 
 Rather than working out byte offsets, dump a package, edit the JSON, and let the tool work out the
@@ -1068,8 +1223,8 @@ what it read there. An import retarget or removal names its import by the path i
 ```
 
 A texture takes an image the same way: `textures` names each texture by `object` (or `export`)
-and its `image`, a file beside the edit file, with an optional `quality` of `fast`, `default` or
-`best`. Each image is encoded in its texture's own format against the package as the save reads
+and its `image`, a file beside the edit file of any kind `asset texture --in` takes, with an
+optional `quality` of `fast`, `default` or `best`. Each image is encoded in its texture's own format against the package as the save reads
 it, so it fits whatever copy the save builds on, and the textures of one package go in one save,
 from one edit file or from several a manifest merges, as `asset texture --in` saves them:
 
@@ -1134,6 +1289,14 @@ numbers, strings and names take forms that say which instruction holds them (`5`
 the bytes hold it. A text is assembled only for a function whose own text assembles back to its
 exact bytes, which `asset audit --text-check` counts across the game.
 
+`asset script --pseudo` reads a function rather than editing it: the same statements in the same
+order, with a condition and the code it skips nested as `if` and `else`, a loop as `while`, an
+event graph's sequences as the `push` and `pop` that run them, and a label where an event enters or
+a jump lands. Each statement prints once, and a jump that does not nest stays a `goto`; `asset
+audit --flow-check` holds every script in the game to that and counts the gotos. `--flow` lists the
+blocks the jumps divide the function into and the edges between them, following its flow stack so
+a pop leads where its push said, and `--dot` writes them for Graphviz.
+
 A text can give its function locals of its own, one `local Name: Type` line each ahead of the first
 statement; the function gains a field for each after the ones it has, so its parameters stay first.
 A type is `Bool`, `Byte`, `Int`, `Int64`, `Float`, `Double`, `Name`, `Str`, `Text`, `Object<path>`,
@@ -1178,7 +1341,7 @@ Glow(1.5f)`, finds it, and a call to it is held to its signature; `--class` pick
 the package holds more than one. A name the class or a Blueprint parent already uses is refused; a
 native parent's functions are listed nowhere the toolkit reads, so the save notes that it did not
 look. In an edit file a `script_texts` entry with `new_function` and `signature` in place of
-`export` does the same, and the app's script view has New function.
+`export` does the same.
 
 ### Niagara scripts
 
@@ -1192,10 +1355,7 @@ reads each entry, and the script's parameter store. GPU scripts carry no bytecod
 `--trace Particles.Color` follows each output whose name starts so back to what it is computed
 from, as one expression and as its leaves: each constant with the instruction and operand that read
 it, how many operands share it and every output its instruction reaches, and the particle values,
-inputs and data interface calls it also takes. An output whose leaves are all literals is baked. In the
-app, a `NiagaraScript` export's VM view shows the same listing beside its outputs: each opens to
-what it is made of, a leaf shows the instruction reading it, and a constant copies the `asset
-edit-vm` line that changes it.
+inputs and data interface calls it also takes. An output whose leaves are all literals is baked.
 
 ```bash
 rivals-cli asset vm /Game/VFX/NS_Thing                                       # the scripts
@@ -1220,6 +1380,70 @@ holding what the operand read, as the trace keys it (`lit+48=0x3F400000`):
 The save reads every script it changed back and holds it to the planned bytes. A script that
 carries data for the experimental VM, which fixes where its constants are when it is compiled, or
 whose bytecode is stored compressed, is refused; no shipped script has either.
+
+### Niagara colours
+
+`asset colors` lists where an effect's colours come from, grouped by emitter. A colour curve is
+read by its baked samples (its `ShaderLUT`, RGBA over the curve's time range): the cooked curve
+keeps no keys, and the game never bakes the samples again, so the samples are what it draws. Each
+of an emitter's scripts keeps its own copy of a curve, so a curve is listed once per script that
+holds it. A curve that also keeps its samples as a texture says so; a material reads that only
+where a renderer binds it, which no shipped effect does, so the samples are what draws. Colour arrays follow, then colour parameters: a user parameter's default (its copies
+in `ExposedParameters` and the system's compiled store), a script's own constant, and the colours
+the game swaps in for the other team, which the hit effects keep in `LocalizationParametersDefault`
+under names like `L10n.Muzzle_light_IsEnemyColor`. A parameter in a script's own store is otherwise
+a placeholder the run time fills, and is left out. Then the colours a CPU script writes, channel
+by channel, each saying when no renderer draws it: a channel written from a literal shows the
+`asset edit-vm` operand that changes it, and a computed one points at `asset vm --trace`. A GPU
+script's colours are shader code, so only the curves it samples are listed. A three- or
+four-component vector a renderer binds to a colour parameter is listed as a colour too, its X, Y and
+Z as red, green and blue; one kept in a parameter store is not. Last come each renderer's materials,
+with the colour parameters they draw with (a name holding `color`, `colour`, `tint` or `颜色`, but not
+`offset` or `softness`): the renderer's own values first, then each material's and its parents' in
+turn, nearest first, down to the base material's defaults, which its cook saves beside its shaders
+(`asset dump` shows them as its `CachedExpressionData`; its shaders keep their own copy, so changing
+them there is not known to change what the game draws). A parameter the renderer binds to a variable
+says so, since that variable sets it every frame. A source whose name mentions enemies is marked, as
+is one past 1 (HDR) or grey.
+
+`asset recolor` changes every curve, array and parameter in the package, or those `--export`
+(repeatable), `--param` or `--enemy` pick (`--param` also names a script colour, as `asset colors`
+lists it, or a material colour): `--tint R,G,B` multiplies each colour, `--paint R,G,B`
+gives each that hue and saturation at its own brightness, so fades and HDR glows keep their shape,
+and `--hue DEGREES` turns each hue, leaving greys grey. Alpha is never changed. Each edit is held
+to the value it read. Most effects keep their colours in their scripts, such as an update script
+giving each particle `Initial * (1.0, 0.26, 0.0)`, and `--scripts` changes those too. Each colour
+a renderer draws (its colour binding, a decal's `DecalColorBinding` among them, `Particles.Color`
+unless it binds another, or a colour or vector one of its colour parameters is bound to) is
+transformed just before the script writes it: the tool's sum goes in ahead of the outputs, on temp
+registers of its own, so every channel changes however the script worked it out, and the colours the
+drawn ones are worked out from stay as they were. A tint or a hue turn skips a colour worked out
+from its own last value, which would take it again every frame, and names it; a paint never builds
+up, so it goes on those too. An enemy pick changes no script colour, since a script works both
+teams' colours out in one value. A script the transform cannot go into safely is named and left as
+it is; none of Punisher's effects has one. `--materials` changes the renderers' material colours
+too, each set as the renderer's own value (its `MaterialParameters.VectorParameters`), which the
+engine applies over the material: only this effect changes, whatever else draws with the material. A
+colour the renderer binds to a variable is that variable's to set, so it is named and left, and
+changes with `--scripts` where a script writes it; so is a material layer's, which the renderer's
+values do not reach, and one the renderer's materials give different values. In an edit file a
+`vm_colors` entry makes a script's change, `"transform": "paint"` with the scale `k` each channel
+takes of the brightest, or `"linear"` with a `matrix` of rows:
+
+```json
+{"edits": {"vm_colors": [{"export": "47", "attribute": "Particles.Color", "transform": "paint", "k": [0.0, 1.0, 0.0]}]}}
+```
+
+```bash
+rivals-cli asset colors  /Game/VFX/NS_Thing                                   # every colour source
+rivals-cli asset colors  /Game/VFX/NS_Thing --samples                         # every curve sample
+rivals-cli asset recolor /Game/VFX/NS_Thing --paint 0.6,0.1,1 --into MyMod    # the whole effect purple
+rivals-cli asset recolor /Game/VFX/NS_Thing --enemy --hue 120 --into MyMod    # the other team's colours
+rivals-cli asset recolor /Game/VFX/NS_Thing --scripts --paint 0,1,0 --into MyMod  # scripts' colours too
+rivals-cli asset recolor /Game/VFX/NS_Thing --enemy --materials --paint 0,0.3,1 --into MyMod  # and the materials'
+rivals-cli asset recolor /Game/VFX/NS_Thing --export 0 --export 2 --tint 1,1,2 --dry-run --into MyMod
+rivals-cli asset recolor /Game/VFX/NS_Thing --scripts --param Emitter01.Color02 --paint 0,1,0 --into MyMod  # one script colour
+```
 
 `ini` and `tweaks` take `--pak`, a pak path or a mod's whole name in `~mods`. `--json` makes every
 command emit machine-readable output, and failures exit non-zero. `--dry-run` reports what a write command
@@ -1251,7 +1475,7 @@ The Plugins tab manages the `.asi` plugins in `Binaries/Win64/plugins` and shows
 - **Where plugins are looked for.** Beside the game and in `plugins`, which is where Minimal ASI Loader looks, and with Ultimate ASI Loader also in `scripts` and one folder down in each. A plugin beside the game takes the place of one of the same name in `plugins`, which Minimal ASI Loader then skips.
 - **Switching on and off.** A plugin or loader is switched off by adding `.disabled` to its name, which every loader skips. This works with the game open, since Windows lets a loaded DLL be renamed, and takes effect on the next launch.
 - **Companion files.** Files beside a plugin that carry its name, such as `PigeonPass.ini` or `PigeonPass.log`, are shown with it. An `.ini` opens in the INI Editor, anything else in its default app. Deleting a plugin asks before deleting them, and keeps them unless asked, since they can hold settings or licence keys.
-- **Installing.** Drop `.asi` files, folders, or zip, 7z and rar archives on the tab, or use Add. Each `.asi` goes into `plugins` with the files beside it that carry its name. A settings file already installed is kept rather than written over, a plugin already installed is replaced only once confirmed, and DLLs in what is dropped are skipped and reported, so a loader is never installed this way.
+- **Installing.** Drop `.asi` or `.dll` files, folders, or zip, 7z and rar archives on the tab, or use Add. Each `.asi` goes into `plugins` with the files beside it that carry its name, and a `.dll` dropped on its own goes in the same way under its `.asi` name, since a plugin is a DLL by another extension. A settings file already installed is kept rather than written over, a plugin already installed is replaced only once confirmed, and a loader DLL dropped on its own is refused while the DLLs inside a dropped folder or archive are skipped and reported, so a loader is never installed this way.
 - **The signature bypass's files** (its payload, and the `dsound.dll` it installed) are tagged, and switching either off or deleting it first warns that mods in `~mods` stop loading without it.
 
 ## INI Editor

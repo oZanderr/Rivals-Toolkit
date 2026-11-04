@@ -353,15 +353,16 @@ impl PathFilter {
         if self.0.is_empty() {
             return true;
         }
-        let path = path.replace('\\', "/");
+        let path = match path.contains('\\') {
+            true => std::borrow::Cow::Owned(path.replace('\\', "/")),
+            false => std::borrow::Cow::Borrowed(path),
+        };
         let lower = path.to_lowercase();
-        let name = package_name_of_entry(&path).map(|name| name.to_lowercase());
-        self.0.iter().any(|needle| {
-            lower.contains(needle.as_str())
-                || name
-                    .as_deref()
-                    .is_some_and(|name| name.contains(needle.as_str()))
-        })
+        self.0.iter().any(|needle| lower.contains(needle.as_str()))
+            || package_name_of_entry(&path).is_some_and(|name| {
+                let name = name.to_lowercase();
+                self.0.iter().any(|needle| name.contains(needle.as_str()))
+            })
     }
 }
 
@@ -592,13 +593,13 @@ pub fn list_game_packages(
 /// Conversion has nothing to say, and a context borrows its log for as long as it lives.
 static LOG: LazyLock<retoc::logging::Log> = LazyLock::new(retoc::logging::Log::no_log);
 
-/// Packages one converter reads before it is dropped, which is also how a walk over many packages
-/// splits them between threads. A converter keeps the header of every package it converts and
-/// every one those import, so a long walk with one would hold the whole game's headers; making one
-/// costs about forty packages' worth of work.
+/// Packages one converter reads before it is dropped, in a walk too long to share one. A converter
+/// keeps the header of every package it converts and every one those import, so a long walk with
+/// one would hold the whole game's headers; making one costs about forty packages' worth of work.
 pub const PACKAGES_PER_CONVERTER: usize = 512;
 
-/// The conversion caches for one store, held across as many packages as the caller reads.
+/// The conversion caches for one store, held across as many packages as the caller reads, from
+/// as many threads.
 ///
 /// A context fills with the store's script object table and the header of every package an import
 /// resolves through. Building one per package costs about forty times the package itself, so any
@@ -606,6 +607,11 @@ pub const PACKAGES_PER_CONVERTER: usize = 512;
 pub struct PackageConverter<'a> {
     context: FZenPackageContext<'a>,
 }
+
+const _: fn() = || {
+    fn shared<T: Sync>() {}
+    shared::<PackageConverter<'static>>();
+};
 
 impl<'a> PackageConverter<'a> {
     pub fn new(store: &'a dyn IoStoreTrait) -> Self {
@@ -618,6 +624,21 @@ impl<'a> PackageConverter<'a> {
             )
             .with_extra_script_objects(crate::script_objects::current()),
         }
+    }
+
+    /// A converter over the same store sharing this one's script object table, with caches of its
+    /// own: for a walk too long to keep one converter's caches throughout.
+    pub fn sibling(&self) -> Self {
+        Self {
+            context: self.context.sibling(),
+        }
+    }
+
+    /// Builds the script object table now, so the threads that share this converter or its
+    /// siblings do not each build it on first use.
+    pub fn prepare(&self) {
+        // A table that does not build fails each conversion with why, as it would unprepared.
+        let _ = self.context.prepare();
     }
 
     /// Converts one already-resolved package back to its legacy form.

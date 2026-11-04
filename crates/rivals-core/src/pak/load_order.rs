@@ -120,6 +120,15 @@ impl IoStoreTrait for LoadOrder {
             None => self.base().read(chunk_id),
         }
     }
+    fn read_prefix(&self, chunk_id: FIoChunkId, len: u64) -> retoc::anyhow::Result<Vec<u8>> {
+        if self.skipped(chunk_id) {
+            return Ok(Vec::new());
+        }
+        match self.holding(chunk_id) {
+            Some(store) => store.read_prefix(chunk_id, len),
+            None => self.base().read_prefix(chunk_id, len),
+        }
+    }
     fn read_raw(&self, chunk_id_raw: FIoChunkIdRaw) -> retoc::anyhow::Result<Vec<u8>> {
         let store = self
             .layers
@@ -192,5 +201,64 @@ impl IoStoreTrait for LoadOrder {
         &self,
     ) -> retoc::anyhow::Result<retoc::script_objects::ZenScriptObjects> {
         self.base().load_script_objects()
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use retoc::version::EngineVersion;
+    use retoc::zen::FZenPackageHeader;
+    use std::io::Cursor;
+
+    /// The header a conversion reads for an import, from the package's first bytes through the
+    /// load order, is the one the whole package gives: for a spread of the game's packages, and
+    /// its largest, whose headers outgrow the first read.
+    #[test]
+    fn an_import_s_header_from_its_first_bytes_is_the_whole_package_s() {
+        let Ok(root) = std::env::var("RIVALS_GAME_ROOT") else {
+            return;
+        };
+        let order = open(&root, false, false).expect("open");
+        let toc_version = order.container_file_version().expect("toc version");
+        let header_version = order.container_header_version().expect("header version");
+        let mut ids: Vec<FPackageId> = order
+            .packages_all()
+            .map(|pkg| pkg.id())
+            .step_by(997)
+            .collect();
+        let mut by_size: Vec<(u64, FPackageId)> = order
+            .chunks()
+            .filter(|chunk| chunk.id().get_chunk_type() == EIoChunkType::ExportBundleData)
+            .map(|chunk| (chunk.size(), chunk.id().get_package_id()))
+            .collect();
+        by_size.sort_unstable_by_key(|(size, _)| std::cmp::Reverse(*size));
+        ids.extend(by_size.iter().take(50).map(|(_, id)| *id));
+        let mut compared = 0;
+        for id in ids {
+            let chunk = FIoChunkId::from_package_id(id, 0, EIoChunkType::ExportBundleData);
+            if !order.has_chunk_id(chunk) {
+                continue;
+            }
+            let entry = order.package_store_entry(id);
+            let parse = |data: &[u8]| {
+                FZenPackageHeader::deserialize(
+                    &mut Cursor::new(data),
+                    entry.clone(),
+                    toc_version,
+                    header_version,
+                    Some(EngineVersion::UE5_3.package_file_version()),
+                )
+                .expect("parse")
+            };
+            let first =
+                retoc::zen::read_header_bytes(&order, chunk, header_version).expect("prefix");
+            let whole = order.read(chunk).expect("whole");
+            assert!(first.len() <= whole.len());
+            assert_eq!(parse(&first), parse(&whole), "{id:?}");
+            compared += 1;
+        }
+        assert!(compared > 500, "{compared}");
     }
 }

@@ -9,6 +9,7 @@ pub(crate) mod hero_cache;
 pub(crate) mod heroes;
 pub(crate) mod profiles;
 mod status;
+pub(crate) mod subfolders;
 
 pub(crate) use bypass::{BypassKind, BypassRole, bypass_role, install_asi_loader};
 pub(crate) use conflicts::{CachedLister, ConflictReport};
@@ -86,11 +87,12 @@ pub(crate) fn delete_mods(mods_folder: &str, names: &[String]) -> BulkOpResult {
 
 pub(crate) fn install_mods(
     mods_folder: &str,
+    into: &str,
     sources: &[String],
     io: rivals_core::pak::iostore_out::IoStoreOptions,
     game_root: Option<&str>,
-) -> Vec<InstallOutcome> {
-    folder::install_mods(mods_folder, sources, io, game_root)
+) -> Result<Vec<InstallOutcome>, String> {
+    folder::install_mods(mods_folder, into, sources, io, game_root)
 }
 
 pub(crate) fn rename_mod(

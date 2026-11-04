@@ -713,6 +713,18 @@ impl UnversionedHeader {
 
 /// The header UE writes for a struct that stores none of its slots: one fragment skipping as many
 /// of them as it can hold, flagged last, and no mask. This is how a struct is stored from nothing.
+/// The header UE's builder writes for a struct storing exactly these values, in slot order.
+pub(crate) fn header_for(items: &[HeaderItem]) -> Result<Vec<u8>, String> {
+    let mut header = UnversionedHeader {
+        fragments: Vec::new(),
+        items: items.to_vec(),
+        zero_bits: Vec::new(),
+        zero_mask_bytes: Vec::new(),
+    };
+    header.normalize();
+    header.write()
+}
+
 pub(crate) fn empty_header(slots: usize) -> Vec<u8> {
     let skip = slots.min(FRAGMENT_CAP as usize) as u16;
     (IS_LAST_MASK | skip).to_le_bytes().to_vec()

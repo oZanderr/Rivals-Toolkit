@@ -58,7 +58,7 @@ pub struct MethodInput {
 pub struct AbilityPackage {
     pub path: String,
     pub variant: Variant,
-    /// The container it was read from, which is where the inspector opens it.
+    /// The container it was read from.
     pub container: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub in_mod: Option<String>,

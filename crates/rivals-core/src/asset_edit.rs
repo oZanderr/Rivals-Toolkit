@@ -170,7 +170,7 @@ pub fn preview_read_edits(
             return table_last(request, mappings, loaded, parsed);
         }
     }
-    if !changes.vm_consts.is_empty() {
+    if !changes.vm_consts.is_empty() || !changes.vm_colors.is_empty() {
         return vm_stage(request, mappings, loaded, parsed);
     }
     if !changes.paths.is_empty() {
@@ -274,9 +274,9 @@ fn table_last(
     Ok((last, loaded))
 }
 
-/// Plans the constants a save gives Niagara scripts' VM programs against the package as it reads,
-/// makes them as path edits with the rest of the save, and reads each script back to hold it to
-/// the plan.
+/// Plans the constants a save gives Niagara scripts' VM programs and the colours it transforms in
+/// them against the package as it reads, makes them as path edits with the rest of the save, and
+/// reads each script back to hold it to the plan.
 fn vm_stage(
     request: &AssetEditRequest<'_>,
     mappings: Option<&Mappings>,
@@ -284,10 +284,20 @@ fn vm_stage(
     parsed: &rivals_uasset::ParsedPackage,
 ) -> Result<(PatchedBundle, FSerializedAssetBundle), String> {
     let changes = &request.changes;
-    let lowered =
-        rivals_uasset::lower_vm_consts(parsed, &changes.vm_consts, mappings, changes.allow_drift)?;
+    let lowered = rivals_uasset::lower_vm_edits(
+        parsed,
+        &changes.vm_consts,
+        &changes.vm_colors,
+        mappings,
+        changes.allow_drift,
+    )?;
+    let rewrites_bytecode = lowered
+        .paths
+        .iter()
+        .any(|edit| edit.path == "CachedScriptVM.ByteCode.Data");
     let next = PackageEdits {
         vm_consts: Vec::new(),
+        vm_colors: Vec::new(),
         paths: [changes.paths.clone(), lowered.paths].concat(),
         ..changes.clone()
     };
@@ -309,14 +319,13 @@ fn vm_stage(
         rivals_uasset::verify_vm_edits(&after, &lowered.plans, mappings)?;
     }
     let mut notes = lowered.notes;
-    // The literals are numbers, so the raw rewrite's caution about objects named in its bytes
-    // does not apply to them.
-    notes.extend(
-        patched
-            .notes
-            .drain(..)
-            .filter(|note| !note.starts_with("ScriptLiterals is written as the bytes typed")),
-    );
+    // The literals are numbers and the bytecode names no object, so the raw rewrite's caution
+    // about objects named in its bytes does not apply to them.
+    let numbers_only = |note: &String| {
+        note.starts_with("ScriptLiterals is written as the bytes typed")
+            || (rewrites_bytecode && note.starts_with("Data is written as the bytes typed"))
+    };
+    notes.extend(patched.notes.drain(..).filter(|note| !numbers_only(note)));
     patched.notes = notes;
     Ok((patched, loaded))
 }
@@ -1031,30 +1040,6 @@ fn read_parent(
     Ok((entry, loaded, parent))
 }
 
-/// The components the parent Blueprint of the one a request names adds, by variable name, which
-/// one of its own can be copied from.
-pub fn parent_components(
-    request: &AssetEditRequest<'_>,
-    mappings: Option<&Mappings>,
-) -> Result<Vec<String>, String> {
-    let (_, parsed) = read_package(request, mappings)?;
-    let (_, _, parent) = read_parent(request, mappings, &parsed)?;
-    Ok(parent
-        .exports
-        .iter()
-        .filter(|export| export.class_name == "SCS_Node")
-        .filter_map(
-            |node| match entry_named(&node.properties, "InternalVariableName") {
-                Some(rivals_uasset::PropertyEntry {
-                    value: PropertyValue::Name { value },
-                    ..
-                }) => Some(value.clone()),
-                _ => None,
-            },
-        )
-        .collect())
-}
-
 /// Copies a component the parent Blueprint adds into this one, as a component of its own attached
 /// where the original is, in stages each checked on its own: the parent's template is copied under
 /// this class, an empty node is added to its construction script, the node is wired to build the
@@ -1715,43 +1700,6 @@ fn infer_import_classes(
         }
     }
     Ok((edits, notes))
-}
-
-/// Drops the notes asking for the class of an import the save itself gives one.
-fn without_inferred(
-    request: &AssetEditRequest<'_>,
-    bundle: &AssetBundle<'_>,
-    parsed: &rivals_uasset::ParsedPackage,
-    export: u32,
-    text: &str,
-    warnings: Vec<rivals_uasset::Diagnostic>,
-) -> Vec<rivals_uasset::Diagnostic> {
-    let probe = AssetEditRequest {
-        changes: PackageEdits {
-            script_texts: vec![rivals_uasset::ScriptTextEdit {
-                export,
-                text: text.to_string(),
-                was: None,
-                object: None,
-            }],
-            ..Default::default()
-        },
-        ..*request
-    };
-    let Ok((inferred, _)) = infer_import_classes(&probe, bundle, parsed) else {
-        return warnings;
-    };
-    warnings
-        .into_iter()
-        .filter(|warning| {
-            !inferred.iter().any(|edit| match edit {
-                ImportEdit::Add { path, .. } => warning
-                    .message
-                    .starts_with(&format!("{path} is imported without a class")),
-                _ => false,
-            })
-        })
-        .collect()
 }
 
 /// The chain of Blueprint structs from `start` that needs `own` read first, following each one's
@@ -3442,224 +3390,9 @@ fn text_calls(
     out
 }
 
-/// What writing a function anew from text would do, before anything is saved.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct TextPreview {
-    /// What stops the text assembling, line by line. Nothing else is worked out until it does.
-    pub diagnostics: Vec<rivals_uasset::Diagnostic>,
-    /// What assembles but is worth knowing, such as an object imported without its class.
-    pub warnings: Vec<rivals_uasset::Diagnostic>,
-    /// Why the save would be refused once the text assembles: a label something enters at that
-    /// the text dropped, a layout the function has to keep, a call of the wrong shape.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub refused: Option<String>,
-    /// The calls the save would need leave for, as the refusal it would give without it.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub unchecked: Option<String>,
-    /// What the save would change: the script, each entry and resume point it moves, its layout.
-    pub applied: Vec<rivals_uasset::AppliedEdit>,
-}
-
-/// What writing the function at `export` anew from `text` would do: the check a save makes, and
-/// the changes it would make, without saving.
-pub fn preview_script_text(
-    request: &AssetEditRequest<'_>,
-    mappings: Option<&Mappings>,
-    export: u32,
-    text: &str,
-) -> Result<TextPreview, String> {
-    let (loaded, parsed) = read_package(request, mappings)?;
-    let (diagnostics, warnings) =
-        rivals_uasset::text_diagnostics(&bundle_of(&loaded), &parsed, export, text)?;
-    let warnings = without_inferred(
-        request,
-        &bundle_of(&loaded),
-        &parsed,
-        export,
-        text,
-        warnings,
-    );
-    let mut preview = TextPreview {
-        diagnostics,
-        warnings,
-        refused: None,
-        unchecked: None,
-        applied: Vec::new(),
-    };
-    if !preview.diagnostics.is_empty() {
-        return Ok(preview);
-    }
-    let attempt = |allow_unchecked: bool| {
-        preview_edits(
-            &AssetEditRequest {
-                changes: PackageEdits {
-                    script_texts: vec![rivals_uasset::ScriptTextEdit {
-                        export,
-                        text: text.to_string(),
-                        was: None,
-                        object: None,
-                    }],
-                    allow_unchecked,
-                    ..Default::default()
-                },
-                ..*request
-            },
-            mappings,
-        )
-    };
-    let outcome = match attempt(false) {
-        Err(refused) if refused.starts_with(crate::object_check::UNCHECKED) => {
-            preview.unchecked = Some(refused);
-            attempt(true)
-        }
-        other => other,
-    };
-    match outcome {
-        Ok((patched, _)) => preview.applied = patched.applied,
-        Err(refused) => preview.refused = Some(refused),
-    }
-    Ok(preview)
-}
-
-/// What adding `add` would do: its text's problems line by line, read against the function the
-/// save makes first, or the changes the save would make, why it would refuse, and what it would
-/// need leave for.
-pub fn preview_new_function(
-    request: &AssetEditRequest<'_>,
-    mappings: Option<&Mappings>,
-    add: &rivals_uasset::NewFunctionEdit,
-) -> Result<TextPreview, String> {
-    let (loaded, parsed) = read_package(request, mappings)?;
-    let shell = rivals_uasset::NewFunctionEdit {
-        text: "Return Nothing\nEndOfScript".into(),
-        ..add.clone()
-    };
-    let made = preview_read_edits(
-        &AssetEditRequest {
-            changes: PackageEdits {
-                new_functions: vec![shell.clone()],
-                ..Default::default()
-            },
-            ..*request
-        },
-        mappings,
-        loaded,
-        &parsed,
-    );
-    let (made, _) = match made {
-        Ok(made) => made,
-        Err(refused) => {
-            return Ok(TextPreview {
-                diagnostics: Vec::new(),
-                warnings: Vec::new(),
-                refused: Some(refused),
-                unchecked: None,
-                applied: Vec::new(),
-            });
-        }
-    };
-    let bundle = AssetBundle {
-        asset: &made.asset,
-        exports: &made.exports,
-    };
-    let after = reparse(request, mappings, &made.asset, &made.exports)?;
-    let export = rivals_uasset::new_function_export(&after, &shell)?;
-    let (diagnostics, warnings) =
-        rivals_uasset::text_diagnostics(&bundle, &after, export, &add.text)?;
-    let warnings = without_inferred(request, &bundle, &after, export, &add.text, warnings);
-    let mut preview = TextPreview {
-        diagnostics,
-        warnings,
-        refused: None,
-        unchecked: None,
-        applied: Vec::new(),
-    };
-    if !preview.diagnostics.is_empty() {
-        return Ok(preview);
-    }
-    let attempt = |allow_unchecked: bool| {
-        preview_edits(
-            &AssetEditRequest {
-                changes: PackageEdits {
-                    new_functions: vec![add.clone()],
-                    allow_unchecked,
-                    ..Default::default()
-                },
-                ..*request
-            },
-            mappings,
-        )
-    };
-    let outcome = match attempt(false) {
-        Err(refused) if refused.starts_with(crate::object_check::UNCHECKED) => {
-            preview.unchecked = Some(refused);
-            attempt(true)
-        }
-        other => other,
-    };
-    match outcome {
-        Ok((patched, _)) => preview.applied = patched.applied,
-        Err(refused) => preview.refused = Some(refused),
-    }
-    Ok(preview)
-}
-
-/// What a call would meet pointed at another function, before anything is saved.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct CallPreview {
-    /// The function the call names now.
-    pub callee: String,
-    /// What the function the call names now takes and gives back, written out, or what the call
-    /// passes and keeps when the function does not say.
-    pub was: Option<String>,
-    /// What the new function takes and gives back, when its own records say.
-    pub now: Option<String>,
-    /// `fits`, `mismatch` or `unknown`, as a save would find it.
-    pub verdict: &'static str,
-    pub reason: Option<String>,
-}
-
-/// How the call starting at `at` in the statement at `statement` would fare pointed at `new`:
-/// the check a save makes, without saving.
-pub fn preview_call(
-    request: &AssetEditRequest<'_>,
-    mappings: Option<&Mappings>,
-    export: u32,
-    statement: u32,
-    at: u32,
-    new: &str,
-) -> Result<CallPreview, String> {
-    let (_, parsed) = read_package(request, mappings)?;
-    let judged = judge_call(
-        request,
-        mappings,
-        &parsed,
-        export,
-        statement,
-        at,
-        new.trim(),
-    )
-    .ok_or_else(|| format!("no call starts at 0x{at:04X} in export {export}"))?;
-    let (verdict, reason) = match judged.fit {
-        rivals_uasset::Fit::Fits => ("fits", None),
-        rivals_uasset::Fit::Mismatch(reason) => ("mismatch", Some(reason)),
-        rivals_uasset::Fit::Unknown(reason) => ("unknown", Some(reason)),
-    };
-    Ok(CallPreview {
-        callee: judged.callee,
-        was: Some(rivals_uasset::render_call_shape(&judged.was)),
-        now: judged.now.as_ref().map(rivals_uasset::render_call_shape),
-        verdict,
-        reason,
-    })
-}
-
 /// A call held against the function a retarget points it at.
 struct Judged {
     callee: String,
-    /// The old function's shape, or what the call passes and keeps when that is not known.
-    was: rivals_uasset::CallShape,
-    now: Option<rivals_uasset::CallShape>,
     fit: rivals_uasset::Fit,
 }
 
@@ -3711,7 +3444,6 @@ fn judge_call(
             "what {new} takes could not be read from its package"
         )),
     };
-    let now = looked.ok().flatten();
     if fit == rivals_uasset::Fit::Fits {
         fit = match call.opcode {
             // A Blueprint function, which is all a check can fit, is never native and static.
@@ -3731,8 +3463,6 @@ fn judge_call(
     }
     Some(Judged {
         callee: call.callee,
-        was: old.unwrap_or(passed),
-        now,
         fit,
     })
 }
@@ -4756,20 +4486,17 @@ pub fn plan_export_removal(
     let mut plan = rivals_uasset::plan_removal(&parsed, &request.changes.remove_exports)?;
     // The generic "may be imported" warning gives way to names when an index has been built.
     if !plan.public.is_empty()
-        && let Ok(Some(index)) = crate::import_index::load(request.game_root)
+        && let Ok(Some(index)) = crate::import_index::current_if_built(request.game_root)
     {
         plan.resolve_importers(|path| index.importers_of(path).packages);
         plan.resolve_mentions(|package| index.mentions_of(package));
-        if index.is_stale(request.game_root) {
-            plan.warnings
-                .push(crate::import_index::STALE_WARNING.to_string());
-        }
+        plan.warnings.extend(index.notes());
     }
     Ok(plan)
 }
 
 /// One package to copy exports out of, named the way an asset is named anywhere else here.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct CopyFrom {
     /// A path, or a container file name to look up under `Paks` and then `Paks/~mods`.
     pub container: String,
@@ -5031,14 +4758,11 @@ pub fn plan_export_edits(
         &request.changes.reset_exports,
     )?;
     if !plan.public.is_empty()
-        && let Ok(Some(index)) = crate::import_index::load(request.game_root)
+        && let Ok(Some(index)) = crate::import_index::current_if_built(request.game_root)
     {
         plan.resolve_importers(|path| index.importers_of(path).packages);
         plan.resolve_mentions(|package| index.mentions_of(package));
-        if index.is_stale(request.game_root) {
-            plan.warnings
-                .push(crate::import_index::STALE_WARNING.to_string());
-        }
+        plan.warnings.extend(index.notes());
     }
     Ok(plan)
 }
@@ -5495,6 +5219,22 @@ fn prepare(
         read_from.entry,
         read_from.kind,
     )?;
+    let (patched, loaded) = patch_loaded(read_from, mappings, loaded, options)?;
+    Ok(Prepared::Ready {
+        entry,
+        patched: Box::new(patched),
+        loaded: Box::new(loaded),
+    })
+}
+
+/// The package `loaded`, read where `read_from` says, with `read_from`'s edits patched in and
+/// checked as a save checks them, with what a patch leaves to it: the sidecars it did not touch.
+pub(crate) fn patch_loaded(
+    read_from: AssetEditRequest<'_>,
+    mappings: Option<&Mappings>,
+    loaded: FSerializedAssetBundle,
+    options: &SaveOptions,
+) -> Result<(PatchedBundle, FSerializedAssetBundle), String> {
     // Images become their textures' new pixels against the package as this save reads it.
     let read_from = if read_from.changes.texture_images.is_empty() {
         read_from
@@ -5518,11 +5258,7 @@ fn prepare(
             mappings,
             &read_from.changes,
         )? {
-            return Ok(Prepared::Ready {
-                entry,
-                patched: Box::new(patched),
-                loaded: Box::new(loaded),
-            });
+            return Ok((patched, loaded));
         }
     }
     // Each stage reads back what it wrote, which is what the stage after it reads.
@@ -5548,12 +5284,8 @@ fn prepare(
         None => (patched, loaded),
     };
     let after = reparse(&read_from, mappings, &patched.asset, &patched.exports)?;
-    check_load_order(&request.changes, &parsed, &after)?;
-    Ok(Prepared::Ready {
-        entry,
-        patched: Box::new(patched),
-        loaded: Box::new(loaded),
-    })
+    check_load_order(&read_from.changes, &parsed, &after)?;
+    Ok((patched, loaded))
 }
 
 #[cfg(test)]
@@ -5796,27 +5528,6 @@ fn empty_package() -> crate::pak::iostore_out::PackageBytes {
     }
 }
 
-/// The mod's own copy of the asset a request names, when the mod already carries one: the
-/// container to inspect so that edits are made on top of it.
-pub fn mod_copy_of(
-    request: &AssetEditRequest<'_>,
-    target: SaveTarget,
-) -> Result<Option<PathBuf>, String> {
-    let entry = save_entry(request)?;
-    let options = SaveOptions {
-        target,
-        ..Default::default()
-    };
-    if !destination_check(request, &entry, &options)? {
-        return Ok(None);
-    }
-    let pak = mod_pak_path(request.game_root, request.mod_name)?;
-    Ok(Some(match target {
-        SaveTarget::IoStore => pak.with_extension("utoc"),
-        SaveTarget::Pak => pak,
-    }))
-}
-
 /// Stops a save that would replace the mod's own copy with the original plus the new edits,
 /// unless the caller asked to replace it or to build on it.
 fn holds_copy(
@@ -5982,6 +5693,7 @@ pub fn other_overrides(game_root: &str, entry: &str, own: &Path) -> Vec<String> 
 /// The other mods the game mounts beside one, with what each holds, read once for a save of many
 /// packages.
 pub(crate) struct OtherMods {
+    /// Its container's path below `~mods`, as the others are named.
     own_name: String,
     plain: bool,
     held: Vec<(String, std::collections::HashSet<String>)>,
@@ -5989,16 +5701,12 @@ pub(crate) struct OtherMods {
 
 impl OtherMods {
     pub(crate) fn around(game_root: &str, own: &Path) -> Self {
-        let own_name = own
-            .with_extension("utoc")
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let mods = mods_dir(game_root);
+        let own_name = crate::mods::path_below(&mods, &own.with_extension("utoc"));
         let plain = own
             .extension()
             .is_some_and(|ext| ext.eq_ignore_ascii_case("pak"));
         // A mod the game does not mount, such as one outside `~mods`, is loaded over nothing.
-        let mods = mods_dir(game_root);
         if !crate::mod_ops::ModFiles::of(own).is_ok_and(|files| files.mounts(&mods)) {
             return Self {
                 own_name,
@@ -6012,7 +5720,7 @@ impl OtherMods {
             .map(walkdir::DirEntry::into_path)
             .filter(|path| path.extension().is_some_and(|ext| ext == "utoc"))
             .filter_map(|path| {
-                let name = path.file_name()?.to_string_lossy().into_owned();
+                let name = crate::mods::path_below(&mods, &path);
                 if name.eq_ignore_ascii_case(&own_name) {
                     return None;
                 }
@@ -8133,20 +7841,34 @@ mod game_data_tests {
         "Marvel/Content/Marvel/Characters/1021/1021001/Meshes/SK_1021_1021001.uasset";
     /// A material instance with a Nanite override, cooked as a flag and a hard reference.
     const NANITE_MATERIAL: &str = "Marvel/Content/Marvel/VFX/Materials/Characters/1034/Materials/1034503/MI_1034503_Line_84_003.uasset";
+    /// A base material whose cached parameters hold nine vector defaults.
+    const BEAM_MATERIAL: &str = "Marvel/Content/Marvel/VFX/Materials/Characters/1014/MasterMaterials/M_101431_Beam_3_005.uasset";
+    /// An instance of it with no static permutation, so no shaders of its own.
+    const BEAM_INSTANCE: &str = "Marvel/Content/Marvel/VFX/Materials/Characters/1014/Materials/MI_101431_Beam_3_005_21.uasset";
     /// A pose asset: an animation asset that closes with its skeleton guid and nothing after.
     const POSE_ASSET: &str = "Marvel/Content/Marvel/Characters/1063/1063500/AnimationDataAssets/RBF/PA_Thigh_L_UERBFSolver.uasset";
     /// A sound cue whose wave players name their waves after two strip bytes.
     const SOUND_CUE: &str = "Marvel/Content/Marvel/Environment/FluidFlux/Surface/Templates/River/Audio/CS_RiverSource.uasset";
     const RIG: &str = "Marvel/Content/Marvel/Characters/Common/Rig/Paragon_Proto_Retarget.uasset";
+    /// A Wwise aux bus: its cooked data, then the attenuation radius the bus writes after it.
+    const WWISE_BUS: &str =
+        "Marvel/Content/Marvel/Wwise/Assets/WwiseBus/spatial/rev_room_wood_small.uasset";
+    /// A static mesh whose render data closes with eight screen sizes this game writes at sixteen
+    /// bytes each.
+    const SCREEN_SIZES: &str =
+        "Marvel/Content/Marvel/Characters/1014/1014502/Weapons/Cup/Meshes/SM_WP_1014502_Cup.uasset";
+    /// A music event with one bank and one streamed medium, closing with its durations and the
+    /// three fields this game's engine adds.
+    const WWISE_EVENT: &str =
+        "Marvel/Content/Marvel/Wwise/Assets/Events/Music/music_new/event/Dead.uasset";
+    /// An ability timeline whose third track fires a camera shake.
+    const HULK_TIMELINE: &str =
+        "Marvel/Content/Marvel/AbilitySystem/1014/101433/Timeline_101433_01.uasset";
     /// Exports whose remainder is cooked data the reader names rather than decodes.
-    const NAMED_PAYLOADS: [(&str, &str); 6] = [
+    const NAMED_PAYLOADS: [(&str, &str); 5] = [
         (
             "Marvel/Content/Marvel/Characters/GameMode/2206/4040/Skelot_4040001.uasset",
             "Skelot animation data",
-        ),
-        (
-            "Marvel/Content/Marvel/Wwise/Assets/WwiseBus/spatial/rev_room_wood_small.uasset",
-            "Wwise audio data",
         ),
         (
             "Marvel/Content/Marvel/Environment/5007/50070010/GC_BluePrint/Component/GC_50070010Component036I/GC_50070010Component036I.uasset",
@@ -8261,9 +7983,15 @@ mod game_data_tests {
         ("CLOTH_MESH", CLOTH_MESH),
         ("SAMPLED_MESH", SAMPLED_MESH),
         ("NANITE_MATERIAL", NANITE_MATERIAL),
+        ("BEAM_MATERIAL", BEAM_MATERIAL),
+        ("BEAM_INSTANCE", BEAM_INSTANCE),
         ("POSE_ASSET", POSE_ASSET),
         ("SOUND_CUE", SOUND_CUE),
         ("RIG", RIG),
+        ("WWISE_BUS", WWISE_BUS),
+        ("WWISE_EVENT", WWISE_EVENT),
+        ("SCREEN_SIZES", SCREEN_SIZES),
+        ("HULK_TIMELINE", HULK_TIMELINE),
         ("GROUND_MOTION_ANIM_BP", GROUND_MOTION_ANIM_BP),
         ("CURVE_ANIM_BP", CURVE_ANIM_BP),
         ("INSTANCED", INSTANCED),
@@ -8326,6 +8054,14 @@ mod game_data_tests {
             "Marvel/Content/Marvel/VFX/VAT/Characters/1032/BAT/SquirrelAssist_Loop/T_SquirrelAssist_Loop_BAT_Pos.uasset",
         ),
         (
+            "TEXTURE_OPTIONAL_TOP",
+            "Marvel/Content/Marvel/Characters/1014/1014001/Textures/T_1014001_Body_D.uasset",
+        ),
+        (
+            "TEXTURE_TOP_LEFT_OUT",
+            "Marvel/Content/Marvel/Characters/1014/1014001/Textures/T_1014001_Body_N.uasset",
+        ),
+        (
             "MAP_KRAKOA_ART",
             "Marvel/Content/Marvel/Maps/KrakoaC/KrakoaC01/KrakoaC01_Art.umap",
         ),
@@ -8359,6 +8095,11 @@ mod game_data_tests {
         "Marvel/Content/Mods/ToolkitTest/RetargetRenamed.uasset",
         "Marvel/Content/Mods/X/DA_Thing.uasset",
         "Marvel/Plugins/MarvelGAS/Content/Mods/X/DA_Thing.uasset",
+        // What the texture batch's naming tests name.
+        "Marvel/Content/Marvel/Maps/Lobby/Lobby.umap",
+        "Marvel/Content/A/T_Twice.uasset",
+        "Marvel/Content/B/T_Twice.uasset",
+        "Marvel/Content/VFX/NS_Glow.uasset",
     ];
 
     /// The files that pin a real game asset. A source scan cannot tell a fixture from an example,
@@ -8371,6 +8112,7 @@ mod game_data_tests {
         ("pak/iostore_out.rs", include_str!("pak/iostore_out.rs")),
         ("schema_synth.rs", include_str!("schema_synth.rs")),
         ("texture.rs", include_str!("texture.rs")),
+        ("texture_batch.rs", include_str!("texture_batch.rs")),
     ];
 
     /// Every path the shipped game holds, mount-relative, the way a fixture constant spells it.
@@ -10106,6 +9848,32 @@ mod game_data_tests {
                 .any(|note| note.contains("not carried over")),
             "{:?}",
             patched.notes
+        );
+    }
+
+    /// A name the parent Blueprint adds no component under is refused with the names it does add.
+    #[test]
+    fn a_component_the_parent_does_not_add_is_refused_naming_those_it_does() {
+        let Some(fixture) = Fixture::open(OVERRIDES) else {
+            return;
+        };
+        let request = fixture.request_changes(PackageEdits {
+            add_components: vec![rivals_uasset::AddComponent {
+                node: 0,
+                name: "ScopeCheckCopy".into(),
+                with_children: false,
+                from_parent: Some("NoSuchComponent".into()),
+            }],
+            ..Default::default()
+        });
+        let refused = match preview_edits(&request, Some(&fixture.schema)) {
+            Ok(_) => panic!("a component the parent does not add should be refused"),
+            Err(refused) => refused,
+        };
+        assert!(
+            refused.contains("adds no component named NoSuchComponent; it adds ")
+                && refused.contains("LevelScopeCheckComponentBP"),
+            "{refused}"
         );
     }
 
@@ -14751,35 +14519,39 @@ mod game_data_tests {
             .count();
         assert_eq!(unchanged, 0, "every export still reads whole");
         // Made again, the edits find their values there already.
-        let again = rivals_uasset::lower_vm_consts(&after, &edits, Some(&fixture.schema), false)
-            .expect("lowers");
+        let again =
+            rivals_uasset::lower_vm_edits(&after, &edits, &[], Some(&fixture.schema), false)
+                .expect("lowers");
         assert!(
             again.paths.is_empty() && again.plans.is_empty(),
             "{:?}",
             again.notes
         );
         // Setting a literal to the value it holds changes nothing either.
-        let same = rivals_uasset::lower_vm_consts(
+        let same = rivals_uasset::lower_vm_edits(
             &before,
             &[edit(0xBD, 1, "10.0", "lit+48=0x41200000")],
+            &[],
             Some(&fixture.schema),
             false,
         )
         .expect("lowers");
         assert!(same.paths.is_empty());
         // Written against a value the operand no longer reads, the edit is refused.
-        let stale = rivals_uasset::lower_vm_consts(
+        let stale = rivals_uasset::lower_vm_edits(
             &before,
             &[edit(0xBD, 0, "1.0", "lit+44=0x3F800000")],
+            &[],
             Some(&fixture.schema),
             false,
         )
         .expect_err("drift");
         assert!(stale.starts_with(rivals_uasset::DRIFT), "{stale}");
         // A register is not a constant to give a value.
-        let register = rivals_uasset::lower_vm_consts(
+        let register = rivals_uasset::lower_vm_edits(
             &before,
             &[edit(0xBD, 2, "1.0", "")],
+            &[],
             Some(&fixture.schema),
             false,
         )
@@ -16778,6 +16550,261 @@ mod game_data_tests {
         );
     }
 
+    /// Every span the game's layout has and a stock cook's lacks, by the field naming it: a skeletal
+    /// mesh slot's tags, a static mesh screen size's second value, a string table entry's marker.
+    fn game_only_spans(parsed: &rivals_uasset::ParsedPackage) -> Vec<(u64, u64)> {
+        fn walk(entries: &[PropertyEntry], out: &mut Vec<(u64, u64)>) {
+            for entry in entries {
+                if matches!(entry.name.as_str(), "MaterialTags" | "Extra")
+                    && let Some(span) = entry.span
+                {
+                    out.push(span);
+                    continue;
+                }
+                let nested: Vec<&[PropertyEntry]> = match &entry.value {
+                    PropertyValue::Struct { fields, .. } => vec![fields],
+                    PropertyValue::Array { items } => items
+                        .iter()
+                        .filter_map(|item| match item {
+                            PropertyValue::Struct { fields, .. } => Some(fields.as_slice()),
+                            _ => None,
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                for fields in nested {
+                    walk(fields, out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for export in &parsed.exports {
+            walk(&export.properties, &mut out);
+        }
+        for table in &parsed.string_tables {
+            out.extend(table.entries.iter().map(|entry| (entry.tag_at, entry.end)));
+        }
+        out.sort();
+        out
+    }
+
+    /// Real packages taken down to a stock editor's layout and converted back. What a stock cook
+    /// lacks the conversion cannot know, so it writes each part empty; the package has to come back
+    /// as the game's own with exactly those parts emptied, byte for byte, sizes, offsets and the
+    /// bulk data placed inside each export included.
+    #[test]
+    fn game_packages_taken_to_a_stock_layout_convert_back_byte_for_byte() {
+        for (entry, gaps) in [(SAMPLED_MESH, 1), (SCREEN_SIZES, 8), (TAGGED_TABLE, 2)] {
+            let Some(fixture) = Fixture::open(entry) else {
+                return;
+            };
+            let bundle = fixture.bundle();
+            let spans = game_only_spans(&fixture.parse());
+            // A mesh's real LODs have a screen size; the slots past its last hold none.
+            let fixture_lods = fixture
+                .parse()
+                .exports
+                .iter()
+                .flat_map(|export| export.properties.iter())
+                .filter(|entry| entry.name == "ScreenSize")
+                .map(|entry| match &entry.value {
+                    PropertyValue::Array { items } => items
+                        .iter()
+                        .filter(|item| match item {
+                            PropertyValue::Struct { fields, .. } => fields.iter().any(|field| {
+                                field.name == "Default"
+                                    && matches!(field.value, PropertyValue::Float { value } if value > 0.0)
+                            }),
+                            _ => false,
+                        })
+                        .count() as u32,
+                    _ => 0,
+                })
+                .next()
+                .unwrap_or(0);
+            assert!(spans.len() >= gaps, "{entry}: {} spans", spans.len());
+            let rewrite = |empty: bool| {
+                // The eight-byte parts are a static mesh's LOD distances, LOD 0 first.
+                let mut lod = 0u32;
+                let splices: Vec<rivals_uasset::Splice> = spans
+                    .iter()
+                    .map(|&(start, end)| rivals_uasset::Splice {
+                        start,
+                        end,
+                        bytes: if !empty {
+                            Vec::new()
+                        } else if end - start == 8 {
+                            let kind = rivals_uasset::StockGapKind::ScreenSize {
+                                lod: lod % 8,
+                                lods: fixture_lods,
+                            };
+                            lod += 1;
+                            kind.filler()
+                        } else {
+                            vec![0; 4]
+                        },
+                    })
+                    .collect();
+                rivals_uasset::rewrite(&bundle, &splices, rivals_uasset::HeaderDraft::default())
+                    .expect("rewrite")
+            };
+            let stripped = rewrite(false);
+            let expected = rewrite(true);
+            let stock = AssetBundle {
+                asset: &stripped.asset,
+                exports: &stripped.exports,
+            };
+            let reread =
+                rivals_uasset::parse_package(&stock, Some(&fixture.schema)).expect("parse");
+            // The game's distance fields read as the editor's once the mesh reads as a stock cook;
+            // that finding is no stripped part.
+            let filled = reread
+                .stock_gaps
+                .iter()
+                .filter(|gap| !matches!(gap.kind, rivals_uasset::StockGapKind::RenderData { .. }))
+                .count();
+            assert_eq!(
+                filled,
+                spans.len(),
+                "{entry}: every stripped part reads as a gap"
+            );
+            let converted = rivals_uasset::conform_layout(&stock, Some(&fixture.schema))
+                .expect("convert")
+                .expect("something to convert");
+            assert!(
+                converted.asset == expected.asset,
+                "{entry}: the header differs from the game's with the parts emptied"
+            );
+            assert!(
+                converted.exports == expected.exports,
+                "{entry}: the exports differ from the game's with the parts emptied"
+            );
+        }
+    }
+
+    /// A Wwise event's cooked data is ordinary struct data once read: a medium's id inside the
+    /// language map and a duration from the trailer both take an edit and read back.
+    #[test]
+    fn a_wwise_event_s_medium_and_duration_take_edits() {
+        let Some(fixture) = Fixture::open(WWISE_EVENT) else {
+            return;
+        };
+        let medium_id = |export: &rivals_uasset::ParsedExport| -> PropertyEntry {
+            let cooked = find_field(&export.properties, &|f| f.name == "EventCookedData")
+                .expect("the cooked data");
+            let PropertyValue::Struct { fields, .. } = &cooked.value else {
+                panic!("{:?}", cooked.value);
+            };
+            let map = find_field(fields, &|f| f.name == "EventLanguageMap").expect("a map");
+            let PropertyValue::Map { entries } = &map.value else {
+                panic!("{:?}", map.value);
+            };
+            let PropertyValue::Struct { fields, .. } = &entries[0].value else {
+                panic!("{:?}", entries[0].value);
+            };
+            let media = find_field(fields, &|f| f.name == "Media").expect("the media");
+            let PropertyValue::Array { items } = &media.value else {
+                panic!("{:?}", media.value);
+            };
+            let PropertyValue::Struct { fields, .. } = &items[0] else {
+                panic!("{:?}", items[0]);
+            };
+            find_field(fields, &|f| f.name == "MediaId")
+                .expect("a medium id")
+                .clone()
+        };
+        let before = fixture.parse();
+        let event = export_of_class(&before, "AkAudioEvent");
+        let id = medium_id(event);
+        let duration = find_field(&event.properties, &|f| f.name == "MaximumDuration")
+            .expect("the duration")
+            .clone();
+
+        let (_, after) = fixture.apply(vec![
+            edit_of(
+                &id,
+                EditOp::Set {
+                    text: "133371219".into(),
+                },
+            ),
+            edit_of(
+                &duration,
+                EditOp::Set {
+                    text: "12.5".into(),
+                },
+            ),
+        ]);
+        let event = export_of_class(&after, "AkAudioEvent");
+        assert!(
+            matches!(event.status, ExportStatus::Complete),
+            "{:?}",
+            event.status
+        );
+        assert!(
+            matches!(
+                medium_id(event).value,
+                PropertyValue::Int { value: 133371219 }
+            ),
+            "{:?}",
+            medium_id(event).value
+        );
+        let duration =
+            find_field(&event.properties, &|f| f.name == "MaximumDuration").expect("the duration");
+        assert!(
+            matches!(duration.value, PropertyValue::Float { value } if value == 12.5),
+            "{:?}",
+            duration.value
+        );
+    }
+
+    /// An ability timeline's own copy of its tracks reads to the export's end, and a start time set
+    /// on the property copy lands on both copies.
+    #[test]
+    fn a_timeline_notify_s_start_time_is_set_on_both_copies() {
+        let Some(fixture) = Fixture::open(HULK_TIMELINE) else {
+            return;
+        };
+        let start_time = |export: &rivals_uasset::ParsedExport, copy: &str| -> PropertyEntry {
+            let tracks = find_field(&export.properties, &|f| f.name == copy).expect("the tracks");
+            let PropertyValue::Array { items } = &tracks.value else {
+                panic!("{:?}", tracks.value);
+            };
+            let PropertyValue::Struct { fields, .. } = &items[2] else {
+                panic!("{:?}", items[2]);
+            };
+            let notifies = find_field(fields, &|f| f.name == "Notifies").expect("the notifies");
+            let PropertyValue::Array { items } = &notifies.value else {
+                panic!("{:?}", notifies.value);
+            };
+            let PropertyValue::Struct { fields, .. } = &items[0] else {
+                panic!("{:?}", items[0]);
+            };
+            find_field(fields, &|f| f.name == "StartTime")
+                .expect("a start time")
+                .clone()
+        };
+        let before = fixture.parse();
+        let timeline = export_of_class(&before, "AnimTimeline");
+        assert!(
+            matches!(timeline.status, ExportStatus::Complete),
+            "{:?}",
+            timeline.status
+        );
+        let (_, after) = fixture.apply(vec![edit_of(
+            &start_time(timeline, "AnimNotifyTracks"),
+            EditOp::Set { text: "0.5".into() },
+        )]);
+        let timeline = export_of_class(&after, "AnimTimeline");
+        for copy in ["AnimNotifyTracks", "CookedNotifyTracks"] {
+            let held = start_time(timeline, copy);
+            assert!(
+                matches!(held.value, PropertyValue::Float { value } if value == 0.5),
+                "{copy}: {:?}",
+                held.value
+            );
+        }
+    }
+
     /// The class tails that were left unexplained across the containers: a pose asset and a rig
     /// read to their end, a cue and its wave players too, an animation sequence's payload now
     /// starts after its skeleton guid, and the rest are named as the payloads they are.
@@ -16807,6 +16834,10 @@ mod game_data_tests {
         complete(SOUND_CUE, "SoundCue", "");
         complete(SOUND_CUE, "SoundNodeWavePlayer", "SoundWave");
         complete(RIG, "Rig", "");
+        complete(WWISE_BUS, "AkAuxBus", "AuxBusCookedData");
+        complete(WWISE_BUS, "AkAuxBus", "MaxAttenuationRadius");
+        complete(WWISE_EVENT, "AkAudioEvent", "EventCookedData");
+        complete(WWISE_EVENT, "AkAudioEvent", "bHasMotionEvent");
         for (entry, kind) in NAMED_PAYLOADS {
             let Some(fixture) = Fixture::open(entry) else {
                 return;
@@ -16849,6 +16880,41 @@ mod game_data_tests {
             Some(sequence.serial_offset as u64 + consumed),
             "the payload starts where the guid ends"
         );
+    }
+
+    /// A base material's cook saves the parameters it declares ahead of its shaders, so only the
+    /// shader maps stay a payload; an instance with no static permutation of its own reads to its
+    /// end.
+    #[test]
+    fn a_material_s_cached_parameters_read_ahead_of_its_shader_maps() {
+        let Some(fixture) = Fixture::open(BEAM_MATERIAL) else {
+            return;
+        };
+        let parsed = fixture.parse();
+        let material = export_of_class(&parsed, "Material");
+        let ExportStatus::Payload { consumed, kind, .. } = material.status else {
+            panic!("{:?} {:?}", material.status, material.note);
+        };
+        assert_eq!(kind, "shader maps");
+        let cached = find_field(&material.properties, &|f| f.name == "CachedExpressionData")
+            .expect("the cached expression data");
+        assert_eq!(
+            cached.span.map(|(_, end)| end),
+            Some(material.serial_offset as u64 + consumed),
+            "the shader maps start where the cached data ends"
+        );
+        let Some(fixture) = Fixture::open(BEAM_INSTANCE) else {
+            return;
+        };
+        let parsed = fixture.parse();
+        let instance = export_of_class(&parsed, "MaterialInstanceConstant");
+        assert!(
+            matches!(instance.status, ExportStatus::Complete),
+            "{:?} {:?}",
+            instance.status,
+            instance.note
+        );
+        find_field(&instance.properties, &|f| f.name == "CachedData").expect("its cached data");
     }
 
     /// The four native layouts that failed across the containers, each read to its end: cloth
@@ -19879,23 +19945,11 @@ mod game_data_tests {
                 .iter()
                 .any(|line| line.text.contains("KismetMathLibrary:Less_IntInt(")),
         );
-        let preview = preview_call(
-            &fixture.request_changes(PackageEdits::default()),
-            Some(&fixture.schema),
-            export.index,
-            statement,
-            at,
-            less,
-        )
-        .expect("previewed");
-        assert_eq!(preview.verdict, "unknown", "{preview:?}");
-        assert_eq!(preview.was.as_deref(), Some("(Int, Int) -> Bool"));
-        assert_eq!(preview.now, None);
     }
 
     /// A Blueprint function says what it takes in its own records, so a call pointed at one that
-    /// takes something else is refused outright: here an event taking a text pointed at one taking
-    /// a string.
+    /// takes something else is refused outright, even told to save anyway: here an event taking a
+    /// text pointed at one taking a string.
     #[test]
     fn a_blueprint_call_is_refused_for_a_function_of_another_shape() {
         let Some(fixture) = Fixture::open(PLAYER_CONTROLLER) else {
@@ -19909,25 +19963,25 @@ mod game_data_tests {
             rivals_uasset::SlotKind::Call,
             "VirtualFunction",
         );
-        let request = fixture.request_changes(PackageEdits::default());
-        let preview = |value: &str| {
-            preview_call(
-                &request,
-                Some(&fixture.schema),
-                export.index,
+        let edit = PackageEdits {
+            scripts: vec![ScriptConstEdit {
+                export: export.index,
                 statement,
-                at,
-                value,
-            )
-            .expect("previewed")
+                at: Some(at),
+                value: "ShowMessageToChatPanel".into(),
+                ..ScriptConstEdit::default()
+            }],
+            allow_unchecked: true,
+            ..Default::default()
         };
-        let other = preview("ShowMessageToChatPanel");
-        assert_eq!(other.callee, "EventTellClientMsg");
-        assert_eq!(other.verdict, "mismatch", "{other:?}");
-        assert_eq!(other.was.as_deref(), Some("(Text)"));
-        assert_eq!(other.now.as_deref(), Some("(Str)"));
-        let elsewhere = preview("NoSuchFunction");
-        assert_eq!(elsewhere.verdict, "unknown", "{elsewhere:?}");
+        let refused = match preview_edits(&fixture.request_changes(edit), Some(&fixture.schema)) {
+            Ok(_) => panic!("a call of another shape should be refused"),
+            Err(refused) => refused,
+        };
+        assert!(
+            refused.starts_with("EventTellClientMsg cannot call ShowMessageToChatPanel instead"),
+            "{refused}"
+        );
     }
 
     /// A world's streaming levels are what its own serializer writes after its properties; the
@@ -21004,21 +21058,6 @@ Let LocalVariable(ToolkitCount) = 3
                 .contains("field 0 of a Vector2D literal is a Float, and Vector2D holds a Double"),
             "{fields}"
         );
-        let previewed = preview_script_text(
-            &fixture.request_changes(PackageEdits::default()),
-            Some(&fixture.schema),
-            graph,
-            &with("Let LocalVariable(ToolkitAmount) = 1.0f\n"),
-        )
-        .expect("previewed");
-        assert!(
-            previewed
-                .refused
-                .as_deref()
-                .is_some_and(|refused| refused.contains("stores a Float in ToolkitAmount")),
-            "{:?}",
-            previewed.refused
-        );
         let fitting = with(
             "Let LocalVariable(ToolkitAmount) = 1.0\nLet LocalVariable(ToolkitCount) = 2\nLet LocalVariable(ToolkitAt) = StructConst</Script/CoreUObject.Vector2D>(0.0, 0.0)\n",
         );
@@ -21040,46 +21079,5 @@ Let LocalVariable(ToolkitCount) = 3
         let text = text_of(&before, "Initialize Anim Events");
         let (patched, _) = fixture.apply_changes(text_edit(export, text));
         assert_eq!(patched.exports, fixture.loaded.exports_file_buffer);
-    }
-
-    /// The app's preview names a text's problems by line, and once the text assembles, what the
-    /// save would change and the calls it would need leave for.
-    #[test]
-    fn a_text_preview_lists_problems_by_line_and_then_what_a_save_would_do() {
-        let Some(fixture) = Fixture::open(PLAYER_CONTROLLER) else {
-            return;
-        };
-        let before = fixture.parse();
-        let export = function(&before, "IsActiveAbility").index;
-        let request = fixture.request_changes(PackageEdits::default());
-        let broken = preview_script_text(&request, Some(&fixture.schema), export, "Jump\n")
-            .expect("previewed");
-        assert_eq!(broken.diagnostics.len(), 1, "{broken:?}");
-        assert_eq!(broken.diagnostics[0].line, 1);
-        assert!(broken.applied.is_empty());
-
-        let text = text_of(&before, "IsActiveAbility").replacen(
-            "@0139:\n",
-            "LetBool LocalVariable(CallFunc_Greater_IntInt_ReturnValue) = CallMath /Script/Engine.KismetMathLibrary:Less_IntInt(LocalVariable(CallFunc_Array_Length_ReturnValue), 3)\n@0139:\n",
-            1,
-        );
-        let preview =
-            preview_script_text(&request, Some(&fixture.schema), export, &text).expect("previewed");
-        assert!(preview.diagnostics.is_empty(), "{preview:?}");
-        assert!(preview.refused.is_none(), "{preview:?}");
-        assert!(
-            preview
-                .unchecked
-                .as_deref()
-                .is_some_and(|unchecked| unchecked.contains("Less_IntInt")),
-            "{preview:?}"
-        );
-        assert!(
-            preview
-                .applied
-                .iter()
-                .any(|applied| applied.name == "IsActiveAbility script text"),
-            "{preview:?}"
-        );
     }
 }

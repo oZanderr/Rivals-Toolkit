@@ -1,7 +1,7 @@
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { cleanup, render, screen, waitFor, within } from "@/test/render";
 import { createTauri, deferred, installTauri, type TauriMock } from "@/test/tauri";
 
 vi.mock("@tauri-apps/api/core", async () => {

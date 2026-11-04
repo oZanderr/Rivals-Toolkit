@@ -221,15 +221,26 @@ mod tests {
     /// or a large config would save as something subtly different from a small one.
     #[test]
     fn a_staged_file_saves_the_same_bytes_as_an_inline_one() {
-        let dir = std::env::temp_dir().join(format!(
+        // The pak is Oodle-compressed, which needs the library the other Oodle tests take.
+        if std::env::var_os("OODLE_LIB_PATH").is_none() {
+            return;
+        }
+        struct Scratch(std::path::PathBuf);
+        impl Drop for Scratch {
+            fn drop(&mut self) {
+                std::fs::remove_dir_all(&self.0).ok();
+            }
+        }
+        let scratch = Scratch(std::env::temp_dir().join(format!(
             "rivals-ini-staged-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("clock")
                 .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).expect("scratch");
+        )));
+        let dir = &scratch.0;
+        std::fs::create_dir_all(dir).expect("scratch");
         let entry = "Marvel/Config/DefaultEngine.ini";
         let body = "[ConsoleVariables]\r\nr.One=1\r\nr.Two=2";
 
@@ -269,7 +280,6 @@ mod tests {
             !staged_file.exists(),
             "the staging file is consumed by the save"
         );
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Windows device profiles the shipping client can run. `Windows` is the active one and the

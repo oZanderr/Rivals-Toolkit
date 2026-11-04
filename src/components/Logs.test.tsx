@@ -1,7 +1,7 @@
-import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { render, screen, waitFor } from "@/test/render";
 import { createTauri, installTauri, type TauriMock } from "@/test/tauri";
 
 vi.mock("@tauri-apps/api/core", async () => {
@@ -224,6 +224,26 @@ describe("Logs", () => {
 
     expect(await screen.findByText(LINES[0].text)).toBeTruthy();
     expect(tauri.callsTo("game_log_rows")[0]).toMatchObject({ snapshot: 1, start: 0 });
+  });
+
+  it("shows the opened log without filtering it again, and numbers each filter it sends", async () => {
+    const user = userEvent.setup();
+    render(<Logs gamePath="C:\Game" isActive onOpenSettings={() => {}} />);
+    await screen.findByText("Cause");
+    await user.click(screen.getByRole("button", { name: "Log" }));
+    expect(await screen.findByText(LINES[0].text)).toBeTruthy();
+    expect(tauri.callsTo("filter_game_log")).toEqual([]);
+    expect(tauri.callsTo("game_log_rows").filter((call) => call.start === 0)).toHaveLength(1);
+
+    const errors = screen.getByRole("button", { name: /^Error\s?1$/ });
+    await user.click(errors);
+    await waitFor(() => expect(tauri.callsTo("filter_game_log")).toHaveLength(1));
+    await user.click(errors);
+    await waitFor(() => expect(tauri.callsTo("filter_game_log")).toHaveLength(2));
+    const [first, second] = tauri.callsTo("filter_game_log");
+    expect(first.filter).toMatchObject({ verbosities: ["error"] });
+    expect(second.filter).toMatchObject({ verbosities: [] });
+    expect(Number(second.seq)).toBeGreaterThan(Number(first.seq));
   });
 
   it("opens the log at an error group's first line", async () => {

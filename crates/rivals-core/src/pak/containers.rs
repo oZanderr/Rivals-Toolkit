@@ -66,16 +66,9 @@ pub fn mod_container_stems(paks_dir: &Path) -> HashSet<String> {
 
 /// The containers of every switched-on IoStore mod under `~mods`, the one whose copy wins first.
 pub fn mod_utocs(paks_dir: &Path) -> Vec<PathBuf> {
-    let mut utocs: Vec<PathBuf> = utoc_paths(&paks_dir.join("~mods")).collect();
-    utocs.sort_by(|a, b| {
-        let name = |path: &Path| {
-            path.file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned()
-        };
-        crate::mods::winner_order(&name(a), &name(b))
-    });
+    let mods = paks_dir.join("~mods");
+    let mut utocs: Vec<PathBuf> = utoc_paths(&mods).collect();
+    utocs.sort_by(|a, b| crate::mods::winner_order_below(&mods, a, b));
     utocs
 }
 
@@ -110,7 +103,7 @@ fn utoc_paths(root: &Path) -> impl Iterator<Item = PathBuf> {
 
 /// The admitted TOC files with their size and modification time: what the open store is made of,
 /// so a game update, a saved mod or a container arriving or leaving shows as a different key.
-type StoreKey = Vec<(PathBuf, u64, Option<SystemTime>)>;
+pub(crate) type StoreKey = Vec<(PathBuf, u64, Option<SystemTime>)>;
 
 static BASE_STORE: Mutex<Option<(StoreKey, Arc<dyn IoStoreTrait>)>> = Mutex::new(None);
 
@@ -245,6 +238,16 @@ fn open_store(
     );
     *cached = Some((key, Arc::clone(&store)));
     Ok(store)
+}
+
+/// The TOC files the base-game store opened for `target` reads, with their size and modification
+/// time: what anything built from that store depends on.
+pub(crate) fn base_store_files(paks_dir: &Path, target: &str) -> StoreKey {
+    let undecryptable = undecryptable_container_stems(paks_dir);
+    let mods = mod_container_stems(paks_dir);
+    store_key(paks_dir, &|name: &str| {
+        admits_container(name, target, &undecryptable, &mods)
+    })
 }
 
 fn store_key(paks_dir: &Path, admits: &dyn Fn(&str) -> bool) -> StoreKey {

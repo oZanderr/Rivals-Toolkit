@@ -54,8 +54,10 @@ pub(crate) fn repack_iostore(
     compression: super::profile::PackCompression,
     carry: &HeaderCarry,
     game_root: Option<&str>,
+    conform: bool,
+    mappings: Option<std::sync::Arc<rivals_uasset::Mappings>>,
     app: AppHandle,
-) -> Result<(), String> {
+) -> Result<rivals_core::pak::pack::PackReport, String> {
     REPACK_CANCEL.store(false, Ordering::Relaxed);
     let progress = |current, total| {
         let _ = app.emit(
@@ -76,6 +78,8 @@ pub(crate) fn repack_iostore(
             oodle_level,
             obfuscate: Some(obfuscate),
             reencode: false,
+            conform,
+            mappings,
         },
         carry,
         &|| {
@@ -90,8 +94,7 @@ pub(crate) fn repack_iostore(
         concurrency::POOL.current_num_threads(),
         &REPACK_CANCEL,
         &progress,
-    )?;
-    Ok(())
+    )
 }
 
 use rivals_core::pak::containers::open_utoc;

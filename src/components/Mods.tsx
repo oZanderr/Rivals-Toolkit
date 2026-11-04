@@ -11,6 +11,8 @@ import {
   Archive,
   Check,
   FolderOpen,
+  FolderPlus,
+  Languages,
   Layers,
   PackageOpen,
   Pencil,
@@ -31,6 +33,11 @@ import {
 } from "lucide-react";
 
 import { HeroIcon } from "@/components/HeroIcon";
+import { dropFolderAt } from "@/components/mods/dropTarget";
+import { FolderNameDialog } from "@/components/mods/FolderNameDialog";
+import { FolderRow } from "@/components/mods/FolderRow";
+import { MoveToMenu } from "@/components/mods/MoveToMenu";
+import { RenameInput } from "@/components/mods/RenameInput";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -60,7 +67,25 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Tip } from "@/components/ui/tooltip";
+import { useCollapsedFolders } from "@/hooks/useCollapsedFolders";
 import { emitModsChanged, normalizeFolderPath, onModsChanged } from "@/lib/modsEvents";
+import {
+  buildModTree,
+  folderPaths,
+  indent,
+  isInFolder,
+  leafName,
+  modsIn,
+  movedName,
+  parentFolder,
+  renamedUnder,
+  treeRows,
+  withFolderRenamed,
+  withFolderShown,
+  withoutFolder,
+  type FolderNode,
+  type TreeRow,
+} from "@/lib/modTree";
 import { useShowHeroIcons } from "@/lib/showHeroIcons";
 import { cn } from "@/lib/utils";
 
@@ -82,6 +107,15 @@ interface SyncResult {
   fetched_at: number;
   bytes: number;
   source_url: string;
+}
+
+/** A mod's name without its extension or `.disabled`, in lower case, as the toolkit keys what it
+ *  keeps for a mod. */
+function modStem(fullName: string): string {
+  return leafName(fullName)
+    .replace(/\.disabled$/i, "")
+    .replace(/\.(pak|utoc|ucas)$/i, "")
+    .toLowerCase();
 }
 
 interface ModEntry {
@@ -146,6 +180,20 @@ interface ModsStatus {
   sig_bypass_kind: BypassKind;
   mod_entries: ModEntry[];
   conflicts_resolved: number;
+  /** Every folder below `~mods`, or null while subfolders are not scanned. */
+  folders: string[] | null;
+}
+
+/** What deleting a folder did. */
+interface FolderDeleteReport {
+  deleted: number;
+  failures: { full_name: string; error: string }[];
+  /** Files that are no mod's, left where they were. */
+  kept: string[];
+}
+
+function plural(count: number, word: string): string {
+  return `${count} ${word}${count !== 1 ? "s" : ""}`;
 }
 
 interface BulkOpResult {
@@ -172,9 +220,33 @@ interface InstallOutcome {
     replaced_disabled: boolean;
     replaced_enabled: boolean;
     /** Packed into a container as it went in: a folder of loose files, or a plain pak's packages. */
-    packed?: { from: "folder" | "plain_pak"; packages: number };
+    packed?: {
+      from: "folder" | "plain_pak";
+      packages: number;
+      /** Packages an editor cooked, given the layout the game reads. */
+      conformed?: ConformedPackage[];
+      /** Packages an editor cooked that could not be, packed as they were. */
+      unconformed?: UnconformedPackage[];
+    };
   } | null;
   error: string | null;
+}
+
+interface ConformedPackage {
+  package: string;
+  changes: string[];
+}
+
+interface UnconformedPackage {
+  package: string;
+  reason: string;
+}
+
+/** What converting an installed mod to the game's layout did. */
+interface ConformReport {
+  conformed?: ConformedPackage[];
+  unconformed?: UnconformedPackage[];
+  written: boolean;
 }
 
 export function Mods({
@@ -192,6 +264,8 @@ export function Mods({
   } | null>(null);
   const showHeroIcons = useShowHeroIcons();
   const [busyMods, setBusyMods] = useState<Set<string>>(new Set());
+  /** The mods the toolkit keeps translations for, by their names in lower case. */
+  const [textEdited, setTextEdited] = useState<Set<string>>(new Set());
   const [isExporting, setIsExporting] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -199,6 +273,16 @@ export function Mods({
   const [bulkBusy, setBulkBusy] = useState(false);
   const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
   const [renamingMod, setRenamingMod] = useState<string | null>(null);
+  const [renamingFolder, setRenamingFolder] = useState<string | null>(null);
+  /** The new-folder dialog: the folder it goes in, and the mods to move into it once made. */
+  const [folderDialog, setFolderDialog] = useState<{ parent: string; moving: string[] } | null>(
+    null
+  );
+  const [folderDialogSeq, setFolderDialogSeq] = useState(0);
+  const [folderDelete, setFolderDelete] = useState<{ path: string; count: number } | null>(null);
+  /** The folder a drop being dragged over the list would install into, "" for `~mods`. */
+  const [dropTarget, setDropTarget] = useState("");
+  const { collapsed, updateCollapsed } = useCollapsedFolders();
   const [conflictReport, setConflictReport] = useState<ConflictReport | null>(null);
   const [conflictDetailOpen, setConflictDetailOpen] = useState(false);
   const [profiles, setProfiles] = useState<ModProfile[]>([]);
@@ -212,7 +296,7 @@ export function Mods({
   const [lastAppliedProfile, setLastAppliedProfile] = useState<string | null>(null);
   const [pendingDeleteProfile, setPendingDeleteProfile] = useState<string | null>(null);
   const newProfileInputRef = useRef<HTMLInputElement>(null);
-  const lastClickedIndex = useRef<number | null>(null);
+  const lastClicked = useRef<string | null>(null);
   const listRef = useRef<HTMLUListElement>(null);
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const modsStatusRef = useRef(modsStatus);
@@ -247,6 +331,10 @@ export function Mods({
       return invoke<ModsStatus>("get_mods_status", { gameRoot: gamePath })
         .then(async (s) => {
           setModsStatus(s);
+          invoke<string[]>("text_edited_mods").then(
+            (stems) => setTextEdited(new Set(stems)),
+            () => setTextEdited(new Set())
+          );
           if (!silent) showNotice("Mods refreshed", "ok", 4000);
           else if (s.conflicts_resolved > 0)
             showNotice(
@@ -346,20 +434,54 @@ export function Mods({
     }
   }
 
+  const filtersActive = heroFilter !== "all" || searchQuery.trim().length > 0;
+  const matches = useMemo(() => {
+    if (!filtersActive) return undefined;
+    const targetId = Number(heroFilter);
+    const q = searchQuery.trim().toLowerCase();
+    return (e: ModEntry) =>
+      (heroFilter === "all" ||
+        (heroFilter === "unknown"
+          ? e.heroes.length === 0
+          : !Number.isFinite(targetId) || e.heroes.some((h) => h.character_id === targetId))) &&
+      (!q || e.display_name.toLowerCase().includes(q));
+  }, [filtersActive, heroFilter, searchQuery]);
+  const foldersOn = modsStatus?.folders != null;
+  const tree = useMemo(
+    () => buildModTree(modsStatus?.mod_entries ?? [], modsStatus?.folders ?? []),
+    [modsStatus]
+  );
+  const allFolders = useMemo(() => folderPaths(tree), [tree]);
+  const rows = useMemo(() => treeRows(tree, collapsed, matches), [tree, collapsed, matches]);
+  const matchingMods = useMemo(() => {
+    const entries = modsStatus?.mod_entries ?? [];
+    return matches ? entries.filter(matches) : entries;
+  }, [modsStatus, matches]);
+  const visibleMods = rows.flatMap((row) => (row.kind === "mod" ? [row.mod] : []));
+  const filteredCount = matchingMods.length;
+
   // Drag-and-drop: install the mods, archives and folders dropped anywhere on the window.
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     getCurrentWindow()
       .onDragDropEvent(async (event) => {
+        // Folders are drop targets only while the list shows them.
+        const folderAt = (position: { x: number; y: number }) =>
+          modsStatusRef.current?.folders != null ? dropFolderAt(position) : "";
         if (event.payload.type === "enter") {
           if (
             isActiveRef.current &&
             modsStatusRef.current?.mods_folder_exists &&
             !gameRunningRef.current
-          )
+          ) {
             setIsDragging(true);
+            setDropTarget(folderAt(event.payload.position));
+          }
+        } else if (event.payload.type === "over") {
+          if (isActiveRef.current) setDropTarget(folderAt(event.payload.position));
         } else if (event.payload.type === "drop") {
           setIsDragging(false);
+          setDropTarget("");
           if (!isActiveRef.current || dropProcessingRef.current) return;
           if (gameRunningRef.current) {
             showNotice("Close Marvel Rivals before installing mods.", "err");
@@ -369,6 +491,7 @@ export function Mods({
           if (!folder) return;
           const sourcePaths = event.payload.paths;
           if (sourcePaths.length === 0) return;
+          const into = folderAt(event.payload.position);
           dropProcessingRef.current = true;
           // Packing a folder of loose files can take a while.
           showNotice("Installing…", "info", 600_000);
@@ -376,12 +499,15 @@ export function Mods({
             const outcomes = await invoke<InstallOutcome[]>("install_mods", {
               modsFolder: folder,
               sourcePaths,
+              folder: into || null,
             });
             let installed = 0;
             let packed = 0;
+            let conformed = 0;
             let replacedDisabled = 0;
             let replacedEnabled = 0;
             const errors: string[] = [];
+            const unconformed: string[] = [];
             for (const { at, installed: result, error } of outcomes) {
               if (!result) {
                 const name = at.split(/[\\/]/).pop() ?? at;
@@ -391,25 +517,35 @@ export function Mods({
               }
               installed++;
               if (result.packed) packed++;
+              conformed += result.packed?.conformed?.length ?? 0;
+              for (const left of result.packed?.unconformed ?? []) {
+                unconformed.push(`${left.package}: ${left.reason}`);
+              }
               if (result.replaced_disabled) replacedDisabled++;
               if (result.replaced_enabled) replacedEnabled++;
             }
             if (installed > 0) {
+              if (into) updateCollapsed((prev) => withFolderShown(prev, into));
               await refreshRef.current(true);
               emitChange();
             }
             const n = (c: number, s: string) => `${c} ${s}${c !== 1 ? "s" : ""}`;
             const parts: string[] = [];
             if (packed > 0) parts.push(`packed ${n(packed, "mod")} into containers`);
+            if (conformed > 0)
+              parts.push(`gave ${n(conformed, "package")} the layout the game reads`);
             if (replacedEnabled > 0) parts.push(`updated ${n(replacedEnabled, "existing mod")}`);
             if (replacedDisabled > 0)
               parts.push(`replaced ${n(replacedDisabled, "disabled version")}`);
             const suffix = parts.length > 0 ? ` (${parts.join(", ")})` : "";
-            const done = `Installed ${n(installed, "mod")}${suffix}`;
+            const done = `Installed ${n(installed, "mod")}${into ? ` into ${into}` : ""}${suffix}`;
             if (errors.length > 0) {
               const more =
                 errors.length > 1 ? ` (and ${errors.length - 1} more not installed)` : "";
               showNotice(`${installed > 0 ? `${done}; ` : ""}${errors[0]}${more}`, "err");
+            } else if (unconformed.length > 0) {
+              const more = unconformed.length > 1 ? ` (and ${unconformed.length - 1} more)` : "";
+              showNotice(`${done}; left as the editor cooked it: ${unconformed[0]}${more}`, "err");
             } else showNotice(done, "ok");
           } catch (e: unknown) {
             showNotice(String(e), "err");
@@ -418,6 +554,7 @@ export function Mods({
           }
         } else if (event.payload.type === "leave") {
           setIsDragging(false);
+          setDropTarget("");
         }
       })
       .then((fn) => {
@@ -496,14 +633,16 @@ export function Mods({
     }
   }
 
-  function handleRowClick(index: number, fullName: string, e: React.MouseEvent) {
-    const entries = modsStatus?.mod_entries ?? [];
+  function handleRowClick(fullName: string, e: React.MouseEvent) {
+    const shown = visibleMods.map((mod) => mod.full_name);
+    const anchor = lastClicked.current === null ? -1 : shown.indexOf(lastClicked.current);
     setSelected((prev) => {
       const next = new Set(prev);
-      if (e.shiftKey && lastClickedIndex.current !== null) {
-        const start = Math.min(lastClickedIndex.current, index);
-        const end = Math.max(lastClickedIndex.current, index);
-        for (let i = start; i <= end; i++) next.add(entries[i].full_name);
+      if (e.shiftKey && anchor >= 0) {
+        const index = shown.indexOf(fullName);
+        const start = Math.min(anchor, index);
+        const end = Math.max(anchor, index);
+        for (let i = start; i <= end; i++) next.add(shown[i]);
       } else if (e.ctrlKey || e.metaKey) {
         if (next.has(fullName)) next.delete(fullName);
         else next.add(fullName);
@@ -517,24 +656,39 @@ export function Mods({
       }
       return next;
     });
-    lastClickedIndex.current = index;
+    lastClicked.current = fullName;
   }
 
   function clearSelection() {
     setSelected(new Set());
-    lastClickedIndex.current = null;
+    lastClicked.current = null;
   }
 
   function selectAll() {
-    if (!modsStatus) return;
-    setSelected(new Set(modsStatus.mod_entries.map((e) => e.full_name)));
+    setSelected(new Set(matchingMods.map((e) => e.full_name)));
   }
 
-  async function bulkToggle(enabled: boolean) {
-    if (!modsStatus || selected.size === 0 || bulkBusy) return;
+  function bulkToggle(enabled: boolean) {
+    return toggleMods(Array.from(selected), enabled);
+  }
+
+  function markBusy(names: readonly string[], busy: boolean) {
+    setBusyMods((prev) => {
+      const next = new Set(prev);
+      for (const name of names) {
+        if (busy) next.add(name);
+        else next.delete(name);
+      }
+      return next;
+    });
+  }
+
+  async function toggleMods(names: readonly string[], enabled: boolean) {
+    if (!modsStatus || names.length === 0 || bulkBusy) return;
+    const named = new Set(names);
     // Skip mods already in the target state
     const targets = modsStatus.mod_entries
-      .filter((e) => selected.has(e.full_name) && e.enabled !== enabled)
+      .filter((e) => named.has(e.full_name) && e.enabled !== enabled)
       .map((e) => e.full_name);
     if (targets.length === 0) return;
     setBulkBusy(true);
@@ -634,20 +788,28 @@ export function Mods({
     }
   }
 
-  async function revealMod(entry: ModEntry) {
-    if (!modsStatus) return;
+  /** The path on disk of `relative`, a mod or folder below `~mods`, in the folder's own separators. */
+  function modPath(relative: string): string {
+    const root = modsStatus?.mods_folder_path ?? "";
+    const sep = root.includes("\\") ? "\\" : "/";
+    return relative ? `${root}${sep}${relative.replaceAll("/", sep)}` : root;
+  }
+
+  async function reveal(path: string) {
     try {
-      const sep = modsStatus.mods_folder_path.includes("\\") ? "\\" : "/";
-      await revealItemInDir(`${modsStatus.mods_folder_path}${sep}${entry.full_name}`);
+      await revealItemInDir(path);
     } catch (e: unknown) {
       showNotice(String(e), "err");
     }
   }
 
+  function revealMod(entry: ModEntry) {
+    if (modsStatus) void reveal(modPath(entry.full_name));
+  }
+
   async function copyPath(entry: ModEntry) {
     if (!modsStatus) return;
-    const sep = modsStatus.mods_folder_path.includes("\\") ? "\\" : "/";
-    const fullPath = `${modsStatus.mods_folder_path}${sep}${entry.full_name}`;
+    const fullPath = modPath(entry.full_name);
     try {
       await navigator.clipboard.writeText(fullPath);
       showNotice("Copied path", "ok", 2000);
@@ -686,10 +848,259 @@ export function Mods({
     }
   }
 
+  /** Gives an installed mod an editor cooked the layout the game reads, where it is. */
+  async function conformMod(entry: ModEntry) {
+    if (!modsStatus || !gamePath) return;
+    const modPak = modPath(entry.full_name);
+    setBusyMods((prev) => new Set(prev).add(entry.full_name));
+    showNotice(`Converting ${entry.display_name}…`, "info", 600_000);
+    try {
+      const report = await invoke<ConformReport>("conform_mod", {
+        gameRoot: gamePath,
+        modPak,
+        compression: "oodle",
+      });
+      const done = report.conformed?.length ?? 0;
+      const left = report.unconformed ?? [];
+      if (done === 0 && left.length === 0) {
+        showNotice(`${entry.display_name} already matches the layout the game reads`, "ok");
+      } else if (left.length > 0) {
+        showNotice(
+          `${entry.display_name}: left as the editor cooked it: ${left[0].package}: ${left[0].reason}`,
+          "err"
+        );
+      } else {
+        showNotice(
+          `${entry.display_name}: gave ${done} package${done !== 1 ? "s" : ""} the layout the game reads`,
+          "ok"
+        );
+      }
+      if (report.written) {
+        await refreshRef.current(true);
+        emitChange();
+      }
+    } catch (e: unknown) {
+      showNotice(String(e), "err");
+    } finally {
+      setBusyMods((prev) => {
+        const next = new Set(prev);
+        next.delete(entry.full_name);
+        return next;
+      });
+    }
+  }
+
+  /** Writes a mod's translations again over the game's current ones, as a patch that changed them
+   *  needs. */
+  async function rebuildText(entry: ModEntry) {
+    if (!modsStatus || !gamePath) return;
+    const modPak = modPath(entry.full_name);
+    setBusyMods((prev) => new Set(prev).add(entry.full_name));
+    try {
+      const report = await invoke<{ files: { culture: string; removed: boolean }[] }>(
+        "rebuild_mod_text",
+        { gameRoot: gamePath, modPak }
+      );
+      const cultures = report.files.filter((file) => !file.removed).map((file) => file.culture);
+      showNotice(
+        cultures.length > 0
+          ? `${entry.display_name}: wrote its ${cultures.join(", ")} translations over the game's current ones`
+          : `${entry.display_name} words no text its own way any more, so its translations were taken out`,
+        "ok"
+      );
+    } catch (e: unknown) {
+      showNotice(String(e), "err");
+    } finally {
+      setBusyMods((prev) => {
+        const next = new Set(prev);
+        next.delete(entry.full_name);
+        return next;
+      });
+    }
+  }
+
   function viewInAssetManager(entry: ModEntry) {
     if (!modsStatus || !onViewInAssetManager) return;
-    const sep = modsStatus.mods_folder_path.includes("\\") ? "\\" : "/";
-    onViewInAssetManager(`${modsStatus.mods_folder_path}${sep}${entry.full_name}`);
+    onViewInAssetManager(modPath(entry.full_name));
+  }
+
+  // ── Folder actions ───────────────────────────────────────────────
+
+  function openFolderDialog(parent: string, moving: string[]) {
+    setFolderDialog({ parent, moving });
+    setFolderDialogSeq((n) => n + 1);
+  }
+
+  async function moveMods(names: string[], to: string) {
+    if (!modsStatus || names.length === 0 || bulkBusy) return;
+    setBulkBusy(true);
+    markBusy(names, true);
+    try {
+      const res = await invoke<BulkOpResult>("move_mods", {
+        modsFolder: modsStatus.mods_folder_path,
+        fullNames: names,
+        to,
+      });
+      const failed = new Set(res.failures.map((f) => f.full_name));
+      const moved = (name: string) =>
+        names.includes(name) && !failed.has(name) ? movedName(name, to) : name;
+      setSelected((prev) => new Set([...prev].map(moved)));
+      if (lastClicked.current) lastClicked.current = moved(lastClicked.current);
+      if (to) updateCollapsed((prev) => withFolderShown(prev, to));
+      await refresh(true);
+      emitChange();
+      if (res.failures.length === 0) {
+        showNotice(`Moved ${plural(res.successes, "mod")} to ${to || "~mods"}`, "ok");
+      } else {
+        showNotice(
+          `Moved ${res.successes}, ${res.failures.length} failed: ${res.failures[0].error}`,
+          "err"
+        );
+      }
+    } catch (e: unknown) {
+      showNotice(String(e), "err");
+    } finally {
+      setBulkBusy(false);
+      markBusy(names, false);
+    }
+  }
+
+  async function createFolder(path: string, moving: string[]) {
+    if (!modsStatus) return;
+    try {
+      const made = await invoke<string>("create_mod_folder", {
+        modsFolder: modsStatus.mods_folder_path,
+        path,
+      });
+      updateCollapsed((prev) => withFolderShown(prev, made));
+      if (moving.length > 0) {
+        await moveMods(moving, made);
+      } else {
+        await refresh(true);
+        emitChange();
+        showNotice(`Made ${made}`, "ok", 3000);
+      }
+    } catch (e: unknown) {
+      showNotice(String(e), "err");
+    }
+  }
+
+  async function renameFolder(path: string, name: string) {
+    setRenamingFolder(null);
+    const newName = name.trim();
+    if (!modsStatus || !newName || newName === leafName(path)) return;
+    setBulkBusy(true);
+    try {
+      const renamed = await invoke<string>("rename_mod_folder", {
+        modsFolder: modsStatus.mods_folder_path,
+        path,
+        newName,
+      });
+      updateCollapsed((prev) => withFolderRenamed(prev, path, renamed));
+      setSelected((prev) => new Set([...prev].map((n) => renamedUnder(n, path, renamed) ?? n)));
+      lastClicked.current = null;
+      await refresh(true);
+      emitChange();
+    } catch (e: unknown) {
+      showNotice(String(e), "err");
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
+  function requestDeleteFolder(folder: FolderNode<ModEntry>) {
+    const count = modsIn(folder).length;
+    if (count === 0) void deleteFolder(folder.path, false);
+    else setFolderDelete({ path: folder.path, count });
+  }
+
+  async function deleteFolder(path: string, withMods: boolean) {
+    setFolderDelete(null);
+    if (!modsStatus) return;
+    setBulkBusy(true);
+    try {
+      const report = await invoke<FolderDeleteReport>("delete_mod_folder", {
+        modsFolder: modsStatus.mods_folder_path,
+        path,
+        withMods,
+      });
+      updateCollapsed((prev) => withoutFolder(prev, path));
+      await refresh(true);
+      emitChange();
+      const mods = report.deleted > 0 ? ` and ${plural(report.deleted, "mod")} in it` : "";
+      if (report.failures.length > 0) {
+        showNotice(
+          `Deleted ${plural(report.deleted, "mod")} in ${path}, ${report.failures.length} failed: ${report.failures[0].error}`,
+          "err"
+        );
+      } else if (report.kept.length > 0) {
+        showNotice(
+          `Deleted the mods in ${path}, and kept ${plural(report.kept.length, "file")} that no mod owns, such as ${leafName(report.kept[0])}`,
+          "info",
+          8000,
+          { revealPath: modPath(report.kept[0]) }
+        );
+      } else {
+        showNotice(`Deleted ${path}${mods}`, "ok");
+      }
+    } catch (e: unknown) {
+      showNotice(String(e), "err");
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
+  function renderFolderRow(row: Extract<TreeRow<ModEntry>, { kind: "folder" }>) {
+    const { folder, mods } = row;
+    const names = mods.map((mod) => mod.full_name);
+    const picked = names.filter((name) => selected.has(name)).length;
+    return (
+      <FolderRow
+        key={`folder:${folder.path}`}
+        folder={folder}
+        depth={row.depth}
+        expanded={row.expanded}
+        collapsible={!filtersActive}
+        mods={mods}
+        selected={picked === 0 ? false : picked === names.length ? true : "indeterminate"}
+        busy={bulkBusy || names.some((name) => busyMods.has(name))}
+        gameRunning={gameRunning}
+        renaming={renamingFolder === folder.path}
+        drop={
+          !isDragging || dropTarget === ""
+            ? null
+            : dropTarget === folder.path
+              ? "target"
+              : isInFolder(folder.path, dropTarget)
+                ? "inside"
+                : null
+        }
+        actions={{
+          toggleExpanded: () =>
+            updateCollapsed((prev) => {
+              const next = new Set(prev);
+              if (!next.delete(folder.path)) next.add(folder.path);
+              return next;
+            }),
+          select: (on) =>
+            setSelected((prev) => {
+              const next = new Set(prev);
+              for (const name of names) {
+                if (on) next.add(name);
+                else next.delete(name);
+              }
+              return next;
+            }),
+          switchAll: (enabled) => void toggleMods(names, enabled),
+          newSubfolder: () => openFolderDialog(folder.path, []),
+          startRename: () => setRenamingFolder(folder.path),
+          rename: (name) => void renameFolder(folder.path, name),
+          cancelRename: () => setRenamingFolder(null),
+          reveal: () => void reveal(modPath(folder.path)),
+          remove: () => requestDeleteFolder(folder),
+        }}
+      />
+    );
   }
 
   // ── Profile actions ───────────────────────────────────────────────
@@ -795,7 +1206,7 @@ export function Mods({
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isActive, selected, bulkBusy, bulkDeleteOpen]);
+  }, [isActive, selected, bulkBusy, bulkDeleteOpen, matchingMods]);
 
   async function exportZip() {
     if (!modsStatus || isExporting) return;
@@ -824,24 +1235,6 @@ export function Mods({
 
   const enabledCount = modsStatus?.mod_entries.filter((m) => m.enabled).length ?? 0;
   const totalCount = modsStatus?.mod_entries.length ?? 0;
-
-  const filteredEntries = useMemo<ModEntry[]>(() => {
-    if (!modsStatus) return [];
-    let entries = modsStatus.mod_entries;
-    if (heroFilter === "unknown") {
-      entries = entries.filter((e) => e.heroes.length === 0);
-    } else if (heroFilter !== "all") {
-      const targetId = Number(heroFilter);
-      if (Number.isFinite(targetId)) {
-        entries = entries.filter((e) => e.heroes.some((h) => h.character_id === targetId));
-      }
-    }
-    const q = searchQuery.trim().toLowerCase();
-    if (q) entries = entries.filter((e) => e.display_name.toLowerCase().includes(q));
-    return entries;
-  }, [modsStatus, heroFilter, searchQuery]);
-  const filteredCount = filteredEntries.length;
-  const filtersActive = heroFilter !== "all" || searchQuery.trim().length > 0;
 
   async function bulkRescanHeroes() {
     if (!gamePath || selectedEntries.length === 0) return;
@@ -882,10 +1275,7 @@ export function Mods({
 
   async function bulkCopyPaths() {
     if (!modsStatus || selectedEntries.length === 0) return;
-    const sep = modsStatus.mods_folder_path.includes("\\") ? "\\" : "/";
-    const paths = selectedEntries
-      .map((e) => `${modsStatus.mods_folder_path}${sep}${e.full_name}`)
-      .join("\n");
+    const paths = selectedEntries.map((e) => modPath(e.full_name)).join("\n");
     try {
       await navigator.clipboard.writeText(paths);
       showNotice(`Copied ${selectedEntries.length} paths`, "ok", 2000);
@@ -927,6 +1317,8 @@ export function Mods({
     selectedEntries.length > 0 && selectedEntries.every((e) => e.enabled);
   const allDisabledInSelection =
     selectedEntries.length > 0 && selectedEntries.every((e) => !e.enabled);
+  const selectionFolders = new Set(selectedEntries.map((e) => parentFolder(e.full_name)));
+  const selectionFolder = selectionFolders.size === 1 ? [...selectionFolders][0] : null;
   const conflictsByMod = useMemo(() => {
     const map = new Map<string, ConflictGroup>();
     if (!conflictReport) return map;
@@ -954,7 +1346,7 @@ export function Mods({
   }, [modsStatus, profiles, lastAppliedProfile]);
 
   const selectAllState: boolean | "indeterminate" =
-    totalCount > 0 && selected.size === totalCount
+    matchingMods.length > 0 && matchingMods.every((e) => selected.has(e.full_name))
       ? true
       : selected.size > 0
         ? "indeterminate"
@@ -962,14 +1354,24 @@ export function Mods({
 
   return (
     <div ref={outerRef} className="relative flex flex-1 min-h-0 w-full flex-col gap-3">
-      {isDragging && (
-        <div className="pointer-events-none absolute inset-0 z-50 flex flex-col items-center justify-center gap-3 rounded-lg border-2 border-dashed border-ok bg-background/80 backdrop-blur-sm">
-          <UploadCloud size={36} className="text-ok" />
-          <span className="text-sm font-semibold text-ok">
-            Drop mods, archives or folders to install
-          </span>
-        </div>
-      )}
+      {isDragging &&
+        (foldersOn ? (
+          <div className="pointer-events-none absolute inset-0 z-50 rounded-lg border-2 border-dashed border-ok">
+            <div className="absolute top-3 left-1/2 flex -translate-x-1/2 items-center gap-2 rounded-full border border-ok/40 bg-background/95 px-3 py-1.5 text-[12px] font-semibold text-ok shadow-md">
+              <UploadCloud size={14} />
+              {dropTarget
+                ? `Drop to install into ${dropTarget}`
+                : "Drop to install into ~mods, or onto a folder"}
+            </div>
+          </div>
+        ) : (
+          <div className="pointer-events-none absolute inset-0 z-50 flex flex-col items-center justify-center gap-3 rounded-lg border-2 border-dashed border-ok bg-background/80 backdrop-blur-sm">
+            <UploadCloud size={36} className="text-ok" />
+            <span className="text-sm font-semibold text-ok">
+              Drop mods, archives or folders to install
+            </span>
+          </div>
+        ))}
       {/* Header */}
       <div className="flex min-h-8 items-center gap-3">
         <h2 className="shrink-0 text-xl font-bold">Mods</h2>
@@ -1044,7 +1446,8 @@ export function Mods({
           <AlertTriangle size={15} className="shrink-0 text-warn" />
           <span className="flex-1 text-[12px] text-warn">
             {conflictCount} mod{conflictCount !== 1 ? "s" : ""} ha
-            {conflictCount !== 1 ? "ve" : "s"} asset conflicts, the alphabetically first pak wins
+            {conflictCount !== 1 ? "ve" : "s"} asset conflicts, the pak first by its path in ~mods
+            wins
           </span>
           <Button
             variant="ghost"
@@ -1184,6 +1587,18 @@ export function Mods({
                 )}
               </div>
               <div className="flex items-center -mr-1">
+                {foldersOn && (
+                  <Tip content="New folder">
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      onClick={() => openFolderDialog("", [])}
+                      aria-label="New folder"
+                    >
+                      <FolderPlus size={15} />
+                    </Button>
+                  </Tip>
+                )}
                 <Tip content="Open ~mods folder">
                   <Button variant="ghost" size="icon-sm" onClick={openFolder} disabled={!gamePath}>
                     <FolderOpen size={15} />
@@ -1395,7 +1810,7 @@ export function Mods({
 
         {/* Scrollable list */}
         <div className="min-h-0 flex-1 overflow-y-auto bg-background">
-          {pathLoading ? null : !modsStatus || totalCount === 0 ? (
+          {pathLoading ? null : !modsStatus || (totalCount === 0 && allFolders.length === 0) ? (
             <div className="flex h-full flex-col items-center justify-center py-12">
               <div className="flex w-full max-w-md flex-col gap-4">
                 <p className="text-sm text-muted-foreground">
@@ -1429,12 +1844,14 @@ export function Mods({
             </div>
           ) : (
             <ul ref={listRef}>
-              {filteredEntries.length === 0 && filtersActive && (
+              {matchingMods.length === 0 && filtersActive && (
                 <li className="flex h-12 items-center justify-center text-[12px] text-muted-foreground">
                   No mods match the current filter.
                 </li>
               )}
-              {filteredEntries.map((entry, index) => {
+              {rows.map((row) => {
+                if (row.kind === "folder") return renderFolderRow(row);
+                const entry = row.mod;
                 const busy = busyMods.has(entry.full_name);
                 const isSelected = selected.has(entry.full_name);
                 const isMulti = isSelected && selected.size > 1;
@@ -1442,16 +1859,23 @@ export function Mods({
                   <ContextMenu key={entry.full_name}>
                     <ContextMenuTrigger asChild>
                       <li
-                        onClick={(e) => handleRowClick(index, entry.full_name, e)}
+                        data-drop-folder={row.parent}
+                        onClick={(e) => handleRowClick(entry.full_name, e)}
                         onContextMenu={() => {
                           if (!selected.has(entry.full_name)) {
                             setSelected(new Set([entry.full_name]));
-                            lastClickedIndex.current = index;
+                            lastClicked.current = entry.full_name;
                           }
                         }}
                         className={cn(
                           "relative flex h-12 cursor-default items-center gap-3 border-b border-border/50 px-3 last:border-transparent select-none",
-                          isSelected ? "bg-primary/10 hover:bg-primary/15" : "hover:bg-secondary/40"
+                          isSelected
+                            ? "bg-primary/10 hover:bg-primary/15"
+                            : "hover:bg-secondary/40",
+                          isDragging &&
+                            dropTarget !== "" &&
+                            isInFolder(row.parent, dropTarget) &&
+                            "bg-ok/5"
                         )}
                       >
                         {isSelected && (
@@ -1475,6 +1899,7 @@ export function Mods({
                             "flex min-w-0 flex-1 items-center gap-2 text-[13px]",
                             !entry.enabled && "opacity-40"
                           )}
+                          style={row.depth > 0 ? { paddingLeft: indent(row.depth) } : undefined}
                         >
                           <Tip content="Double-click to rename" side="top" align="start">
                             <span
@@ -1493,12 +1918,12 @@ export function Mods({
                             >
                               {renamingMod === entry.full_name ? (
                                 <RenameInput
-                                  displayName={entry.display_name}
+                                  displayName={leafName(entry.display_name)}
                                   onCommit={(v) => renameMod(entry, v)}
                                   onCancel={() => setRenamingMod(null)}
                                 />
                               ) : (
-                                <ModName displayName={entry.display_name} />
+                                <ModName displayName={leafName(entry.display_name)} />
                               )}
                             </span>
                           </Tip>
@@ -1654,6 +2079,15 @@ export function Mods({
                             <PowerOff />
                             Disable {selected.size} selected
                           </ContextMenuItem>
+                          {foldersOn && (
+                            <MoveToMenu
+                              folders={allFolders}
+                              current={selectionFolder}
+                              disabled={bulkBusy || gameRunning}
+                              onMove={(to) => void moveMods(Array.from(selected), to)}
+                              onNewFolder={() => openFolderDialog("", Array.from(selected))}
+                            />
+                          )}
                           <ContextMenuSeparator />
                           <ContextMenuItem onSelect={bulkCopyPaths}>
                             <Copy />
@@ -1688,13 +2122,24 @@ export function Mods({
                             <Pencil />
                             Rename
                           </ContextMenuItem>
-                          <ContextMenuItem
-                            disabled={!entry.enabled}
-                            onSelect={() => viewInAssetManager(entry)}
-                          >
-                            <PackageOpen />
-                            View in Asset Manager
-                          </ContextMenuItem>
+                          {foldersOn && (
+                            <MoveToMenu
+                              folders={allFolders}
+                              current={row.parent}
+                              disabled={busy || bulkBusy || gameRunning}
+                              onMove={(to) => void moveMods([entry.full_name], to)}
+                              onNewFolder={() => openFolderDialog("", [entry.full_name])}
+                            />
+                          )}
+                          {onViewInAssetManager && (
+                            <ContextMenuItem
+                              disabled={!entry.enabled}
+                              onSelect={() => viewInAssetManager(entry)}
+                            >
+                              <PackageOpen />
+                              View in Asset Manager
+                            </ContextMenuItem>
+                          )}
                           <ContextMenuItem onSelect={() => revealMod(entry)}>
                             <FolderOpen />
                             Show in folder
@@ -1707,6 +2152,24 @@ export function Mods({
                             <RefreshCw />
                             Rescan heroes
                           </ContextMenuItem>
+                          {entry.kind === "IoStore" && (
+                            <ContextMenuItem
+                              disabled={busy || bulkBusy || gameRunning || !entry.enabled}
+                              onSelect={() => conformMod(entry)}
+                            >
+                              <Layers />
+                              Convert editor-made assets
+                            </ContextMenuItem>
+                          )}
+                          {textEdited.has(modStem(entry.full_name)) && (
+                            <ContextMenuItem
+                              disabled={busy || bulkBusy || gameRunning}
+                              onSelect={() => rebuildText(entry)}
+                            >
+                              <Languages />
+                              Rebuild translations
+                            </ContextMenuItem>
+                          )}
                         </>
                       )}
                       <ContextMenuSeparator />
@@ -1756,6 +2219,44 @@ export function Mods({
         </AlertDialogContent>
       </AlertDialog>
 
+      <FolderNameDialog
+        key={folderDialogSeq}
+        parent={folderDialog?.parent ?? null}
+        then={
+          folderDialog && folderDialog.moving.length > 0
+            ? `then moves ${plural(folderDialog.moving.length, "mod")} into it`
+            : undefined
+        }
+        onConfirm={(path) => void createFolder(path, folderDialog?.moving ?? [])}
+        onClose={() => setFolderDialog(null)}
+      />
+
+      <AlertDialog
+        open={folderDelete !== null}
+        onOpenChange={(open) => !open && setFolderDelete(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Delete {folderDelete?.path} and its {plural(folderDelete?.count ?? 0, "mod")}?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              This permanently removes every mod in the folder and its subfolders, with their
+              .ucas/.utoc companions. Files that are no mod&apos;s stay. This cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className={cn("bg-err text-white hover:bg-err/90 focus-visible:ring-err/40")}
+              onClick={() => folderDelete && void deleteFolder(folderDelete.path, true)}
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       <AlertDialog open={conflictDetailOpen} onOpenChange={setConflictDetailOpen}>
         <AlertDialogContent className="max-w-lg max-h-[80vh] flex flex-col">
           <AlertDialogHeader>
@@ -1763,7 +2264,8 @@ export function Mods({
             <AlertDialogDescription>
               {conflictReport?.asset_conflicts.length ?? 0} asset
               {conflictReport?.asset_conflicts.length !== 1 ? "s" : ""} modified by multiple mods.
-              The alphabetically first pak wins, unless another carries a higher _N_P patch number.
+              The pak whose path in ~mods comes first alphabetically wins, its folder included,
+              unless another carries a higher _N_P patch number.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <ConflictList conflicts={conflictReport?.asset_conflicts ?? []} />
@@ -1786,71 +2288,6 @@ function ModName({ displayName }: { displayName: string }) {
       <span className="font-semibold">{base}</span>
       {suffix && <span className="font-mono text-muted-foreground/40">{suffix}</span>}
     </>
-  );
-}
-
-function RenameInput({
-  displayName,
-  onCommit,
-  onCancel,
-}: {
-  displayName: string;
-  onCommit: (value: string) => void;
-  onCancel: () => void;
-}) {
-  // Peel the parent subdirectory off; it stays fixed, only the filename is editable.
-  const slashIdx = displayName.lastIndexOf("/");
-  const parentPrefix = slashIdx >= 0 ? displayName.slice(0, slashIdx + 1) : "";
-  const leaf = slashIdx >= 0 ? displayName.slice(slashIdx + 1) : displayName;
-  // Split leaf into editable base and preserved suffix (_NNNNN_P).
-  const match = leaf.match(/^(.+?)(_\d+_P)?\.pak$/);
-  const base = match ? match[1] : leaf;
-  const suffix = match?.[2] ?? "";
-  const ref = useRef<HTMLInputElement>(null);
-  const committed = useRef(false);
-
-  useEffect(() => {
-    const el = ref.current;
-    if (el) {
-      el.focus();
-      el.select();
-    }
-  }, []);
-
-  const commit = (value: string) => {
-    if (committed.current) return;
-    committed.current = true;
-    onCommit(value + suffix);
-  };
-
-  return (
-    <span className="flex items-center gap-0 rounded border border-primary bg-background focus-within:ring-1 focus-within:ring-primary">
-      {parentPrefix && (
-        <span className="shrink-0 pl-1.5 font-mono text-[13px] text-muted-foreground/60">
-          {parentPrefix}
-        </span>
-      )}
-      <input
-        ref={ref}
-        defaultValue={base}
-        className="min-w-0 flex-1 bg-transparent px-1.5 py-0.5 text-[13px] font-semibold outline-none"
-        onClick={(e) => e.stopPropagation()}
-        onKeyDown={(e) => {
-          e.stopPropagation();
-          if (e.key === "Enter") {
-            commit((e.target as HTMLInputElement).value);
-          } else if (e.key === "Escape") {
-            onCancel();
-          }
-        }}
-        onBlur={(e) => commit(e.target.value)}
-      />
-      {suffix && (
-        <span className="shrink-0 pr-1.5 font-mono text-[13px] text-muted-foreground/40">
-          {suffix}
-        </span>
-      )}
-    </span>
   );
 }
 

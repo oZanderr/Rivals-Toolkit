@@ -218,10 +218,6 @@ impl StructDefinition {
         self.inner.super_struct.as_deref()
     }
 
-    pub fn field_count(&self) -> usize {
-        self.inner.properties.len()
-    }
-
     pub fn properties(&self) -> &[Property] {
         &self.inner.properties
     }
@@ -548,13 +544,9 @@ fn take_index(cursor: &mut Cursor<'_>, references: &mut Vec<IndexRef>) -> Result
     Ok(index)
 }
 
-/// A schema source holding only synthesised structs, consulted when the mappings file has no entry.
-pub fn mappings_from_definitions(definitions: Vec<StructDefinition>) -> Mappings {
-    mappings_from_definitions_with(definitions, None)
-}
-
-/// [`mappings_from_definitions`] with each definition's ancestry copied in from `parents`, so a
-/// Blueprint class recovered from its package still decodes the properties it inherits.
+/// A schema source holding only synthesised structs, consulted when the mappings file has no
+/// entry, each definition's ancestry copied in from `parents`, so a Blueprint class recovered from
+/// its package still decodes the properties it inherits.
 pub fn mappings_from_definitions_with(
     definitions: Vec<StructDefinition>,
     parents: Option<&Mappings>,

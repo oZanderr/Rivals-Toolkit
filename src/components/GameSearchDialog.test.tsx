@@ -1,7 +1,7 @@
-import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { act, render, screen, waitFor, within } from "@/test/render";
 import { createTauri, deferred, emitEvent, installTauri, type TauriMock } from "@/test/tauri";
 
 vi.mock("@tauri-apps/api/core", async () => {
@@ -51,10 +51,9 @@ function result(extra: Record<string, unknown> = {}) {
 }
 
 let mock: TauriMock;
-const opened = vi.fn();
 
 function mount() {
-  render(<GameSearch gamePath={GAME} onOpenHit={opened} />);
+  render(<GameSearch gamePath={GAME} />);
 }
 
 /** Opens the dialog and searches for `text`. */
@@ -64,7 +63,6 @@ async function searchFor(user: ReturnType<typeof userEvent.setup>, text: string)
 }
 
 beforeEach(() => {
-  opened.mockReset();
   mock = createTauri().on("search_game", () => result());
   installTauri(mock);
 });
@@ -251,11 +249,15 @@ describe("GameSearch", () => {
     ).toBeTruthy();
   });
 
-  it("hands over the container a hit was found in", async () => {
+  it("copies the command that shows a hit, from the mod the game loads it from", async () => {
     mount();
     const user = userEvent.setup();
     await searchFor(user, "SetScalarParameterValue");
     await user.click(await screen.findByText(MOD_HIT.line));
-    expect(opened).toHaveBeenCalledWith(MOD_HIT);
+    // user-event stands in for the clipboard, so what was copied reads back from it.
+    expect(await navigator.clipboard.readText()).toBe(
+      `rivals-cli asset script "${MOD_HIT.package}" --from "${MOD_HIT.in_mod}" --export 2`
+    );
+    expect(screen.getByText("copied")).toBeTruthy();
   });
 });

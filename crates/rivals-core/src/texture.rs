@@ -1,5 +1,5 @@
-//! A texture's pixels: its platform data read from the package, decoded from its pixel format to
-//! RGBA, and saved as PNG, or as OpenEXR where they are high dynamic range.
+//! A texture's pixels: its platform data read from the package, decoded from its pixel format,
+//! saved as image files and replaced from them.
 
 use std::path::Path;
 
@@ -12,6 +12,9 @@ use rivals_uasset::{
 use serde::Serialize;
 
 use crate::asset_edit::AssetEditRequest;
+use crate::image_file::{DdsImage, ImageIn, ImageKind, Pixels, encode_pixels, read_image};
+#[cfg(test)]
+use crate::image_file::{decode_exr, decode_png, encode_exr, encode_png};
 
 /// How a pixel format stores its pixels.
 #[derive(Debug, Clone, Copy)]
@@ -334,7 +337,7 @@ fn read_layout(
 /// How texture `index` of the package `loaded` holds is laid out, read from its export alone, or
 /// with the rest of the package when it does not read whole alone. `request` says where `loaded`
 /// was read from.
-fn layout_of(
+pub(crate) fn layout_of(
     request: &AssetEditRequest<'_>,
     mappings: Option<&Mappings>,
     loaded: &FSerializedAssetBundle,
@@ -389,7 +392,10 @@ pub fn texture_info(
 }
 
 /// The bytes of `mip`, from the file the bulk data table puts them in.
-fn mip_bytes<'a>(loaded: &'a FSerializedAssetBundle, mip: &TextureMip) -> Result<&'a [u8], String> {
+pub(crate) fn mip_bytes<'a>(
+    loaded: &'a FSerializedAssetBundle,
+    mip: &TextureMip,
+) -> Result<&'a [u8], String> {
     let size = usize::try_from(mip.size).map_err(|_| "a mip has no size".to_string())?;
     let (file, at): (Option<&[u8]>, i64) = match mip.placement {
         "inline" => (
@@ -455,125 +461,20 @@ fn decode_mip<C: Channel>(
     Ok((mip.size_x, mip.size_y * layers as u32, rgba))
 }
 
-/// 8-bit RGBA pixels as a PNG file's bytes.
-pub fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
-    let mut out = Vec::new();
-    {
-        let mut encoder = png::Encoder::new(&mut out, width, height);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        let mut writer = encoder
-            .write_header()
-            .map_err(|e| format!("Could not write the PNG: {e}"))?;
-        writer
-            .write_image_data(rgba)
-            .map_err(|e| format!("Could not write the PNG: {e}"))?;
-    }
-    Ok(out)
-}
-
-/// RGBA floats as an OpenEXR file's bytes: one RGBA layer of scan lines, ZIP-compressed, which
-/// every tool reads, in halves for a texture that holds halves and in floats for one that holds
-/// floats.
-pub fn encode_exr(width: u32, height: u32, rgba: &[f32], halves: bool) -> Result<Vec<u8>, String> {
-    use exr::prelude::*;
-
-    let (w, h) = (width as usize, height as usize);
-    let pixel = |x: usize, y: usize| {
-        let at = (y * w + x) * 4;
-        (rgba[at], rgba[at + 1], rgba[at + 2], rgba[at + 3])
-    };
-    let encoding = Encoding {
-        compression: Compression::ZIP16,
-        blocks: Blocks::ScanLines,
-        line_order: LineOrder::Increasing,
-    };
-    let mut out = std::io::Cursor::new(Vec::new());
-    let written = if halves {
-        let channels = SpecificChannels::rgba(|Vec2(x, y)| {
-            let (r, g, b, a) = pixel(x, y);
-            (
-                f16::from_f32(r),
-                f16::from_f32(g),
-                f16::from_f32(b),
-                f16::from_f32(a),
-            )
-        });
-        Image::from_encoded_channels((w, h), encoding, channels)
-            .write()
-            .to_buffered(&mut out)
-    } else {
-        let channels = SpecificChannels::rgba(|Vec2(x, y)| pixel(x, y));
-        Image::from_encoded_channels((w, h), encoding, channels)
-            .write()
-            .to_buffered(&mut out)
-    };
-    written.map_err(|e| format!("Could not write the OpenEXR file: {e}"))?;
-    Ok(out.into_inner())
-}
-
-/// An OpenEXR file's first RGBA layer, at its largest level, as floats: alpha 1 where it has none.
-pub fn decode_exr(bytes: &[u8]) -> Result<(u32, u32, Vec<f32>), String> {
-    use exr::prelude::*;
-
-    let image = read()
-        .no_deep_data()
-        .largest_resolution_level()
-        .rgba_channels(
-            |size: Vec2<usize>, _: &RgbaChannels| (size.width(), vec![0f32; size.area() * 4]),
-            |(width, pixels): &mut (usize, Vec<f32>),
-             Vec2(x, y): Vec2<usize>,
-             (r, g, b, a): (f32, f32, f32, f32)| {
-                let at = (y * *width + x) * 4;
-                pixels[at..at + 4].copy_from_slice(&[r, g, b, a]);
-            },
-        )
-        .first_valid_layer()
-        .all_attributes()
-        .from_buffered(std::io::Cursor::new(bytes))
-        .map_err(|e| format!("Could not read the OpenEXR file: {e}"))?;
-    let size = image.layer_data.size;
-    if size.area() == 0 {
-        return Err("the OpenEXR file has no pixels".into());
-    }
-    let (_, pixels) = image.layer_data.channel_data.pixels;
-    Ok((size.width() as u32, size.height() as u32, pixels))
-}
-
-/// An image file's pixels as RGBA: 8 bits from a PNG, floats from an OpenEXR file.
-enum Pixels {
-    Low(Vec<u8>),
-    High(Vec<f32>),
-}
-
-/// The image at `path`, a PNG or an OpenEXR file told apart by how it starts, with its size.
-fn read_image(path: &Path) -> Result<(u32, u32, Pixels), String> {
-    let bytes =
-        std::fs::read(path).map_err(|e| format!("Could not read {}: {e}", path.display()))?;
-    if bytes.starts_with(&[0x76, 0x2f, 0x31, 0x01]) {
-        let (width, height, rgba) = decode_exr(&bytes)?;
-        Ok((width, height, Pixels::High(rgba)))
-    } else if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        let (width, height, rgba) = decode_png(&bytes)?;
-        Ok((width, height, Pixels::Low(rgba)))
-    } else {
-        Err(format!(
-            "{} is neither a PNG nor an OpenEXR file",
-            path.display()
-        ))
-    }
-}
-
 /// Why an image of the other kind is refused: a texture holding high dynamic range values goes out
-/// and comes in as OpenEXR, an 8-bit one as PNG.
-fn other_kind(name: &str, format: &str, hdr: bool, verb: &str) -> String {
+/// and comes in as OpenEXR or DDS, an 8-bit one as PNG, TGA, BMP or DDS, and comes in from JPEG too.
+fn other_kind(name: &str, format: &str, hdr: bool, incoming: bool) -> String {
+    let verb = if incoming { "give it" } else { "save it as" };
     if hdr {
         format!(
-            "{name} is {format}, whose high dynamic range values a PNG cannot hold: {verb} an \
-             OpenEXR (.exr) file"
+            "{name} is {format}, whose high dynamic range values an 8-bit image cannot hold: {verb} \
+             an OpenEXR (.exr) or DDS file"
         )
     } else {
-        format!("{name} is {format}, whose values are 8-bit: {verb} a PNG")
+        let jpeg = if incoming { ", JPEG" } else { "" };
+        format!(
+            "{name} is {format}, whose values are 8-bit: {verb} a PNG, TGA, BMP{jpeg} or DDS file"
+        )
     }
 }
 
@@ -582,13 +483,26 @@ pub struct SavedImage {
     pub path: String,
     pub export: u32,
     pub mip: usize,
+    /// The mips the file holds, from `mip` down: every one for a DDS, else one.
+    pub mips: usize,
     pub format: String,
     pub width: u32,
     pub height: u32,
 }
 
-/// Saves mip `mip` of a texture at `out`, or with `None` the largest the package has: as a PNG, or
-/// as an OpenEXR file for a texture holding high dynamic range values, which `out` is named for.
+/// A texture's mips as an image file's bytes, with what they are.
+pub(crate) struct TextureFile {
+    pub bytes: Vec<u8>,
+    pub mip: usize,
+    pub mips: usize,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Saves mip `mip` of a texture at `out`, or with `None` the largest the package has, as the kind
+/// of image `out` is named for: a PNG, TGA or BMP for an 8-bit texture, an OpenEXR file for one
+/// holding high dynamic range values, or for either a DDS of its own bytes for that mip and every
+/// one below it.
 pub fn save_image(
     request: &AssetEditRequest<'_>,
     mappings: Option<&Mappings>,
@@ -596,25 +510,56 @@ pub fn save_image(
     mip: Option<usize>,
     out: &Path,
 ) -> Result<SavedImage, String> {
+    let kind = ImageKind::of_path(out).ok_or_else(|| {
+        format!(
+            "{} is not named as an image: name it .png, .tga, .bmp, .exr or .dds",
+            out.display()
+        )
+    })?;
     let (loaded, row, layout) = read_layout(request, mappings, export)?;
-    let name = row.object_name;
+    let file = texture_file(&loaded, &row.object_name, &layout, mip, kind)?;
+    std::fs::write(out, &file.bytes)
+        .map_err(|e| format!("Could not write {}: {e}", out.display()))?;
+    let platform = layout.platform()?;
+    Ok(SavedImage {
+        path: out.to_string_lossy().into_owned(),
+        export: layout.export,
+        mip: file.mip,
+        mips: file.mips,
+        format: platform.format.clone(),
+        width: file.width,
+        height: file.height,
+    })
+}
+
+/// Mip `mip` of texture `name`, laid out as `layout` in the package `loaded` holds, or with `None`
+/// the largest the package has, as a file of `kind`.
+pub(crate) fn texture_file(
+    loaded: &FSerializedAssetBundle,
+    name: &str,
+    layout: &TextureLayout,
+    mip: Option<usize>,
+    kind: ImageKind,
+) -> Result<TextureFile, String> {
     let platform = layout.platform()?;
     let format = PixelFormat::of(&platform.format)?;
-    let exr = out
-        .extension()
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("exr"));
-    if exr != format.is_hdr() {
-        return Err(other_kind(
-            &name,
-            &platform.format,
-            format.is_hdr(),
-            "save it as",
+    if !kind.writes() {
+        return Err(format!(
+            "{name} does not go out as a JPEG, which would lose detail: save it as {}",
+            if format.is_hdr() {
+                "an OpenEXR (.exr) or DDS file"
+            } else {
+                "a PNG, TGA, BMP or DDS file"
+            }
         ));
+    }
+    if !kind.holds(format.is_hdr()) {
+        return Err(other_kind(name, &platform.format, format.is_hdr(), false));
     }
     let mip = match mip {
         Some(mip) => mip,
         None => (0..platform.mips.len())
-            .find(|index| mip_bytes(&loaded, &platform.mips[*index]).is_ok())
+            .find(|index| mip_bytes(loaded, &platform.mips[*index]).is_ok())
             .ok_or("the package has the pixels of none of the texture's mips")?,
     };
     let chosen = platform.mips.get(mip).ok_or_else(|| {
@@ -623,23 +568,69 @@ pub fn save_image(
             platform.mips.len()
         )
     })?;
-    let bytes = mip_bytes(&loaded, chosen).map_err(|e| format!("mip {mip}: {e}"))?;
-    let (width, height, file) = if exr {
+    if kind == ImageKind::Dds {
+        return dds_file(loaded, name, layout, platform, mip);
+    }
+    let bytes = mip_bytes(loaded, chosen).map_err(|e| format!("mip {mip}: {e}"))?;
+    let (width, height, pixels) = if format.is_hdr() {
         let (width, height, rgba) = decode_mip::<f32>(format, platform, chosen, bytes)?;
-        let file = encode_exr(width, height, &rgba, format.holds_halves())?;
-        (width, height, file)
+        (width, height, Pixels::High(rgba))
     } else {
         let (width, height, rgba) = decode_mip::<u8>(format, platform, chosen, bytes)?;
-        (width, height, encode_png(width, height, &rgba)?)
+        (width, height, Pixels::Low(rgba))
     };
-    std::fs::write(out, file).map_err(|e| format!("Could not write {}: {e}", out.display()))?;
-    Ok(SavedImage {
-        path: out.to_string_lossy().into_owned(),
-        export: layout.export,
+    Ok(TextureFile {
+        bytes: encode_pixels(kind, width, height, &pixels, format.holds_halves())?,
         mip,
-        format: platform.format.clone(),
+        mips: 1,
         width,
         height,
+    })
+}
+
+/// A DDS file of a texture's own bytes for mip `mip` and every one below it.
+fn dds_file(
+    loaded: &FSerializedAssetBundle,
+    name: &str,
+    layout: &TextureLayout,
+    platform: &TexturePlatform,
+    mip: usize,
+) -> Result<TextureFile, String> {
+    if layout.class == "VolumeTexture" {
+        return Err(format!(
+            "{name} is a volume texture, which goes out as its depth slices stacked top to bottom \
+             in a PNG or OpenEXR file"
+        ));
+    }
+    let chain = &platform.mips[mip..];
+    let top = &chain[0];
+    let mut bytes = Vec::with_capacity(chain.len());
+    for (below, each) in chain.iter().enumerate() {
+        let shrink = |side: u32| side.checked_shr(below as u32).unwrap_or(0).max(1);
+        if (each.size_x, each.size_y) != (shrink(top.size_x), shrink(top.size_y)) {
+            return Err(format!(
+                "{name}'s mip {} is {}x{}, not half the one above it, as a DDS file's mips are",
+                mip + below,
+                each.size_x,
+                each.size_y
+            ));
+        }
+        bytes.push(mip_bytes(loaded, each).map_err(|e| format!("mip {}: {e}", mip + below))?);
+    }
+    let file = crate::image_file::encode_dds(
+        &platform.format,
+        top.size_x,
+        top.size_y,
+        layer_count(layout, platform),
+        layout.class == "TextureCube",
+        &bytes,
+    )?;
+    Ok(TextureFile {
+        bytes: file,
+        mip,
+        mips: chain.len(),
+        width: top.size_x,
+        height: top.size_y,
     })
 }
 
@@ -813,44 +804,6 @@ impl PixelFormat {
             }
         }
     }
-}
-
-/// A PNG's pixels as 8-bit RGBA, whatever its color type and depth.
-pub fn decode_png(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
-    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
-    decoder.set_transformations(png::Transformations::normalize_to_color8());
-    let mut reader = decoder
-        .read_info()
-        .map_err(|e| format!("Could not read the PNG: {e}"))?;
-    let size = reader
-        .output_buffer_size()
-        .ok_or("the PNG is too large to read")?;
-    let mut buffer = vec![0; size];
-    let info = reader
-        .next_frame(&mut buffer)
-        .map_err(|e| format!("Could not read the PNG: {e}"))?;
-    buffer.truncate(info.buffer_size());
-    let rgba = match info.color_type {
-        png::ColorType::Rgba => buffer,
-        png::ColorType::Rgb => buffer
-            .as_chunks::<3>()
-            .0
-            .iter()
-            .flat_map(|p| [p[0], p[1], p[2], 255])
-            .collect(),
-        png::ColorType::GrayscaleAlpha => buffer
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .flat_map(|p| [p[0], p[0], p[0], p[1]])
-            .collect(),
-        png::ColorType::Grayscale => buffer.iter().flat_map(|&g| [g, g, g, 255]).collect(),
-        png::ColorType::Indexed => return Err("the PNG's palette did not expand".into()),
-    };
-    if info.width == 0 || info.height == 0 {
-        return Err("the PNG has no pixels".into());
-    }
-    Ok((info.width, info.height, rgba))
 }
 
 /// The next mip down of `layers`, each `width` by `height`: half the size, each pixel the average
@@ -1044,6 +997,9 @@ pub struct ImportReport {
     /// volume's depth, else 1.
     pub layers: u32,
     pub mips: usize,
+    /// Of `mips`, how many a DDS file in the texture's own format gave, written as they are.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub given_mips: Option<usize>,
     /// Brushes in the mod drawing the texture at a size they store, which a new size leaves as is.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub brushes: Vec<String>,
@@ -1069,9 +1025,11 @@ pub struct ImportBatch {
 }
 
 /// Gives a texture the pixels of the image at `image`, encoded in the texture's own format at the
-/// image's size, its mips rebuilt from them: a PNG for an 8-bit texture, an OpenEXR file for one
-/// holding high dynamic range values. A cube's six faces, an array's slices or a volume's depth
-/// stack top to bottom in the image, as a saved one has them, and keep their count.
+/// image's size, its mips rebuilt from them: a PNG, TGA, BMP or JPEG for an 8-bit texture, an
+/// OpenEXR file for one holding high dynamic range values. A cube's six faces, an array's slices or
+/// a volume's depth stack top to bottom in the image, as a saved one has them, and keep their
+/// count. A DDS file in the texture's own format gives its mips as they are, the ones it lacks
+/// built from its smallest; one in another format is read as its largest mip's pixels.
 #[allow(clippy::too_many_arguments)]
 pub fn import_image(
     request: &AssetEditRequest<'_>,
@@ -1185,7 +1143,7 @@ pub fn import_images(
             batch.written = Some(message);
             batch.warnings = warnings;
             if resized && let Some(texture) = crate::asset::package_name_of_entry(request.entry) {
-                batch.brushes = brushes_at(request.game_root, &pak, mappings, &texture);
+                batch.brushes = brushes_at(request.game_root, &pak, mappings, &[texture]);
             }
         }
         crate::asset_edit::SaveOutcome::HoldsCopy { pak } => {
@@ -1200,7 +1158,7 @@ pub fn import_images(
 
 /// The image at `image` encoded as new mips for texture `row` laid out as `layout`, in the
 /// package `loaded` holds, with what that makes of it.
-fn encode_image(
+pub(crate) fn encode_image(
     loaded: &FSerializedAssetBundle,
     row: &ExportRow,
     layout: &TextureLayout,
@@ -1220,29 +1178,46 @@ fn encode_image(
     }
     let platform = layout.platform()?;
     let format = PixelFormat::of(&platform.format)?;
-    let (width, stacked, pixels) = read_image(image)?;
-    let mips = match &pixels {
-        Pixels::High(rgba) if format.is_hdr() => {
-            build_mips(layout, format, width, stacked, rgba, quality)
-        }
-        Pixels::Low(rgba) if !format.is_hdr() => {
-            build_mips(layout, format, width, stacked, rgba, quality)
-        }
-        _ => Err(other_kind(
-            name,
-            &platform.format,
-            format.is_hdr(),
-            "give it",
-        )),
-    }
-    .map_err(|e| {
+    let named = |e: String| {
         if e.starts_with(name.as_str()) {
             e
         } else {
             format!("{name}: {e}")
         }
-    })?;
-    let (height, layers) = (mips[0].size_y, layer_count(layout, platform));
+    };
+    let mut notes = Vec::new();
+    let (mips, given_mips) = match read_image(image)? {
+        ImageIn::Pixels {
+            width,
+            height,
+            pixels,
+        } => (
+            pixel_mips(layout, format, width, height, &pixels, quality, name).map_err(named)?,
+            None,
+        ),
+        ImageIn::Blocks(dds) if dds.format == platform.format => {
+            let (mips, given) = dds_mips(layout, format, dds, quality).map_err(named)?;
+            (mips, Some(given))
+        }
+        ImageIn::Blocks(dds) => {
+            notes.push(format!(
+                "the DDS file is {} and {name} {}, so the file's largest mip was encoded again and \
+                 the mips below it rebuilt",
+                dds.format, platform.format
+            ));
+            let (width, stacked, pixels) = dds_pixels(&dds).map_err(named)?;
+            (
+                pixel_mips(layout, format, width, stacked, &pixels, quality, name)
+                    .map_err(named)?,
+                None,
+            )
+        }
+    };
+    let (width, height, layers) = (
+        mips[0].size_x,
+        mips[0].size_y,
+        layer_count(layout, platform),
+    );
 
     // Sizes are the texture's own, which a cook that left out its largest mips keeps full.
     let to = platform.full_size((width, height));
@@ -1260,11 +1235,167 @@ fn encode_image(
         to,
         layers,
         mips: mips.len(),
+        given_mips,
         brushes: Vec::new(),
-        warnings: left_out.into_iter().collect(),
+        warnings: left_out.into_iter().chain(notes).collect(),
         written: None,
     };
     Ok((report, mips))
+}
+
+/// Texture `layout`'s mips in `format` built from an image's pixels, its layers stacked top to
+/// bottom in an image `width` by `stacked`, which have to be of the range the texture holds.
+fn pixel_mips(
+    layout: &TextureLayout,
+    format: PixelFormat,
+    width: u32,
+    stacked: u32,
+    pixels: &Pixels,
+    quality: Quality,
+    name: &str,
+) -> Result<Vec<rivals_uasset::NewMip>, String> {
+    match pixels {
+        Pixels::High(rgba) if format.is_hdr() => {
+            build_mips(layout, format, width, stacked, rgba, quality)
+        }
+        Pixels::Low(rgba) if !format.is_hdr() => {
+            build_mips(layout, format, width, stacked, rgba, quality)
+        }
+        _ => Err(other_kind(
+            name,
+            &layout.platform()?.format,
+            format.is_hdr(),
+            true,
+        )),
+    }
+}
+
+/// A DDS file's largest mip decoded, its layers stacked top to bottom.
+fn dds_pixels(dds: &DdsImage) -> Result<(u32, u32, Pixels), String> {
+    let format = PixelFormat::of(dds.format)?;
+    let top = dds.mips.first().ok_or("the DDS file has no mips")?;
+    let layer = format.mip_size(dds.width, dds.height);
+    let pixels = if format.is_hdr() {
+        let layers: Vec<Vec<f32>> = top
+            .chunks_exact(layer)
+            .map(|chunk| format.decode_hdr(dds.width, dds.height, chunk))
+            .collect::<Result<_, _>>()?;
+        Pixels::High(layers.concat())
+    } else {
+        let layers: Vec<Vec<u8>> = top
+            .chunks_exact(layer)
+            .map(|chunk| format.decode(dds.width, dds.height, chunk))
+            .collect::<Result<_, _>>()?;
+        Pixels::Low(layers.concat())
+    };
+    Ok((dds.width, dds.height * dds.layers, pixels))
+}
+
+/// Texture `layout`'s mips from a DDS file in its own format `format`: the file's as they are, as
+/// many of them as the chain [`mip_count`] makes takes, and the rest built from its smallest. How
+/// many were the file's comes with them.
+fn dds_mips(
+    layout: &TextureLayout,
+    format: PixelFormat,
+    dds: DdsImage,
+    quality: Quality,
+) -> Result<(Vec<rivals_uasset::NewMip>, usize), String> {
+    let platform = layout.platform()?;
+    if layout.class == "VolumeTexture" {
+        return Err(
+            "a volume texture takes its depth slices stacked top to bottom in a PNG or OpenEXR \
+             file, not a DDS"
+                .into(),
+        );
+    }
+    let layers = layer_count(layout, platform);
+    if dds.layers != layers {
+        return Err(if layers == 1 {
+            format!(
+                "the DDS file holds {} layers, where the texture takes one",
+                dds.layers
+            )
+        } else {
+            format!(
+                "it has {layers} {}, and the DDS file holds {}",
+                layer_noun(layout),
+                dds.layers
+            )
+        });
+    }
+    if layout.class == "TextureCube" && dds.width != dds.height {
+        return Err(format!(
+            "a cube's faces are square; the DDS file's are {}x{}",
+            dds.width, dds.height
+        ));
+    }
+    let count = mip_count(platform, false, (dds.width, dds.height, layers));
+    let given = dds.mips.len().min(count);
+    let size_z = if layout.class == "Texture2DArray" {
+        layers
+    } else {
+        1
+    };
+    let mut mips: Vec<rivals_uasset::NewMip> = dds
+        .mips
+        .into_iter()
+        .take(given)
+        .enumerate()
+        .map(|(below, bytes)| {
+            let shrink = |side: u32| side.checked_shr(below as u32).unwrap_or(0).max(1);
+            rivals_uasset::NewMip {
+                size_x: shrink(dds.width),
+                size_y: shrink(dds.height),
+                size_z,
+                bytes,
+            }
+        })
+        .collect();
+    let smallest = mips.last().ok_or("the DDS file has no mips")?;
+    let rest = if format.is_hdr() {
+        mips_below::<f32>(format, smallest, count - given, quality)?
+    } else {
+        mips_below::<u8>(format, smallest, count - given, quality)?
+    };
+    mips.extend(rest);
+    Ok((mips, given))
+}
+
+/// The `more` mips below `smallest`, each layer decoded and halved on its own.
+fn mips_below<C: Channel>(
+    format: PixelFormat,
+    smallest: &rivals_uasset::NewMip,
+    more: usize,
+    quality: Quality,
+) -> Result<Vec<rivals_uasset::NewMip>, String> {
+    if more == 0 {
+        return Ok(Vec::new());
+    }
+    let layer = format.mip_size(smallest.size_x, smallest.size_y);
+    let mut level = Level {
+        width: smallest.size_x,
+        height: smallest.size_y,
+        layers: smallest
+            .bytes
+            .chunks_exact(layer)
+            .map(|chunk| C::decode(format, smallest.size_x, smallest.size_y, chunk))
+            .collect::<Result<_, _>>()?,
+    };
+    let mut out = Vec::with_capacity(more);
+    for _ in 0..more {
+        level = level.half(false);
+        out.push(rivals_uasset::NewMip {
+            size_x: level.width,
+            size_y: level.height,
+            size_z: smallest.size_z,
+            bytes: level
+                .layers
+                .iter()
+                .flat_map(|layer| C::encode(format, level.width, level.height, layer, quality))
+                .collect(),
+        });
+    }
+    Ok(out)
 }
 
 /// `request`'s edits with each image they name encoded as its texture's new pixels, against the
@@ -1319,14 +1450,16 @@ fn number_of(value: &PropertyValue) -> Option<f64> {
     }
 }
 
-/// Every brush under `value` that draws `texture` at a size it stores, by the path to it.
-fn brushes_in(value: &PropertyValue, path: &str, texture: &str, out: &mut Vec<String>) {
+/// Every brush under `value` that draws one of `textures` at a size it stores, by the path to it.
+fn brushes_in(value: &PropertyValue, path: &str, textures: &[String], out: &mut Vec<String>) {
     match value {
         PropertyValue::Struct { fields, .. } => {
             let draws = fields.iter().any(|field| {
                 field.name == "ResourceObject"
                     && matches!(&field.value, PropertyValue::Object { path: Some(object), .. }
-                        if object.split('.').next() == Some(texture))
+                    if object.split('.').next().is_some_and(|package| {
+                        textures.iter().any(|texture| texture == package)
+                    }))
             });
             let stored = fields.iter().find_map(|field| match &field.value {
                 PropertyValue::Struct { fields: xy, .. } if field.name == "ImageSize" => {
@@ -1342,86 +1475,122 @@ fn brushes_in(value: &PropertyValue, path: &str, texture: &str, out: &mut Vec<St
                 brushes_in(
                     &field.value,
                     &format!("{path}.{}", field.name),
-                    texture,
+                    textures,
                     out,
                 );
             }
         }
         PropertyValue::Array { items } | PropertyValue::Set { items } => {
             for (index, item) in items.iter().enumerate() {
-                brushes_in(item, &format!("{path}[{index}]"), texture, out);
+                brushes_in(item, &format!("{path}[{index}]"), textures, out);
             }
         }
         PropertyValue::Map { entries } => {
             for (index, entry) in entries.iter().enumerate() {
-                brushes_in(&entry.value, &format!("{path}[{index}]"), texture, out);
+                brushes_in(&entry.value, &format!("{path}[{index}]"), textures, out);
             }
         }
         _ => {}
     }
 }
 
-/// The brushes in the mod beside `pak` that draw `texture` at a size they store: given another
-/// size, it still draws at that one through them.
-fn brushes_at(
+/// The brushes in the mod beside `pak` that draw one of `textures`, by package name, at a size
+/// they store: given another size, a texture still draws at that one through them. One pass over
+/// the mod, its packages read in parallel, for however many textures.
+pub(crate) fn brushes_at(
     game_root: &str,
     pak: &Path,
     mappings: Option<&Mappings>,
-    texture: &str,
+    textures: &[String],
 ) -> Vec<String> {
+    use rayon::prelude::*;
+
     use crate::schema_synth::{self, LayoutReader, PackageSource};
 
     let utoc = pak.with_extension("utoc").to_string_lossy().into_owned();
     let Ok((store, packages)) = crate::asset::list_packages(game_root, &utoc) else {
         return Vec::new();
     };
-    let converter = crate::asset::PackageConverter::new(store.as_ref());
-    let layouts = LayoutReader::through(store.as_ref(), &converter);
+    let drawn: std::collections::HashSet<retoc::FPackageId> = textures
+        .iter()
+        .map(|texture| crate::asset::package_id(texture))
+        .collect();
+    let texture_classes: Vec<retoc::script_objects::FPackageObjectIndex> =
+        rivals_uasset::TEXTURE_CLASSES
+            .iter()
+            .map(|class| {
+                retoc::script_objects::FPackageObjectIndex::create_script_import(&format!(
+                    "/Script/Engine.{class}"
+                ))
+            })
+            .collect();
+    let versions = (
+        retoc::version::EngineVersion::UE5_3.toc_version(),
+        retoc::version::EngineVersion::UE5_3.container_header_version(),
+    );
     // A brush names the texture by a reference its package imports, so only those packages, and
-    // the texture's own, are read.
-    let drawn = crate::asset::package_id(texture);
-    let mut out = Vec::new();
-    for (id, entry) in &packages {
-        let imports = *id == drawn
-            || store
-                .package_store_entry(*id)
-                .is_some_and(|held| held.imported_packages.contains(&drawn));
-        if !imports {
-            continue;
-        }
-        let Ok(bundle) = converter.convert(*id, entry) else {
-            continue;
-        };
-        let parsed = schema_synth::parse_package_through(
-            &rivals_uasset::AssetBundle {
-                asset: &bundle.asset_file_buffer,
-                exports: &bundle.exports_file_buffer,
-            },
-            mappings,
-            &PackageSource {
-                game_root,
-                container: &utoc,
-                entry,
-                kind: crate::asset::AssetSource::Utoc,
-                mod_container: None,
-            },
-            &layouts,
-            rivals_uasset::ParseOptions::default(),
-        );
-        let Ok(parsed) = parsed else {
-            continue;
-        };
-        for export in &parsed.exports {
-            for property in &export.properties {
-                brushes_in(
-                    &property.value,
-                    &format!("{entry}: {}.{}", export.object_name, property.name),
-                    texture,
-                    &mut out,
+    // the textures' own, are read, and of those only the ones holding anything but textures.
+    let candidates: Vec<&crate::asset::PackageEntry> = packages
+        .iter()
+        .filter(|(id, _)| {
+            drawn.contains(id)
+                || store.package_store_entry(*id).is_some_and(|held| {
+                    held.imported_packages
+                        .iter()
+                        .any(|import| drawn.contains(import))
+                })
+        })
+        .filter(|(id, _)| {
+            crate::game_search::export_classes(store.as_ref(), *id, versions)
+                .is_none_or(|classes| classes.iter().any(|class| !texture_classes.contains(class)))
+        })
+        .collect();
+    let converter = crate::asset::PackageConverter::new(store.as_ref());
+    // A layout reader keeps its own caches, so each thread has one.
+    let mut out: Vec<String> = candidates
+        .par_iter()
+        .map_init(
+            || LayoutReader::through(store.as_ref(), &converter),
+            |layouts, (id, entry)| {
+                let mut found = Vec::new();
+                let Ok(bundle) = converter.convert(*id, entry) else {
+                    return found;
+                };
+                let parsed = schema_synth::parse_package_through(
+                    &rivals_uasset::AssetBundle {
+                        asset: &bundle.asset_file_buffer,
+                        exports: &bundle.exports_file_buffer,
+                    },
+                    mappings,
+                    &PackageSource {
+                        game_root,
+                        container: &utoc,
+                        entry,
+                        kind: crate::asset::AssetSource::Utoc,
+                        mod_container: None,
+                    },
+                    layouts,
+                    rivals_uasset::ParseOptions::default(),
                 );
-            }
-        }
-    }
+                let Ok(parsed) = parsed else {
+                    return found;
+                };
+                for export in &parsed.exports {
+                    for property in &export.properties {
+                        brushes_in(
+                            &property.value,
+                            &format!("{entry}: {}.{}", export.object_name, property.name),
+                            textures,
+                            &mut found,
+                        );
+                    }
+                }
+                found
+            },
+        )
+        .flatten_iter()
+        .collect();
+    out.sort();
     out
 }
 
@@ -2468,6 +2637,115 @@ mod game_data_tests {
         let refused = dry(PLAIN, &exr).unwrap_err();
         std::fs::remove_dir_all(&dir).ok();
         assert!(refused.contains("a PNG"), "{refused}");
+    }
+
+    /// A texture goes out as a DDS file of its own blocks, every mip from the largest the package
+    /// has down, and comes back from it byte for byte, none encoded again. A DDS short of mips has
+    /// the rest built from its smallest, and one in another format is encoded again.
+    #[test]
+    fn a_texture_goes_out_as_a_dds_file_and_comes_back_byte_for_byte() {
+        const BODY: &str =
+            "Marvel/Content/Marvel/Characters/1014/1014001/Textures/T_1014001_Body_D.uasset";
+        const NORMAL: &str =
+            "Marvel/Content/Marvel/Characters/1014/1014001/Textures/T_1014001_Body_N.uasset";
+        const CUBE: &str = "Engine/Content/EngineResources/DefaultTextureCube.uasset";
+        const BC6H: &str = "Marvel/Content/Marvel/Environment/Common/LightingRes/X20_Hdri/DaylightAmbientCubemap_2D.uasset";
+        const HALVES: &str =
+            "Engine/Content/EngineMaterials/Substrate/Glints2/AGlintTex2dArray2.uasset";
+        const VOLUME: &str = "Engine/Content/EngineResources/DefaultVolumeTexture.uasset";
+        let (Ok(root), Ok(usmap)) = (
+            std::env::var("RIVALS_GAME_ROOT"),
+            std::env::var("RIVALS_USMAP"),
+        ) else {
+            return;
+        };
+        if std::env::var_os("OODLE_LIB_PATH").is_none() {
+            return;
+        }
+        let schema = crate::mappings::load(std::path::Path::new(&usmap)).expect("mappings");
+        let source = format!(
+            "{}/MarvelGame/Marvel/Content/Paks/pakchunk0-Windows.utoc",
+            root.replace('\\', "/")
+        );
+        let request = |entry: &'static str| crate::asset_edit::AssetEditRequest {
+            game_root: &root,
+            container: &source,
+            entry,
+            kind: asset::AssetSource::Utoc,
+            mod_name: "",
+            changes: Default::default(),
+        };
+        let dir = std::env::temp_dir().join(format!("rivals-dds-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch");
+        let out = dir.join("out.dds");
+
+        for entry in [BODY, NORMAL, CUBE, BC6H, HALVES] {
+            let saved = super::save_image(&request(entry), Some(&schema), None, None, &out)
+                .unwrap_or_else(|e| panic!("{entry}: {e}"));
+            let (loaded, row, layout) =
+                super::read_layout(&request(entry), Some(&schema), None).expect("layout");
+            let platform = layout.platform().expect("one format");
+            let (report, mips) =
+                super::encode_image(&loaded, &row, &layout, &out, super::Quality::Fast)
+                    .unwrap_or_else(|e| panic!("{entry}: {e}"));
+            assert_eq!(report.given_mips, Some(mips.len()), "{entry}");
+            assert_eq!(mips.len(), saved.mips, "{entry}");
+            assert_eq!(mips.len(), platform.mips.len() - saved.mip, "{entry}");
+            for (mip, stored) in mips.iter().zip(&platform.mips[saved.mip..]) {
+                assert_eq!((mip.size_x, mip.size_y), (stored.size_x, stored.size_y));
+                assert!(
+                    mip.bytes == super::mip_bytes(&loaded, stored).unwrap(),
+                    "{entry} {}x{}",
+                    mip.size_x,
+                    mip.size_y
+                );
+            }
+        }
+
+        // The body's DDS cut to its two largest mips has the rest built, and decoded to RGBA it
+        // is encoded again.
+        super::save_image(&request(BODY), Some(&schema), None, None, &out).expect("save");
+        let dds = crate::image_file::decode_dds(&std::fs::read(&out).unwrap()).expect("dds");
+        let (loaded, row, layout) =
+            super::read_layout(&request(BODY), Some(&schema), None).expect("layout");
+        let top: Vec<&[u8]> = dds.mips[..2].iter().map(Vec::as_slice).collect();
+        let short = dir.join("short.dds");
+        std::fs::write(
+            &short,
+            crate::image_file::encode_dds(dds.format, dds.width, dds.height, 1, false, &top)
+                .unwrap(),
+        )
+        .unwrap();
+        let (report, mips) =
+            super::encode_image(&loaded, &row, &layout, &short, super::Quality::Fast).unwrap();
+        assert_eq!((report.given_mips, mips.len()), (Some(2), dds.mips.len()));
+        assert!(mips[1].bytes == dds.mips[1]);
+        let format = super::PixelFormat::of(dds.format).unwrap();
+        let rgba = format.decode(dds.width, dds.height, &dds.mips[0]).unwrap();
+        let other = dir.join("rgba.dds");
+        std::fs::write(
+            &other,
+            crate::image_file::encode_dds("PF_R8G8B8A8", dds.width, dds.height, 1, false, &[&rgba])
+                .unwrap(),
+        )
+        .unwrap();
+        let (report, mips) =
+            super::encode_image(&loaded, &row, &layout, &other, super::Quality::Fast).unwrap();
+        assert_eq!((report.given_mips, mips.len()), (None, dds.mips.len()));
+        assert!(report.warnings.iter().any(|w| w.contains("encoded again")));
+
+        // A volume does not go out as a DDS, and nothing goes out as a JPEG.
+        let volume = super::save_image(&request(VOLUME), Some(&schema), None, None, &out);
+        let jpeg = super::save_image(
+            &request(BODY),
+            Some(&schema),
+            None,
+            None,
+            &dir.join("out.jpg"),
+        );
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(volume.unwrap_err().contains("volume texture"));
+        assert!(jpeg.unwrap_err().contains("JPEG"));
     }
 
     /// A texture sharing its package's bulk data with another texture leaves the other's entries

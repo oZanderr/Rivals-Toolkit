@@ -5,7 +5,8 @@ use std::sync::{LazyLock, Mutex};
 
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
 
-static CHECK_ENABLED: AtomicBool = AtomicBool::new(true);
+// Off in this crate's own tests, so whether the game happens to be open never decides one.
+static CHECK_ENABLED: AtomicBool = AtomicBool::new(!cfg!(test));
 
 pub fn set_check_enabled(enabled: bool) {
     CHECK_ENABLED.store(enabled, Ordering::Relaxed);

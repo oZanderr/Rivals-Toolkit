@@ -11,6 +11,7 @@ use retoc::iostore::IoStoreTrait;
 use retoc::iostore_writer::IoStoreWriter;
 use retoc::legacy_asset::FSerializedAssetBundle;
 use retoc::version::EngineVersion;
+use retoc::zen_asset_conversion::ConvertedZenAssetBundle;
 use retoc::{EIoChunkType, FIoChunkId, FPackageId, FSHAHash, UEPathBuf};
 
 use crate::pak::containers::{open_utoc, utoc_is_obfuscated};
@@ -22,7 +23,7 @@ use crate::pak::profile::{
 /// Marvel Rivals ships UE 5.3, and a mod container has to answer to the same loader.
 const ENGINE: EngineVersion = EngineVersion::UE5_3;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct IoStoreOptions {
     pub compression: PackCompression,
     pub oodle_level: Option<retoc::OodleCompressionLevel>,
@@ -32,6 +33,11 @@ pub struct IoStoreOptions {
     /// they keep the blocks they were stored in, and only a block in another method is compressed
     /// again.
     pub reencode: bool,
+    /// Bring loose packages a stock editor cooked to this game's layout as they are packed.
+    pub conform: bool,
+    /// The game's schema, which bringing a static mesh to the game's layout writes its properties
+    /// against.
+    pub mappings: Option<std::sync::Arc<rivals_uasset::Mappings>>,
 }
 
 impl IoStoreOptions {
@@ -51,6 +57,8 @@ impl Default for IoStoreOptions {
             oodle_level: None,
             obfuscate: None,
             reencode: false,
+            conform: true,
+            mappings: None,
         }
     }
 }
@@ -265,10 +273,7 @@ impl HeaderCarry {
 
     /// Gives a converted package the shader maps its old entry listed, beside any a shader
     /// archive's asset info gave it.
-    pub fn restore_shader_maps(
-        &self,
-        converted: &mut retoc::zen_asset_conversion::ConvertedZenAssetBundle,
-    ) {
+    pub fn restore_shader_maps(&self, converted: &mut ConvertedZenAssetBundle) {
         let Some(carried) = self.shader_map_hashes.get(&converted.package_id) else {
             return;
         };
@@ -296,6 +301,46 @@ pub struct PackageBytes {
     pub optional_bulk: Option<Vec<u8>>,
     pub memory_mapped_bulk: Option<Vec<u8>>,
     pub shader_map_hashes: Vec<FSHAHash>,
+}
+
+/// A package converted for IoStore, ready for the writer to put in.
+pub struct BuiltPackage {
+    converted: ConvertedZenAssetBundle,
+    /// Shader maps the source listed, restored when neither the conversion nor the mod's copy
+    /// names any.
+    fallback_hashes: Vec<FSHAHash>,
+}
+
+impl PackageBytes {
+    /// The package converted for IoStore, which a producer can do on a thread of its own while the
+    /// writer writes the ones before it.
+    pub fn build(self) -> Result<BuiltPackage, String> {
+        let relative = crate::asset::contained_entry(&self.entry)?;
+        let mounted: UEPathBuf = format!("{RIVALS_MOUNT_POINT}{relative}").into();
+        let bundle = FSerializedAssetBundle {
+            asset_file_buffer: self.asset,
+            exports_file_buffer: self.exports,
+            bulk_data_buffer: self.bulk,
+            optional_bulk_data_buffer: self.optional_bulk,
+            memory_mapped_bulk_data_buffer: self.memory_mapped_bulk,
+        };
+        let converted = retoc::zen_asset_conversion::build_zen_asset(
+            bundle,
+            &HashMap::new(),
+            mounted.as_ref(),
+            Some(ENGINE.package_file_version()),
+            ENGINE.container_header_version(),
+            false,
+            None,
+            None,
+            &retoc::logging::Log::no_log(),
+        )
+        .map_err(|e| format!("convert {} for IoStore: {e}", self.entry))?;
+        Ok(BuiltPackage {
+            converted,
+            fallback_hashes: self.shader_map_hashes,
+        })
+    }
 }
 
 impl PackageFiles<'_> {
@@ -357,6 +402,25 @@ pub fn stage_batch_into_iostore(
     stage_container(utoc, count, produce, &HashSet::new(), options)
 }
 
+/// [`stage_batch_into_iostore`] for packages already converted, as producers on other threads
+/// hand them over, so the writer does nothing but write.
+pub fn stage_built_into_iostore(
+    utoc: &Path,
+    count: usize,
+    mut produce: impl FnMut(usize) -> Option<BuiltPackage>,
+    options: &IoStoreOptions,
+) -> Result<Option<StagedContainer>, String> {
+    stage_container_from(
+        utoc,
+        utoc,
+        count,
+        |index| Ok(produce(index)),
+        &HashSet::new(),
+        None,
+        options,
+    )
+}
+
 /// Packages another container holds, written into one as they are stored there: their chunks and
 /// store entries byte for byte, so nothing is converted and nothing is read from the game.
 pub struct PackagesFrom<'a> {
@@ -375,7 +439,7 @@ pub fn stage_bringing_into_iostore(
         utoc,
         utoc,
         0,
-        |_| None,
+        |_| Ok(None),
         &HashSet::new(),
         Some(from),
         options,
@@ -422,7 +486,7 @@ pub fn copy_container(
     dropped: &HashSet<FPackageId>,
     options: &IoStoreOptions,
 ) -> Result<IoStoreReport, String> {
-    stage_container_from(source, dest, 0, |_| None, dropped, None, options)?
+    stage_container_from(source, dest, 0, |_| Ok(None), dropped, None, options)?
         .ok_or_else(|| "nothing to copy".to_string())?
         .commit()
 }
@@ -430,11 +494,12 @@ pub fn copy_container(
 fn stage_container(
     utoc: &Path,
     count: usize,
-    produce: impl FnMut(usize) -> Option<PackageBytes>,
+    mut produce: impl FnMut(usize) -> Option<PackageBytes>,
     dropped: &HashSet<FPackageId>,
     options: &IoStoreOptions,
 ) -> Result<Option<StagedContainer>, String> {
-    stage_container_from(utoc, utoc, count, produce, dropped, None, options)
+    let built = |index| produce(index).map(PackageBytes::build).transpose();
+    stage_container_from(utoc, utoc, count, built, dropped, None, options)
 }
 
 /// The container read from `source` and built under `dest`'s name, which is where its id comes
@@ -443,7 +508,7 @@ fn stage_container_from(
     source: &Path,
     dest: &Path,
     count: usize,
-    mut produce: impl FnMut(usize) -> Option<PackageBytes>,
+    mut produce: impl FnMut(usize) -> Result<Option<BuiltPackage>, String>,
     dropped: &HashSet<FPackageId>,
     brought: Option<&PackagesFrom<'_>>,
     options: &IoStoreOptions,
@@ -543,37 +608,16 @@ fn stage_container_from(
     report.carried_localized = carry.localized.len();
     report.carried_redirects = carry.redirects.len();
 
-    let shader_maps: HashMap<String, Vec<FSHAHash>> = HashMap::new();
     let mut written: HashSet<FIoChunkId> = HashSet::new();
     let mut carried: Vec<Carried> = Vec::new();
     for index in 0..count {
-        let Some(package) = produce(index) else {
+        let Some(BuiltPackage {
+            mut converted,
+            fallback_hashes,
+        }) = produce(index)?
+        else {
             continue;
         };
-        let relative = crate::asset::contained_entry(&package.entry)?;
-        let mounted: UEPathBuf = format!("{RIVALS_MOUNT_POINT}{relative}").into();
-        let entry = package.entry;
-        let fallback_hashes = package.shader_map_hashes;
-        let bundle = FSerializedAssetBundle {
-            asset_file_buffer: package.asset,
-            exports_file_buffer: package.exports,
-            bulk_data_buffer: package.bulk,
-            optional_bulk_data_buffer: package.optional_bulk,
-            memory_mapped_bulk_data_buffer: package.memory_mapped_bulk,
-        };
-        let mut converted = retoc::zen_asset_conversion::build_zen_asset(
-            bundle,
-            &shader_maps,
-            mounted.as_ref(),
-            Some(ENGINE.package_file_version()),
-            ENGINE.container_header_version(),
-            false,
-            None,
-            None,
-            &retoc::logging::Log::no_log(),
-        )
-        .map_err(|e| format!("convert {entry} for IoStore: {e}"))?;
-
         let held = existing
             .as_ref()
             .and_then(|store| store.package_store_entry(converted.package_id));

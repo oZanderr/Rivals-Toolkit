@@ -590,11 +590,56 @@ struct Incoming {
     companions: Vec<PathBuf>,
 }
 
+/// What building a plugin leaves beside its `.asi`, which the game never loads: the same binary as
+/// a `.dll`, its debug symbols and the linker's by-products.
+const BUILD_OUTPUTS: [&str; 5] = [".dll", ".pdb", ".lib", ".exp", ".ilk"];
+
+fn is_build_output(name: &str) -> bool {
+    let base = split_disabled(name).0;
+    BUILD_OUTPUTS
+        .iter()
+        .any(|extension| strip_suffix_ci(base, extension).is_some_and(|stem| !stem.is_empty()))
+}
+
+/// The plugin `file` and the files beside it that go in with it: its settings and data, not what
+/// its build left there.
+fn incoming(file: &Listed, beside: &[&Listed]) -> Incoming {
+    Incoming {
+        asi: file.path.clone(),
+        file_name: file.name.clone(),
+        companions: beside
+            .iter()
+            .filter(|file| !is_build_output(&file.name))
+            .map(|file| file.path.clone())
+            .collect(),
+    }
+}
+
+/// The file a source installs from: for a `.dll` with the `.asi` of its name beside it, that
+/// `.asi`, which is the plugin its build made twice.
+fn plugin_file(source: &Path) -> PathBuf {
+    let name = source
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if let Some(stem) = strip_suffix_ci(&name, ".dll").filter(|stem| !stem.is_empty()) {
+        let asi = source.with_file_name(format!("{stem}.asi"));
+        if asi.is_file() {
+            return asi;
+        }
+    }
+    source.to_path_buf()
+}
+
 /// Installs the plugins each of `sources` holds into `plugins`: an `.asi` with the files beside it
-/// carrying its name, or every one in a folder or zip, 7z or rar archive. A plugin's files already
-/// there are kept, and a source holding a plugin already installed writes nothing unless `replace`.
+/// carrying its name, a `.dll` the same way under the `.asi` name (or the `.asi` beside it of its
+/// name, which is the plugin), or every `.asi` in a folder or zip, 7z or rar archive. What a
+/// plugin's build leaves beside it, its `.dll`, `.pdb` and linker files, stays behind. A plugin's
+/// files already there are kept, and a source holding a plugin already installed writes nothing
+/// unless `replace`. A plugin named by several of its files goes in once.
 pub fn install(game_root: &str, sources: &[PathBuf], replace: bool) -> Vec<PluginInstall> {
     let plugins = plugins_dir(game_root);
+    let mut seen: Vec<PathBuf> = Vec::new();
     sources
         .iter()
         .map(|source| {
@@ -602,7 +647,15 @@ pub fn install(game_root: &str, sources: &[PathBuf], replace: bool) -> Vec<Plugi
                 source: source.display().to_string(),
                 ..PluginInstall::default()
             };
-            if let Err(error) = install_from(&plugins, source, replace, &mut outcome) {
+            let from = plugin_file(source);
+            if from.is_file() {
+                let key = from.canonicalize().unwrap_or_else(|_| from.clone());
+                if seen.contains(&key) {
+                    return outcome;
+                }
+                seen.push(key);
+            }
+            if let Err(error) = install_from(&plugins, &from, replace, &mut outcome) {
                 outcome.error = Some(error);
             }
             outcome
@@ -627,26 +680,51 @@ fn install_from(
             .owners
             .iter()
             .filter(|(file, _)| file.path == source)
-            .map(|(file, beside)| Incoming {
-                asi: file.path.clone(),
-                file_name: file.name.clone(),
-                companions: beside.iter().map(|file| file.path.clone()).collect(),
-            })
+            .map(|(file, beside)| incoming(file, beside))
+            .collect()
+    } else if source.is_file()
+        && !split_disabled(&name).1
+        && let Some(stem) = strip_suffix_ci(&name, ".dll").filter(|stem| !stem.is_empty())
+    {
+        if is_proxy_name(&name) {
+            return Err("is an ASI loader, which is not installed with plugins".to_string());
+        }
+        // An ASI plugin is a DLL by another extension, so a dropped one goes in as the .asi it is.
+        let dir = source.parent().unwrap_or(Path::new(""));
+        let as_asi = format!("{stem}.asi");
+        let mut listed = list(dir);
+        for file in listed.iter_mut().filter(|file| file.path == source) {
+            file.name.clone_from(&as_asi);
+        }
+        let folder = sort_folder(&listed, false);
+        folder
+            .owners
+            .iter()
+            .filter(|(file, _)| file.path == source)
+            .map(|(file, beside)| incoming(file, beside))
             .collect()
     } else if source.is_file() && crate::mod_library::archive_kind(source).is_ok() {
         let unpacked = crate::mod_library::unpack_archive(source)?;
         return place(plugins, gather(unpacked.dir(), outcome), replace, outcome);
+    } else if source.is_file() && is_build_output(&name) {
+        outcome.skipped.push(Skipped {
+            file: name,
+            reason: "left by a plugin's build, which the game does not load".to_string(),
+        });
+        return Ok(());
     } else if !source.exists() {
         return Err("does not exist".to_string());
     } else {
-        return Err("is not an .asi plugin, a folder or a zip, 7z or rar archive".to_string());
+        return Err(
+            "is not an .asi or .dll plugin, a folder or a zip, 7z or rar archive".to_string(),
+        );
     };
     place(plugins, incoming, replace, outcome)
 }
 
 /// Every plugin under `root`, with DLLs in it reported as skipped.
 fn gather(root: &Path, outcome: &mut PluginInstall) -> Vec<Incoming> {
-    let mut incoming: Vec<Incoming> = Vec::new();
+    let mut found: Vec<Incoming> = Vec::new();
     let dirs = walkdir::WalkDir::new(root)
         .max_depth(INSTALL_DEPTH)
         .sort_by_file_name()
@@ -684,7 +762,7 @@ fn gather(root: &Path, outcome: &mut PluginInstall) -> Vec<Incoming> {
                 });
                 continue;
             }
-            if incoming
+            if found
                 .iter()
                 .any(|other| other.file_name.eq_ignore_ascii_case(&file.name))
             {
@@ -694,14 +772,10 @@ fn gather(root: &Path, outcome: &mut PluginInstall) -> Vec<Incoming> {
                 });
                 continue;
             }
-            incoming.push(Incoming {
-                asi: file.path.clone(),
-                file_name: file.name.clone(),
-                companions: beside.iter().map(|file| file.path.clone()).collect(),
-            });
+            found.push(incoming(file, beside));
         }
     }
-    incoming
+    found
 }
 
 fn copy_into(from: &Path, to: &Path) -> Result<(), String> {
@@ -1043,6 +1117,80 @@ mod tests {
         assert_eq!(fs::read(game.plugins().join("Cool.asi")).unwrap(), b"v2");
         assert_eq!(fs::read(game.plugins().join("Cool.ini")).unwrap(), b"mine");
         assert!(!game.plugins().join("Cool.asi.disabled").exists());
+    }
+
+    #[test]
+    fn a_dropped_dll_goes_in_as_an_asi_and_a_loader_does_not() {
+        let game = Scratch::game("install-dll");
+        let source = Scratch::new("install-dll-source");
+        let dll = source.0.join("Cool.dll");
+        touch(&dll, b"MZ plugin");
+        touch(&source.0.join("Cool.ini"), b"defaults");
+        touch(&source.0.join("dsound.dll"), b"MZ loader");
+
+        let outcome = install(game.root(), std::slice::from_ref(&dll), false);
+        assert_eq!(outcome[0].error, None);
+        assert_eq!(outcome[0].installed, ["Cool.asi", "Cool.ini"]);
+        assert_eq!(
+            fs::read(game.plugins().join("Cool.asi")).unwrap(),
+            b"MZ plugin"
+        );
+        assert!(!game.plugins().join("Cool.dll").exists());
+
+        let loader = install(game.root(), &[source.0.join("dsound.dll")], false);
+        assert!(
+            loader[0]
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("ASI loader")),
+            "{:?}",
+            loader[0].error
+        );
+        assert!(!game.plugins().join("dsound.asi").exists());
+    }
+
+    /// A plugin's build leaves it as a `.dll` too, with its symbols: only the `.asi` and its
+    /// settings go in, however it is dropped, and once when several of its files are.
+    #[test]
+    fn only_the_asi_of_a_build_goes_in() {
+        let source = Scratch::new("install-build-source");
+        let build = source.0.join("x64").join("Release");
+        touch(&build.join("Cool.asi"), b"MZ asi");
+        touch(&build.join("Cool.dll"), b"MZ dll");
+        for leftover in ["Cool.pdb", "Cool.lib", "Cool.exp"] {
+            touch(&build.join(leftover), b"");
+        }
+        touch(&build.join("Cool.ini"), b"[General]");
+        let plugins_of = |game: &Scratch| -> Vec<String> {
+            let mut names: Vec<String> = fs::read_dir(game.plugins())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        };
+
+        let all = Scratch::game("install-build-all");
+        let named = ["Cool.asi", "Cool.dll", "Cool.pdb"].map(|name| build.join(name));
+        let outcomes = install(all.root(), &named, false);
+        assert!(outcomes.iter().all(|o| o.error.is_none()), "{outcomes:?}");
+        assert!(
+            outcomes.iter().all(|o| o.existing.is_empty()),
+            "{outcomes:?}"
+        );
+        assert_eq!(outcomes[0].installed, ["Cool.asi", "Cool.ini"]);
+        assert_eq!(outcomes[2].skipped.len(), 1);
+        assert_eq!(plugins_of(&all), ["Cool.asi", "Cool.ini"]);
+
+        let dll = Scratch::game("install-build-dll");
+        let outcome = install(dll.root(), &[build.join("Cool.dll")], false);
+        assert_eq!(outcome[0].installed, ["Cool.asi", "Cool.ini"]);
+        assert_eq!(fs::read(dll.plugins().join("Cool.asi")).unwrap(), b"MZ asi");
+
+        let folder = Scratch::game("install-build-folder");
+        let outcome = install(folder.root(), std::slice::from_ref(&source.0), false);
+        assert_eq!(outcome[0].error, None);
+        assert_eq!(plugins_of(&folder), ["Cool.asi", "Cool.ini"]);
     }
 
     #[test]

@@ -111,12 +111,14 @@ pub(crate) async fn repack_iostore(
     obfuscate: bool,
     compression: PackCompression,
     app: AppHandle,
-) -> Result<(), String> {
+) -> Result<rivals_core::pak::pack::PackReport, String> {
     if crate::game_status::should_block_for_game() {
         return Err(crate::game_status::game_running_error());
     }
     let level = Some(mod_compression_level(&state).to_oodle());
     let game_root = state.lock().ok().and_then(|s| s.game_path.clone());
+    let conform = crate::settings::conform_mods(&state);
+    let usmap = crate::asset_view::configured_usmap(&state);
     tauri::async_runtime::spawn_blocking(move || {
         pak::repack_iostore(
             &input_dir,
@@ -125,6 +127,8 @@ pub(crate) async fn repack_iostore(
             obfuscate,
             compression,
             game_root.as_deref(),
+            conform,
+            crate::settings::load_mappings(usmap.as_deref()),
             app,
         )
     })
@@ -148,6 +152,8 @@ pub(crate) async fn repack_mod_in_place(
         return Err(crate::game_status::game_running_error());
     }
     let level = Some(mod_compression_level(&state).to_oodle());
+    let conform = crate::settings::conform_mods(&state);
+    let usmap = crate::asset_view::configured_usmap(&state);
     tauri::async_runtime::spawn_blocking(move || {
         pak::repack_mod_in_place(
             &game_root,
@@ -157,8 +163,32 @@ pub(crate) async fn repack_mod_in_place(
             recompress,
             level,
             compression,
+            conform,
+            crate::settings::load_mappings(usmap.as_deref()),
             app,
         )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Brings an installed mod a stock editor cooked to this game's layout where it is.
+#[tauri::command]
+pub(crate) async fn conform_mod(
+    state: State<'_, SettingsState>,
+    game_root: String,
+    mod_pak: String,
+    compression: PackCompression,
+    app: AppHandle,
+) -> Result<InPlaceReport, String> {
+    if crate::game_status::should_block_for_game() {
+        return Err(crate::game_status::game_running_error());
+    }
+    let level = Some(mod_compression_level(&state).to_oodle());
+    let usmap = crate::asset_view::configured_usmap(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let mappings = crate::settings::load_mappings(usmap.as_deref());
+        pak::conform_mod_in_place(&game_root, &mod_pak, level, compression, mappings, app)
     })
     .await
     .map_err(|e| e.to_string())?

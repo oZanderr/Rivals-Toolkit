@@ -4,12 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Loader2, TextSearch } from "lucide-react";
 
-import {
-  SearchResults,
-  type GroupBy,
-  type SearchHit,
-  type SearchResult,
-} from "@/components/SearchResults";
+import { SearchResults, type GroupBy, type SearchResult } from "@/components/SearchResults";
 import {
   AlertDialog,
   AlertDialogCancel,
@@ -24,6 +19,7 @@ import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import { Switch } from "@/components/ui/switch";
 import { Tip } from "@/components/ui/tooltip";
+import { hitCommand } from "@/lib/cliCommand";
 
 interface GameSearchResult extends SearchResult {
   /** How many places were found in all; `hits` lists the first of them by path. */
@@ -77,19 +73,10 @@ const PHASES: Record<SearchProgress["phase"], string> = {
 /**
  * The Asset Manager's "Search Game" button and the dialog it opens. The search runs in the
  * backend over every package the game loads, enabled mods included. Its state lives here rather
- * than in the dialog, so a hit opened in the inspector leaves the results, and a search still
- * running, as they were.
+ * than in the dialog, so closing the dialog leaves the results, and a search still running, as
+ * they were. A hit copies the CLI command that shows it, from the mod the game loads it from.
  */
-export function GameSearch({
-  gamePath,
-  disabled,
-  onOpenHit,
-}: {
-  gamePath: string;
-  disabled?: boolean;
-  /** Opens a hit in the inspector, from the container it was found in. */
-  onOpenHit: (hit: SearchHit) => void;
-}) {
+export function GameSearch({ gamePath, disabled }: { gamePath: string; disabled?: boolean }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [values, setValues] = useState(false);
@@ -298,10 +285,7 @@ export function GameSearch({
                   packages={search.result.packages}
                   note={note}
                   groupBy={groupBy}
-                  onOpen={(hit) => {
-                    setOpen(false);
-                    onOpenHit(hit);
-                  }}
+                  commandOf={(hit) => hitCommand(hit, hit.in_mod)}
                 />
               </>
             )}
