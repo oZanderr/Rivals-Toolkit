@@ -426,7 +426,9 @@ export function Plugins({ gamePath, isActive, gameRunning, pathLoading, onOpenIn
   async function pickAndInstall() {
     const picked = await open({
       multiple: true,
-      filters: [{ name: "ASI plugins and archives", extensions: ["asi", "zip", "7z", "rar"] }],
+      filters: [
+        { name: "ASI plugins and archives", extensions: ["asi", "dll", "zip", "7z", "rar"] },
+      ],
     }).catch(() => null);
     if (!picked) return;
     await install(Array.isArray(picked) ? picked : [picked]);
@@ -443,7 +445,7 @@ export function Plugins({ gamePath, isActive, gameRunning, pathLoading, onOpenIn
     await afterChange(true);
   }
 
-  // Drag-and-drop: install the .asi files, folders and archives dropped on the window.
+  // Drag-and-drop: install the .asi and .dll files, folders and archives dropped on the window.
   useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | undefined;
@@ -700,7 +702,7 @@ export function Plugins({ gamePath, isActive, gameRunning, pathLoading, onOpenIn
         <div className="pointer-events-none absolute inset-0 z-50 flex flex-col items-center justify-center gap-3 rounded-lg border-2 border-dashed border-ok bg-background/80 backdrop-blur-sm">
           <UploadCloud size={36} className="text-ok" />
           <span className="text-sm font-semibold text-ok">
-            Drop .asi plugins, archives or folders to install
+            Drop .asi or .dll plugins, archives or folders to install
           </span>
         </div>
       )}
@@ -994,7 +996,9 @@ export function Plugins({ gamePath, isActive, gameRunning, pathLoading, onOpenIn
                 )}
               </div>
               <div className="flex items-center gap-1 -mr-1">
-                <Tip content={gameRunning ? BLOCKED_TIP : "Install .asi plugins or archives"}>
+                <Tip
+                  content={gameRunning ? BLOCKED_TIP : "Install .asi or .dll plugins, or archives"}
+                >
                   <Button
                     variant="ghost"
                     size="xs"
@@ -1053,7 +1057,7 @@ export function Plugins({ gamePath, isActive, gameRunning, pathLoading, onOpenIn
               <UploadCloud size={28} className="text-muted-foreground/60" />
               <p className="text-sm text-muted-foreground">No plugins installed.</p>
               <p className="text-[12px] text-muted-foreground/80">
-                Drop .asi files, folders or zip, 7z and rar archives here, or use Add.
+                Drop .asi or .dll files, folders or zip, 7z and rar archives here, or use Add.
               </p>
             </div>
           ) : (

@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use retoc::legacy_asset::{FLegacyPackageHeader, FObjectExport};
 use retoc::zen::FPackageIndex;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::header_edit::Tables;
 use crate::package::{ExportStatus, ParsedExport, ParsedPackage};
@@ -23,7 +23,7 @@ use crate::write::{HeaderDraft, Splice};
 const RF_CLASS_DEFAULT_OBJECT: u32 = 0x10;
 
 /// One export to copy in, named by the source the caller supplies under `from`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CopyExport {
     /// Which of the caller's sources this comes from. Opaque here: the caller decides what a
     /// source key means, since this crate knows nothing about containers or files.

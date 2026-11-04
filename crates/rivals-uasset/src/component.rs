@@ -88,7 +88,16 @@ pub fn plan_inherited_component(
             name_in(&node.properties, "InternalVariableName")
                 .is_some_and(|variable| variable.eq_ignore_ascii_case(from))
         })
-        .ok_or_else(|| format!("the parent Blueprint adds no component named {from}"))?;
+        .ok_or_else(|| {
+            let added: Vec<&str> = parent_nodes
+                .iter()
+                .filter_map(|node| name_in(&node.properties, "InternalVariableName"))
+                .collect();
+            format!(
+                "the parent Blueprint adds no component named {from}; it adds {}",
+                added.join(", ")
+            )
+        })?;
     let source_template = object_in(&source.properties, "ComponentTemplate")
         .and_then(export_of)
         .ok_or_else(|| format!("{from} builds no template in the parent's package"))?;

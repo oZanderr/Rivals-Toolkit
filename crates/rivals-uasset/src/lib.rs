@@ -46,12 +46,12 @@ mod script_text;
 mod script_text_edit;
 pub use call_shape::{
     CallShape, CallSite, Fit, compare as compare_calls, compare_written as compare_written_call,
-    render as render_call_shape, shape_of_signature, site_at, stores_in,
+    shape_of_signature, site_at, stores_in,
 };
 pub use script_edit::{narrowing_edits, widening_edits};
 pub use script_encode::{
     AssembleOptions, Assembled, NewImport, RoundTripFailure, RoundTrips, imports_text_adds,
-    script_round_trips, text_diagnostics,
+    script_round_trips,
 };
 pub use script_flow::{
     EdgeKind, EntryKind, FlowBlock, FlowEdge, FlowEntry, FlowLine, ScriptFlow, flow_fault,
@@ -152,7 +152,7 @@ pub use niagara_vm::{
 };
 pub use niagara_vm_edit::{
     ColorTransform, LoweredVm, VmColorTransform, VmConstEdit, VmEditPlan, lower_vm_edits,
-    parse_vm_value, verify_vm_edits, vm_edit_refusal,
+    parse_vm_value, verify_vm_edits,
 };
 pub use package::{
     AppliedFixup, AssetBundle, ExportRow, ExportStatus, ImportInfo, PackageInfo, ParseOptions,
@@ -185,8 +185,8 @@ pub use unversion::{Unversioned, unversion_package};
 pub use ustruct::type_text as property_type_text;
 pub use ustruct::{
     FieldRecord, FieldRole, FunctionField, FunctionSignature, RecordTail, StructDefinition,
-    StructLayout, definitions_of, mappings_from_definitions, mappings_from_definitions_with,
-    read_struct_definitions, read_struct_definitions_pathed,
+    StructLayout, definitions_of, mappings_from_definitions_with, read_struct_definitions,
+    read_struct_definitions_pathed,
 };
 pub use value::{MapEntry, PropertyEntry, PropertyValue};
 pub use write::{

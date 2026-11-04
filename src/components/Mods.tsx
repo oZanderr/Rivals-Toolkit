@@ -1812,13 +1812,15 @@ export function Mods({
                             <Pencil />
                             Rename
                           </ContextMenuItem>
-                          <ContextMenuItem
-                            disabled={!entry.enabled}
-                            onSelect={() => viewInAssetManager(entry)}
-                          >
-                            <PackageOpen />
-                            View in Asset Manager
-                          </ContextMenuItem>
+                          {onViewInAssetManager && (
+                            <ContextMenuItem
+                              disabled={!entry.enabled}
+                              onSelect={() => viewInAssetManager(entry)}
+                            >
+                              <PackageOpen />
+                              View in Asset Manager
+                            </ContextMenuItem>
+                          )}
                           <ContextMenuItem onSelect={() => revealMod(entry)}>
                             <FolderOpen />
                             Show in folder

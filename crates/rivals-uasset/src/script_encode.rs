@@ -710,31 +710,6 @@ pub(crate) fn assemble(
     })
 }
 
-/// What is wrong with `text` as the script of `export`, line by line, and what is only worth
-/// knowing: both empty for a text that assembles cleanly.
-pub fn text_diagnostics(
-    bundle: &AssetBundle<'_>,
-    parsed: &ParsedPackage,
-    export: u32,
-    text: &str,
-) -> Result<(Vec<Diagnostic>, Vec<Diagnostic>), String> {
-    let header = crate::package::read_header(bundle)?;
-    let mut tables = Tables {
-        names: header.name_map.clone(),
-        imports: header.imports.clone(),
-    };
-    let options = AssembleOptions {
-        add_names: true,
-        add_imports: true,
-    };
-    Ok(
-        match assemble(text, parsed, export, &header, &mut tables, options) {
-            Ok(assembled) => (Vec::new(), assembled.warnings),
-            Err(errors) => (errors, Vec::new()),
-        },
-    )
-}
-
 /// The imports assembling `text` as the script of `export` would add to the package, in the order
 /// the text names them: what a caller able to read other packages can give their classes. Empty
 /// for a text that does not assemble, whose diagnostics say why.

@@ -539,10 +539,10 @@ mod tests {
         assert!(file.edits.keys.is_empty());
     }
 
-    /// The exact object the inspector sends. The app, the CLI and an edit file share one shape,
-    /// so a field renamed on either side has to break here first.
+    /// An edit list of every kind of edit, as an edit file holds one, so a field renamed on
+    /// either side has to break here first.
     #[test]
-    fn the_shape_the_inspector_sends_is_the_shape_the_engine_reads() {
+    fn an_edit_file_s_shape_is_the_shape_the_engine_reads() {
         let sent = r#"{
             "values": [
                 {"offset": 9496, "name": "HeroID", "kind": "str", "op": "set", "text": "2022"},
@@ -579,7 +579,7 @@ mod tests {
             "reset_exports": [4],
             "duplicate_exports": [{"export": 2, "name": "Copy"}]
         }"#;
-        let list: EditList = serde_json::from_str(sent).expect("the inspector's own shape");
+        let list: EditList = serde_json::from_str(sent).expect("an edit file's shape");
         assert_eq!(list.values.len(), 8);
         assert_eq!(list.imports.len(), 2);
         assert_eq!(list.rows.len(), 3);

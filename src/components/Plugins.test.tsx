@@ -1,7 +1,7 @@
-import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { render, screen, waitFor } from "@/test/render";
 import { createTauri, installTauri, type TauriMock } from "@/test/tauri";
 
 type DragHandler = (event: { payload: { type: string; paths?: string[] } }) => unknown;

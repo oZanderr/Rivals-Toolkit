@@ -388,7 +388,7 @@ pub fn bulk_bytes(request: &Request<'_>, resource: u32) -> Result<Vec<u8>, Strin
     )
 }
 
-/// The bulk data table as the inspector shows it.
+/// The bulk data table as `asset bulk` lists it.
 pub fn bulk_list(request: &Request<'_>) -> Result<Vec<rivals_uasset::ResourceInfo>, String> {
     Ok(parse(request)?.resources)
 }

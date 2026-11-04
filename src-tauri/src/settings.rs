@@ -32,6 +32,26 @@ pub(crate) struct ModProfile {
     pub modified_at: u64,
 }
 
+/// The sidebar's tabs as the user arranged them, by id. The front end owns which ids exist, and
+/// fills in or drops ids itself.
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct TabLayout {
+    pub order: Vec<String>,
+    pub hidden: Vec<String>,
+}
+
+/// The value when it reads as one, else its default, so one unreadable setting cannot reset the
+/// rest of the file.
+fn lenient<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned + Default,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).unwrap_or_default())
+}
+
 /// Stored under the same names the command line reads, so both front ends agree on a level.
 pub(crate) type CompressionLevelSetting = rivals_core::pak::profile::OodleLevel;
 
@@ -79,15 +99,15 @@ pub(crate) struct Settings {
     /// Path to a .usmap mappings file, or a folder holding one. Reading asset properties needs it.
     #[serde(default)]
     pub(crate) usmap_path: Option<String>,
-    /// The mod pak asset edits were last saved into, so the inspector can offer it again.
+    /// The mod pak asset edits were last saved into, which the CLI saves into when given none.
     #[serde(default)]
     pub(crate) asset_mod_name: Option<String>,
     /// What an asset edit is saved as. The game reads packages only from IoStore, so an unset
     /// setting means IoStore; a plain pak is for tooling that converts it onward itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) asset_save_target: Option<rivals_core::asset_edit::SaveTarget>,
-    /// The language the inspector shows texts in, as the game names it (`en`, `ja`, ...). Unset
-    /// means English.
+    /// The language the CLI shows texts in when given no `--culture`, as the game names it (`en`,
+    /// `ja`, ...). Unset means English.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) text_culture: Option<String>,
     /// A game log key and IV in hex, set by hand when a patch changes the bundled ones.
@@ -95,6 +115,13 @@ pub(crate) struct Settings {
     pub(crate) log_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) log_iv: Option<String>,
+    /// None until the user first arranges the tabs, so they get the front end's default.
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) tab_layout: Option<TabLayout>,
     /// Settings this build does not know, written back as they were read: another build of the
     /// app, newer or older, may share this file, and saving here must not lose what it stored.
     #[serde(flatten)]
@@ -127,6 +154,7 @@ impl Default for Settings {
             text_culture: None,
             log_key: None,
             log_iv: None,
+            tab_layout: None,
             others: serde_json::Map::new(),
         }
     }
@@ -207,6 +235,21 @@ pub(crate) fn set_show_hero_icons(
 ) -> Result<(), String> {
     let mut guard = state.lock().map_err(|e| e.to_string())?;
     guard.show_hero_icons = enabled;
+    guard.save()
+}
+
+#[tauri::command]
+pub(crate) fn get_tab_layout(state: State<'_, SettingsState>) -> Option<TabLayout> {
+    state.lock().ok().and_then(|s| s.tab_layout.clone())
+}
+
+#[tauri::command]
+pub(crate) fn set_tab_layout(
+    state: State<'_, SettingsState>,
+    layout: TabLayout,
+) -> Result<(), String> {
+    let mut guard = state.lock().map_err(|e| e.to_string())?;
+    guard.tab_layout = Some(layout);
     guard.save()
 }
 
@@ -377,5 +420,39 @@ mod tests {
             serde_json::json!({ "nested": [1, 2] })
         );
         assert_eq!(saved["game_path"], "C:/Games/MarvelRivals");
+    }
+
+    /// A tab layout that does not read falls back to the default alone, so it cannot reset the
+    /// file's other settings.
+    #[test]
+    fn an_unreadable_tab_layout_falls_back_alone() {
+        for layout in [r#""x""#, "5", "null", r#"{"order":[1,2]}"#] {
+            let stored =
+                format!(r#"{{"game_path": "C:/Games/MarvelRivals", "tab_layout": {layout}}}"#);
+            let settings: Settings = serde_json::from_str(&stored).expect("read");
+            assert_eq!(
+                settings.game_path.as_deref(),
+                Some("C:/Games/MarvelRivals"),
+                "{layout}"
+            );
+            assert!(settings.tab_layout.is_none(), "{layout}");
+        }
+    }
+
+    /// The ids are kept as they were stored, unknown ones too, and a layout naming only an order
+    /// reads with nothing hidden.
+    #[test]
+    fn a_tab_layout_keeps_its_ids_as_stored() {
+        let stored = r#"{"tab_layout": {"order": ["logs", "a-later-tab"]}}"#;
+        let settings: Settings = serde_json::from_str(stored).expect("read");
+        let layout = settings.tab_layout.as_ref().expect("stored");
+        assert_eq!(layout.order, ["logs", "a-later-tab"]);
+        assert!(layout.hidden.is_empty());
+        let saved: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&settings).expect("write")).expect("json");
+        assert_eq!(
+            saved["tab_layout"],
+            serde_json::json!({ "order": ["logs", "a-later-tab"], "hidden": [] })
+        );
     }
 }

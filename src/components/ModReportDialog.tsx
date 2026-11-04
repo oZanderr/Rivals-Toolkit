@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { AlertTriangle } from "lucide-react";
 
-import { SearchResults, type SearchHit, type SearchResult } from "@/components/SearchResults";
+import { SearchResults, type SearchResult } from "@/components/SearchResults";
 import {
   AlertDialog,
   AlertDialogCancel,
@@ -15,10 +15,10 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Tip } from "@/components/ui/tooltip";
+import { hitCommand } from "@/lib/cliCommand";
 import { shortPath } from "@/lib/contentPath";
 import { cn } from "@/lib/utils";
-
-export type { SearchHit } from "@/components/SearchResults";
 
 interface PackageReport {
   path: string;
@@ -49,8 +49,6 @@ interface Props {
   onClose: () => void;
   /** Asks to take a package back out of the mod. */
   onRevert?: (path: string) => void;
-  /** Opens a search hit in the inspector, at its statement when it has one. */
-  onOpenHit: (hit: SearchHit) => void;
 }
 
 /** The patch number nearly every mod ships with, which says nothing about this one. */
@@ -77,7 +75,7 @@ const SECTIONS: { key: keyof ModReport; title: string; hint: string }[] = [
 ];
 
 /** Mount with `key={container}` so each mod starts from an empty report. */
-export function ModReportDialog({ gamePath, container, onClose, onRevert, onOpenHit }: Props) {
+export function ModReportDialog({ gamePath, container, onClose, onRevert }: Props) {
   const modName = container.split(/[\\/]/).pop() ?? container;
   const [report, setReport] = useState<ModReport | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -153,7 +151,11 @@ export function ModReportDialog({ gamePath, container, onClose, onRevert, onOpen
         <div className="flex-1 overflow-y-auto -mx-6 px-6 text-[12px]">
           {searchError && <p className="text-err">{searchError}</p>}
           {search && (
-            <SearchResults query={search.query} result={search.result} onOpen={onOpenHit} />
+            <SearchResults
+              query={search.query}
+              result={search.result}
+              commandOf={(hit) => hitCommand(hit, container)}
+            />
           )}
           {error && <p className="text-err">{error}</p>}
           {!error && !report && <p className="text-muted-foreground">Reading the mod…</p>}
@@ -219,18 +221,19 @@ function PackageList({
       {packages.map((p) => (
         <div key={p.path}>
           <div className="flex items-center gap-2">
-            <span
-              className={cn(
-                "w-32 shrink-0 truncate text-[11px]",
-                p.error ? "text-warn" : "text-muted-foreground"
-              )}
-              title={p.error}
-            >
-              {p.kind}
-            </span>
-            <span className="truncate font-mono text-[11px]" title={p.path}>
-              {shortPath(p.path)}
-            </span>
+            <Tip content={p.error}>
+              <span
+                className={cn(
+                  "w-32 shrink-0 truncate text-[11px]",
+                  p.error ? "text-warn" : "text-muted-foreground"
+                )}
+              >
+                {p.kind}
+              </span>
+            </Tip>
+            <Tip content={p.path}>
+              <span className="truncate font-mono text-[11px]">{shortPath(p.path)}</span>
+            </Tip>
             {action && (
               <Button
                 size="sm"

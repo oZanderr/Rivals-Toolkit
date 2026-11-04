@@ -81,7 +81,7 @@ struct Candidate {
     id: FPackageId,
     path: String,
     layer: usize,
-    /// The container it was read from, which is where the inspector opens it.
+    /// The container it was read from.
     container: Arc<str>,
     /// That container's versions, which its header is read by.
     versions: Option<(EIoStoreTocVersion, EIoContainerHeaderVersion)>,
@@ -183,7 +183,7 @@ pub fn game_search(
         .enumerate()
         .flat_map_iter(|(index, chunk)| {
             let converter = PackageConverter::new(&order);
-            // A value search reads values the way the inspector shows them, which can take layouts
+            // A value search reads values the way `asset dump` shows them, which can take layouts
             // recovered from the Blueprints that define them: the copies the game loads, read
             // through the same converter, which already holds the headers they import.
             let layouts = values.then(|| LayoutReader::through(&order, &converter));
@@ -381,7 +381,7 @@ fn search_one(
     }
 }
 
-/// One package read the way a search reads it: through `layouts` the way the inspector shows its
+/// One package read the way a search reads it: through `layouts` the way `asset dump` shows its
 /// values, or with the plain parse bytecode needs.
 fn parse_candidate(
     converter: &PackageConverter<'_>,
@@ -396,7 +396,7 @@ fn parse_candidate(
         exports: &bundle.exports_file_buffer,
     };
     match layouts {
-        // Values read the way the inspector shows them.
+        // Values read the way `asset dump` shows them.
         Some(layouts) => schema_synth::parse_package_through(
             &bundle,
             Some(mappings),
@@ -426,7 +426,7 @@ fn parse_candidate(
 /// A package the game loads, read whole.
 pub(crate) struct ReadPackage {
     pub path: String,
-    /// The container it was read from, which is where the inspector opens it.
+    /// The container it was read from.
     pub container: String,
     /// The enabled mod whose copy the game loads.
     pub in_mod: Option<String>,

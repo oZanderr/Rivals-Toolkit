@@ -9,11 +9,13 @@ It combines a React frontend with a Tauri/Rust backend to provide:
 - ASI plugin management, and a view of the proxy DLL that loads them
 - pak-based INI and game settings tweak tooling
 - an INI editor for the configs inside paks and loose ones such as plugin settings
-- `.uasset` inspection and editing: property trees, data tables, string tables, animation keys
+- textures saved and replaced in bulk, a mod's contents report, and a search of the game, each hit
+  copying the `rivals-cli` command that shows it
 - shader cache cleanup and game launch helpers
 
 It also ships `rivals-cli`, a command-line tool over the same engine for scripting config tweaks and
-pak INI edits. See [Command Line](#command-line).
+pak INI edits, and the only place packages are inspected and edited. See
+[Command Line](#command-line).
 
 Current platform support: Windows only.
 
@@ -268,9 +270,8 @@ or derives from, itself or through one of its package's own classes below it, is
 those packages: the import index finds them, and is built first when it has not been. A type is written as a `local` line takes it (see below), a Blueprint one
 loading after its type as for a struct's field, and `--class` picks the class when the package
 holds more than one. A package whose classes its own records describe otherwise than the mappings
-file does, as after this, is read with its own records. The app's script view has New variable, for
-the class of the function shown. A function can be added to a Blueprint class, and an existing one
-rewritten whole, as text: see below.
+file does, as after this, is read with its own records. A function can be added to a Blueprint
+class, and an existing one rewritten whole, as text: see below.
 
 `asset add-field --name X --type T` adds a field to a Blueprint struct after its own, named as the
 editor names a member: `X_<n>_<GUID>`, the guid the same each time the same field is added. Each
@@ -297,8 +298,7 @@ constant lists a value for every field, so the save gives each such constant a d
 fields, zero, false, none or empty, and writes that package into the mod with the struct; a script
 that cannot change size, a field type whose constant is not written here (a struct or a
 container), or a package another mod holds is refused instead. `--struct` picks the struct when the
-package holds more than one. In the app, a
-Blueprint struct's export actions offer Add field.
+package holds more than one.
 
 `asset edit-script` changes one thing inside a function's bytecode, addressed by the statement
 offset `asset script` prints: a literal by its place in the statement (`--const`) or by where it
@@ -1281,8 +1281,7 @@ event graph's sequences as the `push` and `pop` that run them, and a label where
 a jump lands. Each statement prints once, and a jump that does not nest stays a `goto`; `asset
 audit --flow-check` holds every script in the game to that and counts the gotos. `--flow` lists the
 blocks the jumps divide the function into and the edges between them, following its flow stack so
-a pop leads where its push said, and `--dot` writes them for Graphviz. In the app, the script pane's
-Pseudo-code switch shows the same, and a line opens its statement in the listing.
+a pop leads where its push said, and `--dot` writes them for Graphviz.
 
 A text can give its function locals of its own, one `local Name: Type` line each ahead of the first
 statement; the function gains a field for each after the ones it has, so its parameters stay first.
@@ -1328,7 +1327,7 @@ Glow(1.5f)`, finds it, and a call to it is held to its signature; `--class` pick
 the package holds more than one. A name the class or a Blueprint parent already uses is refused; a
 native parent's functions are listed nowhere the toolkit reads, so the save notes that it did not
 look. In an edit file a `script_texts` entry with `new_function` and `signature` in place of
-`export` does the same, and the app's script view has New function.
+`export` does the same.
 
 ### Niagara scripts
 
@@ -1342,10 +1341,7 @@ reads each entry, and the script's parameter store. GPU scripts carry no bytecod
 `--trace Particles.Color` follows each output whose name starts so back to what it is computed
 from, as one expression and as its leaves: each constant with the instruction and operand that read
 it, how many operands share it and every output its instruction reaches, and the particle values,
-inputs and data interface calls it also takes. An output whose leaves are all literals is baked. In the
-app, a `NiagaraScript` export's VM view shows the same listing beside its outputs: each opens to
-what it is made of, a leaf shows the instruction reading it, and a constant copies the `asset
-edit-vm` line that changes it.
+inputs and data interface calls it also takes. An output whose leaves are all literals is baked.
 
 ```bash
 rivals-cli asset vm /Game/VFX/NS_Thing                                       # the scripts
@@ -1435,13 +1431,6 @@ rivals-cli asset recolor /Game/VFX/NS_Thing --export 0 --export 2 --tint 1,1,2 -
 rivals-cli asset recolor /Game/VFX/NS_Thing --scripts --param Emitter01.Color02 --paint 0,1,0 --into MyMod  # one script colour
 ```
 
-In the app, a Niagara package's Colour view lists the same sources. A curve shows its samples as a
-gradient and a table, a colour array its swatches, and a parameter its colour, each edited in place
-or with the same tint, paint and hue tools, saved like any other edit. Recolour effect applies a
-tool to every curve, array and parameter (or the enemy ones) in one save, and with the material
-colours, each renderer's too. A script colour shows its channels with what each is computed from,
-and opens in the VM view. A renderer lists its materials' colours and where each comes from.
-
 `ini` and `tweaks` take `--pak`, a pak path or a mod's whole name in `~mods`. `--json` makes every
 command emit machine-readable output, and failures exit non-zero. `--dry-run` reports what a write command
 would change without touching the pak, and `--section` pins an Engine.ini edit to a given section
@@ -1472,7 +1461,7 @@ The Plugins tab manages the `.asi` plugins in `Binaries/Win64/plugins` and shows
 - **Where plugins are looked for.** Beside the game and in `plugins`, which is where Minimal ASI Loader looks, and with Ultimate ASI Loader also in `scripts` and one folder down in each. A plugin beside the game takes the place of one of the same name in `plugins`, which Minimal ASI Loader then skips.
 - **Switching on and off.** A plugin or loader is switched off by adding `.disabled` to its name, which every loader skips. This works with the game open, since Windows lets a loaded DLL be renamed, and takes effect on the next launch.
 - **Companion files.** Files beside a plugin that carry its name, such as `PigeonPass.ini` or `PigeonPass.log`, are shown with it. An `.ini` opens in the INI Editor, anything else in its default app. Deleting a plugin asks before deleting them, and keeps them unless asked, since they can hold settings or licence keys.
-- **Installing.** Drop `.asi` files, folders, or zip, 7z and rar archives on the tab, or use Add. Each `.asi` goes into `plugins` with the files beside it that carry its name. A settings file already installed is kept rather than written over, a plugin already installed is replaced only once confirmed, and DLLs in what is dropped are skipped and reported, so a loader is never installed this way.
+- **Installing.** Drop `.asi` or `.dll` files, folders, or zip, 7z and rar archives on the tab, or use Add. Each `.asi` goes into `plugins` with the files beside it that carry its name, and a `.dll` dropped on its own goes in the same way under its `.asi` name, since a plugin is a DLL by another extension. A settings file already installed is kept rather than written over, a plugin already installed is replaced only once confirmed, and a loader DLL dropped on its own is refused while the DLLs inside a dropped folder or archive are skipped and reported, so a loader is never installed this way.
 - **The signature bypass's files** (its payload, and the `dsound.dll` it installed) are tagged, and switching either off or deleting it first warns that mods in `~mods` stop loading without it.
 
 ## INI Editor

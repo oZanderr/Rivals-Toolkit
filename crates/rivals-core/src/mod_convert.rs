@@ -272,6 +272,16 @@ fn convert(
     let live_pak = files.part("pak");
     validate_target(game_root, &live_pak)?;
     let stem = files.stem.clone();
+    // The game can start while the mod is rebuilt, and holds its files open once it runs.
+    let may_swap = || -> Result<(), String> {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("Repack cancelled".to_string());
+        }
+        if crate::game_status::should_block_for_game() {
+            return Err(crate::game_status::game_running_error());
+        }
+        Ok(())
+    };
     let live_utoc = files.part("utoc");
     let from_iostore = live_utoc.is_file() && files.part("ucas").is_file();
     let to_iostore = to == ModFormat::Iostore;
@@ -325,7 +335,16 @@ fn convert(
             return Err("Repack cancelled".to_string());
         }
         let staged_pak = staged.join(format!("{stem}.pak"));
-        let contents_out = swap_checked(files, &stem, &staged, to, &contents_in, &[], dry_run)?;
+        let contents_out = swap_checked(
+            files,
+            &stem,
+            &staged,
+            to,
+            &contents_in,
+            &[],
+            dry_run,
+            &may_swap,
+        )?;
         return Ok(ConvertReport {
             container_name: stem,
             format: to.name(),
@@ -458,7 +477,16 @@ fn convert(
 
     // Converting to this game's layout writes only when there was something to convert.
     let dry_run = dry_run || (conforming && conformed.is_empty());
-    let contents_out = swap_checked(files, &stem, &staged, to, &contents_in, &left_out, dry_run)?;
+    let contents_out = swap_checked(
+        files,
+        &stem,
+        &staged,
+        to,
+        &contents_in,
+        &left_out,
+        dry_run,
+        &may_swap,
+    )?;
 
     Ok(ConvertReport {
         container_name: stem,
@@ -516,7 +544,9 @@ fn copies_directly(game_root: &str, utoc: &Path) -> Result<Option<Direct>, Strin
 }
 
 /// Holds what was staged to everything the mod held, but the shader archives the pack left out and
-/// warned about, then swaps it in unless `dry_run`. Gives what the staged mod holds.
+/// warned about, then swaps it in unless `dry_run` or `may_swap` refuses at the last moment. Gives
+/// what the staged mod holds.
+#[allow(clippy::too_many_arguments)]
 fn swap_checked(
     files: &ModFiles,
     stem: &str,
@@ -525,6 +555,7 @@ fn swap_checked(
     contents_in: &HashSet<String>,
     left_out: &[String],
     dry_run: bool,
+    may_swap: &dyn Fn() -> Result<(), String>,
 ) -> Result<HashSet<String>, String> {
     let staged_pak = staged.join(format!("{stem}.pak"));
     let contents_out = mod_contents(&staged_pak, to == ModFormat::Iostore)?;
@@ -545,6 +576,7 @@ fn swap_checked(
 
     check_staged(staged, stem, to)?;
     if !dry_run {
+        may_swap()?;
         // The shared store may still hold the live container open, which Windows will not let the
         // swap move.
         containers::drop_cached_store();
@@ -683,6 +715,45 @@ mod tests {
         assert!(err.contains("switched off"), "{err}");
         assert!(off.part("pak").is_file());
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A cancel or the game starting while the mod was rebuilt stops the swap with the rebuild
+    /// done, and the live mod is left as it was.
+    #[test]
+    fn a_refused_swap_leaves_the_live_mod_as_it_was() {
+        let (root, files) = ini_mod("refused");
+        let live = files.part("pak");
+        let before = fs::read(&live).expect("live pak");
+        let staged = scratch("refused-staged");
+        plain::write_files(
+            &staged.join(format!("{}.pak", files.stem)),
+            vec![(
+                "Marvel/Config/DefaultEngine.ini".into(),
+                b"[Core]\nA=2\n".to_vec(),
+            )],
+            &PakOptions {
+                compression: PackCompression::Zlib,
+                oodle_level: None,
+            },
+        )
+        .expect("the rebuilt mod");
+        let contents_in = mod_contents(&live, false).expect("contents");
+        let err = swap_checked(
+            &files,
+            &files.stem,
+            &staged,
+            ModFormat::Pak,
+            &contents_in,
+            &[],
+            false,
+            &|| Err("the game started".to_string()),
+        )
+        .unwrap_err();
+        assert_eq!(err, "the game started");
+        assert_eq!(fs::read(&live).expect("live pak"), before);
+        assert!(!live.with_extension("pak.bak").exists());
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&staged);
     }
 
     /// A rebuild that left out one of the files the format needs stops before the swap.

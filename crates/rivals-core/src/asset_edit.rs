@@ -1040,30 +1040,6 @@ fn read_parent(
     Ok((entry, loaded, parent))
 }
 
-/// The components the parent Blueprint of the one a request names adds, by variable name, which
-/// one of its own can be copied from.
-pub fn parent_components(
-    request: &AssetEditRequest<'_>,
-    mappings: Option<&Mappings>,
-) -> Result<Vec<String>, String> {
-    let (_, parsed) = read_package(request, mappings)?;
-    let (_, _, parent) = read_parent(request, mappings, &parsed)?;
-    Ok(parent
-        .exports
-        .iter()
-        .filter(|export| export.class_name == "SCS_Node")
-        .filter_map(
-            |node| match entry_named(&node.properties, "InternalVariableName") {
-                Some(rivals_uasset::PropertyEntry {
-                    value: PropertyValue::Name { value },
-                    ..
-                }) => Some(value.clone()),
-                _ => None,
-            },
-        )
-        .collect())
-}
-
 /// Copies a component the parent Blueprint adds into this one, as a component of its own attached
 /// where the original is, in stages each checked on its own: the parent's template is copied under
 /// this class, an empty node is added to its construction script, the node is wired to build the
@@ -1724,43 +1700,6 @@ fn infer_import_classes(
         }
     }
     Ok((edits, notes))
-}
-
-/// Drops the notes asking for the class of an import the save itself gives one.
-fn without_inferred(
-    request: &AssetEditRequest<'_>,
-    bundle: &AssetBundle<'_>,
-    parsed: &rivals_uasset::ParsedPackage,
-    export: u32,
-    text: &str,
-    warnings: Vec<rivals_uasset::Diagnostic>,
-) -> Vec<rivals_uasset::Diagnostic> {
-    let probe = AssetEditRequest {
-        changes: PackageEdits {
-            script_texts: vec![rivals_uasset::ScriptTextEdit {
-                export,
-                text: text.to_string(),
-                was: None,
-                object: None,
-            }],
-            ..Default::default()
-        },
-        ..*request
-    };
-    let Ok((inferred, _)) = infer_import_classes(&probe, bundle, parsed) else {
-        return warnings;
-    };
-    warnings
-        .into_iter()
-        .filter(|warning| {
-            !inferred.iter().any(|edit| match edit {
-                ImportEdit::Add { path, .. } => warning
-                    .message
-                    .starts_with(&format!("{path} is imported without a class")),
-                _ => false,
-            })
-        })
-        .collect()
 }
 
 /// The chain of Blueprint structs from `start` that needs `own` read first, following each one's
@@ -3451,224 +3390,9 @@ fn text_calls(
     out
 }
 
-/// What writing a function anew from text would do, before anything is saved.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct TextPreview {
-    /// What stops the text assembling, line by line. Nothing else is worked out until it does.
-    pub diagnostics: Vec<rivals_uasset::Diagnostic>,
-    /// What assembles but is worth knowing, such as an object imported without its class.
-    pub warnings: Vec<rivals_uasset::Diagnostic>,
-    /// Why the save would be refused once the text assembles: a label something enters at that
-    /// the text dropped, a layout the function has to keep, a call of the wrong shape.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub refused: Option<String>,
-    /// The calls the save would need leave for, as the refusal it would give without it.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub unchecked: Option<String>,
-    /// What the save would change: the script, each entry and resume point it moves, its layout.
-    pub applied: Vec<rivals_uasset::AppliedEdit>,
-}
-
-/// What writing the function at `export` anew from `text` would do: the check a save makes, and
-/// the changes it would make, without saving.
-pub fn preview_script_text(
-    request: &AssetEditRequest<'_>,
-    mappings: Option<&Mappings>,
-    export: u32,
-    text: &str,
-) -> Result<TextPreview, String> {
-    let (loaded, parsed) = read_package(request, mappings)?;
-    let (diagnostics, warnings) =
-        rivals_uasset::text_diagnostics(&bundle_of(&loaded), &parsed, export, text)?;
-    let warnings = without_inferred(
-        request,
-        &bundle_of(&loaded),
-        &parsed,
-        export,
-        text,
-        warnings,
-    );
-    let mut preview = TextPreview {
-        diagnostics,
-        warnings,
-        refused: None,
-        unchecked: None,
-        applied: Vec::new(),
-    };
-    if !preview.diagnostics.is_empty() {
-        return Ok(preview);
-    }
-    let attempt = |allow_unchecked: bool| {
-        preview_edits(
-            &AssetEditRequest {
-                changes: PackageEdits {
-                    script_texts: vec![rivals_uasset::ScriptTextEdit {
-                        export,
-                        text: text.to_string(),
-                        was: None,
-                        object: None,
-                    }],
-                    allow_unchecked,
-                    ..Default::default()
-                },
-                ..*request
-            },
-            mappings,
-        )
-    };
-    let outcome = match attempt(false) {
-        Err(refused) if refused.starts_with(crate::object_check::UNCHECKED) => {
-            preview.unchecked = Some(refused);
-            attempt(true)
-        }
-        other => other,
-    };
-    match outcome {
-        Ok((patched, _)) => preview.applied = patched.applied,
-        Err(refused) => preview.refused = Some(refused),
-    }
-    Ok(preview)
-}
-
-/// What adding `add` would do: its text's problems line by line, read against the function the
-/// save makes first, or the changes the save would make, why it would refuse, and what it would
-/// need leave for.
-pub fn preview_new_function(
-    request: &AssetEditRequest<'_>,
-    mappings: Option<&Mappings>,
-    add: &rivals_uasset::NewFunctionEdit,
-) -> Result<TextPreview, String> {
-    let (loaded, parsed) = read_package(request, mappings)?;
-    let shell = rivals_uasset::NewFunctionEdit {
-        text: "Return Nothing\nEndOfScript".into(),
-        ..add.clone()
-    };
-    let made = preview_read_edits(
-        &AssetEditRequest {
-            changes: PackageEdits {
-                new_functions: vec![shell.clone()],
-                ..Default::default()
-            },
-            ..*request
-        },
-        mappings,
-        loaded,
-        &parsed,
-    );
-    let (made, _) = match made {
-        Ok(made) => made,
-        Err(refused) => {
-            return Ok(TextPreview {
-                diagnostics: Vec::new(),
-                warnings: Vec::new(),
-                refused: Some(refused),
-                unchecked: None,
-                applied: Vec::new(),
-            });
-        }
-    };
-    let bundle = AssetBundle {
-        asset: &made.asset,
-        exports: &made.exports,
-    };
-    let after = reparse(request, mappings, &made.asset, &made.exports)?;
-    let export = rivals_uasset::new_function_export(&after, &shell)?;
-    let (diagnostics, warnings) =
-        rivals_uasset::text_diagnostics(&bundle, &after, export, &add.text)?;
-    let warnings = without_inferred(request, &bundle, &after, export, &add.text, warnings);
-    let mut preview = TextPreview {
-        diagnostics,
-        warnings,
-        refused: None,
-        unchecked: None,
-        applied: Vec::new(),
-    };
-    if !preview.diagnostics.is_empty() {
-        return Ok(preview);
-    }
-    let attempt = |allow_unchecked: bool| {
-        preview_edits(
-            &AssetEditRequest {
-                changes: PackageEdits {
-                    new_functions: vec![add.clone()],
-                    allow_unchecked,
-                    ..Default::default()
-                },
-                ..*request
-            },
-            mappings,
-        )
-    };
-    let outcome = match attempt(false) {
-        Err(refused) if refused.starts_with(crate::object_check::UNCHECKED) => {
-            preview.unchecked = Some(refused);
-            attempt(true)
-        }
-        other => other,
-    };
-    match outcome {
-        Ok((patched, _)) => preview.applied = patched.applied,
-        Err(refused) => preview.refused = Some(refused),
-    }
-    Ok(preview)
-}
-
-/// What a call would meet pointed at another function, before anything is saved.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct CallPreview {
-    /// The function the call names now.
-    pub callee: String,
-    /// What the function the call names now takes and gives back, written out, or what the call
-    /// passes and keeps when the function does not say.
-    pub was: Option<String>,
-    /// What the new function takes and gives back, when its own records say.
-    pub now: Option<String>,
-    /// `fits`, `mismatch` or `unknown`, as a save would find it.
-    pub verdict: &'static str,
-    pub reason: Option<String>,
-}
-
-/// How the call starting at `at` in the statement at `statement` would fare pointed at `new`:
-/// the check a save makes, without saving.
-pub fn preview_call(
-    request: &AssetEditRequest<'_>,
-    mappings: Option<&Mappings>,
-    export: u32,
-    statement: u32,
-    at: u32,
-    new: &str,
-) -> Result<CallPreview, String> {
-    let (_, parsed) = read_package(request, mappings)?;
-    let judged = judge_call(
-        request,
-        mappings,
-        &parsed,
-        export,
-        statement,
-        at,
-        new.trim(),
-    )
-    .ok_or_else(|| format!("no call starts at 0x{at:04X} in export {export}"))?;
-    let (verdict, reason) = match judged.fit {
-        rivals_uasset::Fit::Fits => ("fits", None),
-        rivals_uasset::Fit::Mismatch(reason) => ("mismatch", Some(reason)),
-        rivals_uasset::Fit::Unknown(reason) => ("unknown", Some(reason)),
-    };
-    Ok(CallPreview {
-        callee: judged.callee,
-        was: Some(rivals_uasset::render_call_shape(&judged.was)),
-        now: judged.now.as_ref().map(rivals_uasset::render_call_shape),
-        verdict,
-        reason,
-    })
-}
-
 /// A call held against the function a retarget points it at.
 struct Judged {
     callee: String,
-    /// The old function's shape, or what the call passes and keeps when that is not known.
-    was: rivals_uasset::CallShape,
-    now: Option<rivals_uasset::CallShape>,
     fit: rivals_uasset::Fit,
 }
 
@@ -3720,7 +3444,6 @@ fn judge_call(
             "what {new} takes could not be read from its package"
         )),
     };
-    let now = looked.ok().flatten();
     if fit == rivals_uasset::Fit::Fits {
         fit = match call.opcode {
             // A Blueprint function, which is all a check can fit, is never native and static.
@@ -3740,8 +3463,6 @@ fn judge_call(
     }
     Some(Judged {
         callee: call.callee,
-        was: old.unwrap_or(passed),
-        now,
         fit,
     })
 }
@@ -4778,7 +4499,7 @@ pub fn plan_export_removal(
 }
 
 /// One package to copy exports out of, named the way an asset is named anywhere else here.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct CopyFrom {
     /// A path, or a container file name to look up under `Paks` and then `Paks/~mods`.
     pub container: String,
@@ -5811,27 +5532,6 @@ fn empty_package() -> crate::pak::iostore_out::PackageBytes {
         memory_mapped_bulk: None,
         shader_map_hashes: Vec::new(),
     }
-}
-
-/// The mod's own copy of the asset a request names, when the mod already carries one: the
-/// container to inspect so that edits are made on top of it.
-pub fn mod_copy_of(
-    request: &AssetEditRequest<'_>,
-    target: SaveTarget,
-) -> Result<Option<PathBuf>, String> {
-    let entry = save_entry(request)?;
-    let options = SaveOptions {
-        target,
-        ..Default::default()
-    };
-    if !destination_check(request, &entry, &options)? {
-        return Ok(None);
-    }
-    let pak = mod_pak_path(request.game_root, request.mod_name)?;
-    Ok(Some(match target {
-        SaveTarget::IoStore => pak.with_extension("utoc"),
-        SaveTarget::Pak => pak,
-    }))
 }
 
 /// Stops a save that would replace the mod's own copy with the original plus the new edits,
@@ -10157,6 +9857,32 @@ mod game_data_tests {
                 .any(|note| note.contains("not carried over")),
             "{:?}",
             patched.notes
+        );
+    }
+
+    /// A name the parent Blueprint adds no component under is refused with the names it does add.
+    #[test]
+    fn a_component_the_parent_does_not_add_is_refused_naming_those_it_does() {
+        let Some(fixture) = Fixture::open(OVERRIDES) else {
+            return;
+        };
+        let request = fixture.request_changes(PackageEdits {
+            add_components: vec![rivals_uasset::AddComponent {
+                node: 0,
+                name: "ScopeCheckCopy".into(),
+                with_children: false,
+                from_parent: Some("NoSuchComponent".into()),
+            }],
+            ..Default::default()
+        });
+        let refused = match preview_edits(&request, Some(&fixture.schema)) {
+            Ok(_) => panic!("a component the parent does not add should be refused"),
+            Err(refused) => refused,
+        };
+        assert!(
+            refused.contains("adds no component named NoSuchComponent; it adds ")
+                && refused.contains("LevelScopeCheckComponentBP"),
+            "{refused}"
         );
     }
 
@@ -20228,23 +19954,11 @@ mod game_data_tests {
                 .iter()
                 .any(|line| line.text.contains("KismetMathLibrary:Less_IntInt(")),
         );
-        let preview = preview_call(
-            &fixture.request_changes(PackageEdits::default()),
-            Some(&fixture.schema),
-            export.index,
-            statement,
-            at,
-            less,
-        )
-        .expect("previewed");
-        assert_eq!(preview.verdict, "unknown", "{preview:?}");
-        assert_eq!(preview.was.as_deref(), Some("(Int, Int) -> Bool"));
-        assert_eq!(preview.now, None);
     }
 
     /// A Blueprint function says what it takes in its own records, so a call pointed at one that
-    /// takes something else is refused outright: here an event taking a text pointed at one taking
-    /// a string.
+    /// takes something else is refused outright, even told to save anyway: here an event taking a
+    /// text pointed at one taking a string.
     #[test]
     fn a_blueprint_call_is_refused_for_a_function_of_another_shape() {
         let Some(fixture) = Fixture::open(PLAYER_CONTROLLER) else {
@@ -20258,25 +19972,25 @@ mod game_data_tests {
             rivals_uasset::SlotKind::Call,
             "VirtualFunction",
         );
-        let request = fixture.request_changes(PackageEdits::default());
-        let preview = |value: &str| {
-            preview_call(
-                &request,
-                Some(&fixture.schema),
-                export.index,
+        let edit = PackageEdits {
+            scripts: vec![ScriptConstEdit {
+                export: export.index,
                 statement,
-                at,
-                value,
-            )
-            .expect("previewed")
+                at: Some(at),
+                value: "ShowMessageToChatPanel".into(),
+                ..ScriptConstEdit::default()
+            }],
+            allow_unchecked: true,
+            ..Default::default()
         };
-        let other = preview("ShowMessageToChatPanel");
-        assert_eq!(other.callee, "EventTellClientMsg");
-        assert_eq!(other.verdict, "mismatch", "{other:?}");
-        assert_eq!(other.was.as_deref(), Some("(Text)"));
-        assert_eq!(other.now.as_deref(), Some("(Str)"));
-        let elsewhere = preview("NoSuchFunction");
-        assert_eq!(elsewhere.verdict, "unknown", "{elsewhere:?}");
+        let refused = match preview_edits(&fixture.request_changes(edit), Some(&fixture.schema)) {
+            Ok(_) => panic!("a call of another shape should be refused"),
+            Err(refused) => refused,
+        };
+        assert!(
+            refused.starts_with("EventTellClientMsg cannot call ShowMessageToChatPanel instead"),
+            "{refused}"
+        );
     }
 
     /// A world's streaming levels are what its own serializer writes after its properties; the
@@ -21353,21 +21067,6 @@ Let LocalVariable(ToolkitCount) = 3
                 .contains("field 0 of a Vector2D literal is a Float, and Vector2D holds a Double"),
             "{fields}"
         );
-        let previewed = preview_script_text(
-            &fixture.request_changes(PackageEdits::default()),
-            Some(&fixture.schema),
-            graph,
-            &with("Let LocalVariable(ToolkitAmount) = 1.0f\n"),
-        )
-        .expect("previewed");
-        assert!(
-            previewed
-                .refused
-                .as_deref()
-                .is_some_and(|refused| refused.contains("stores a Float in ToolkitAmount")),
-            "{:?}",
-            previewed.refused
-        );
         let fitting = with(
             "Let LocalVariable(ToolkitAmount) = 1.0\nLet LocalVariable(ToolkitCount) = 2\nLet LocalVariable(ToolkitAt) = StructConst</Script/CoreUObject.Vector2D>(0.0, 0.0)\n",
         );
@@ -21389,46 +21088,5 @@ Let LocalVariable(ToolkitCount) = 3
         let text = text_of(&before, "Initialize Anim Events");
         let (patched, _) = fixture.apply_changes(text_edit(export, text));
         assert_eq!(patched.exports, fixture.loaded.exports_file_buffer);
-    }
-
-    /// The app's preview names a text's problems by line, and once the text assembles, what the
-    /// save would change and the calls it would need leave for.
-    #[test]
-    fn a_text_preview_lists_problems_by_line_and_then_what_a_save_would_do() {
-        let Some(fixture) = Fixture::open(PLAYER_CONTROLLER) else {
-            return;
-        };
-        let before = fixture.parse();
-        let export = function(&before, "IsActiveAbility").index;
-        let request = fixture.request_changes(PackageEdits::default());
-        let broken = preview_script_text(&request, Some(&fixture.schema), export, "Jump\n")
-            .expect("previewed");
-        assert_eq!(broken.diagnostics.len(), 1, "{broken:?}");
-        assert_eq!(broken.diagnostics[0].line, 1);
-        assert!(broken.applied.is_empty());
-
-        let text = text_of(&before, "IsActiveAbility").replacen(
-            "@0139:\n",
-            "LetBool LocalVariable(CallFunc_Greater_IntInt_ReturnValue) = CallMath /Script/Engine.KismetMathLibrary:Less_IntInt(LocalVariable(CallFunc_Array_Length_ReturnValue), 3)\n@0139:\n",
-            1,
-        );
-        let preview =
-            preview_script_text(&request, Some(&fixture.schema), export, &text).expect("previewed");
-        assert!(preview.diagnostics.is_empty(), "{preview:?}");
-        assert!(preview.refused.is_none(), "{preview:?}");
-        assert!(
-            preview
-                .unchecked
-                .as_deref()
-                .is_some_and(|unchecked| unchecked.contains("Less_IntInt")),
-            "{preview:?}"
-        );
-        assert!(
-            preview
-                .applied
-                .iter()
-                .any(|applied| applied.name == "IsActiveAbility script text"),
-            "{preview:?}"
-        );
     }
 }

@@ -63,7 +63,7 @@ pub struct InlinePayload {
     pub size: i64,
 }
 
-/// One bulk data resource as the inspector shows it: where its payload sits and whether the
+/// One bulk data resource as `asset bulk` lists it: where its payload sits and whether the
 /// bytes can be replaced.
 #[derive(Debug, Clone, Serialize)]
 pub struct ResourceInfo {
@@ -117,7 +117,7 @@ pub fn bulk_lock(resource: &FObjectDataResource) -> Option<String> {
     None
 }
 
-/// The bulk data table as the inspector shows it.
+/// The bulk data table as `asset bulk` lists it.
 pub fn resource_infos(header: &FLegacyPackageHeader, exports: &[u8]) -> Vec<ResourceInfo> {
     header
         .data_resources

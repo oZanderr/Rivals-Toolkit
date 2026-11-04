@@ -161,9 +161,9 @@ impl TextName {
 pub fn game_translations(game_root: &str, culture: &str) -> Result<(String, Locres), String> {
     let wanted = format!("Marvel/Content/Localization/Game/{culture}/Game.locres");
     let path = game_files::cased(game_root, &wanted)?
-        .ok_or_else(|| format!("the game ships no translations for {culture}"))?;
+        .ok_or_else(|| crate::localization::no_translations(game_root, culture))?;
     let bytes = game_files::read(game_root, &path)?
-        .ok_or_else(|| format!("the game ships no translations for {culture}"))?;
+        .ok_or_else(|| crate::localization::no_translations(game_root, culture))?;
     Ok((
         path,
         Locres::read(&bytes).map_err(|e| format!("{wanted}: {e}"))?,

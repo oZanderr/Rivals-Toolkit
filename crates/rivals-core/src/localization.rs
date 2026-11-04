@@ -137,7 +137,7 @@ impl Localizer {
             )
         });
         if files.is_empty() {
-            return Err(format!("the game ships no translations for {culture}"));
+            return Err(no_translations(game_root, culture));
         }
         let mut localizer = Localizer {
             culture: culture.to_string(),
@@ -191,15 +191,30 @@ fn mod_paks(game_root: &str) -> Vec<std::path::PathBuf> {
     paks
 }
 
-/// The languages the base game ships translations for.
+/// The languages the game ships its own translations for, spelt as the game spells them.
 pub fn cultures(game_root: &str) -> Result<Vec<String>, String> {
-    let mut found: Vec<String> = game_files::list(game_root, ".locres")?
-        .iter()
-        .filter_map(|path| path.rsplit('/').nth(1).map(str::to_string))
-        .collect();
+    let mut found = Vec::new();
+    for path in game_files::list(game_root, "/game.locres")? {
+        if path.starts_with("marvel/content/localization/game/")
+            && let Some(cased) = game_files::cased(game_root, &path)?
+            && let Some(culture) = cased.rsplit('/').nth(1)
+        {
+            found.push(culture.to_string());
+        }
+    }
     found.sort();
-    found.dedup();
     Ok(found)
+}
+
+/// The refusal for a language the game ships no translations for, naming those it does.
+pub(crate) fn no_translations(game_root: &str, culture: &str) -> String {
+    match cultures(game_root) {
+        Ok(shipped) if !shipped.is_empty() => format!(
+            "the game ships no translations for {culture}; it ships {}",
+            shipped.join(", ")
+        ),
+        _ => format!("the game ships no translations for {culture}"),
+    }
 }
 
 /// UE's `FCrc::StrCrc32`, which translations store for the source string they were made from:
@@ -698,6 +713,14 @@ mod tests {
             Some("QUICK MATCH")
         );
         assert!(cultures(&root).expect("cultures").iter().any(|c| c == "ja"));
+        let refused = match Localizer::for_culture(&root, "xx") {
+            Ok(_) => panic!("a language the game does not ship should be refused"),
+            Err(refused) => refused,
+        };
+        assert!(
+            refused.contains("for xx; it ships ") && refused.contains("ja"),
+            "{refused}"
+        );
     }
 
     /// A table's texts come back with what the game shows, while `value` keeps what the package

@@ -1,7 +1,7 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { act, render, screen, waitFor } from "@/test/render";
 import {
   createTauri,
   deferred,
@@ -50,8 +50,8 @@ function pak(path: string) {
 
 let mock: TauriMock;
 
-function mount() {
-  render(<AssetManager gamePath={GAME} gameRunning={false} />);
+function mount(gameRunning = false) {
+  render(<AssetManager gamePath={GAME} gameRunning={gameRunning} />);
 }
 
 /** Opens the context menu of the pak listed as `name`. */
@@ -64,7 +64,8 @@ beforeEach(() => {
   mock = createTauri()
     .on("list_pak_files_info", () => [pak(GAME_PAK), pak(MOD_PAK)])
     .on("list_known_heroes", () => [])
-    .on("cancel_texture_batch", () => null);
+    .on("cancel_texture_batch", () => null)
+    .on("get_should_block_for_game", () => false);
   installTauri(mock);
   dialogStub.open.mockReset();
 });
@@ -169,5 +170,91 @@ describe("AssetManager texture batches", () => {
     expect(mock.callsTo("import_textures")[0]).toEqual(
       expect.objectContaining({ container: `${PAKS}\\pakchunk0-Windows.utoc`, modName: "Mine" })
     );
+  });
+});
+
+const SECOND_MOD = `${PAKS}\\~mods\\Other_9999999_P.pak`;
+
+function repacked() {
+  return { container_name: "x", assets_in: 1, assets_out: 1, carried_pak_entries: 0 };
+}
+
+/** Starts a Repack All over both mods with the dialog's defaults. */
+async function repackAll(user: ReturnType<typeof userEvent.setup>) {
+  await screen.findByText("~mods/Skin_9999999_P.pak");
+  await user.click(screen.getByRole("button", { name: /Repack All/ }));
+  await user.click(await screen.findByRole("button", { name: "Repack" }));
+}
+
+describe("AssetManager Repack All", () => {
+  beforeEach(() => {
+    mock.on("list_pak_files_info", () => [pak(GAME_PAK), pak(MOD_PAK), pak(SECOND_MOD)]);
+  });
+
+  it("does not start while the game is running or still closing", async () => {
+    mock.on("repack_mod_in_place", () => repacked());
+    mount(true);
+    const user = userEvent.setup();
+    await screen.findByText("~mods/Skin_9999999_P.pak");
+    await user.click(screen.getByRole("button", { name: /Repack All/ }));
+    expect(await screen.findByText(/Marvel Rivals is running, or still closing/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Repack" })).toBeNull();
+    expect(mock.callsTo("repack_mod_in_place")).toHaveLength(0);
+  });
+
+  it("stops when the game starts partway, rather than failing every mod left", async () => {
+    let running = false;
+    mock
+      .on("get_should_block_for_game", () => running)
+      .on("repack_mod_in_place", () => {
+        running = true;
+        return repacked();
+      });
+    mount();
+    const user = userEvent.setup();
+    await repackAll(user);
+    expect(
+      await screen.findByText(
+        "Stopped after repacking 1 of 2: Marvel Rivals is running. Repack the rest once it has closed."
+      )
+    ).toBeTruthy();
+    expect(mock.callsTo("repack_mod_in_place")).toHaveLength(1);
+  });
+
+  it("stops when the game starts while a mod repacks, leaving that mod as it was", async () => {
+    let running = false;
+    mock
+      .on("get_should_block_for_game", () => running)
+      .on("cancel_repack_iostore", () => null)
+      .on("repack_mod_in_place", () => {
+        // The backend checks once more before it swaps the rebuilt mod in.
+        running = true;
+        throw "Marvel Rivals is running! Close the game before modifying mods.";
+      });
+    mount();
+    const user = userEvent.setup();
+    await repackAll(user);
+    expect(
+      await screen.findByText(
+        "Stopped after repacking 0 of 2: Marvel Rivals started while repacking Skin_9999999_P.pak, which was left as it was. Repack the rest once it has closed."
+      )
+    ).toBeTruthy();
+    expect(mock.callsTo("repack_mod_in_place")).toHaveLength(1);
+  });
+
+  it("cancels the whole batch, not just the mod being repacked", async () => {
+    const first = deferred<unknown>();
+    mock
+      .on("repack_mod_in_place", () => first.promise)
+      .on("cancel_legacy_extraction", () => null)
+      .on("cancel_repack_iostore", () => null);
+    mount();
+    const user = userEvent.setup();
+    await repackAll(user);
+    await waitFor(() => expect(mock.callsTo("repack_mod_in_place")).toHaveLength(1));
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    await act(async () => first.reject("Repack cancelled"));
+    expect(await screen.findByText(/^Cancelled after repacking 0 of 2/)).toBeTruthy();
+    expect(mock.callsTo("repack_mod_in_place")).toHaveLength(1);
   });
 });

@@ -13,7 +13,8 @@ use serde::Serialize;
 
 use crate::asset_edit::AssetEditRequest;
 use crate::image_file::{DdsImage, ImageIn, ImageKind, Pixels, encode_pixels, read_image};
-pub use crate::image_file::{decode_exr, decode_png, encode_exr, encode_png};
+#[cfg(test)]
+use crate::image_file::{decode_exr, decode_png, encode_exr, encode_png};
 
 /// How a pixel format stores its pixels.
 #[derive(Debug, Clone, Copy)]
@@ -388,42 +389,6 @@ pub fn texture_info(
         undecodable,
         hdr,
     })
-}
-
-/// A PNG of a texture for showing it: its largest mip the package has that is no larger than
-/// `largest` on a side, or the smallest it has when none is, high dynamic range values clamped to
-/// what 8 bits hold.
-pub fn preview_png(
-    request: &AssetEditRequest<'_>,
-    mappings: Option<&Mappings>,
-    export: Option<u32>,
-    largest: u32,
-) -> Result<Vec<u8>, String> {
-    let (loaded, _, layout) = read_layout(request, mappings, export)?;
-    let platform = layout.platform()?;
-    let format = PixelFormat::of(&platform.format)?;
-    let stored: Vec<&TextureMip> = platform
-        .mips
-        .iter()
-        .filter(|mip| mip_bytes(&loaded, mip).is_ok())
-        .collect();
-    let chosen = stored
-        .iter()
-        .find(|mip| mip.size_x.max(mip.size_y) <= largest)
-        .or(stored.last())
-        .ok_or("the package has the pixels of none of the texture's mips")?;
-    let bytes = mip_bytes(&loaded, chosen)?;
-    let (width, height, rgba) = if format.is_hdr() {
-        let (width, height, rgba) = decode_mip::<f32>(format, platform, chosen, bytes)?;
-        let rgba = rgba
-            .iter()
-            .map(|&v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)
-            .collect();
-        (width, height, rgba)
-    } else {
-        decode_mip::<u8>(format, platform, chosen, bytes)?
-    };
-    encode_png(width, height, &rgba)
 }
 
 /// The bytes of `mip`, from the file the bulk data table puts them in.

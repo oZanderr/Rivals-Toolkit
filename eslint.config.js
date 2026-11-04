@@ -44,6 +44,15 @@ export default tseslint.config(
         },
       ],
       "import/no-duplicates": "error",
+      "no-restricted-syntax": [
+        "error",
+        {
+          // Lowercase tags are DOM elements; Button spreads its props onto one.
+          selector:
+            "JSXOpeningElement[name.name=/^([a-z]|Button$)/] > JSXAttribute[name.name='title']",
+          message: "Hover hints use the Tip component, not a native title attribute.",
+        },
+      ],
     },
   },
   {

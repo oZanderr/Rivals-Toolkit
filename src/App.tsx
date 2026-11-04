@@ -1,18 +1,8 @@
-import { useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
-import {
-  FileCode2,
-  Package,
-  Play,
-  Plug,
-  Puzzle,
-  ScrollText,
-  Settings as SettingsIcon,
-  SlidersHorizontal,
-  Volume2,
-} from "lucide-react";
+import { Play } from "lucide-react";
 
 import { AssetManager } from "./components/AssetManager";
 import { ConfigTweaks } from "./components/ConfigTweaks";
@@ -20,27 +10,20 @@ import { IniEditor } from "./components/IniEditor";
 import { Logs } from "./components/Logs";
 import { Mods } from "./components/Mods";
 import { Plugins } from "./components/Plugins";
-import { Settings } from "./components/Settings";
+import { Settings, type SettingsSection } from "./components/Settings";
+import { SidebarTabs } from "./components/SidebarTabs";
 import { Sounds } from "./components/Sounds";
 import { Titlebar } from "./components/Titlebar";
 import { UpdateAvailableDialog } from "./components/UpdateAvailableDialog";
 
 import { Separator } from "@/components/ui/separator";
-import { Tip, TooltipProvider } from "@/components/ui/tooltip";
+import { TIP_DELAY, Tip, TooltipProvider } from "@/components/ui/tooltip";
 import { useGameRunning } from "@/hooks/useGameRunning";
+import { useTabLayout } from "@/hooks/useTabLayout";
 import { useUpdateCheck, type UpdateInfo } from "@/hooks/useUpdateCheck";
 import { useWebviewDefaults } from "@/hooks/useWebviewDefaults";
+import { ALWAYS_SHOWN, visibleTabs, type Tab } from "@/lib/tabs";
 import { cn } from "@/lib/utils";
-
-type Tab =
-  | "mod-tools"
-  | "plugins"
-  | "pak-manager"
-  | "ini-editor"
-  | "config-tweaks"
-  | "sounds"
-  | "logs"
-  | "settings";
 
 interface InstallInfo {
   path: string;
@@ -48,24 +31,14 @@ interface InstallInfo {
   launch_url: string;
 }
 
-const TABS: { id: Tab; label: string; icon: ReactNode }[] = [
-  { id: "mod-tools", label: "Mods", icon: <Puzzle size={15} /> },
-  { id: "plugins", label: "Plugins", icon: <Plug size={15} /> },
-  { id: "sounds", label: "Sounds", icon: <Volume2 size={15} /> },
-  { id: "config-tweaks", label: "Config Tweaks", icon: <SlidersHorizontal size={15} /> },
-  { id: "ini-editor", label: "INI Editor", icon: <FileCode2 size={15} /> },
-  { id: "pak-manager", label: "Asset Manager", icon: <Package size={15} /> },
-  { id: "logs", label: "Logs", icon: <ScrollText size={15} /> },
-  { id: "settings", label: "Settings", icon: <SettingsIcon size={15} /> },
-];
-
 function App() {
-  const [activeTab, setActiveTab] = useState<Tab>("mod-tools");
+  const { layout, setLayout } = useTabLayout();
+  const [activeTab, setActiveTab] = useState<Tab | null>(null);
   const [gamePath, setGamePath] = useState("");
   const [installInfo, setInstallInfo] = useState<InstallInfo | null | undefined>(undefined);
   const [detecting, setDetecting] = useState(false);
   const [showDetectBadge, setShowDetectBadge] = useState(false);
-  const [mountedTabs, setMountedTabs] = useState<Set<Tab>>(() => new Set(["mod-tools"]));
+  const [mountedTabs, setMountedTabs] = useState<Set<Tab>>(() => new Set());
   const [version, setVersion] = useState("");
   const autoUpdateInfo = useUpdateCheck();
   const {
@@ -181,8 +154,21 @@ function App() {
     setActiveTab("ini-editor");
   }, []);
 
-  // A tab stays mounted once shown, so switching back keeps its state.
-  if (!mountedTabs.has(activeTab)) {
+  const [settingsSection, setSettingsSection] = useState<SettingsSection | null>(null);
+
+  const customizeTabs = useCallback(() => {
+    setSettingsSection("tabs");
+    setActiveTab("settings");
+  }, []);
+
+  // The first shown tab opens at startup, and takes over when the open one is hidden.
+  const shown = layout ? visibleTabs(layout) : null;
+  if (shown && (activeTab === null || !shown.includes(activeTab))) {
+    setActiveTab(shown[0] ?? ALWAYS_SHOWN);
+  }
+
+  // A tab stays mounted once shown, so switching back keeps its state. Hiding it keeps it too.
+  if (activeTab && !mountedTabs.has(activeTab)) {
     setMountedTabs((prev) => new Set(prev).add(activeTab));
   }
 
@@ -195,7 +181,7 @@ function App() {
   useWebviewDefaults();
 
   return (
-    <TooltipProvider>
+    <TooltipProvider delayDuration={TIP_DELAY} skipDelayDuration={0}>
       <div className="flex h-screen flex-col overflow-hidden bg-background text-foreground">
         <Titlebar />
         {activeUpdateInfo?.update_available && (
@@ -208,22 +194,13 @@ function App() {
         <div className="flex min-h-0 flex-1 overflow-hidden">
           {/* Sidebar */}
           <nav className="flex w-48 min-w-48 flex-col overflow-x-hidden overflow-y-auto border-r border-border bg-sidebar">
-            <ul className="flex flex-1 flex-col gap-0.5 px-2 pt-2">
-              {TABS.map((t) => (
-                <li key={t.id}>
-                  <button
-                    onClick={() => setActiveTab(t.id)}
-                    className={cn(
-                      "flex w-full items-center gap-2.5 rounded-sm px-2.5 py-2 text-sm text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground",
-                      activeTab === t.id && "bg-secondary font-semibold text-foreground"
-                    )}
-                  >
-                    {t.icon}
-                    {t.label}
-                  </button>
-                </li>
-              ))}
-            </ul>
+            <SidebarTabs
+              layout={layout}
+              activeTab={activeTab}
+              onSelect={setActiveTab}
+              onLayoutChange={setLayout}
+              onCustomize={customizeTabs}
+            />
 
             <div className="px-2 pb-2">
               <Tip
@@ -279,7 +256,9 @@ function App() {
                   isActive={activeTab === "mod-tools"}
                   gameRunning={gameBlocking}
                   pathLoading={installInfo === undefined}
-                  onViewInAssetManager={navigateToAssetManager}
+                  onViewInAssetManager={
+                    shown?.includes("pak-manager") ? navigateToAssetManager : undefined
+                  }
                 />
               </div>
             )}
@@ -296,7 +275,7 @@ function App() {
                   isActive={activeTab === "plugins"}
                   gameRunning={gameBlocking}
                   pathLoading={installInfo === undefined}
-                  onOpenInEditor={navigateToIniEditor}
+                  onOpenInEditor={shown?.includes("ini-editor") ? navigateToIniEditor : undefined}
                 />
               </div>
             )}
@@ -310,10 +289,8 @@ function App() {
                 <AssetManager
                   gamePath={gamePath}
                   gameRunning={gameBlocking}
-                  isActive={activeTab === "pak-manager"}
                   pendingPak={pendingAssetPak}
                   onPendingPakConsumed={() => setPendingAssetPak(null)}
-                  onOpenSettings={() => setActiveTab("settings")}
                 />
               </div>
             )}
@@ -385,6 +362,10 @@ function App() {
                   detecting={detecting}
                   showDetectBadge={showDetectBadge}
                   onManualUpdateFound={handleManualUpdateFound}
+                  tabLayout={layout}
+                  onTabLayoutChange={setLayout}
+                  pendingSection={settingsSection}
+                  onPendingSectionConsumed={() => setSettingsSection(null)}
                 />
               </div>
             )}

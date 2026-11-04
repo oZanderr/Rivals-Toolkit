@@ -18,7 +18,7 @@ use crate::kismet::{self, Expr, NameId, ObjectRef, PropertyRef, Script, Span, Te
 use crate::package::ParsedPackage;
 
 /// A problem with assembler text, where it is.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
     pub line: u32,
     pub column: u32,

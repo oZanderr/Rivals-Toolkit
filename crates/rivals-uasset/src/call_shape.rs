@@ -617,20 +617,6 @@ fn without_classes(text: &str) -> String {
     out
 }
 
-/// A shape written out, `(Int, Float) -> Bool`, with `?` for what nothing said. A return nothing
-/// said is left out.
-pub fn render(shape: &CallShape) -> String {
-    let args: Vec<&str> = shape
-        .args
-        .iter()
-        .map(|arg| arg.as_deref().unwrap_or("?"))
-        .collect();
-    match &shape.returns {
-        Some(returns) => format!("({}) -> {returns}", args.join(", ")),
-        None => format!("({})", args.join(", ")),
-    }
-}
-
 /// A Blueprint function's shape, from its own field records.
 pub fn shape_of_signature(signature: &FunctionSignature) -> CallShape {
     let params: Vec<_> = signature

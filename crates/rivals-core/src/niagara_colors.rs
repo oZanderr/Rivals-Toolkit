@@ -7,7 +7,7 @@ use rivals_uasset::{
     PropertyValue, VmColorTransform, VmLeaf, VmScript, VmTrace, VmType, lower_vm_edits,
     read_vm_script, show_bits, store_params, trace_outputs, was_of,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::inherit::ArchetypeSource;
 
@@ -512,8 +512,7 @@ fn names_a_colour(name: &str) -> bool {
 }
 
 /// A change [`recolor`] makes to a colour, alpha aside.
-#[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
-#[serde(tag = "tool", rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Recolor {
     /// Multiplies red, green and blue by these, past 1 to brighten.
     Tint { rgb: [f32; 3] },
@@ -578,21 +577,16 @@ fn transform_of(tool: Recolor) -> ColorTransform {
 
 /// Which colours [`recolor_edits`] changes: every curve, array and parameter in the package, or
 /// those of some exports, of one parameter, or whose names mention enemies.
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default)]
 pub struct RecolorPick {
     /// Empty for every export.
-    #[serde(default)]
     pub exports: Vec<u32>,
     /// One colour by its name: a parameter, a script colour's attribute or a material colour.
-    #[serde(default)]
     pub param: Option<String>,
-    #[serde(default)]
     pub enemy: bool,
     /// Also change the colours CPU scripts write for a renderer to draw, where each is written.
-    #[serde(default)]
     pub scripts: bool,
     /// Also change the colours the renderers' materials draw with, each set on the renderer.
-    #[serde(default)]
     pub materials: bool,
 }
 
