@@ -1168,10 +1168,7 @@ fn lut_of(props: &[PropertyEntry]) -> ColorBody {
         Some(PropertyValue::Bool { value: true })
     );
     ColorBody::Lut {
-        samples: floats
-            .chunks_exact(4)
-            .map(|c| [c[0], c[1], c[2], c[3]])
-            .collect(),
+        samples: floats.as_chunks::<4>().0.to_vec(),
         min_time: float_of(field(props, "LUTMinTime")).unwrap_or(0.0),
         max_time: float_of(field(props, "LUTMaxTime")).unwrap_or(1.0),
         use_lut: !matches!(
