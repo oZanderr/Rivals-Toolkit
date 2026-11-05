@@ -87,11 +87,34 @@ pub fn put_back(moved: &[(PathBuf, PathBuf)]) {
     }
 }
 
+/// Writes `to` whole through a file beside it, renamed over it once complete. Windows refuses to
+/// touch a file the game holds, but Linux lets one the game has open be cut short under it.
+pub fn replace_file(
+    to: &Path,
+    write: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let name = to
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let temporary = to.with_file_name(format!(".{name}.tmp"));
+    let written = write(&temporary).and_then(|()| std::fs::rename(&temporary, to));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    written
+}
+
+/// Copies `from` over `to` the way [`replace_file`] writes.
+pub fn copy_over(from: &Path, to: &Path) -> std::io::Result<()> {
+    replace_file(to, |temporary| std::fs::copy(from, temporary).map(|_| ()))
+}
+
 /// Windows refuses to move a file another process holds, and here that process is almost always
 /// the game. Worth saying, since the running-game check can be turned off.
 pub fn held_open_hint(error: &std::io::Error) -> &'static str {
     const SHARING_VIOLATION: i32 = 32;
-    if error.raw_os_error() == Some(SHARING_VIOLATION) {
+    if cfg!(windows) && error.raw_os_error() == Some(SHARING_VIOLATION) {
         ". Something has the file open, which is usually Marvel Rivals itself."
     } else {
         ""

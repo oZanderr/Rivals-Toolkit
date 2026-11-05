@@ -43,11 +43,14 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Tip } from "@/components/ui/tooltip";
+import { WineLaunchOption } from "@/components/WineLaunchOption";
 import { useSaveHotkeys } from "@/hooks/useSaveHotkeys";
 import { useScrollAtBottom } from "@/hooks/useScrollAtBottom";
 import type { UpdateInfo } from "@/hooks/useUpdateCheck";
 import type { KeyCheck } from "@/lib/gameLogs";
 import { emitModsChanged, normalizeFolderPath, onModsChanged } from "@/lib/modsEvents";
+import { modsFolderOf } from "@/lib/paths";
+import { isWindows } from "@/lib/platform";
 import { setShowHeroIcons } from "@/lib/showHeroIcons";
 import type { TabLayout } from "@/lib/tabs";
 import { emitTweakProfilesChanged, onTweakProfilesChanged } from "@/lib/tweakProfileEvents";
@@ -236,6 +239,7 @@ export function Settings({
   } | null>(null);
   const bypassNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [bypassKind, setBypassKind] = useState<BypassKind | null>(null);
+  const [wineLaunchOption, setWineLaunchOption] = useState<string | null>(null);
 
   const [tweakProfiles, setTweakProfiles] = useState<TweakProfile[]>([]);
   const [profileNotice, setProfileNotice] = useState<{
@@ -316,12 +320,25 @@ export function Settings({
     };
   }, [draftGamePath]);
 
+  useEffect(() => {
+    if (!draftGamePath || bypassKind === null) return;
+    let cancelled = false;
+    invoke<string | null>("get_wine_launch_option", { gameRoot: draftGamePath })
+      .then((v) => {
+        if (!cancelled) setWineLaunchOption(v);
+      })
+      .catch(() => {
+        if (!cancelled) setWineLaunchOption(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [draftGamePath, bypassKind]);
+
   // The Plugins tab can switch off or delete the bypass's files.
   useEffect(() => {
     if (!draftGamePath) return;
-    const folder = normalizeFolderPath(
-      `${draftGamePath}\\MarvelGame\\Marvel\\Content\\Paks\\~mods`
-    );
+    const folder = normalizeFolderPath(modsFolderOf(draftGamePath));
     return onModsChanged((event) => {
       if (event.source === "Settings" || normalizeFolderPath(event.modsFolder) !== folder) return;
       invoke<BypassKind>("get_signature_bypass_kind", { gameRoot: draftGamePath })
@@ -654,7 +671,7 @@ export function Settings({
       });
       setBypassNotice({ msg, type: "ok" });
       emitModsChanged({
-        modsFolder: `${draftGamePath}\\MarvelGame\\Marvel\\Content\\Paks\\~mods`,
+        modsFolder: modsFolderOf(draftGamePath),
         source: "Settings",
       });
     } catch (e: unknown) {
@@ -672,7 +689,7 @@ export function Settings({
       });
       setBypassNotice({ msg, type: "ok" });
       emitModsChanged({
-        modsFolder: `${draftGamePath}\\MarvelGame\\Marvel\\Content\\Paks\\~mods`,
+        modsFolder: modsFolderOf(draftGamePath),
         source: "Settings",
       });
     } catch (e: unknown) {
@@ -808,7 +825,7 @@ export function Settings({
           setSavedRecursive(draftRecursive);
           if (draftGamePath) {
             emitModsChanged({
-              modsFolder: `${draftGamePath}\\MarvelGame\\Marvel\\Content\\Paks\\~mods`,
+              modsFolder: modsFolderOf(draftGamePath),
               source: "Settings",
             });
           }
@@ -958,7 +975,11 @@ export function Settings({
                     setDraftGamePath(e.target.value);
                     setPathError(null);
                   }}
-                  placeholder={`e.g. C:\\Program Files (x86)\\Steam\\steamapps\\common\\MarvelRivals`}
+                  placeholder={
+                    isWindows()
+                      ? `e.g. C:\\Program Files (x86)\\Steam\\steamapps\\common\\MarvelRivals`
+                      : "e.g. /home/you/.local/share/Steam/steamapps/common/MarvelRivals"
+                  }
                   className="h-8 pr-20 rounded-none border-0 shadow-none font-mono text-[12px] focus-visible:ring-0 focus-visible:border-0"
                 />
               </Tip>
@@ -1167,6 +1188,11 @@ export function Settings({
                 </>
               )}
             </div>
+            {wineLaunchOption && bypassKind !== null && bypassKind !== "none" && (
+              <div className="px-3 pb-3">
+                <WineLaunchOption option={wineLaunchOption} />
+              </div>
+            )}
           </div>
 
           {/* ── Advanced ── */}

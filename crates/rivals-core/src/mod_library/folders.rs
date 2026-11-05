@@ -201,8 +201,8 @@ pub fn rename_folder(mods: &Path, path: &str, new_name: &str) -> Result<String, 
         return Ok(renamed);
     }
     let to = mods.join(&renamed);
-    // A change of case alone finds the folder itself there, on Windows.
-    if to.exists() && !renamed.eq_ignore_ascii_case(&path) {
+    // A change of case alone finds the folder itself there on Windows, and another folder on Linux.
+    if to.exists() && !(cfg!(windows) && renamed.eq_ignore_ascii_case(&path)) {
         return Err(format!("{renamed} already exists"));
     }
     std::fs::rename(&from, &to)

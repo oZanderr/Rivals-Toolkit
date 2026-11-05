@@ -31,7 +31,6 @@ retoc.workspace = true
 aes.workspace = true
 hex.workspace = true
 walkdir.workspace = true
-winreg = "0.52"
 dirs.workspace = true
 zip.workspace = true
 blake3.workspace = true
@@ -41,3 +40,6 @@ ureq = { version = "3", features = ["json"] }
 lewton = "0.10"
 sysinfo.workspace = true
 mimalloc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"

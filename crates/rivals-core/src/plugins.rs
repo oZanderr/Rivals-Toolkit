@@ -97,6 +97,8 @@ pub struct PluginsStatus {
     pub plugins_dir_exists: bool,
     pub loaders: Vec<Loader>,
     pub plugins: Vec<Plugin>,
+    /// The Steam launch option Proton needs to load the switched-on loaders, none on Windows.
+    pub wine_launch_option: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -410,9 +412,27 @@ pub fn scan(game_root: &str) -> PluginsStatus {
         plugins_dir: plugins.display().to_string(),
         win64_exists: win64.is_dir(),
         plugins_dir_exists: plugins.is_dir(),
+        wine_launch_option: wine_launch_option(&loaders),
         loaders,
         plugins: found,
     }
+}
+
+/// `WINEDLLOVERRIDES` for the switched-on loaders. Wine has its own copy of every proxy name but
+/// Bink's, and loads that over the one beside the game unless told to prefer the native file.
+fn wine_launch_option(loaders: &[Loader]) -> Option<String> {
+    if cfg!(windows) {
+        return None;
+    }
+    let mut names: Vec<String> = loaders
+        .iter()
+        .filter(|loader| loader.enabled)
+        .map(|loader| owner_stem(&loader.proxy_for).to_ascii_lowercase())
+        .filter(|name| !name.starts_with("bink"))
+        .collect();
+    names.sort();
+    names.dedup();
+    (!names.is_empty()).then(|| format!("WINEDLLOVERRIDES=\"{}=n,b\" %command%", names.join(",")))
 }
 
 /// The `.ini` files plugins and loaders keep their settings in: every one in `plugins`, and those
@@ -504,7 +524,10 @@ pub fn set_enabled(game_root: &str, path: &Path, enabled: bool) -> Result<(PathB
 /// violation, which [`crate::mods::held_open_hint`] does not cover.
 fn delete_hint(error: &std::io::Error) -> &'static str {
     const ACCESS_DENIED: i32 = 5;
-    if error.raw_os_error() == Some(ACCESS_DENIED) && crate::game_status::is_game_running() {
+    if cfg!(windows)
+        && error.raw_os_error() == Some(ACCESS_DENIED)
+        && crate::game_status::is_game_running()
+    {
         ". Marvel Rivals has it loaded: switch it off now and delete it once the game is closed."
     } else {
         crate::mods::held_open_hint(error)
@@ -779,7 +802,7 @@ fn gather(root: &Path, outcome: &mut PluginInstall) -> Vec<Incoming> {
 }
 
 fn copy_into(from: &Path, to: &Path) -> Result<(), String> {
-    fs::copy(from, to).map(|_| ()).map_err(|error| {
+    crate::mods::copy_over(from, to).map_err(|error| {
         format!(
             "Could not write {}: {error}{}",
             to.display(),
@@ -903,6 +926,27 @@ mod tests {
             .iter()
             .map(|companion| companion.file_name.as_str())
             .collect()
+    }
+
+    /// Proton loads Wine's own copy of a proxy unless told to prefer the one beside the game, and
+    /// has none of Bink's.
+    #[test]
+    fn scan_names_the_overrides_proton_needs() {
+        let game = Scratch::game("overrides");
+        touch(&game.win64().join("DSOUND.dll"), b"MZ");
+        touch(&game.win64().join("version.dll.disabled"), b"MZ");
+        touch(&game.win64().join("winmm.dll"), b"MZ");
+        touch(&game.win64().join("binkw64.dll"), b"MZ");
+
+        let option = scan(game.root()).wine_launch_option;
+        if cfg!(windows) {
+            assert_eq!(option, None);
+        } else {
+            assert_eq!(
+                option.as_deref(),
+                Some(r#"WINEDLLOVERRIDES="dsound,winmm=n,b" %command%"#)
+            );
+        }
     }
 
     /// Each plugin takes the files carrying its name, the longest name winning, whatever their

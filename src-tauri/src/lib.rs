@@ -165,6 +165,7 @@ pub fn run() {
             mods::subfolders::delete_mod_folder,
             // plugins
             plugins::get_plugins_status,
+            plugins::get_wine_launch_option,
             plugins::set_plugin_enabled,
             plugins::set_plugins_enabled,
             plugins::delete_plugins,

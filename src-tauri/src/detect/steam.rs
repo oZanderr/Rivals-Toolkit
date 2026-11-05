@@ -1,10 +1,8 @@
-//! Detects Marvel Rivals installation via Steam registry entries and library folders.
+//! Detects Marvel Rivals installation via the Steam install and its library folders.
 
 use std::{fs, path::PathBuf};
 
-use super::registry::hklm_str;
-
-const MARVEL_STEAM_APPID: &str = "2767030";
+use crate::paths::STEAM_APP_ID;
 
 /// Extract the quoted value token from an ACF/VDF line: `"key"  "value"`
 fn acf_value(line: &str) -> Option<&str> {
@@ -12,15 +10,27 @@ fn acf_value(line: &str) -> Option<&str> {
     (!val.is_empty()).then_some(val)
 }
 
-fn steam_library_paths() -> Vec<PathBuf> {
-    let Some(root) = [r"SOFTWARE\Wow6432Node\Valve\Steam", r"SOFTWARE\Valve\Steam"]
+#[cfg(windows)]
+fn steam_root() -> Option<PathBuf> {
+    [r"SOFTWARE\Wow6432Node\Valve\Steam", r"SOFTWARE\Valve\Steam"]
         .iter()
-        .find_map(|&k| hklm_str(k, "InstallPath"))
-    else {
+        .find_map(|&k| super::registry::hklm_str(k, "InstallPath"))
+        .map(|root| PathBuf::from(root.trim()))
+}
+
+/// The link a native Steam install keeps to its data folder. Flatpak and Snap installs are picked
+/// by hand in Settings.
+#[cfg(not(windows))]
+fn steam_root() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| home.join(".steam").join("steam"))
+}
+
+fn steam_library_paths() -> Vec<PathBuf> {
+    let Some(root) = steam_root() else {
         return Vec::new();
     };
 
-    let root_steamapps = PathBuf::from(root.trim()).join("steamapps");
+    let root_steamapps = root.join("steamapps");
     let vdf = root_steamapps.join("libraryfolders.vdf");
 
     if let Ok(content) = fs::read_to_string(&vdf) {
@@ -41,7 +51,7 @@ fn steam_library_paths() -> Vec<PathBuf> {
 
 pub(super) fn find_steam_install() -> Option<PathBuf> {
     steam_library_paths().into_iter().find_map(|lib| {
-        let manifest = lib.join(format!("appmanifest_{MARVEL_STEAM_APPID}.acf"));
+        let manifest = lib.join(format!("appmanifest_{STEAM_APP_ID}.acf"));
         let content = fs::read_to_string(&manifest).ok()?;
         content.lines().find_map(|line| {
             let line = line.trim();

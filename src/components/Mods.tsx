@@ -86,6 +86,7 @@ import {
   type FolderNode,
   type TreeRow,
 } from "@/lib/modTree";
+import { joinPath } from "@/lib/paths";
 import { useShowHeroIcons } from "@/lib/showHeroIcons";
 import { cn } from "@/lib/utils";
 
@@ -791,8 +792,7 @@ export function Mods({
   /** The path on disk of `relative`, a mod or folder below `~mods`, in the folder's own separators. */
   function modPath(relative: string): string {
     const root = modsStatus?.mods_folder_path ?? "";
-    const sep = root.includes("\\") ? "\\" : "/";
-    return relative ? `${root}${sep}${relative.replaceAll("/", sep)}` : root;
+    return relative ? joinPath(root, relative) : root;
   }
 
   async function reveal(path: string) {

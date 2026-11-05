@@ -3,6 +3,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use rivals_core::mods::replace_file;
 use serde::{Deserialize, Serialize};
 
 use crate::paths::{binaries_dir, mods_dir, plugins_dir};
@@ -190,9 +191,9 @@ pub(crate) fn install_signature_bypass(game_root: &str) -> Result<String, String
     if let Some(plugins) = paths.payload_asi.parent() {
         fs::create_dir_all(plugins).map_err(|e| format!("create plugins dir: {e}"))?;
     }
-    fs::write(&paths.loader_dll, BYPASS_ASI_LOADER)
+    replace_file(&paths.loader_dll, |to| fs::write(to, BYPASS_ASI_LOADER))
         .map_err(|e| format!("write {LOADER_DLL_FILENAME}: {e}"))?;
-    fs::write(&paths.payload_asi, BYPASS_PAYLOAD_ASI)
+    replace_file(&paths.payload_asi, |to| fs::write(to, BYPASS_PAYLOAD_ASI))
         .map_err(|e| format!("write {PAYLOAD_ASI_FILENAME}: {e}"))?;
 
     if !mods_dir(game_root).exists() {
@@ -309,7 +310,7 @@ pub(crate) fn install_asi_loader(game_root: &str) -> Result<String, String> {
         fs::remove_file(&loader_off)
             .map_err(|e| format!("remove {}: {e}", loader_off.display()))?;
     }
-    fs::write(&paths.loader_dll, BYPASS_ASI_LOADER)
+    replace_file(&paths.loader_dll, |to| fs::write(to, BYPASS_ASI_LOADER))
         .map_err(|e| format!("write {LOADER_DLL_FILENAME}: {e}"))?;
     Ok(if updating {
         format!("Updated {LOADER_DLL_FILENAME} to the current Minimal ASI Loader.")

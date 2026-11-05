@@ -13,8 +13,182 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
+  build-windows:
     runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v5
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+          shared-key: tauri-release
+          save-if: false
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Windows executable (no bundles)
+        run: pnpm tauri build --no-bundle
+
+      - name: Build CLI
+        run: cargo build --release -p rivals-cli
+
+      # The app's zip keeps its name: the in-app updater downloads it by that name. The CLI ships
+      # apart, so a CLI copied from an older app zip is never mistaken for the current one.
+      - name: Package release zips
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $repoRoot = $env:GITHUB_WORKSPACE
+          $releaseDir = Join-Path $repoRoot "target/release"
+          $stagingRoot = Join-Path $releaseDir "_package"
+          $outDir = Join-Path $repoRoot "release-assets"
+          $oo2corePath = Join-Path $repoRoot "src-tauri/resources/oo2core_9_win64.dll"
+
+          foreach ($dir in @($stagingRoot, $outDir)) {
+            if (Test-Path $dir) {
+              Remove-Item $dir -Recurse -Force
+            }
+          }
+          New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+
+          # Each zip holds its executable and the Oodle DLL it reads compressed paks with.
+          foreach ($package in @(
+            @{ Base = "rivals-toolkit-$tag-windows-x64"; Exe = "rivals-toolkit.exe" },
+            @{ Base = "rivals-cli-$tag-windows-x64"; Exe = "rivals-cli.exe" }
+          )) {
+            $exePath = Join-Path $releaseDir $package.Exe
+            foreach ($required in @($exePath, $oo2corePath)) {
+              if (-not (Test-Path $required)) {
+                throw "Required release file not found: $required"
+              }
+            }
+
+            $stagingDir = Join-Path $stagingRoot $package.Base
+            New-Item -ItemType Directory -Path $stagingDir -Force | Out-Null
+
+            Copy-Item $exePath (Join-Path $stagingDir $package.Exe) -Force
+            Copy-Item $oo2corePath (Join-Path $stagingDir "oo2core_9_win64.dll") -Force
+
+            $zipPath = Join-Path $outDir "$($package.Base).zip"
+            Compress-Archive -Path "$stagingDir/*" -DestinationPath $zipPath -CompressionLevel Optimal
+          }
+
+      - name: Upload release assets
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows
+          path: release-assets/*
+          if-no-files-found: error
+
+  build-linux:
+    # The oldest supported runner, so the AppImage runs on every glibc since.
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v5
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+          shared-key: tauri-release-linux
+          save-if: false
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build AppImage
+        run: pnpm tauri build --bundles appimage
+
+      - name: Build CLI
+        run: cargo build --release -p rivals-cli
+
+      # The AppImage is named for the in-app updater, which downloads it by that name.
+      - name: Package release assets
+        run: |
+          set -euo pipefail
+          tag="${{ github.ref_name }}"
+          out="release-assets"
+          oodle="src-tauri/resources/liboo2corelinux64.so.9"
+          rm -rf "$out" && mkdir -p "$out"
+
+          shopt -s nullglob
+          appimages=(target/release/bundle/appimage/*.AppImage)
+          if [ "${#appimages[@]}" -ne 1 ]; then
+            echo "Expected one AppImage, found ${#appimages[@]}" >&2
+            exit 1
+          fi
+          cp "${appimages[0]}" "$out/rivals-toolkit-$tag-linux-x64.AppImage"
+          chmod +x "$out/rivals-toolkit-$tag-linux-x64.AppImage"
+
+          # The CLI reads compressed paks with the Oodle library beside it.
+          cli="rivals-cli-$tag-linux-x64"
+          mkdir -p "target/release/_package/$cli"
+          cp target/release/rivals-cli "$oodle" "target/release/_package/$cli/"
+          tar -czf "$out/$cli.tar.gz" -C target/release/_package "$cli"
+
+      - name: Upload release assets
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux
+          path: release-assets/*
+          if-no-files-found: error
+
+  publish:
+    needs: [build-windows, build-linux]
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
@@ -66,87 +240,13 @@ jobs:
           $changelog | Add-Content $env:GITHUB_OUTPUT
           $delim | Add-Content $env:GITHUB_OUTPUT
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v5
+      - name: Download release assets
+        uses: actions/download-artifact@v8
         with:
-          version: 10
+          path: release-assets
+          merge-multiple: true
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: 24
-          cache: pnpm
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Rust cache
-        uses: swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            . -> target
-          shared-key: tauri-release
-          save-if: false
-
-      - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Build Windows executable (no bundles)
-        run: pnpm tauri build --no-bundle
-
-      - name: Build CLI
-        run: cargo build --release -p rivals-cli
-
-      - name: Verify release executables exist
-        shell: pwsh
-        run: |
-          foreach ($exePath in @("target/release/rivals-toolkit.exe", "target/release/rivals-cli.exe")) {
-            if (-not (Test-Path $exePath)) {
-              throw "Expected executable not found at $exePath"
-            }
-          }
-
-      # The app's zip keeps its name: the in-app updater downloads it by that name. The CLI ships
-      # apart, so a CLI copied from an older app zip is never mistaken for the current one.
-      - name: Package release zips
-        shell: pwsh
-        run: |
-          $tag = "${{ steps.vars.outputs.tag }}"
-          $repoRoot = $env:GITHUB_WORKSPACE
-          $releaseDir = Join-Path $repoRoot "target/release"
-          $stagingRoot = Join-Path $releaseDir "_package"
-          $oo2corePath = Join-Path $repoRoot "src-tauri/resources/oo2core_9_win64.dll"
-
-          if (Test-Path $stagingRoot) {
-            Remove-Item $stagingRoot -Recurse -Force
-          }
-
-          # Each zip holds its executable and the Oodle DLL it reads compressed paks with.
-          foreach ($package in @(
-            @{ Base = "rivals-toolkit-$tag-windows-x64"; Exe = "rivals-toolkit.exe" },
-            @{ Base = "rivals-cli-$tag-windows-x64"; Exe = "rivals-cli.exe" }
-          )) {
-            $exePath = Join-Path $releaseDir $package.Exe
-            foreach ($required in @($exePath, $oo2corePath)) {
-              if (-not (Test-Path $required)) {
-                throw "Required release file not found: $required"
-              }
-            }
-
-            $zipPath = Join-Path $releaseDir "$($package.Base).zip"
-            if (Test-Path $zipPath) {
-              Remove-Item $zipPath -Force
-            }
-            $stagingDir = Join-Path $stagingRoot $package.Base
-            New-Item -ItemType Directory -Path $stagingDir -Force | Out-Null
-
-            Copy-Item $exePath (Join-Path $stagingDir $package.Exe) -Force
-            Copy-Item $oo2corePath (Join-Path $stagingDir "oo2core_9_win64.dll") -Force
-
-            Compress-Archive -Path "$stagingDir/*" -DestinationPath $zipPath -CompressionLevel Optimal
-          }
-
-      - name: Create or update GitHub Release with zip packages
+      - name: Create or update GitHub Release with the packages
         shell: pwsh
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -156,15 +256,17 @@ jobs:
           $repo = "${{ github.repository }}"
           $notesPath = Join-Path $env:RUNNER_TEMP "release-notes.md"
           $downloads = @(
-            @{ Name = "rivals-toolkit-$tag-windows-x64.zip"; What = "Desktop app" },
-            @{ Name = "rivals-cli-$tag-windows-x64.zip"; What = "Command-line tool" }
+            @{ Name = "rivals-toolkit-$tag-windows-x64.zip"; What = "Desktop app, Windows" },
+            @{ Name = "rivals-toolkit-$tag-linux-x64.AppImage"; What = "Desktop app, Linux" },
+            @{ Name = "rivals-cli-$tag-windows-x64.zip"; What = "Command-line tool, Windows" },
+            @{ Name = "rivals-cli-$tag-linux-x64.tar.gz"; What = "Command-line tool, Linux" }
           )
 
           $rows = @()
           $uploads = @()
           foreach ($download in $downloads) {
             $assetName = $download.Name
-            $assetPath = Join-Path $env:GITHUB_WORKSPACE "target/release/$assetName"
+            $assetPath = Join-Path $env:GITHUB_WORKSPACE "release-assets/$assetName"
             if (-not (Test-Path $assetPath)) {
               throw "Expected release asset not found at $assetPath"
             }
@@ -218,11 +320,11 @@ jobs:
           $tag = "${{ steps.vars.outputs.tag }}"
           $repo = "${{ github.repository }}"
           $releaseUrl = "https://github.com/$repo/releases/tag/$tag"
-          $appAsset = "rivals-toolkit-$tag-windows-x64.zip"
-          $cliAsset = "rivals-cli-$tag-windows-x64.zip"
-          $appUrl = "https://github.com/$repo/releases/download/$tag/$appAsset"
-          $cliUrl = "https://github.com/$repo/releases/download/$tag/$cliAsset"
-          $downloads = "[App]($appUrl), [CLI]($cliUrl)"
+          $base = "https://github.com/$repo/releases/download/$tag"
+          $downloads = @(
+            "App: [Windows]($base/rivals-toolkit-$tag-windows-x64.zip), [Linux]($base/rivals-toolkit-$tag-linux-x64.AppImage)",
+            "CLI: [Windows]($base/rivals-cli-$tag-windows-x64.zip), [Linux]($base/rivals-cli-$tag-linux-x64.tar.gz)"
+          ) -join "`n"
 
           $changelog = $env:CHANGELOG
 

@@ -641,13 +641,15 @@ pub fn install_pak(
     if replaced_disabled {
         crate::mods::delete_mod(mods, &disabled)?;
     }
-    std::fs::copy(source, &dest).map_err(|e| format!("Failed to copy {file_name}: {e}"))?;
+    crate::mods::copy_over(source, &dest)
+        .map_err(|e| format!("Failed to copy {file_name}: {e}"))?;
 
     for extension in COMPANION_EXTS {
         let name = format!("{stem}.{extension}");
         let (given, installed) = (from.join(&name), mods.join(&name));
         if given.is_file() {
-            std::fs::copy(&given, &installed).map_err(|e| format!("Failed to copy {name}: {e}"))?;
+            crate::mods::copy_over(&given, &installed)
+                .map_err(|e| format!("Failed to copy {name}: {e}"))?;
         } else if installed.exists() {
             std::fs::remove_file(&installed)
                 .map_err(|e| format!("Failed to remove the old {name}: {e}"))?;

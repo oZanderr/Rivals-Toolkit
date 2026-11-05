@@ -11,7 +11,7 @@ use rivals_core::game_logs::{
 use serde::Serialize;
 use tauri::State;
 
-use crate::game_status::game_pids;
+use crate::game_status::is_game_running;
 use crate::mods::CachedLister;
 use crate::settings::SettingsState;
 
@@ -56,9 +56,12 @@ pub(crate) async fn list_game_sessions(
     state: State<'_, SettingsState>,
 ) -> Result<Vec<Session>, String> {
     let key = log_key(&state)?;
-    tauri::async_runtime::spawn_blocking(move || game_logs::list_sessions(&game_pids(), &key))
-        .await
-        .map_err(|e| e.to_string())
+    let game_root = state.lock().ok().and_then(|s| s.game_path.clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        game_logs::list_sessions(game_root.as_deref(), is_game_running(), &key)
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[derive(Serialize)]
@@ -99,11 +102,12 @@ pub(crate) async fn open_game_log(
         crash_dir: crash_dir.map(PathBuf::from),
     };
     let opened = tauri::async_runtime::spawn_blocking(move || {
-        let mods = (!game_root.is_empty()).then(|| ModsContext {
-            game_root: &game_root,
+        let game_root = Some(game_root.as_str()).filter(|root| !root.is_empty());
+        let mods = game_root.map(|game_root| ModsContext {
+            game_root,
             lister: &CachedLister,
         });
-        game_logs::open(session, &key, &game_pids(), mods)
+        game_logs::open(game_root, session, &key, is_game_running(), mods)
     })
     .await
     .map_err(|e| e.to_string())??;
@@ -324,12 +328,14 @@ pub(crate) async fn get_log_key_status(
     state: State<'_, SettingsState>,
 ) -> Result<KeyCheck, String> {
     let key = log_key(&state)?;
-    tauri::async_runtime::spawn_blocking(move || game_logs::check_key(&key))
+    let game_root = state.lock().ok().and_then(|s| s.game_path.clone());
+    tauri::async_runtime::spawn_blocking(move || game_logs::check_key(game_root.as_deref(), &key))
         .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub(crate) fn get_game_logs_dir() -> Option<String> {
-    rivals_core::paths::logs_dir().map(|p| p.to_string_lossy().into_owned())
+pub(crate) fn get_game_logs_dir(state: State<'_, SettingsState>) -> Option<String> {
+    let game_root = state.lock().ok().and_then(|s| s.game_path.clone());
+    rivals_core::paths::logs_dir(game_root.as_deref()).map(|p| p.to_string_lossy().into_owned())
 }

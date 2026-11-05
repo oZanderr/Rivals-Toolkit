@@ -141,22 +141,13 @@ pub fn write(path: &Path, content: &str, expected_modified: Option<u64>) -> Resu
         }
     }
     let bytes = encoding_on_disk(path).encode(content);
-    let temporary = path.with_file_name(format!(".{name}.tmp"));
-    fs::write(&temporary, bytes).map_err(|error| {
+    crate::mods::replace_file(path, |temporary| fs::write(temporary, bytes)).map_err(|error| {
         format!(
-            "Could not write {}: {error}{}",
-            temporary.display(),
-            crate::mods::held_open_hint(&error)
-        )
-    })?;
-    if let Err(error) = fs::rename(&temporary, path) {
-        let _ = fs::remove_file(&temporary);
-        return Err(format!(
             "Could not write {}: {error}{}",
             path.display(),
             crate::mods::held_open_hint(&error)
-        ));
-    }
+        )
+    })?;
     fs::metadata(path)
         .ok()
         .and_then(|meta| modified_ms(&meta))
