@@ -27,6 +27,7 @@
 *.exe binary
 *.dll binary
 *.so binary
+*.so.* binary
 *.dylib binary
 *.a binary
 *.lib binary
