@@ -44,7 +44,9 @@ import {
 } from "@/components/ui/context-menu";
 import { Switch } from "@/components/ui/switch";
 import { Tip } from "@/components/ui/tooltip";
+import { WineLaunchOption } from "@/components/WineLaunchOption";
 import { emitModsChanged, normalizeFolderPath, onModsChanged } from "@/lib/modsEvents";
+import { modsFolderOf } from "@/lib/paths";
 import { cn } from "@/lib/utils";
 
 type LoaderKind = "minimal_asi_loader" | "ultimate_asi_loader" | "unknown";
@@ -91,6 +93,7 @@ interface PluginsStatus {
   plugins_dir_exists: boolean;
   loaders: Loader[];
   plugins: Plugin[];
+  wine_launch_option: string | null;
 }
 
 interface BulkOpResult {
@@ -203,7 +206,7 @@ export function Plugins({ gamePath, isActive, gameRunning, pathLoading, onOpenIn
     async () => {}
   );
 
-  const modsFolder = gamePath ? `${gamePath}\\MarvelGame\\Marvel\\Content\\Paks\\~mods` : "";
+  const modsFolder = gamePath ? modsFolderOf(gamePath) : "";
 
   const showNotice = useCallback((msg: string, type: StatusType, duration = 6000) => {
     if (noticeTimer.current) clearTimeout(noticeTimer.current);
@@ -800,6 +803,8 @@ export function Plugins({ gamePath, isActive, gameRunning, pathLoading, onOpenIn
         </div>
       )}
 
+      {status?.wine_launch_option && <WineLaunchOption option={status.wine_launch_option} />}
+
       {/* Loaders */}
       <section className="shrink-0 overflow-hidden rounded-md border border-border">
         <div className="flex h-10 items-center gap-2 border-b border-border bg-card px-3">
@@ -870,7 +875,7 @@ export function Plugins({ gamePath, isActive, gameRunning, pathLoading, onOpenIn
                 <ContextMenuContent>
                   <ContextMenuItem onSelect={() => revealItemInDir(loader.path)}>
                     <FolderOpen />
-                    Reveal in Explorer
+                    Show in folder
                   </ContextMenuItem>
                   <ContextMenuSeparator />
                   <ContextMenuItem
@@ -1182,7 +1187,7 @@ export function Plugins({ gamePath, isActive, gameRunning, pathLoading, onOpenIn
                         <>
                           <ContextMenuItem onSelect={() => revealItemInDir(plugin.path)}>
                             <FolderOpen />
-                            Reveal in Explorer
+                            Show in folder
                           </ContextMenuItem>
                           {plugin.companions.map((c) =>
                             onOpenInEditor && isIni(c.file_name) ? (

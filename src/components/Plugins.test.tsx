@@ -106,6 +106,15 @@ describe("Plugins", () => {
     expect(screen.getByText("PigeonPass.ini")).toBeTruthy();
     expect(screen.getAllByText("Signature bypass")).toHaveLength(2);
     expect(screen.getByText("(3/4 active)")).toBeTruthy();
+    expect(screen.queryByText(/WINEDLLOVERRIDES/)).toBeNull();
+  });
+
+  it("shows the launch option Proton needs when the backend names one", async () => {
+    const option = 'WINEDLLOVERRIDES="dsound=n,b" %command%';
+    tauri.on("get_plugins_status", () => ({ ...STATUS, wine_launch_option: option }));
+    await mount();
+
+    expect(await screen.findByText(option)).toBeTruthy();
   });
 
   it("switches a plugin off by its path", async () => {

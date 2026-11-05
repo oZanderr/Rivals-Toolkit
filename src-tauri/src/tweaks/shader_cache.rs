@@ -2,10 +2,14 @@
 
 use std::fs;
 
-fn clear_shader_cache_files() -> Result<String, String> {
-    let base = dirs::data_local_dir()
-        .map(|p| p.join("Marvel").join("Saved"))
-        .ok_or_else(|| "Could not determine AppData path.".to_string())?;
+use tauri::State;
+
+use crate::paths::saved_dir;
+use crate::settings::SettingsState;
+
+fn clear_shader_cache_files(game_root: Option<&str>) -> Result<String, String> {
+    let base = saved_dir(game_root)
+        .ok_or_else(|| "Could not find the game's Saved folder.".to_string())?;
     let mut cleared = 0usize;
 
     let files = [
@@ -42,6 +46,7 @@ fn clear_shader_cache_files() -> Result<String, String> {
 }
 
 #[tauri::command]
-pub(crate) fn clear_shader_cache() -> Result<String, String> {
-    clear_shader_cache_files()
+pub(crate) fn clear_shader_cache(state: State<'_, SettingsState>) -> Result<String, String> {
+    let game_root = state.lock().ok().and_then(|s| s.game_path.clone());
+    clear_shader_cache_files(game_root.as_deref())
 }

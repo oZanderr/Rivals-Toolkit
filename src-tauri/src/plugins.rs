@@ -23,6 +23,7 @@ pub(crate) struct PluginsStatus {
     plugins_dir_exists: bool,
     loaders: Vec<Tagged<Loader>>,
     plugins: Vec<Tagged<Plugin>>,
+    wine_launch_option: Option<String>,
 }
 
 fn guard() -> Result<(), String> {
@@ -46,6 +47,7 @@ pub(crate) async fn get_plugins_status(game_root: String) -> Result<PluginsStatu
             plugins_dir: status.plugins_dir,
             win64_exists: status.win64_exists,
             plugins_dir_exists: status.plugins_dir_exists,
+            wine_launch_option: status.wine_launch_option,
             loaders: status
                 .loaders
                 .into_iter()
@@ -66,6 +68,14 @@ pub(crate) async fn get_plugins_status(game_root: String) -> Result<PluginsStatu
     })
     .await
     .map_err(|e| e.to_string())
+}
+
+/// The Steam launch option Proton needs for the loaders beside the game, none on Windows.
+#[tauri::command]
+pub(crate) async fn get_wine_launch_option(game_root: String) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || plugins::scan(&game_root).wine_launch_option)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

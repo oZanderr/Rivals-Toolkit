@@ -78,6 +78,7 @@ import { emitModsChanged, normalizeFolderPath, onModsChanged } from "@/lib/modsE
 import { emitPakChanged, onPakChanged } from "@/lib/pakEvents";
 import { previewPakFilename } from "@/lib/pakName";
 import { unreadableScanMessage, type PakScanError } from "@/lib/pakScan";
+import { modsFolderOf } from "@/lib/paths";
 import { cn } from "@/lib/utils";
 
 // ── Types matching Rust backend ─────────────────────────────────────
@@ -627,7 +628,7 @@ export function IniEditor({
       // Refresh other tabs' mod lists. The editor skips its own source so this
       // empty (INI-less) pak isn't pruned from its own list.
       emitModsChanged({
-        modsFolder: `${gamePath}\\MarvelGame\\Marvel\\Content\\Paks\\~mods`,
+        modsFolder: modsFolderOf(gamePath),
         source: "IniEditor",
       });
       showNotice(`Created ${info.pak_name}`, "ok");
@@ -1444,7 +1445,7 @@ export function IniEditor({
       if (!gamePath) return;
       // Skip our own emission; a re-scan would prune the new INI-less pak.
       if (event.source === "IniEditor") return;
-      const modsFolder = `${gamePath}\\MarvelGame\\Marvel\\Content\\Paks\\~mods`;
+      const modsFolder = modsFolderOf(gamePath);
       if (normalizeFolderPath(event.modsFolder) !== normalizeFolderPath(modsFolder)) return;
       scanRef.current(true);
     });

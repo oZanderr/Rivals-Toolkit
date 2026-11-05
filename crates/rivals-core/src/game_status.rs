@@ -1,4 +1,4 @@
-//! Detects whether the Marvel Rivals process is running to block mutating operations on locked pak files.
+//! Detects whether the Marvel Rivals process is running to block mutating operations on the files it has open.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex};
@@ -13,7 +13,8 @@ pub fn set_check_enabled(enabled: bool) {
 }
 
 /// Guard call sites use this; UI surfaces keep using `is_game_running()` so the
-/// indicator stays truthful when the user toggles the check off.
+/// indicator stays truthful when the user toggles the check off. Under Proton it is all that
+/// stops a write to a file the game has open: Wine locks files only against its own processes.
 pub fn should_block_for_game() -> bool {
     if !CHECK_ENABLED.load(Ordering::Relaxed) {
         return false;
@@ -21,9 +22,12 @@ pub fn should_block_for_game() -> bool {
     is_game_running()
 }
 
-/// Shipping executable name — locks pak/ucas/utoc file handles while the game
-/// runs. The launcher exe does not, so ignore it.
+/// The shipping executable, which holds the game's containers open; the launcher does not. Linux
+/// names a process by its `/proc` comm, cut to 15 bytes, which Wine sets from the exe's name.
+#[cfg(not(target_os = "linux"))]
 const GAME_PROCESS: &str = "Marvel-Win64-Shipping.exe";
+#[cfg(target_os = "linux")]
+const GAME_PROCESS: &str = "Marvel-Win64-Sh";
 
 /// Reused across polls to keep the process-name cache warm and avoid reallocating.
 static SYSTEM: LazyLock<Mutex<System>> = LazyLock::new(|| {
@@ -41,27 +45,9 @@ pub fn is_game_running() -> bool {
     };
     sys.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
     sys.processes().values().any(|p| {
-        p.name()
-            .to_string_lossy()
-            .eq_ignore_ascii_case(GAME_PROCESS)
+        // Linux lists threads alongside processes.
+        p.thread_kind().is_none() && p.name().eq_ignore_ascii_case(GAME_PROCESS)
     })
-}
-
-/// The ids of every running game process, which name the logs still being written.
-pub fn game_pids() -> Vec<u32> {
-    let Ok(mut sys) = SYSTEM.lock() else {
-        return Vec::new();
-    };
-    sys.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
-    sys.processes()
-        .iter()
-        .filter(|(_, p)| {
-            p.name()
-                .to_string_lossy()
-                .eq_ignore_ascii_case(GAME_PROCESS)
-        })
-        .map(|(pid, _)| pid.as_u32())
-        .collect()
 }
 
 /// Short English error for mutating ops attempted while the game is running.

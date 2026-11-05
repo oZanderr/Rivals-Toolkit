@@ -4,15 +4,19 @@ pub(crate) mod commands;
 
 use std::{fs, path::Path};
 
+use crate::paths::saved_dir;
 use crate::tweaks::{self, TweakDefinition, TweakSetting, TweakState, parser};
 
-const CONFIG_PATH: &str = "Marvel\\Saved\\Config\\Windows\\GameUserSettings.ini";
-
-pub(crate) fn get_game_user_settings_path() -> Result<String, String> {
-    dirs::data_local_dir()
-        .map(|base| base.join(CONFIG_PATH))
+pub(crate) fn get_game_user_settings_path(game_root: Option<&str>) -> Result<String, String> {
+    saved_dir(game_root)
+        .map(|saved| {
+            saved
+                .join("Config")
+                .join("Windows")
+                .join("GameUserSettings.ini")
+        })
         .map(|p| p.to_string_lossy().into_owned())
-        .ok_or_else(|| "Could not determine AppData path.".to_string())
+        .ok_or_else(|| "Could not find the game's Saved folder.".to_string())
 }
 
 pub(crate) fn read_game_user_settings(path: &str) -> Result<String, String> {

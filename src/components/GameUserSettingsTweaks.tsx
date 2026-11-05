@@ -305,7 +305,7 @@ export function GameUserSettingsTweaks() {
                   disabled={!filePath}
                   onClick={() => filePath && openPath(filePath.replace(/[/\\][^/\\]+$/, ""))}
                 >
-                  Show in Explorer
+                  Show in folder
                 </Button>
               </div>
             </div>

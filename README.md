@@ -17,7 +17,7 @@ It also ships `rivals-cli`, a command-line tool over the same engine for scripti
 pak INI edits, and the only place packages are inspected and edited. See
 [Command Line](#command-line).
 
-Current platform support: Windows only.
+It runs on Windows, and on Linux for the game under Steam's Proton: see [Linux](#linux).
 
 ## Tech Stack
 
@@ -37,6 +37,10 @@ Install the following before running the project:
 - Rust toolchain (stable) via rustup
 - Microsoft C++ Build Tools (Windows)
 - Microsoft Edge WebView2 Runtime (Windows)
+- WebKitGTK and the build packages Tauri lists (Linux); on Debian or Ubuntu, `libwebkit2gtk-4.1-dev
+  build-essential libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev`
+- `liboo2corelinux64.so.9` in `src-tauri/resources` (Linux), the Oodle library pak reads need, as
+  `oo2core_9_win64.dll` is on Windows
 
 Reference: https://tauri.app/start/prerequisites/
 
@@ -124,8 +128,9 @@ cargo test --workspace
 
 ## Command Line
 
-`rivals-cli.exe` ships as its own download, `rivals-cli-<version>-windows-x64.zip`, with the Oodle
-DLL it reads compressed paks with, and scripts the same config-tweak and pak INI engine. The app's
+`rivals-cli` ships as its own download, `rivals-cli-<version>-windows-x64.zip` or
+`rivals-cli-<version>-linux-x64.tar.gz`, with the Oodle library it reads compressed paks with, and
+scripts the same config-tweak and pak INI engine. The app's
 updater updates only the app, so download a new CLI with each release you want it from. It reads the game path the app saved, so `--game-root` is only needed when that
 is unset or you want a different install. In a dev checkout, run it with
 `cargo run -p rivals-cli -- <args>`.
@@ -1095,7 +1100,8 @@ rivals-cli mods export-archive D:\Backups\mods.7z
 
 The game writes an encrypted log for every launch to `%LOCALAPPDATA%\Marvel\Saved\Logs`, and for
 every crash a folder in `%LOCALAPPDATA%\Marvel\Saved\Crashes` holding the crash report and a copy
-of that session's log. `logs list` lists the sessions, the newest first: how each ended (a clean
+of that session's log. On Linux that `%LOCALAPPDATA%` is in the game's Proton prefix, found from
+the game root, so the logs commands need one there. `logs list` lists the sessions, the newest first: how each ended (a clean
 exit, a crash, a fatal error with no report left for it, or a log that stops with neither, as when
 the game is killed), its build, and its crash, with how many crash reports share its message and top
 stack frames. `--crashes` lists only the sessions that crashed. A session is named by its log's file
@@ -1104,7 +1110,7 @@ folder, or as `latest` or `latest-crash`.
 
 `logs decode LOG` prints the log's text as the game wrote it, or writes it to `--out FILE`, which
 `--overwrite` writes over. `--verbosity`, `--category` and `--filter` keep only the lines they match,
-and `--redact` takes out the player's Windows name, account and machine ids, tokens, IP addresses
+and `--redact` takes out the player's user name, account and machine ids, tokens, IP addresses
 and command-line values. `logs analyze LOG` summarises the session: the crash, with its faulting
 module and stack, telling the game's code from Windows, the GPU driver and anything else loaded
 into the game, such as ASI plugins; the fatal error; the errors and warnings, alike lines grouped;
@@ -1452,7 +1458,8 @@ instead of letting the app resolve it. Mutating commands refuse to run while Mar
 since the game holds the pak files; `--force` overrides that. `rivals-cli <command> --help` lists
 every flag.
 
-Keep `oo2core_9_win64.dll` beside the executable, as shipped, or Oodle-compressed paks will not read.
+Keep `oo2core_9_win64.dll` (`liboo2corelinux64.so.9` on Linux) beside the executable, as shipped,
+or Oodle-compressed paks will not read.
 
 ## Project Layout
 
@@ -1465,7 +1472,16 @@ Keep `oo2core_9_win64.dll` beside the executable, as shipped, or Oodle-compresse
 
 ## Signature Bypass
 
-The toolkit installs a signature bypass so the game will load modified pak containers. It drops [Minimal ASI Loader](https://github.com/oZanderr/minimal-asi-loader) into the game's `Binaries/Win64` as `dsound.dll`, which loads the bypass payload `plugins/MarvelRivalsUTOCSignatureBypass.asi` (the original community build, redistributed unmodified). A third-party `dsound.dll` counts as installed too, since it loads the same payload. Anything left from the older `version.dll` scheme, the proxy itself or the superseded `RivalsSigBypass.asi` payload, reports as out of date, and Install clears it before writing the current pair. A `dsound.dll` matching a build the toolkit previously shipped reports out of date as well and is replaced, since the loader keeps its filename across releases and a stale one is otherwise invisible; loaders it does not recognize are left untouched. Remove deletes the payload, and deletes `dsound.dll` only when no other switched-on plugin needs it.
+The toolkit installs a signature bypass so the game will load modified pak containers. It drops [Minimal ASI Loader](https://github.com/oZanderr/minimal-asi-loader) into the game's `Binaries/Win64` as `dsound.dll`, which loads the bypass payload `plugins/MarvelRivalsUTOCSignatureBypass.asi` (the original community build, redistributed unmodified). A third-party `dsound.dll` counts as installed too, since it loads the same payload. Anything left from the older `version.dll` scheme, the proxy itself or the superseded `RivalsSigBypass.asi` payload, reports as out of date, and Install clears it before writing the current pair. A `dsound.dll` matching a build the toolkit previously shipped reports out of date as well and is replaced, since the loader keeps its filename across releases and a stale one is otherwise invisible; loaders it does not recognize are left untouched. Remove deletes the payload, and deletes `dsound.dll` only when no other switched-on plugin needs it. On Linux it loads only with the launch option under [Linux](#linux).
+
+## Linux
+
+The app runs on Linux for the game under Steam's Proton, as an AppImage that updates itself.
+
+- **Finding the game.** Detection reads the libraries of a native Steam install through `~/.steam/steam`. A Flatpak or Snap Steam, or another launcher, is picked by hand in Settings.
+- **Proxy DLLs.** Wine loads its own `dsound.dll`, and its own copy of most names an ASI loader goes by, in place of the one beside the game. The signature bypass and any loader load only once Steam passes `WINEDLLOVERRIDES`, so Settings and the Plugins tab show the launch option the installed loaders need, such as `WINEDLLOVERRIDES="dsound=n,b" %command%`, to paste into the game's launch options in Steam.
+- **The Saved folder** holding the game's config, logs and crash reports is in its Proton prefix, `steamapps/compatdata/2767030/pfx/drive_c/users/steamuser/AppData/Local/Marvel/Saved` in the library the game is installed in.
+- **The running-game check** is all that stops a write to a file the game has open, since Wine locks files only against its own processes. Leave it on.
 
 ## Plugins
 
@@ -1473,7 +1489,7 @@ The Plugins tab manages the `.asi` plugins in `Binaries/Win64/plugins` and shows
 
 - **Loaders.** A DLL named after one an ASI loader stands in for (`dsound.dll`, `version.dll`, `dxgi.dll`, `winmm.dll`, `dinput8.dll`, `d3d11.dll` and the like) is listed as a loader. Minimal ASI Loader (formerly oxiloader) is recognised by its export directory, Ultimate ASI Loader by its `IsUltimateASILoader` export, and anything else, ReShade for one, is shown with its version resource's product name. The tab warns when plugins are switched on with no loader to load them, when more than one loader is switched on, and when `dsound.dll` is a loader build the toolkit shipped and has since replaced, and offers to install or update the bundled loader on its own.
 - **Where plugins are looked for.** Beside the game and in `plugins`, which is where Minimal ASI Loader looks, and with Ultimate ASI Loader also in `scripts` and one folder down in each. A plugin beside the game takes the place of one of the same name in `plugins`, which Minimal ASI Loader then skips.
-- **Switching on and off.** A plugin or loader is switched off by adding `.disabled` to its name, which every loader skips. This works with the game open, since Windows lets a loaded DLL be renamed, and takes effect on the next launch.
+- **Switching on and off.** A plugin or loader is switched off by adding `.disabled` to its name, which every loader skips. This works with the game open, since a loaded DLL can be renamed, and takes effect on the next launch.
 - **Companion files.** Files beside a plugin that carry its name, such as `PigeonPass.ini` or `PigeonPass.log`, are shown with it. An `.ini` opens in the INI Editor, anything else in its default app. Deleting a plugin asks before deleting them, and keeps them unless asked, since they can hold settings or licence keys.
 - **Installing.** Drop `.asi` or `.dll` files, folders, or zip, 7z and rar archives on the tab, or use Add. Each `.asi` goes into `plugins` with the files beside it that carry its name, and a `.dll` dropped on its own goes in the same way under its `.asi` name, since a plugin is a DLL by another extension. A settings file already installed is kept rather than written over, a plugin already installed is replaced only once confirmed, and a loader DLL dropped on its own is refused while the DLLs inside a dropped folder or archive are skipped and reported, so a loader is never installed this way.
 - **The signature bypass's files** (its payload, and the `dsound.dll` it installed) are tagged, and switching either off or deleting it first warns that mods in `~mods` stop loading without it.
@@ -1488,7 +1504,7 @@ The INI Editor edits the INI files inside a mod's `.pak` and loose `.ini` files 
 
 ## Logs
 
-The Logs tab reads the game's engine logs and crash reports, which the game writes encrypted to `%LOCALAPPDATA%\Marvel\Saved`.
+The Logs tab reads the game's engine logs and crash reports, which the game writes encrypted to `%LOCALAPPDATA%\Marvel\Saved` (on Linux, in its Proton prefix).
 
 - **Sessions.** Every launch the game logged, the newest first, with how it ended: a clean exit, a crash, a fatal error with no crash report left for it, a log that stops with neither (the game was killed or the PC went down), or still running. A crash shows how many reports share its message and top stack frames.
 - **Cause.** Shown only when the crash says so outright: the fatal error or the crash report names a package one of the session's mods ships, which names that mod, or the game crashed inside third-party code such as an injected DLL. The same card lists every other mod whose packages the session's errors and warnings name, with those errors; with no cause, they get a card of their own.

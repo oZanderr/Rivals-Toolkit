@@ -1201,6 +1201,11 @@ mod tests {
     fn the_cache_is_named_the_same_however_the_install_path_is_spelt() {
         assert_eq!(
             cache_tag("C:/Games/Marvel Rivals"),
+            cache_tag("c:/games/MARVEL RIVALS/")
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            cache_tag("C:/Games/Marvel Rivals"),
             cache_tag(r"c:\games\MARVEL RIVALS\")
         );
         assert_ne!(cache_tag("C:/Games/A"), cache_tag("C:/Games/B"));

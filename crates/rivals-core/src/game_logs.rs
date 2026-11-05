@@ -1,4 +1,4 @@
-//! Finds the game's engine logs and crash reports under `%LOCALAPPDATA%\Marvel\Saved`, decodes them and tells how each session went.
+//! Finds the game's engine logs and crash reports in its Saved folder, decodes them and tells how each session went.
 
 pub mod analyze;
 pub mod container;
@@ -97,8 +97,8 @@ fn crash_log(dir: &Path) -> Option<PathBuf> {
 
 /// Every session the Logs and Crashes folders hold, a crash joined to its log by file name. The
 /// copy in Logs is preferred: it runs past the moment the crash reporter copied it.
-pub fn session_refs() -> Vec<SessionRef> {
-    let mut sessions: Vec<SessionRef> = logs_dir()
+pub fn session_refs(game_root: Option<&str>) -> Vec<SessionRef> {
+    let mut sessions: Vec<SessionRef> = logs_dir(game_root)
         .map(|dir| log_files(&dir))
         .unwrap_or_default()
         .into_iter()
@@ -113,7 +113,7 @@ pub fn session_refs() -> Vec<SessionRef> {
         .enumerate()
         .map(|(at, s)| (s.name.to_lowercase(), at))
         .collect();
-    for dir in crashes_dir()
+    for dir in crashes_dir(game_root)
         .map(|d| crash::crash_dirs(&d))
         .unwrap_or_default()
     {
@@ -286,10 +286,28 @@ fn probe_file(path: &Path, meta: &std::fs::Metadata, key: &LogKey) -> Probe {
     probe
 }
 
-/// Every session, the newest first. `running` holds the game processes' ids, whose sessions are
-/// still being written. Each log is probed on the caller's rayon pool.
-pub fn list_sessions(running: &[u32], key: &LogKey) -> Vec<Session> {
-    let refs = session_refs();
+/// The session the game is still writing while it runs: the newest log, unless a crash report
+/// already closed it. Logs are named by the game's process id, but under Proton that id is Wine's,
+/// so a running process can't be matched to its log by id.
+fn live_session(refs: &[SessionRef]) -> Option<&str> {
+    let newest = refs
+        .iter()
+        .filter_map(|s| {
+            let modified = std::fs::metadata(s.log_path.as_deref()?)
+                .ok()?
+                .modified()
+                .ok();
+            Some((modified, s))
+        })
+        .max_by_key(|(modified, _)| *modified)?
+        .1;
+    newest.crash_dir.is_none().then_some(newest.name.as_str())
+}
+
+/// Every session, the newest first. Each log is probed on the caller's rayon pool.
+pub fn list_sessions(game_root: Option<&str>, game_running: bool, key: &LogKey) -> Vec<Session> {
+    let refs = session_refs(game_root);
+    let live = game_running.then(|| live_session(&refs)).flatten();
     let crashes: Vec<Option<CrashReport>> = refs
         .par_iter()
         .map(|r| r.crash_dir.as_deref().and_then(|d| crash::read(d).ok()))
@@ -317,7 +335,7 @@ pub fn list_sessions(running: &[u32], key: &LogKey) -> Vec<Session> {
             let pid = pid_of(&r.name).or(report.as_ref().and_then(|c| c.process_id));
             let outcome = if report.is_some() {
                 Outcome::Crashed
-            } else if pid.is_some_and(|pid| running.contains(&pid)) {
+            } else if live == Some(r.name.as_str()) {
                 Outcome::Running
             } else if probe.error.is_some() {
                 Outcome::Unreadable
@@ -384,7 +402,7 @@ pub fn list_sessions(running: &[u32], key: &LogKey) -> Vec<Session> {
 
 /// The session `query` names: a `.log` file, a crash folder, a session's whole name, `latest`
 /// or `latest-crash`.
-pub fn find_session(query: &str) -> Result<SessionRef, String> {
+pub fn find_session(game_root: Option<&str>, query: &str) -> Result<SessionRef, String> {
     let path = Path::new(query);
     if path.is_file() {
         let name = file_stem(path);
@@ -393,7 +411,7 @@ pub fn find_session(query: &str) -> Result<SessionRef, String> {
             .filter(|dir| dir.join(crash::CONTEXT_FILE).is_file())
             .map(Path::to_path_buf);
         let crash_dir = beside.or_else(|| {
-            session_refs()
+            session_refs(game_root)
                 .into_iter()
                 .find(|s| s.name.eq_ignore_ascii_case(&name))
                 .and_then(|s| s.crash_dir)
@@ -405,7 +423,7 @@ pub fn find_session(query: &str) -> Result<SessionRef, String> {
         });
     }
     if path.is_dir() && path.join(crash::CONTEXT_FILE).is_file() {
-        let found = session_refs()
+        let found = session_refs(game_root)
             .into_iter()
             .find(|s| s.crash_dir.as_deref().is_some_and(|d| same_path(d, path)));
         return Ok(found.unwrap_or_else(|| SessionRef {
@@ -415,7 +433,7 @@ pub fn find_session(query: &str) -> Result<SessionRef, String> {
         }));
     }
 
-    let mut refs = session_refs();
+    let mut refs = session_refs(game_root);
     refs.sort_by(|a, b| b.name.cmp(&a.name));
     match query {
         "latest" => {
@@ -488,8 +506,8 @@ pub struct KeyCheck {
 
 /// Whether `key` opens the newest log that has records, which is the one a game patch would
 /// have changed the key for.
-pub fn check_key(key: &LogKey) -> KeyCheck {
-    let mut logs: Vec<(Option<SystemTime>, PathBuf)> = logs_dir()
+pub fn check_key(game_root: Option<&str>, key: &LogKey) -> KeyCheck {
+    let mut logs: Vec<(Option<SystemTime>, PathBuf)> = logs_dir(game_root)
         .map(|dir| log_files(&dir))
         .unwrap_or_default()
         .into_iter()
@@ -569,23 +587,24 @@ fn problem_keys_of(path: &Path, meta: &std::fs::Metadata, key: &LogKey) -> Arc<H
 
 /// The problems the game logged in the latest sessions of `build` that mounted no mods, leaving
 /// out the session named `exclude`.
-pub fn baseline(build: &str, exclude: &str, key: &LogKey) -> Baseline {
-    let mut candidates: Vec<(Option<SystemTime>, PathBuf, std::fs::Metadata)> = session_refs()
-        .into_par_iter()
-        .filter(|s| !s.name.eq_ignore_ascii_case(exclude))
-        .filter_map(|s| {
-            let path = s.log_path?;
-            let meta = std::fs::metadata(&path).ok()?;
-            (meta.len() <= BASELINE_MAX_FILE).then_some((path, meta))
-        })
-        .filter(|(path, meta)| {
-            let probe = probe_file(path, meta, key);
-            probe.error.is_none()
-                && probe.build.as_deref() == Some(build)
-                && probe.mods.as_ref().is_some_and(Vec::is_empty)
-        })
-        .map(|(path, meta)| (meta.modified().ok(), path, meta))
-        .collect();
+pub fn baseline(game_root: Option<&str>, build: &str, exclude: &str, key: &LogKey) -> Baseline {
+    let mut candidates: Vec<(Option<SystemTime>, PathBuf, std::fs::Metadata)> =
+        session_refs(game_root)
+            .into_par_iter()
+            .filter(|s| !s.name.eq_ignore_ascii_case(exclude))
+            .filter_map(|s| {
+                let path = s.log_path?;
+                let meta = std::fs::metadata(&path).ok()?;
+                (meta.len() <= BASELINE_MAX_FILE).then_some((path, meta))
+            })
+            .filter(|(path, meta)| {
+                let probe = probe_file(path, meta, key);
+                probe.error.is_none()
+                    && probe.build.as_deref() == Some(build)
+                    && probe.mods.as_ref().is_some_and(Vec::is_empty)
+            })
+            .map(|(path, meta)| (meta.modified().ok(), path, meta))
+            .collect();
     candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.0));
     candidates.truncate(BASELINE_SESSIONS);
     let read: Vec<Arc<HashSet<String>>> = candidates
@@ -665,9 +684,10 @@ fn empty_log(notes: Vec<String>) -> Result<ParsedLog, String> {
 /// Decodes the session's log whole. A crash still reads when its log does not, so a wrong key
 /// leaves an empty log and says why.
 pub fn open(
+    game_root: Option<&str>,
     session: SessionRef,
     key: &LogKey,
-    running: &[u32],
+    game_running: bool,
     mods: Option<ModsContext<'_>>,
 ) -> Result<OpenedSession, String> {
     let crash = session.crash_dir.as_deref().map(crash::read).transpose()?;
@@ -691,20 +711,21 @@ pub fn open(
             None,
         ),
     };
-    let pid = pid_of(&session.name).or(crash.as_ref().and_then(|c| c.process_id));
+    let live =
+        game_running && live_session(&session_refs(game_root)) == Some(session.name.as_str());
 
     // The build and the mods are logged first, so the head of the text is enough.
     let head = &log.text().as_bytes()[..log.text().len().min(4 << 20)];
     let mounted_mods = mods_in(head).is_some_and(|m| !m.is_empty());
     let baseline = match build_in(head) {
-        Some(build) if mounted_mods => Some(baseline(&build, &session.name, key)),
+        Some(build) if mounted_mods => Some(baseline(game_root, &build, &session.name, key)),
         _ => None,
     };
 
     let mut analysis = analyze(
         &log,
         crash.as_ref(),
-        pid.is_some_and(|pid| running.contains(&pid)),
+        live,
         mods,
         baseline.as_ref().filter(|b| b.sessions > 0),
     );
@@ -793,7 +814,7 @@ mod tests {
             return;
         }
         let key = LogKey::bundled();
-        let sessions = list_sessions(&[], &key);
+        let sessions = list_sessions(None, false, &key);
         assert!(!sessions.is_empty());
         for session in &sessions {
             assert!(
@@ -804,8 +825,8 @@ mod tests {
             );
         }
         for session in &sessions {
-            let found = find_session(&session.name).unwrap();
-            let opened = open(found, &key, &[], None).unwrap();
+            let found = find_session(None, &session.name).unwrap();
+            let opened = open(None, found, &key, false, None).unwrap();
             assert!(opened.key_error.is_none(), "{}", session.name);
             assert_eq!(opened.analysis.outcome, session.outcome, "{}", session.name);
         }

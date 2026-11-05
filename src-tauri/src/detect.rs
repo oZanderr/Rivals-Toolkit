@@ -1,7 +1,10 @@
 //! Marvel Rivals install detection across Steam, Epic Games, and Loading Bay launchers.
 
+#[cfg(windows)]
 mod epic;
+#[cfg(windows)]
 mod loading_bay;
+#[cfg(windows)]
 mod registry;
 mod steam;
 
@@ -9,9 +12,13 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(windows)]
 use epic::find_epic_install;
+#[cfg(windows)]
 use loading_bay::find_loading_bay_install;
 use steam::find_steam_install;
+
+use crate::paths::STEAM_APP_ID;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) enum InstallSource {
@@ -37,20 +44,27 @@ impl InstallInfo {
     }
 
     pub(crate) fn launch_game(&self) -> Result<(), String> {
-        std::process::Command::new("cmd")
-            .args(["/c", "start", "", &self.launch_url])
-            .spawn()
-            .map_err(|e| format!("Failed to launch game: {e}"))?;
-        Ok(())
+        tauri_plugin_opener::open_url(&self.launch_url, None::<&str>)
+            .map_err(|e| format!("Failed to launch game: {e}"))
     }
 }
 
 pub(crate) fn detect_game_install() -> Option<InstallInfo> {
     find_steam_install()
-        .map(|p| InstallInfo::new(p, InstallSource::Steam, "steam://rungameid/2767030"))
-        .or_else(|| {
-            find_epic_install().map(|(p, url)| InstallInfo::new(p, InstallSource::Epic, url))
+        .map(|p| {
+            InstallInfo::new(
+                p,
+                InstallSource::Steam,
+                format!("steam://rungameid/{STEAM_APP_ID}"),
+            )
         })
+        .or_else(detect_other_launchers)
+}
+
+#[cfg(windows)]
+fn detect_other_launchers() -> Option<InstallInfo> {
+    find_epic_install()
+        .map(|(p, url)| InstallInfo::new(p, InstallSource::Epic, url))
         .or_else(|| {
             find_loading_bay_install().map(|p| {
                 InstallInfo::new(
@@ -60,6 +74,12 @@ pub(crate) fn detect_game_install() -> Option<InstallInfo> {
                 )
             })
         })
+}
+
+/// Epic and Loading Bay are found through the registry, so elsewhere only Steam is detected.
+#[cfg(not(windows))]
+fn detect_other_launchers() -> Option<InstallInfo> {
+    None
 }
 
 #[tauri::command]

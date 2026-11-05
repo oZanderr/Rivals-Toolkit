@@ -48,6 +48,7 @@ import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Tip } from "@/components/ui/tooltip";
 import { emitModsChanged } from "@/lib/modsEvents";
+import { joinPath, modsFolderOf } from "@/lib/paths";
 import { cn } from "@/lib/utils";
 
 const SLOT_CONFIGS = [
@@ -352,7 +353,7 @@ export function Sounds({ gamePath, isActive }: Props) {
 
   async function buildMod() {
     const normalizedModName = normalizeModName(modName);
-    const defaultOutputDir = `${gamePath}\\MarvelGame\\Marvel\\Content\\Paks\\~mods`;
+    const defaultOutputDir = modsFolderOf(gamePath);
     const selectedOutputDir = await open({
       directory: true,
       multiple: false,
@@ -364,7 +365,7 @@ export function Sounds({ gamePath, isActive }: Props) {
 
     setBuildResult(null);
 
-    const outputPakPath = `${selectedOutputDir}\\${normalizedModName}_9999999_P.pak`;
+    const outputPakPath = joinPath(selectedOutputDir, `${normalizedModName}_9999999_P.pak`);
     const alreadyExists = await invoke<boolean>("path_exists", { path: outputPakPath });
     if (alreadyExists) {
       setReplaceConfirm({

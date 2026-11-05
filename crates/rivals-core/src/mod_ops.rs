@@ -519,7 +519,7 @@ pub fn copy_mod(
         if !options.dry_run {
             std::fs::create_dir_all(&dest.dir)
                 .map_err(|e| format!("Could not create {}: {e}", dest.dir.display()))?;
-            std::fs::copy(from.part("pak"), dest.part("pak"))
+            crate::mods::copy_over(&from.part("pak"), &dest.part("pak"))
                 .map_err(|e| format!("Could not copy {}: {e}", from.stem))?;
             remove_others(&dest, &taken, &mut report.warnings);
             report.written = true;
@@ -924,9 +924,12 @@ fn rename_plan(from: &ModFiles, to: &str) -> Result<(ModFiles, RenameReport), St
     if dest.stem == from.stem {
         return Err(format!("{} already has that name", from.stem));
     }
-    // The id is the name's hash, ignoring case, so a change of case alone keeps it.
+    // The id is the name's hash, ignoring case, so a change of case alone keeps it. On Windows it
+    // also finds the mod's own files under the new name; on Linux those would be another mod's.
     let same_id = dest.stem.eq_ignore_ascii_case(&from.stem);
-    if !same_id && let Some(taken) = dest.any_files().first() {
+    if !(cfg!(windows) && same_id)
+        && let Some(taken) = dest.any_files().first()
+    {
         return Err(format!("{} is already there", taken.display()));
     }
     let report = RenameReport {

@@ -1,0 +1,13 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "targets": ["appimage"],
+    "linux": {
+      "appimage": {
+        "files": {
+          "/usr/bin/liboo2corelinux64.so.9": "resources/liboo2corelinux64.so.9"
+        }
+      }
+    }
+  }
+}

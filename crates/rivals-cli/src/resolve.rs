@@ -22,11 +22,9 @@ pub fn game_root(flag: Option<&str>, app: &AppSettings) -> Result<String, String
             format!("no game root: pass --game-root, or set the game path in the app ({hint})")
         })?,
     };
-    if !mods_dir(&root).is_dir() {
-        return Err(format!(
-            "{} has no MarvelGame\\Marvel\\Content\\Paks\\~mods folder",
-            root
-        ));
+    let mods = mods_dir(&root);
+    if !mods.is_dir() {
+        return Err(format!("no ~mods folder at {}", mods.display()));
     }
     Ok(root)
 }

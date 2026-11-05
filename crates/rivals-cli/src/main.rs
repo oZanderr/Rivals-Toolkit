@@ -3136,9 +3136,21 @@ fn writes_into_game(cli: &Cli, app: &settings::AppSettings, path: &Path) -> bool
     let Ok(root) = resolve::game_root(cli.game_root.as_deref(), app) else {
         return true;
     };
+    // Resolved as far as it exists, so a path through a link, as Steam's `~/.steam/steam` is,
+    // still lands in the game.
     let plain = |path: &Path| {
-        std::path::absolute(path)
-            .unwrap_or_else(|_| path.to_path_buf())
+        let whole = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+        whole
+            .ancestors()
+            .find_map(|there| {
+                Some(
+                    there
+                        .canonicalize()
+                        .ok()?
+                        .join(whole.strip_prefix(there).ok()?),
+                )
+            })
+            .unwrap_or(whole)
             .to_string_lossy()
             .replace('/', "\\")
             .trim_end_matches('\\')
@@ -5826,8 +5838,9 @@ fn logs_list(cli: &Cli, app: &settings::AppSettings, args: &LogsListArgs) -> Res
     use rivals_core::game_logs;
 
     let key = log_key(app)?;
-    let running = rivals_core::game_status::game_pids();
-    let mut sessions = game_logs::list_sessions(&running, &key);
+    let root = resolve::game_root(cli.game_root.as_deref(), app).ok();
+    let running = rivals_core::game_status::is_game_running();
+    let mut sessions = game_logs::list_sessions(root.as_deref(), running, &key);
     if args.crashes {
         sessions.retain(|s| s.crash_dir.is_some());
     }
@@ -5836,7 +5849,7 @@ fn logs_list(cli: &Cli, app: &settings::AppSettings, args: &LogsListArgs) -> Res
     }
     emit(cli, &sessions, || {
         if sessions.is_empty() {
-            let dir = rivals_core::paths::logs_dir()
+            let dir = rivals_core::paths::logs_dir(root.as_deref())
                 .map(|d| d.display().to_string())
                 .unwrap_or_else(|| "the game's Logs folder".to_string());
             outln!("no game logs in {dir}");
@@ -5881,7 +5894,8 @@ fn logs_decode(
         ));
     }
     let key = log_key(app)?;
-    let session = game_logs::find_session(&args.target.log)?;
+    let root = resolve::game_root(cli.game_root.as_deref(), app).ok();
+    let session = game_logs::find_session(root.as_deref(), &args.target.log)?;
     let path = session
         .log_path
         .clone()
@@ -5983,14 +5997,14 @@ fn logs_analyze(
     use rivals_core::mod_library::DiskLister;
 
     let key = log_key(app)?;
-    let session = game_logs::find_session(&args.target.log)?;
-    let running = rivals_core::game_status::game_pids();
     let root = resolve::game_root(cli.game_root.as_deref(), app).ok();
+    let session = game_logs::find_session(root.as_deref(), &args.target.log)?;
+    let running = rivals_core::game_status::is_game_running();
     let mods = root.as_deref().map(|game_root| ModsContext {
         game_root,
         lister: &DiskLister,
     });
-    let opened = game_logs::open(session, &key, &running, mods)?;
+    let opened = game_logs::open(root.as_deref(), session, &key, running, mods)?;
     let name = opened.session.name.clone();
     let crash = opened.crash.as_ref();
     let analysis = &opened.analysis;
@@ -6219,7 +6233,8 @@ fn logs_key(cli: &Cli, app: &settings::AppSettings) -> Result<(), String> {
     use rivals_core::game_logs::{self, KeySource};
 
     let key = log_key(app)?;
-    let check = game_logs::check_key(&key);
+    let root = resolve::game_root(cli.game_root.as_deref(), app).ok();
+    let check = game_logs::check_key(root.as_deref(), &key);
     emit(cli, &check, || {
         match key.source {
             KeySource::Bundled => outln!("using the bundled log key"),

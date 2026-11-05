@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { dumpCommand, hitCommand } from "./cliCommand";
 
@@ -30,6 +30,13 @@ describe("cliCommand", () => {
     );
     expect(hitCommand(hit({ kind: "value", row: "Hulk" }))).toBe(
       `rivals-cli asset dump "${PKG}" --export 3`
+    );
+  });
+
+  it("single-quotes arguments on Linux, where a ! in double quotes is history", () => {
+    vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Mozilla/5.0 (X11; Linux x86_64)");
+    expect(dumpCommand(PKG, "!Galacta's Mod_9999999_P")).toBe(
+      `rivals-cli asset dump '${PKG}' --from '!Galacta'\\''s Mod_9999999_P'`
     );
   });
 });

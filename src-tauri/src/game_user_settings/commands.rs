@@ -1,12 +1,18 @@
 //! Tauri commands for GameUserSettings.ini operations and tweak detection/application.
 
+use tauri::State;
+
 use crate::game_status::{game_running_error, should_block_for_game};
 use crate::game_user_settings;
+use crate::settings::SettingsState;
 use crate::tweaks::{TweakDefinition, TweakSetting, TweakState};
 
 #[tauri::command]
-pub(crate) fn get_game_user_settings_path() -> Result<String, String> {
-    game_user_settings::get_game_user_settings_path()
+pub(crate) fn get_game_user_settings_path(
+    state: State<'_, SettingsState>,
+) -> Result<String, String> {
+    let game_root = state.lock().ok().and_then(|s| s.game_path.clone());
+    game_user_settings::get_game_user_settings_path(game_root.as_deref())
 }
 
 #[tauri::command]

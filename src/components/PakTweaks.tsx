@@ -39,6 +39,7 @@ import { useScrollAtBottom } from "@/hooks/useScrollAtBottom";
 import { normalizeFolderPath, onModsChanged } from "@/lib/modsEvents";
 import { emitPakChanged, onPakChanged } from "@/lib/pakEvents";
 import { unreadableScanMessage, type PakScanError } from "@/lib/pakScan";
+import { modsFolderOf } from "@/lib/paths";
 import { emitTweakProfilesChanged, onTweakProfilesChanged } from "@/lib/tweakProfileEvents";
 import { cn } from "@/lib/utils";
 
@@ -256,7 +257,7 @@ export function PakTweaks({ gamePath, isActive }: Props) {
   useEffect(() => {
     return onModsChanged((event) => {
       if (!gamePath) return;
-      const modsFolder = `${gamePath}\\MarvelGame\\Marvel\\Content\\Paks\\~mods`;
+      const modsFolder = modsFolderOf(gamePath);
       if (normalizeFolderPath(event.modsFolder) !== normalizeFolderPath(modsFolder)) return;
       scanRef.current(true);
     });

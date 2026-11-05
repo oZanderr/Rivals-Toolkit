@@ -12,16 +12,19 @@ use crate::pak_tweaks::{
 use crate::settings::{SettingsState, recursive_mod_scan};
 use crate::tweaks::{TweakDefinition, TweakSetting, TweakState};
 
-/// Where INI text too large to hand over in one piece is assembled.
-fn staging_dir() -> PathBuf {
-    std::env::temp_dir().join("rivals-toolkit-ini-staging")
+/// Where INI text too large to hand over in one piece is assembled. Kept under this user's cache
+/// rather than the temp folder, which Linux shares between users and often keeps in memory.
+fn staging_dir() -> Result<PathBuf, String> {
+    dirs::cache_dir()
+        .map(|dir| dir.join("rivals-toolkit").join("ini-staging"))
+        .ok_or_else(|| "no cache directory on this system".to_string())
 }
 
 /// `path`, once it is known to be one of the staging files: the caller names it, so it has to be
 /// one of ours before anything appends to it, reads it or deletes it.
 pub(crate) fn staged_file(path: &str) -> Result<PathBuf, String> {
     let candidate = PathBuf::from(path);
-    if candidate.parent() != Some(staging_dir().as_path()) {
+    if candidate.parent() != Some(staging_dir()?.as_path()) {
         return Err(format!("{path} is not a staging file"));
     }
     Ok(candidate)
@@ -42,7 +45,7 @@ pub(crate) async fn stage_pak_ini_chunk(
     chunk: String,
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let dir = staging_dir();
+        let dir = staging_dir()?;
         let target = match path {
             Some(existing) => staged_file(&existing)?,
             None => {
@@ -71,7 +74,9 @@ pub(crate) async fn stage_pak_ini_chunk(
 /// Removes anything a previous session left in the staging directory. A save consumes the files
 /// it uses, so whatever is left is from a run that did not finish.
 pub(crate) fn clear_ini_staging() {
-    let dir = staging_dir();
+    let Ok(dir) = staging_dir() else {
+        return;
+    };
     if !dir.is_dir() {
         return;
     }

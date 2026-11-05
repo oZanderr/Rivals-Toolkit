@@ -84,6 +84,7 @@ import {
 import { dumpCommand } from "@/lib/cliCommand";
 import { detectHeroIdsInPath } from "@/lib/heroIcons";
 import { emitModsChanged, normalizeFolderPath, onModsChanged } from "@/lib/modsEvents";
+import { joinPath, modsFolderOf } from "@/lib/paths";
 import { useShowHeroIcons } from "@/lib/showHeroIcons";
 import { cn } from "@/lib/utils";
 
@@ -365,7 +366,7 @@ export function AssetManager({ gamePath, gameRunning, pendingPak, onPendingPakCo
   useEffect(() => {
     return onModsChanged((event) => {
       if (!gamePath) return;
-      const modsFolder = `${gamePath}\\MarvelGame\\Marvel\\Content\\Paks\\~mods`;
+      const modsFolder = modsFolderOf(gamePath);
       if (normalizeFolderPath(event.modsFolder) !== normalizeFolderPath(modsFolder)) return;
       const modsPrefix = normalizeFolderPath(modsFolder);
       for (const key of [...pakContentsCacheRef.current.keys()]) {
@@ -827,7 +828,7 @@ export function AssetManager({ gamePath, gameRunning, pendingPak, onPendingPakCo
         .split("/")
         .pop()
         ?.replace(/\.pak$/i, "") ?? "output";
-    const outputDir = `${dir}\\${pakBaseName}`;
+    const outputDir = joinPath(dir, pakBaseName);
 
     const info = pakList.find((p) => p.path === selectedPak);
     const isIoStore = info?.has_utoc && info?.has_ucas;
@@ -957,7 +958,7 @@ export function AssetManager({ gamePath, gameRunning, pendingPak, onPendingPakCo
         .split("/")
         .pop()
         ?.replace(/\.pak$/i, "") ?? "output";
-    const outputDir = `${dir}\\${pakBaseName}`;
+    const outputDir = joinPath(dir, pakBaseName);
 
     setBusy(true);
     showNotice("Extracting…", "info");
@@ -977,9 +978,7 @@ export function AssetManager({ gamePath, gameRunning, pendingPak, onPendingPakCo
           outputDir,
         });
       }
-      const revealPath = extracted[0]
-        ? `${outputDir}\\${extracted[0].replace(/\//g, "\\")}`
-        : outputDir;
+      const revealPath = extracted[0] ? joinPath(outputDir, extracted[0]) : outputDir;
       showNotice(`Extracted to ${outputDir}`, "ok", { revealPath });
     } catch (e: unknown) {
       showNotice(String(e), "err");
@@ -999,7 +998,7 @@ export function AssetManager({ gamePath, gameRunning, pendingPak, onPendingPakCo
         .split("/")
         .pop()
         ?.replace(/\.pak$/i, "") ?? "output";
-    const outputDir = `${dir}\\${pakBaseName}`;
+    const outputDir = joinPath(dir, pakBaseName);
     const utocPath = selectedPak.replace(/\.pak$/i, ".utoc");
 
     // Count packages first to warn on large extractions
@@ -1174,7 +1173,7 @@ export function AssetManager({ gamePath, gameRunning, pendingPak, onPendingPakCo
         .split("/")
         .pop()
         ?.replace(/\.pak$/i, "") ?? "output";
-    const outputDir = `${dir}\\${pakBaseName}`;
+    const outputDir = joinPath(dir, pakBaseName);
 
     setBusy(true);
     showNotice("Extracting selected\u2026", "info");
@@ -1228,7 +1227,7 @@ export function AssetManager({ gamePath, gameRunning, pendingPak, onPendingPakCo
       // Derive subfolder name matching backend logic: strip .pak, then _N_P suffix
       const stem = (selectedPak.split(/[\\/]/).pop() ?? "").replace(/\.pak$/i, "");
       const folderName = stem.replace(/_\d+_P$/i, "");
-      const subfolderPath = `${dir}\\${folderName}`;
+      const subfolderPath = joinPath(dir, folderName);
       showNotice(result, "ok", { revealPath: subfolderPath });
     } catch (e: unknown) {
       showNotice(String(e), "err");
@@ -1248,7 +1247,7 @@ export function AssetManager({ gamePath, gameRunning, pendingPak, onPendingPakCo
         .split("/")
         .pop()
         ?.replace(/\.pak$/i, "") ?? "output";
-    const outputDir = `${dir}\\${pakBaseName}`;
+    const outputDir = joinPath(dir, pakBaseName);
     const utocPath = selectedPak.replace(/\.pak$/i, ".utoc");
     const filter = [entry.path];
 
@@ -1392,7 +1391,7 @@ export function AssetManager({ gamePath, gameRunning, pendingPak, onPendingPakCo
         .split("/")
         .pop()
         ?.replace(/\.pak$/i, "") ?? "output";
-    const outputDir = `${dir}\\${pakBaseName}`;
+    const outputDir = joinPath(dir, pakBaseName);
     const utocPath = selectedPak.replace(/\.pak$/i, ".utoc");
     const filter = selectedUtocEntries.map((e) => e.path);
 
@@ -1538,7 +1537,9 @@ export function AssetManager({ gamePath, gameRunning, pendingPak, onPendingPakCo
             break;
           }
           // Each mod is verified and swapped on its own, so one failure leaves the rest alone.
-          failures.push(`${name}: ${String(e).replace(/[A-Za-z]:\\(?:[^\\\r\n:]+\\)+/g, "")}`);
+          failures.push(
+            `${name}: ${String(e).replace(/[A-Za-z]:\\(?:[^\\\r\n:]+\\)+|(?<=^|\s)(?:\/[^/\r\n:]+)+\//g, "")}`
+          );
         } finally {
           clearInterval(watch);
         }
@@ -1606,10 +1607,10 @@ export function AssetManager({ gamePath, gameRunning, pendingPak, onPendingPakCo
 
     setFolderToIoStore(prompt.toIoStore);
     const baseName = prompt.label.replace(/_9999999_P$/i, "");
-    const modsDir = `${gamePath}\\MarvelGame\\Marvel\\Content\\Paks\\~mods`;
+    const modsDir = modsFolderOf(gamePath);
     const ext = prompt.toIoStore ? "utoc" : "pak";
     const output = await save({
-      defaultPath: `${modsDir}\\${baseName}_9999999_P.${ext}`,
+      defaultPath: joinPath(modsDir, `${baseName}_9999999_P.${ext}`),
       filters: [
         prompt.toIoStore
           ? { name: "IoStore container", extensions: ["utoc"] }
@@ -1668,7 +1669,7 @@ export function AssetManager({ gamePath, gameRunning, pendingPak, onPendingPakCo
         .split("/")
         .pop()
         ?.replace(/\.pak$/i, "") ?? "output";
-    const outputDir = `${dir}\\${pakBaseName}`;
+    const outputDir = joinPath(dir, pakBaseName);
     const sourceUtoc = selectedPak.replace(/\.pak$/i, ".utoc");
     setBusy(true);
     startOperation(`Extracting ${pakBaseName}`, ["cancel_vanilla_extract"]);
@@ -1941,7 +1942,7 @@ export function AssetManager({ gamePath, gameRunning, pendingPak, onPendingPakCo
                           </ContextMenuItem>
                           <ContextMenuItem onSelect={() => revealPak(p)}>
                             <FolderOpen size={14} />
-                            Reveal in File Explorer
+                            Show in folder
                           </ContextMenuItem>
                           {isMod && (
                             <ContextMenuItem onSelect={() => promptRepackInPlace(p)}>
