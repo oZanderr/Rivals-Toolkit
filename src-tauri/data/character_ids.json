@@ -1,6 +1,6 @@
 {
   "source": "https://raw.githubusercontent.com/donutman07/MarvelRivalsCharacterIDs/main/MarvelRivalsCharacterIDs.md",
-  "generated_at": "2026-10-29T12:41:01.079Z",
+  "generated_at": "2026-11-05T14:25:11.751Z",
   "characters": {
     "1011": {
       "name": "Hulk",
@@ -456,7 +456,8 @@
         "1036509": "GROOVY SWING",
         "1036800": "Spider-Man: No Way Home",
         "1036801": "MARVEL COSMIC INVASION",
-        "1036802": "SPIDER-MAN: BRAND NEW DAY"
+        "1036802": "SPIDER-MAN: BRAND NEW DAY",
+        "1036803": "WORTHY SPIDER-MAN"
       }
     },
     "1037": {
@@ -787,6 +788,7 @@
         "1051503": "Future Foundation",
         "1051504": "FEAR ITSELF",
         "1051505": "INFINITY THING",
+        "1051506": "COSMIC COOK",
         "1051800": "The Fantastic Four: First Steps"
       }
     },
