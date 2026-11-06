@@ -1,5 +1,6 @@
 //! Asset inspection subcommands, and the audit that measures parse coverage over a whole container.
 
+use rivals_uasset::plain_value;
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -3964,118 +3965,6 @@ pub fn table(
         summaries,
         picked: row.is_some(),
     })
-}
-
-/// A value as plain JSON: a struct as an object of its fields, an array or set as a list, a map
-/// as an object when its keys are names, strings or numbers and as `{key, value}` pairs when they
-/// are not, a text as what the game shows, an enum by its name and an object by its path. A value
-/// the row holds at its default is that type's zero where its type says, and one it does not
-/// store at all is `null`.
-pub fn plain_value(value: &PropertyValue) -> serde_json::Value {
-    use serde_json::{Value, json};
-
-    let fields = |fields: &[rivals_uasset::PropertyEntry]| {
-        Value::Object(
-            fields
-                .iter()
-                .map(|field| (field.label(), plain_value(&field.value)))
-                .collect(),
-        )
-    };
-    match value {
-        PropertyValue::Bool { value } => Value::Bool(*value),
-        PropertyValue::Int { value } => json!(value),
-        PropertyValue::UInt { value } => json!(value),
-        PropertyValue::Byte { value } => json!(value),
-        PropertyValue::Float { value } => serde_json::Number::from_f64(*value)
-            .map_or_else(|| Value::String(value.to_string()), Value::Number),
-        PropertyValue::Str { value } | PropertyValue::Name { value } => {
-            Value::String(value.clone())
-        }
-        PropertyValue::Text {
-            display: Some(shown),
-            ..
-        }
-        | PropertyValue::Text {
-            value: Some(shown), ..
-        } => Value::String(shown.clone()),
-        PropertyValue::Enum {
-            name: Some(name), ..
-        } => Value::String(name.clone()),
-        PropertyValue::Enum { value, .. } => json!(value),
-        PropertyValue::Object { path, .. } => path.clone().map_or(Value::Null, Value::String),
-        PropertyValue::SoftObject { path } => Value::String(path.clone()),
-        PropertyValue::FieldPath { .. } => Value::String(value.summary()),
-        PropertyValue::LazyObject { guid } => Value::String(guid.clone()),
-        PropertyValue::Array { items } | PropertyValue::Set { items } => {
-            Value::Array(items.iter().map(plain_value).collect())
-        }
-        PropertyValue::Map { entries } => {
-            let keys: Option<Vec<String>> = entries.iter().map(|e| key_text(&e.key)).collect();
-            let unique = keys.as_ref().is_some_and(|keys| {
-                keys.iter().collect::<std::collections::HashSet<_>>().len() == keys.len()
-            });
-            match keys {
-                Some(keys) if unique => Value::Object(
-                    keys.into_iter()
-                        .zip(entries)
-                        .map(|(key, entry)| (key, plain_value(&entry.value)))
-                        .collect(),
-                ),
-                _ => Value::Array(
-                    entries
-                        .iter()
-                        .map(|e| json!({ "key": plain_value(&e.key), "value": plain_value(&e.value) }))
-                        .collect(),
-                ),
-            }
-        }
-        PropertyValue::Struct { fields: held, .. } => fields(held),
-        PropertyValue::Default {
-            fields: held,
-            declared,
-        } => {
-            if held.is_empty() {
-                zero_of(*declared)
-            } else {
-                fields(held)
-            }
-        }
-        PropertyValue::Unset { .. } => Value::Null,
-        other => Value::String(other.summary()),
-    }
-}
-
-/// A map key that can stand as a JSON object key.
-fn key_text(key: &PropertyValue) -> Option<String> {
-    Some(match key {
-        PropertyValue::Str { value } | PropertyValue::Name { value } => value.clone(),
-        PropertyValue::Enum {
-            name: Some(name), ..
-        } => name.clone(),
-        PropertyValue::Enum { value, .. } | PropertyValue::Int { value } => value.to_string(),
-        PropertyValue::UInt { value } => value.to_string(),
-        PropertyValue::Byte { value } => value.to_string(),
-        PropertyValue::Bool { value } => value.to_string(),
-        _ => return None,
-    })
-}
-
-/// What a value of a stored kind holds at its default.
-fn zero_of(declared: Option<&str>) -> serde_json::Value {
-    use serde_json::{Value, json};
-
-    match declared {
-        Some("Bool") => Value::Bool(false),
-        Some(
-            "Int" | "Int8" | "Int16" | "Int64" | "UInt16" | "UInt32" | "UInt64" | "Byte" | "Enum",
-        ) => json!(0),
-        Some("Float" | "Double") => json!(0.0),
-        Some("Str" | "Name" | "Text") => Value::String(String::new()),
-        Some("Array" | "Set") => Value::Array(Vec::new()),
-        Some("Map") => Value::Object(serde_json::Map::new()),
-        _ => Value::Null,
-    }
 }
 
 /// A missing table is nearly always a failed parse, so surface that instead of a bare "not found".

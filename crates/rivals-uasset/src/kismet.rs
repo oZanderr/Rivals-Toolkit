@@ -2450,6 +2450,10 @@ pub enum TermKind {
 pub struct Term {
     pub kind: TermKind,
     pub text: String,
+    /// For a read or write: the struct declaring the property, as a dotted path - a class, a
+    /// struct, or the function owning a local or parameter. The name alone cannot say which.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
 }
 
 /// Everything `expr` names that can be searched for, in bytecode order.
@@ -2464,6 +2468,12 @@ fn collect_terms(expr: &Expr, writing: bool, out: &mut Vec<Term>) {
     let term = |kind, text: &str| Term {
         kind,
         text: text.to_string(),
+        owner: None,
+    };
+    let field = |kind, property: &PropertyRef| Term {
+        kind,
+        text: property.path.clone(),
+        owner: property.owner.path.clone(),
     };
     let variable = if writing {
         TermKind::Write
@@ -2480,7 +2490,7 @@ fn collect_terms(expr: &Expr, writing: bool, out: &mut Vec<Term>) {
             }
         }
         Expr::VirtualCall { function, .. } => out.push(term(TermKind::Call, function)),
-        Expr::Variable { property, .. } => out.push(term(variable, &property.path)),
+        Expr::Variable { property, .. } => out.push(field(variable, property)),
         Expr::ObjectConst { object } | Expr::Cast { class: object, .. } => {
             if let Some(path) = &object.path {
                 out.push(term(TermKind::Object, path));
@@ -2492,8 +2502,8 @@ fn collect_terms(expr: &Expr, writing: bool, out: &mut Vec<Term>) {
             name: "LetValueOnPersistentFrame",
             property,
             ..
-        } => out.push(term(TermKind::Write, &property.path)),
-        Expr::Member { property, .. } => out.push(term(variable, &property.path)),
+        } => out.push(field(TermKind::Write, property)),
+        Expr::Member { property, .. } => out.push(field(variable, property)),
         // An instance delegate reads as the function it names.
         Expr::NameConst {
             name: "InstanceDelegate",
@@ -4089,6 +4099,9 @@ mod tests {
                 (TermKind::String, "Keys.txt"),
             ]
         );
+        // A variable says whose it is - here the function's own local - and nothing else does.
+        let owners: Vec<Option<&str>> = found.iter().map(|t| t.owner.as_deref()).collect();
+        assert_eq!(owners, [Some("/Game/X.X_C:F"), None, None]);
     }
 
     /// Name constants, the functions delegates bind and broadcast, cast classes and struct

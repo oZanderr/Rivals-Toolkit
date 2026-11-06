@@ -22,6 +22,8 @@ pub struct Field {
     /// `IntProperty`, `BoolProperty` or `ObjectProperty`.
     pub kind: &'static str,
     pub flags: u64,
+    /// The class an `ObjectProperty` holds, by the index the package names it by; 0 for none.
+    pub class: i32,
 }
 
 pub fn local(name: &'static str, kind: &'static str) -> Field {
@@ -29,6 +31,7 @@ pub fn local(name: &'static str, kind: &'static str) -> Field {
         name,
         kind,
         flags: 0,
+        class: 0,
     }
 }
 
@@ -37,6 +40,7 @@ pub fn param(name: &'static str, kind: &'static str) -> Field {
         name,
         kind,
         flags: PARM,
+        class: 0,
     }
 }
 
@@ -72,6 +76,8 @@ pub struct Package {
     /// The tagged properties of the class's default object, which the package then holds after
     /// the functions, named `Default__` and the class.
     pub default_values: Option<Vec<u8>>,
+    /// The interfaces the class implements, by the indices the package names them by.
+    pub interfaces: Vec<i32>,
 }
 
 /// The `.uasset` and `.uexp` halves, which parse as the package they were built from.
@@ -146,6 +152,7 @@ impl Package {
             parent: 0,
             class_values: Vec::new(),
             default_values: None,
+            interfaces: Vec::new(),
         }
     }
 
@@ -225,7 +232,7 @@ impl Package {
             out.push(0); // BlueprintReplicationCondition
             match field.kind {
                 "BoolProperty" => out.extend_from_slice(&[4, 0, 1, 0xFF, 1, 1]),
-                "ObjectProperty" => out.extend_from_slice(&0i32.to_le_bytes()),
+                "ObjectProperty" => out.extend_from_slice(&field.class.to_le_bytes()),
                 _ => {}
             }
         }
@@ -270,7 +277,13 @@ impl Package {
         out.extend_from_slice(&0i32.to_le_bytes()); // ClassWithin
         self.name_bytes(&mut out, "None"); // ClassConfigName
         out.extend_from_slice(&0i32.to_le_bytes()); // ClassGeneratedBy
-        out.extend_from_slice(&0i32.to_le_bytes()); // no interfaces
+        out.extend_from_slice(&(self.interfaces.len() as i32).to_le_bytes());
+        for interface in &self.interfaces {
+            // `FImplementedInterface`: the class, its pointer offset, implemented by Blueprint.
+            out.extend_from_slice(&interface.to_le_bytes());
+            out.extend_from_slice(&0i32.to_le_bytes());
+            out.extend_from_slice(&1u32.to_le_bytes());
+        }
         out.extend_from_slice(&0u32.to_le_bytes()); // bDeprecatedForceScriptOrder
         self.name_bytes(&mut out, "None");
         out.extend_from_slice(&1u32.to_le_bytes()); // bCooked

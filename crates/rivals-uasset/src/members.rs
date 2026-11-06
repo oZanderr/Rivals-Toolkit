@@ -467,6 +467,77 @@ pub fn members_of(parsed: &ParsedPackage, class: u32) -> Result<Vec<Member>, Str
     Ok(members)
 }
 
+/// A variable a class declares, as its field record writes it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Variable {
+    pub name: String,
+    /// The property class: `ObjectProperty`, `StructProperty`, `ArrayProperty`, ...
+    pub kind: String,
+    /// What its values are, by path, when the record names it: an object or interface
+    /// property's class, a class property's meta class, a struct's struct, an enum's enum, a
+    /// delegate's signature - for an array, set or map, its element's (a map's value's).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub type_path: Option<String>,
+    /// `EPropertyFlags`.
+    pub flags: u64,
+}
+
+/// The variables the class at `class` declares, in the order its layout lists them, each with
+/// the type its record names.
+pub fn variables_of(parsed: &ParsedPackage, class: u32) -> Result<Vec<Variable>, String> {
+    let layout = layout_of(parsed, class)?;
+    Ok(layout
+        .records
+        .iter()
+        .map(|(record, _)| Variable {
+            name: record.name.clone(),
+            kind: record.kind.clone(),
+            type_path: type_of_record(parsed, record).map(str::to_string),
+            flags: record.property_flags,
+        })
+        .collect())
+}
+
+/// The interfaces the class at `class` implements, by path.
+pub fn interfaces_of(parsed: &ParsedPackage, class: u32) -> Result<Vec<String>, String> {
+    Ok(layout_of(parsed, class)?
+        .interfaces
+        .iter()
+        .filter_map(|&i| path_of(parsed, i).map(str::to_string))
+        .collect())
+}
+
+fn layout_of(parsed: &ParsedPackage, class: u32) -> Result<&crate::ustruct::StructLayout, String> {
+    let export = parsed
+        .exports
+        .get(class as usize)
+        .ok_or_else(|| format!("this package has no export {class}"))?;
+    export
+        .layout
+        .as_ref()
+        .ok_or_else(|| format!("{} is not a class whose layout was read", export.path))
+}
+
+/// The class, struct, enum or signature a field record names, through containers to their element.
+fn type_of_record<'a>(
+    parsed: &'a ParsedPackage,
+    record: &crate::ustruct::FieldRecord,
+) -> Option<&'a str> {
+    match &record.tail {
+        RecordTail::Index(index) => path_of(parsed, *index),
+        // A class property names `Class` first, then the class its values must derive from.
+        RecordTail::Indices(class, meta) => {
+            path_of(parsed, *meta).or_else(|| path_of(parsed, *class))
+        }
+        RecordTail::Enum(index, _) => path_of(parsed, *index),
+        RecordTail::One(inner) => type_of_record(parsed, inner),
+        RecordTail::Two(key, value) => {
+            type_of_record(parsed, value).or_else(|| type_of_record(parsed, key))
+        }
+        RecordTail::None | RecordTail::Bool(_) | RecordTail::Name(_) => None,
+    }
+}
+
 /// The parameters and locals the function at `function` declares.
 pub fn locals_of(parsed: &ParsedPackage, function: u32) -> Result<Vec<Member>, String> {
     let export = parsed
@@ -1304,6 +1375,58 @@ fn statement_label(script: &Script, at: u64) -> String {
 mod tests {
     use super::*;
     use crate::script_fixture::{Code, Function, Import, Package, event_graph};
+
+    /// A class's variables come with the class their records say they hold, and its interfaces
+    /// by path.
+    #[test]
+    fn a_class_lists_its_typed_variables_and_its_interfaces() {
+        let mut package = Package::new("BP_Test_C", &["Target"]);
+        let engine = package.import(Import {
+            class_package: "/Script/CoreUObject",
+            class: "Package",
+            outer: 0,
+            name: "/Script/Engine",
+        });
+        let actor = package.import(Import {
+            class_package: "/Script/CoreUObject",
+            class: "Class",
+            outer: engine,
+            name: "Actor",
+        });
+        let game = package.import(Import {
+            class_package: "/Script/CoreUObject",
+            class: "Package",
+            outer: 0,
+            name: "/Script/Game",
+        });
+        let interactable = package.import(Import {
+            class_package: "/Script/CoreUObject",
+            class: "Class",
+            outer: game,
+            name: "Interactable",
+        });
+        package.members.push(crate::script_fixture::Field {
+            name: "Target",
+            kind: "ObjectProperty",
+            flags: 0,
+            class: actor,
+        });
+        package.interfaces.push(interactable);
+        let parsed = package.build().parsed();
+        assert_eq!(
+            variables_of(&parsed, 0).expect("a class"),
+            [Variable {
+                name: "Target".into(),
+                kind: "ObjectProperty".into(),
+                type_path: Some("/Script/Engine.Actor".into()),
+                flags: 0,
+            }]
+        );
+        assert_eq!(
+            interfaces_of(&parsed, 0).expect("a class"),
+            ["/Script/Game.Interactable"]
+        );
+    }
 
     fn target(parsed: &ParsedPackage, name: &str, kind: MemberKind) -> MemberTarget {
         MemberTarget {

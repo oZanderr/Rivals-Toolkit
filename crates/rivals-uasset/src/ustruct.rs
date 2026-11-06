@@ -329,6 +329,8 @@ pub struct StructLayout {
     pub function_flags_at: Option<u64>,
     /// Where a script struct's `StructFlags` sit, and what they hold.
     pub struct_flags: Option<(u64, u32)>,
+    /// The interfaces a class implements, as the package indices of their classes.
+    pub interfaces: Vec<i32>,
 }
 
 /// What a `UStruct`-derived export stores after its properties, as far as the scanner follows it:
@@ -415,7 +417,8 @@ pub(crate) fn scan_struct_tail(
         take_index(cursor, &mut references)?;
         // `FImplementedInterface`: the class, its pointer offset and whether Blueprint implements it.
         for _ in 0..read_count(cursor, "interfaces")? {
-            take_index(cursor, &mut references)?;
+            let interface = take_index(cursor, &mut references)?;
+            layout.interfaces.push(interface);
             cursor.skip(8)?;
         }
         // bDeprecatedForceScriptOrder, an unused name, bCooked. The names are read rather than

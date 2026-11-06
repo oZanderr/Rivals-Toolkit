@@ -9497,6 +9497,36 @@ mod game_data_tests {
         }
     }
 
+    /// The components a Blueprint's construction script builds list with their classes, one per
+    /// node, a static mesh among them.
+    #[test]
+    fn a_blueprint_lists_the_components_its_construction_script_builds() {
+        let Some(fixture) = Fixture::open(PARENT_CHAIN) else {
+            return;
+        };
+        let parsed = fixture.parse();
+        let class = parsed
+            .exports
+            .iter()
+            .find(|export| export.class_name.ends_with("GeneratedClass"))
+            .expect("a class")
+            .index;
+        let components = rivals_uasset::components_of(&parsed, class);
+        let nodes = parsed
+            .exports
+            .iter()
+            .filter(|e| e.class_name == "SCS_Node")
+            .count();
+        assert_eq!(components.len(), nodes, "{components:?}");
+        assert!(
+            components.iter().any(|c| c
+                .class
+                .as_deref()
+                .is_some_and(|p| p.ends_with("StaticMeshComponent"))),
+            "{components:?}"
+        );
+    }
+
     /// Duplicating the static mesh component of a Blueprint copies its node and template as one
     /// set: the new node builds the new template, which holds the original's mesh, has a name of
     /// its own and no children, and is listed beside the original.

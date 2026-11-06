@@ -413,6 +413,44 @@ fn nodes_of(parsed: &ParsedPackage, script: u32) -> Vec<&ParsedExport> {
         .collect()
 }
 
+/// A component a Blueprint class's construction script builds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Component {
+    /// The variable it is reached by.
+    pub name: String,
+    /// Its class, by path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub class: Option<String>,
+    /// The component or native variable it hangs under; none for a root.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+}
+
+/// The components the construction script of the class at `class` builds, in export order.
+pub fn components_of(parsed: &ParsedPackage, class: u32) -> Vec<Component> {
+    let named = |entries: &[PropertyEntry], name: &str| {
+        name_in(entries, name)
+            .filter(|n| !n.is_empty() && *n != "None")
+            .map(str::to_string)
+    };
+    parsed
+        .exports
+        .iter()
+        .filter(|e| e.class_name == "SimpleConstructionScript" && e.outer_index == class as i32 + 1)
+        .flat_map(|script| nodes_of(parsed, script.index))
+        .filter_map(|node| {
+            Some(Component {
+                name: named(&node.properties, "InternalVariableName")?,
+                class: match &entry(&node.properties, "ComponentClass")?.value {
+                    PropertyValue::Object { path, .. } => path.clone(),
+                    _ => None,
+                },
+                parent: named(&node.properties, "ParentComponentOrVariableName"),
+            })
+        })
+        .collect()
+}
+
 /// Works out what duplicating the component `add.node` builds copies, refusing a node that is not
 /// one, a name a component, the template naming or a variable of the class already takes, and a
 /// node the script's tree does not hold.

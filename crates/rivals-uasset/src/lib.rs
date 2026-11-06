@@ -86,10 +86,11 @@ mod write;
 pub use class_variable::AddVariable;
 pub use component::derived_guid;
 pub use component::{
-    AddComponent, ChangedList, ComponentPlan, ComponentRemoval, InheritedComponent, ListContext,
-    ListEntry, ListScope, NodeParent, RemoveComponent, component_removal_wiring, component_wiring,
-    inherited_component_wiring, plan_component, plan_component_removal, plan_inherited_component,
-    verify_component, verify_component_removal, verify_inherited_component,
+    AddComponent, ChangedList, Component, ComponentPlan, ComponentRemoval, InheritedComponent,
+    ListContext, ListEntry, ListScope, NodeParent, RemoveComponent, component_removal_wiring,
+    component_wiring, components_of, inherited_component_wiring, plan_component,
+    plan_component_removal, plan_inherited_component, verify_component, verify_component_removal,
+    verify_inherited_component,
 };
 pub use conform::{CARRIER_PLUGINS, ConformChange, Conformed, conform_layout, conform_package};
 pub use copy::{CopiedExport, CopyExport, CopyPlan, CopySource, plan_copy};
@@ -138,8 +139,8 @@ pub use member_edit::{
     MemberRename, PossibleUses, RemoveRecords, RenamePlan, plan_member_rename, verify_member_rename,
 };
 pub use members::{
-    Member, MemberKind, MemberTarget, MemberUse, MemberUses, UseRole, UseSite, ancestors_of,
-    element_holding, locals_of, member_uses, members_of,
+    Member, MemberKind, MemberTarget, MemberUse, MemberUses, UseRole, UseSite, Variable,
+    ancestors_of, element_holding, interfaces_of, locals_of, member_uses, members_of, variables_of,
 };
 pub use named_edit::{names_any, place_named};
 pub use names::unused_names;
@@ -155,12 +156,12 @@ pub use niagara_vm_edit::{
     parse_vm_value, verify_vm_edits,
 };
 pub use package::{
-    AppliedFixup, AssetBundle, ExportRow, ExportStatus, ImportInfo, PackageInfo, ParseOptions,
-    ParsedExport, ParsedPackage, TwinChoice, dotted_path, export_bytes, export_rows, header_size,
-    is_unresolved_import_name, lost_import_warning, package_info, package_names, parse_exports_at,
-    parse_package, parse_package_checked, parse_package_opts, parse_package_probed,
-    parse_package_traced, parse_package_traced_with, parse_package_with, read_header,
-    unresolved_import_note, unresolved_imports,
+    AppliedFixup, AssetBundle, ExportRow, ExportStatus, HeaderRefs, ImportInfo, PackageInfo,
+    ParseOptions, ParsedExport, ParsedPackage, TwinChoice, dotted_path, export_bytes, export_rows,
+    header_refs, header_refs_of, header_size, is_unresolved_import_name, lost_import_warning,
+    package_info, package_names, parse_exports_at, parse_package, parse_package_checked,
+    parse_package_opts, parse_package_probed, parse_package_traced, parse_package_traced_with,
+    parse_package_with, read_header, unresolved_import_note, unresolved_imports,
 };
 pub use path_edit::{
     Lowered, PathEdit, PathOp, Place, Segment, below_package, element_segment, elements_of,
@@ -188,7 +189,7 @@ pub use ustruct::{
     StructLayout, definitions_of, mappings_from_definitions_with, read_struct_definitions,
     read_struct_definitions_pathed,
 };
-pub use value::{MapEntry, PropertyEntry, PropertyValue};
+pub use value::{MapEntry, PropertyEntry, PropertyValue, plain_value};
 pub use write::{
     HeaderDraft, IN_SEPARATE_FILE, InlinePayload, MEMORY_MAPPED, OPTIONAL_PAYLOAD, ResourceInfo,
     RewrittenPackage, SEPARATE_PAYLOAD_FLAGS, Splice, bulk_lock, header_round_trips,

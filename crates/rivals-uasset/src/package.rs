@@ -1,6 +1,6 @@
 //! Splits a legacy package into exports and parses each against its own declared byte range.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::io::Cursor as IoCursor;
 
 use retoc::legacy_asset::{
@@ -273,6 +273,84 @@ pub fn unresolved_imports(bundle: &AssetBundle<'_>) -> Result<Vec<String>, Strin
                 .flatten()
         })
         .collect())
+}
+
+/// What a package refers to, as its header alone says: no mappings, no parse.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HeaderRefs {
+    /// The objects it imports and uses, as dotted paths in table order. Left out: an import that
+    /// is only an export's class, template or outer (what the package's objects are, not what
+    /// they use), a package standing only as another import's outer, a subobject or function (a
+    /// call names those; its outer object stays), a class default object, and one retoc could
+    /// not name.
+    pub imports: Vec<String>,
+    /// Package paths its name table holds that no import names: where a soft reference is, since
+    /// a cooked package keeps those paths as names. A candidate only - a name can be a path for
+    /// any other reason.
+    pub names: Vec<String>,
+}
+
+/// [`HeaderRefs`] of a package.
+pub fn header_refs(bundle: &AssetBundle<'_>) -> Result<HeaderRefs, String> {
+    Ok(header_refs_of(&read_header(bundle)?))
+}
+
+/// [`HeaderRefs`] of a header already read.
+pub fn header_refs_of(header: &FLegacyPackageHeader) -> HeaderRefs {
+    let roles = |indices: &mut dyn Iterator<Item = FPackageIndex>| -> HashSet<i32> {
+        indices.filter(|i| i.is_import()).map(|i| i.index).collect()
+    };
+    let what_exports_are = roles(
+        &mut header
+            .exports
+            .iter()
+            .flat_map(|e| [e.class_index, e.template_index, e.outer_index]),
+    );
+    let supers = roles(&mut header.exports.iter().map(|e| e.super_index));
+    let outers = roles(&mut header.imports.iter().map(|i| i.outer_index));
+    let mut seen = HashSet::new();
+    let mut packages = HashSet::new();
+    let mut imports = Vec::new();
+    for (at, import) in header.imports.iter().enumerate() {
+        let index = FPackageIndex::create_import(at as u32);
+        let Ok(name) = header.name_map.get(import.object_name) else {
+            continue;
+        };
+        if is_unresolved_import_name(&name) || name.starts_with("Default__") {
+            continue;
+        }
+        let Some(path) = dotted_path(header, index) else {
+            continue;
+        };
+        packages.insert(path.split(['.', ':']).next().unwrap_or(&path).to_string());
+        // A package its own imports already name, or what an export is rather than uses (a
+        // parent is used: the class derives from it).
+        let package_of_others = import.outer_index.is_null() && outers.contains(&index.index);
+        let what_one_is = what_exports_are.contains(&index.index) && !supers.contains(&index.index);
+        if package_of_others || what_one_is || path.contains(':') {
+            continue;
+        }
+        if seen.insert(path.clone()) {
+            imports.push(path);
+        }
+    }
+    let own = header.summary.package_name.as_str();
+    let mut names: Vec<String> = header
+        .name_map
+        .copy_raw_names()
+        .into_iter()
+        .filter(|n| {
+            n.starts_with('/')
+                && !n.starts_with("/Script/")
+                && n.len() > 1
+                && !n.contains([' ', '.', ':'])
+                && n != own
+                && !packages.contains(n.as_str())
+        })
+        .collect();
+    names.sort();
+    names.dedup();
+    HeaderRefs { imports, names }
 }
 
 /// A bare `UnknownExport` import lost its hash to a converter that predates keeping it, so nothing
@@ -1915,6 +1993,59 @@ fn engine_struct_chain(class_name: &str) -> &'static [&'static str] {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// What a package uses is its parent and what it names, not the classes its own objects are
+    /// or the packages its imports sit in; a game path in its names that nothing imports is where
+    /// a soft reference is.
+    #[test]
+    fn a_header_names_what_the_package_uses() {
+        use crate::script_fixture::{Import, Package};
+        let mut package = Package::new(
+            "BP_Test_C",
+            &[
+                "/Script/Engine",
+                "Actor",
+                "/Game/Other",
+                "Thing_C",
+                "/Game/Soft/Target",
+            ],
+        );
+        let engine = package.import(Import {
+            class_package: "/Script/CoreUObject",
+            class: "Package",
+            outer: 0,
+            name: "/Script/Engine",
+        });
+        package.parent = package.import(Import {
+            class_package: "/Script/CoreUObject",
+            class: "Class",
+            outer: engine,
+            name: "Actor",
+        });
+        let other = package.import(Import {
+            class_package: "/Script/CoreUObject",
+            class: "Package",
+            outer: 0,
+            name: "/Game/Other",
+        });
+        package.import(Import {
+            class_package: "/Script/Engine",
+            class: "BlueprintGeneratedClass",
+            outer: other,
+            name: "Thing_C",
+        });
+        let refs = header_refs(&package.build().bundle()).expect("reads");
+        // The fixture imports `Function` for functions it does not have here, so that import is
+        // as used as any other; what the class is, and the packages, are not.
+        let used: Vec<&str> = refs
+            .imports
+            .iter()
+            .map(String::as_str)
+            .filter(|p| !p.ends_with(".Function"))
+            .collect();
+        assert_eq!(used, ["/Script/Engine.Actor", "/Game/Other.Thing_C"]);
+        assert_eq!(refs.names, ["/Game/Soft/Target"]);
+    }
 
     /// A package cooked with tagged properties reads without mappings, and its functions are still
     /// walked for their fields and bytecode: the engine's own struct classes need no schema.

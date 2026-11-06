@@ -1190,6 +1190,7 @@ mod tests {
             name: "Health",
             kind: "IntProperty",
             flags: CPF_NET,
+            class: 0,
         });
         let refused = saved(
             &package.build(),
