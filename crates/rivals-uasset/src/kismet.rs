@@ -2431,9 +2431,9 @@ pub enum TermKind {
     Call,
     /// A property read, by its dotted path, a struct's member included.
     Read,
-    /// A property assigned or changed in place: a `Let`'s target, a struct member set, an array
-    /// or map built or changed, a delegate bound or changed, an event's parameter stored on the
-    /// event graph's frame.
+    /// A property assigned or changed in place: a `Let`'s target, a call's output pin, a struct
+    /// member set, an array or map built or changed, a delegate bound or changed, an event's
+    /// parameter stored on the event graph's frame.
     Write,
     /// An object named outright, such as a class a cast or spawn takes.
     Object,
@@ -2534,10 +2534,47 @@ fn collect_terms(expr: &Expr, writing: bool, out: &mut Vec<Term>) {
         _ => {}
     }
     let written = written_child(expr, writing);
+    let called = called_name(expr);
     for child in children(expr) {
-        let writes = written.is_some_and(|w| std::ptr::eq(w, child));
+        let writes = written.is_some_and(|w| std::ptr::eq(w, child))
+            || called.is_some_and(|function| is_output_pin(function, child));
         collect_terms(child, writes, out);
     }
+}
+
+/// The bare name of the function `expr` calls, if it is a call.
+fn called_name(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::FinalCall { function, .. } => function.path.as_deref().map(callee_name),
+        Expr::VirtualCall { function, .. } => Some(callee_name(function)),
+        _ => None,
+    }
+}
+
+/// Whether `arg`, an argument of a call to `function`, is where the call stores one of its
+/// outputs. Nothing in bytecode marks an out parameter, but the compiler stores each output pin
+/// of a call node in a temporary of its own, `CallFunc_<Function>_<Pin>` (`_1` and on where the
+/// name is taken), while an input pin is handed whatever is wired to it. Three temporaries it
+/// makes for inputs share that prefix, told apart by how they end: the `ReturnValue` of another
+/// call to the same function wired in, a value widened to the pin's type (`_ImplicitCast`), and
+/// an object cast to it (`_CastInput`).
+fn is_output_pin(function: &str, arg: &Expr) -> bool {
+    let Expr::Variable { property, .. } = arg else {
+        return false;
+    };
+    let Some(pin) = property
+        .path
+        .strip_prefix("CallFunc_")
+        .and_then(|rest| rest.strip_prefix(function))
+        .and_then(|rest| rest.strip_prefix('_'))
+    else {
+        return false;
+    };
+    let pin = match pin.rsplit_once('_') {
+        Some((head, n)) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => head,
+        _ => pin,
+    };
+    !(pin == "ReturnValue" || pin.ends_with("_ImplicitCast") || pin.ends_with("_CastInput"))
 }
 
 /// The delegate property an expression reaches, through any context it is reached by.
@@ -4305,6 +4342,94 @@ mod tests {
             items: vec![var("LocalVariable", "First")],
         };
         assert_eq!(terms_of(&built), ["Write Names", "Read First"]);
+    }
+
+    /// A call writes its output pins and a later statement reads the one it uses, so which
+    /// outputs are used can be asked: here `BreakGameplayCueParameters` writes `EffectContext`
+    /// and `Instigator`, and only `EffectContext` is read after. Taken from a cue's
+    /// `ModifyNiagaraParam`, where every output read as a read of the call making it.
+    #[test]
+    fn a_call_writes_its_output_pins_and_reads_its_inputs() {
+        let local = |path: &str| var("LocalVariable", path);
+        let pins = "CallFunc_BreakGameplayCueParameters";
+        let unpack =
+            "/Script/GameplayAbilities.AbilitySystemBlueprintLibrary:BreakGameplayCueParameters";
+        let broken = call(
+            unpack,
+            vec![
+                local("Parameters"),
+                local(&format!("{pins}_EffectContext")),
+                local(&format!("{pins}_Instigator_1")),
+            ],
+        );
+        assert_eq!(
+            terms_of(&broken),
+            [
+                format!("Call {unpack}"),
+                "Read Parameters".into(),
+                format!("Write {pins}_EffectContext"),
+                format!("Write {pins}_Instigator_1"),
+            ],
+            "an output is a write however many times its name was taken"
+        );
+        let hit =
+            "/Script/GameplayAbilities.AbilitySystemBlueprintLibrary:EffectContextGetHitResult";
+        let used = assign(
+            local("CallFunc_EffectContextGetHitResult_ReturnValue"),
+            call(hit, vec![local(&format!("{pins}_EffectContext"))]),
+        );
+        assert_eq!(
+            terms_of(&used),
+            [
+                "Write CallFunc_EffectContextGetHitResult_ReturnValue".to_string(),
+                format!("Call {hit}"),
+                format!("Read {pins}_EffectContext"),
+            ]
+        );
+        // What the compiler makes for an input: another call's return value, a float widened
+        // to a double and an object cast to an interface - each named for the same function.
+        let add = "/Script/Engine.KismetMathLibrary:Add_DoubleDouble";
+        let sum = assign(
+            local("CallFunc_Add_DoubleDouble_ReturnValue_1"),
+            call(
+                add,
+                vec![
+                    local("CallFunc_Add_DoubleDouble_ReturnValue"),
+                    local("CallFunc_Add_DoubleDouble_B_ImplicitCast_2"),
+                ],
+            ),
+        );
+        assert_eq!(
+            terms_of(&sum),
+            [
+                "Write CallFunc_Add_DoubleDouble_ReturnValue_1".to_string(),
+                format!("Call {add}"),
+                "Read CallFunc_Add_DoubleDouble_ReturnValue".into(),
+                "Read CallFunc_Add_DoubleDouble_B_ImplicitCast_2".into(),
+            ]
+        );
+        // A virtual call on another object writes its outputs the same way.
+        let bounds = context(
+            var("InstanceVariable", "Owner"),
+            Expr::VirtualCall {
+                name: "VirtualFunction",
+                function: "GetActorBounds".into(),
+                params: vec![
+                    local("CallFunc_GetActorBounds_bOnly_CastInput"),
+                    local("CallFunc_GetActorBounds_Origin"),
+                ],
+                id: NameId::default(),
+            },
+        );
+        assert_eq!(
+            terms_of(&bounds),
+            [
+                "Read Owner",
+                "Call GetActorBounds",
+                "Read CallFunc_GetActorBounds_bOnly_CastInput",
+                "Write CallFunc_GetActorBounds_Origin",
+            ]
+        );
     }
 
     /// The census names a call whose object cannot be a function: a package, a type, an object at
