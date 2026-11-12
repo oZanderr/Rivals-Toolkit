@@ -1,6 +1,6 @@
 {
   "source": "https://raw.githubusercontent.com/donutman07/MarvelRivalsCharacterIDs/main/MarvelRivalsCharacterIDs.md",
-  "generated_at": "2026-11-05T14:25:11.751Z",
+  "generated_at": "2026-11-12T14:55:37.465Z",
   "characters": {
     "1011": {
       "name": "Hulk",
@@ -114,6 +114,9 @@
       "name": "Mantis",
       "skins": {
         "1020001": "Default",
+        "1020002": "CHRONAL HARMONY",
+        "1020004": "TWILIGHT TIME",
+        "1020005": "DARKENED DAY",
         "1020100": "KNOWHERE CORP",
         "1020101": "WILL OF GALACTA",
         "1020102": "BLACK & GOLD",
@@ -272,6 +275,7 @@
       "name": "Ultron",
       "skins": {
         "1028001": "Default",
+        "1028002": "AVENGER ULTRON",
         "1028100": "Mechanical Phantom",
         "1028101": "Golden Ultron",
         "1028102": "WILL OF GALACTA",
@@ -363,6 +367,7 @@
       "name": "Squirrel Girl",
       "skins": {
         "1032001": "Default",
+        "1032002": "CHRONAL SQUIRREL",
         "1032100": "ARCTIC LEMMUS",
         "1032101": "WILL OF GALACTA",
         "1032300": "Nut Rocker",
@@ -398,6 +403,7 @@
       "name": "Iron Man",
       "skins": {
         "1034001": "Default",
+        "1034002": "SILVER CENTURION",
         "1034100": "ARMOR MODEL 42",
         "1034300": "Blood Edge Armor",
         "1034301": "IRON MARINER",
@@ -417,6 +423,7 @@
       "name": "Venom",
       "skins": {
         "1035001": "Default",
+        "1035002": "CHROME CARNIVORE",
         "1035100": "CYAN CLASH",
         "1035101": "ANTI-VENOM",
         "1035102": "Hyper Orange",
@@ -633,6 +640,7 @@
       "name": "Namor",
       "skins": {
         "1045001": "Default",
+        "1045002": "CHRONAL MONARCH",
         "1045100": "MAUVE SUB-MARINER",
         "1045101": "Will of Galacta",
         "1045300": "PHANTOM TIDE",
@@ -649,6 +657,7 @@
       "name": "Adam Warlock",
       "skins": {
         "1046001": "Default",
+        "1046002": "INFINITY WATCH",
         "1046100": "COSMIC JADE",
         "1046101": "WILL OF GALACTA",
         "1046102": "King in White",
@@ -725,6 +734,7 @@
       "name": "Wolverine",
       "skins": {
         "1049001": "Default",
+        "1049002": "X DEATHS",
         "1049100": "Lone Wolf",
         "1049101": "WILL OF GALACTA",
         "1049300": "Blood Berserker",
@@ -829,6 +839,7 @@
         "1053306": "RAVISHING RED",
         "1053307": "DARK DIAMOND",
         "1053308": "GOLDEN GRACE",
+        "1053309": "SEAT OF WINTER",
         "1053500": "X-Revolution",
         "1053501": "Phoenix Diamond",
         "1053502": "BLACK QUEEN OF THE MARAUDERS"
@@ -855,6 +866,7 @@
       "name": "Daredevil",
       "skins": {
         "1055001": "Default",
+        "1055002": "THE MAN WITHOUT FEAR",
         "1055100": "Fearless Origin",
         "1055101": "Shenloong's Creed",
         "1055102": "Aurora Twilight",
@@ -923,7 +935,10 @@
         "1058303": "ALLURING ACE",
         "1058304": "DEAD MAN'S HAND",
         "1058500": "BARRIER BUSTER",
-        "1058800": "X-MEN '97 SEASON 2"
+        "1058800": "X-MEN '97 SEASON 2",
+        "1058801": "VERSATILE VALET",
+        "1058802": "PHAGE PALETTE",
+        "1058803": "MATCHA MAID"
       }
     },
     "1059": {
@@ -976,6 +991,7 @@
       "name": "Devil Dinosaur",
       "skins": {
         "1062001": "Default",
+        "1062003": "WILL OF GALACTA",
         "1062100": "TROPICAL BEAST",
         "1062101": "CORPORATE CRUNCHER",
         "1062300": "PLAYFUL PINK",
@@ -1032,6 +1048,7 @@
         "1066001": "Default",
         "1066100": "OBLIVION'S WHISPER",
         "1066101": "SAPPHIRE SANDS",
+        "1066300": "ASTRAL OBLIVION",
         "1066500": "SINFUL BLACKOUT"
       }
     },
@@ -1042,6 +1059,15 @@
         "1067100": "BLUE REQUIEM",
         "1067101": "GODS' GRAVEYARD",
         "1067300": "DIVINE DESTROYER"
+      }
+    },
+    "1068": {
+      "name": "Nightcrawler",
+      "skins": {
+        "1068001": "Default",
+        "1068002": "STEADFAST SWORDSMAN",
+        "1068007": "X-FORCE",
+        "1068008": "HOPE SOARED"
       }
     }
   }
