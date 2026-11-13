@@ -1,5 +1,6 @@
 //! Recovers a struct's layout from the package that defines it when the mappings file has no entry.
 
+use retoc::asset_conversion::LegacyParts;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -41,7 +42,8 @@ impl<'a> LayoutReader<'a> {
             load: Box::new(move |name: &str| {
                 let path = asset::package_path(store, name)
                     .ok_or_else(|| format!("{name} is not in the store being read"))?;
-                converter.convert(asset::package_id(name), &path)
+                // A layout is in the exports; a package's bulk data never holds one.
+                converter.convert_parts(asset::package_id(name), &path, LegacyParts::Package)
             }),
             recovered: RefCell::new(HashMap::new()),
             spent: Cell::new(Duration::ZERO),
@@ -449,7 +451,7 @@ fn synthesise(
                 .ok_or_else(|| format!("{entry} is not in the store being read"))?;
             converter
                 .get_or_init(|| PackageConverter::new(&**store))
-                .convert(asset::package_id(entry), &path)
+                .convert_parts(asset::package_id(entry), &path, LegacyParts::Package)
         }
         None => asset::load_bundle(source.game_root, container, entry, source.kind),
     };

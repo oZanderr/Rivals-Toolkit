@@ -647,9 +647,28 @@ impl<'a> PackageConverter<'a> {
         package_id: retoc::FPackageId,
         path: &str,
     ) -> Result<FSerializedAssetBundle, String> {
+        self.convert_parts(package_id, path, asset_conversion::LegacyParts::Whole)
+    }
+
+    /// [`Self::convert`] producing only `parts`, without reading what is left out: the header
+    /// alone reads the bytes it lies in, and only the whole package reads its bulk data - a
+    /// texture's mips, a mesh's buffers - which a reader of a package's objects never needs and
+    /// which is most of what the game holds.
+    pub fn convert_parts(
+        &self,
+        package_id: retoc::FPackageId,
+        path: &str,
+        parts: asset_conversion::LegacyParts,
+    ) -> Result<FSerializedAssetBundle, String> {
         let writer = MemFileWriter::default();
-        asset_conversion::build_legacy(&self.context, package_id, UEPath::new(path), &writer)
-            .map_err(|e| format!("convert {path} to legacy: {e:#}"))?;
+        asset_conversion::build_legacy_parts(
+            &self.context,
+            package_id,
+            UEPath::new(path),
+            &writer,
+            parts,
+        )
+        .map_err(|e| format!("convert {path} to legacy: {e:#}"))?;
         writer.into_bundle(path)
     }
 }
@@ -658,6 +677,58 @@ impl<'a> PackageConverter<'a> {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// Leaving parts of a package out changes nothing in what is kept: its header reads the same
+    /// from the header's own bytes, its exports the same without its bulk data, and only the
+    /// whole package reads that. On the real game, when `RIVALS_GAME_ROOT` names it: a texture,
+    /// whose mips are bulk data, and Blueprints.
+    #[test]
+    fn a_package_converted_in_parts_keeps_what_the_whole_has() {
+        let Ok(root) = std::env::var("RIVALS_GAME_ROOT") else {
+            return;
+        };
+        let (store, packages) = list_game_packages(&root).expect("list");
+        let pick = |pattern: &str, n: usize| {
+            packages
+                .iter()
+                .filter(|(_, path)| path.contains(pattern))
+                .take(n)
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let mut chosen = pick("/Textures/", 4);
+        chosen.extend(pick("_BP.uasset", 4));
+        assert!(chosen.len() >= 6, "{chosen:?}");
+        // Each through a converter of its own: one that has met the package keeps its header,
+        // and the header alone must be read from its own bytes.
+        let fresh = || PackageConverter::new(store.as_ref());
+        let mut bulk = 0;
+        for (id, path) in &chosen {
+            let header = fresh()
+                .convert_parts(*id, path, asset_conversion::LegacyParts::Header)
+                .expect("header");
+            let package = fresh()
+                .convert_parts(*id, path, asset_conversion::LegacyParts::Package)
+                .expect("package");
+            let whole = fresh().convert(*id, path).expect("whole");
+            assert_eq!(
+                header.asset_file_buffer, whole.asset_file_buffer,
+                "{path}: the header"
+            );
+            assert!(header.exports_file_buffer.is_empty(), "{path}");
+            assert_eq!(package.asset_file_buffer, whole.asset_file_buffer, "{path}");
+            assert_eq!(
+                package.exports_file_buffer, whole.exports_file_buffer,
+                "{path}: the exports"
+            );
+            assert!(
+                package.bulk_data_buffer.is_none() && header.bulk_data_buffer.is_none(),
+                "{path}"
+            );
+            bulk += usize::from(whole.bulk_data_buffer.is_some());
+        }
+        assert!(bulk > 0, "a texture with bulk data among {chosen:?}");
+    }
 
     #[test]
     fn stripping_an_extension_leaves_directory_separators_alone() {
