@@ -175,6 +175,11 @@ pub fn object(out: &mut Vec<u8>, property: &str, index: i32) {
 /// Imports: `[0] /Script/CoreUObject`, `[1] Object` (the class), `[2] /Game/A`, `[3] Foo` in
 /// `/Game/A`, which nothing names, and `[4] B` in `/Game/A`.
 pub fn objects_package() -> (Vec<u8>, Vec<u8>) {
+    objects_package_flagged(0)
+}
+
+/// [`objects_package`] with `Holder`'s object flags `holder_flags`: a class's default object, say.
+pub fn objects_package_flagged(holder_flags: u32) -> (Vec<u8>, Vec<u8>) {
     let close = |out: &mut Vec<u8>| {
         name(out, "None");
         out.extend_from_slice(&0i32.to_le_bytes());
@@ -226,11 +231,12 @@ pub fn objects_package() -> (Vec<u8>, Vec<u8>) {
         at += bytes.len() as i64;
         row
     };
-    let exports = vec![
+    let mut exports = vec![
         row("Holder", 0, &holder),
         row("Child", 1, &child),
         row("Sibling", 0, &sibling),
     ];
+    exports[0].object_flags = holder_flags;
     let mut summary = FLegacyPackageFileSummary {
         package_name: "/Game/TestPackage".to_string(),
         ..Default::default()

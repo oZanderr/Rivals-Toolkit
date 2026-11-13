@@ -639,6 +639,12 @@ pub struct ParseOptions {
     /// Function or ScriptStruct: each stands in its place as a payload, so a reader after
     /// bytecode alone decodes only what holds it.
     pub scripts_only: bool,
+    /// Leave unread every export no class of the package owns: one that is not a class, function
+    /// or struct nor a class's default object, and has none of them among its outers. Each stands
+    /// in its place as a payload, so a reader of a package's classes skips what surrounds them -
+    /// a map's level and actors, a level sequence's tracks - which can be thousands of exports
+    /// around one level script.
+    pub class_owned_only: bool,
 }
 
 fn parse_inner(
@@ -1000,11 +1006,70 @@ fn parse_chosen(
         scripts_only: options.scripts_only,
         ..Default::default()
     };
+    let owned = options.class_owned_only.then(|| class_owned(header, &ctx));
     let exports: Vec<ParsedExport> = chosen
         .iter()
-        .map(|&index| parse_one(bundle, header, &ctx, index, tagged, &mut diagnostics))
+        .map(|&index| match &owned {
+            Some(owned) if !owned.get(index as usize).copied().unwrap_or(true) => {
+                let base = skeleton(index, header, header.exports.get(index as usize));
+                ParsedExport {
+                    status: ExportStatus::Payload {
+                        consumed: 0,
+                        payload_bytes: base.serial_size.max(0) as u64,
+                        kind: "not read: no class owns it",
+                    },
+                    ..base
+                }
+            }
+            _ => parse_one(bundle, header, &ctx, index, tagged, &mut diagnostics),
+        })
         .collect();
     (exports, diagnostics)
+}
+
+/// Which exports a class of the package owns, as `ParseOptions::class_owned_only` reads them: a
+/// class, function or struct, a class's default object, and every export with one of those among
+/// its outers - a default object's subobjects, a class's construction script and its templates.
+fn class_owned(header: &FLegacyPackageHeader, ctx: &Ctx<'_>) -> Vec<bool> {
+    let owner = |export: &FObjectExport| {
+        export.object_flags & RF_CLASS_DEFAULT_OBJECT != 0
+            || object_short_name(header, export.class_index)
+                .is_some_and(|class| holds_script(&struct_chain(ctx, &class)))
+    };
+    let count = header.exports.len();
+    let mut owned: Vec<Option<bool>> = vec![None; count];
+    for start in 0..count {
+        // Up the outers to an owner, an export already settled or the package, then settle every
+        // export the walk passed through the same way.
+        let mut walked = Vec::new();
+        let mut at = Some(start);
+        let verdict = loop {
+            let Some(index) = at else { break false };
+            if let Some(known) = owned[index] {
+                break known;
+            }
+            walked.push(index);
+            if owner(&header.exports[index]) {
+                break true;
+            }
+            // Outers that come back on themselves reach no owner.
+            if walked.len() > count {
+                break false;
+            }
+            let outer = header.exports[index].outer_index;
+            at = outer
+                .is_export()
+                .then(|| outer.to_export_index() as usize)
+                .filter(|&next| next < count);
+        };
+        for index in walked {
+            owned[index] = Some(verdict);
+        }
+    }
+    owned
+        .into_iter()
+        .map(|known| known.unwrap_or(false))
+        .collect()
 }
 
 /// The exports at `chosen` alone, read as a parse of the whole package reads them when it makes
@@ -1993,6 +2058,68 @@ fn engine_struct_chain(class_name: &str) -> &'static [&'static str] {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// Asked to read only what a class owns, a parse reads a class's default object and what sits
+    /// under it, and leaves every other export unread in its place; unasked, it reads them all.
+    #[test]
+    fn only_what_a_class_owns_is_read_when_asked() {
+        use crate::tagged_fixture::objects_package_flagged;
+        let read = |holder_flags: u32, class_owned_only: bool| {
+            let (asset, exports) = objects_package_flagged(holder_flags);
+            let bundle = AssetBundle {
+                asset: &asset,
+                exports: &exports,
+            };
+            let options = ParseOptions {
+                class_owned_only,
+                ..Default::default()
+            };
+            let parsed = parse_package_opts(&bundle, None, None, options).unwrap();
+            parsed
+                .exports
+                .iter()
+                .map(|e| {
+                    let unread = matches!(
+                        e.status,
+                        ExportStatus::Payload {
+                            kind: "not read: no class owns it",
+                            ..
+                        }
+                    );
+                    (e.object_name.clone(), !unread && !e.properties.is_empty())
+                })
+                .collect::<Vec<_>>()
+        };
+        let names = |read: &[(String, bool)]| {
+            read.iter()
+                .filter(|(_, was)| *was)
+                .map(|(name, _)| name.clone())
+                .collect::<Vec<_>>()
+        };
+        // Holder a class's default object: it and Child, under it, are its class's; Sibling is not.
+        let cdo = RF_CLASS_DEFAULT_OBJECT;
+        assert_eq!(names(&read(cdo, true)), ["Holder", "Child"]);
+        assert_eq!(names(&read(cdo, false)), ["Holder", "Child", "Sibling"]);
+        // No class in the package: nothing is read, and every export still stands in its place.
+        let none = read(0, true);
+        assert_eq!(none.len(), 3);
+        assert!(names(&none).is_empty(), "{none:?}");
+    }
+
+    /// A Blueprint's package is all its class's: asked to read only that, it reads the same.
+    #[test]
+    fn a_blueprint_reads_the_same_when_only_what_its_class_owns_is_read() {
+        let built = crate::script_fixture::two_events_laid();
+        let read = |class_owned_only| {
+            let options = ParseOptions {
+                class_owned_only,
+                ..Default::default()
+            };
+            let parsed = parse_package_opts(&built.bundle(), None, None, options).unwrap();
+            serde_json::to_string(&parsed.exports).unwrap()
+        };
+        assert_eq!(read(true), read(false));
+    }
 
     /// What a package uses is its parent and what it names, not the classes its own objects are
     /// or the packages its imports sit in; a game path in its names that nothing imports is where
