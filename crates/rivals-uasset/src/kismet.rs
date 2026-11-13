@@ -2492,28 +2492,33 @@ impl Scope {
 
 /// Everything `expr` names that can be searched for, in bytecode order.
 pub fn statement_terms(expr: &Expr) -> Vec<Term> {
-    statement_terms_with(expr, &|_| None)
+    statement_terms_with(expr, &|_, _| None)
 }
 
 /// As [`statement_terms`], told which arguments each callee takes by reference and may change:
 /// `by_ref` maps a callee, as a call names it (an object path, or a virtual call's bare name),
-/// to those arguments' positions. Bytecode marks no argument as passed by reference, and a
-/// callee's signature is often in another package, so the caller supplies what it knows; the
-/// engine functions that change an argument whatever they declare are known here regardless.
-pub fn statement_terms_with<'s>(
-    expr: &Expr,
-    by_ref: &dyn Fn(&str) -> Option<&'s [usize]>,
-) -> Vec<Term> {
+/// and the object the call is made on - `None` for one on the calling object itself - to those
+/// arguments' positions. Bytecode marks no argument as passed by reference, and a callee's
+/// signature is often in another package, so the caller supplies what it knows, and a virtual
+/// call's object is what says whose function of that name it reaches; the engine functions that
+/// change an argument whatever they declare are known here regardless.
+pub fn statement_terms_with<'s>(expr: &Expr, by_ref: &ByRefArgs<'_, 's>) -> Vec<Term> {
     let mut out = Vec::new();
-    collect_terms(expr, false, by_ref, &mut out);
+    collect_terms(expr, false, None, by_ref, &mut out);
     out
 }
 
-/// `writing` says `expr` is where a value is stored, so the variables it names are written.
+/// What a caller knows about which arguments a callee takes by reference: see
+/// [`statement_terms_with`].
+pub type ByRefArgs<'h, 's> = dyn Fn(&str, Option<&Expr>) -> Option<&'s [usize]> + 'h;
+
+/// `writing` says `expr` is where a value is stored, so the variables it names are written;
+/// `on` is the object `expr` is called on, when it is a call reached through a context.
 fn collect_terms<'s>(
     expr: &Expr,
     writing: bool,
-    by_ref: &dyn Fn(&str) -> Option<&'s [usize]>,
+    on: Option<&Expr>,
+    by_ref: &ByRefArgs<'_, 's>,
     out: &mut Vec<Term>,
 ) {
     let term = |kind, text: &str| Term {
@@ -2589,12 +2594,21 @@ fn collect_terms<'s>(
     let written = written_child(expr, writing);
     let called = called_name(expr);
     // A call's children are its arguments, in order.
-    let referenced = call_target(expr).and_then(by_ref).unwrap_or_default();
+    let referenced = call_target(expr)
+        .and_then(|callee| by_ref(callee, on))
+        .unwrap_or_default();
     for (at, child) in children(expr).into_iter().enumerate() {
         let writes = written.is_some_and(|w| std::ptr::eq(w, child))
             || called.is_some_and(|function| is_output_pin(function, child))
             || referenced.contains(&at);
-        collect_terms(child, writes, by_ref, out);
+        // A context's member is called on its object.
+        let on = match expr {
+            Expr::Context { object, member, .. } if std::ptr::eq(&**member, child) => {
+                Some(&**object)
+            }
+            _ => None,
+        };
+        collect_terms(child, writes, on, by_ref, out);
     }
 }
 
@@ -4560,7 +4574,7 @@ mod tests {
     #[test]
     fn an_argument_taken_by_reference_is_written_by_the_call() {
         let trace = "/Script/Marvel.MarvelBlueprintLibrary:AbilityTraceContext_DoTrace";
-        let by_ref = |callee: &str| (callee == trace).then_some(&[1usize][..]);
+        let by_ref = |callee: &str, _: Option<&Expr>| (callee == trace).then_some(&[1usize][..]);
         let expr = call(
             trace,
             vec![
@@ -4605,14 +4619,27 @@ mod tests {
             params: vec![var("LocalVariable", "Stock")],
             id: NameId::default(),
         };
-        let by_name = |callee: &str| (callee == "Refill").then_some(&[0usize][..]);
+        // Whose `Refill` a virtual call reaches is its object's to say: told the object, the
+        // caller can tell the pool's apart from one on the calling object itself.
+        let pools = |callee: &str, on: Option<&Expr>| {
+            let pool =
+                matches!(on, Some(Expr::Variable { property, .. }) if property.path == "Pool");
+            (callee == "Refill" && pool).then_some(&[0usize][..])
+        };
         assert_eq!(
-            terms_of_with(&virtual_call, &by_name),
-            ["Call Refill", "Write Stock"]
+            terms_of_with(&virtual_call, &pools),
+            ["Call Refill", "Read Stock"],
+            "on the calling object"
+        );
+        let on_pool = context(var("InstanceVariable", "Pool"), virtual_call);
+        assert_eq!(
+            terms_of_with(&on_pool, &pools),
+            ["Read Pool", "Call Refill", "Write Stock"],
+            "on the pool"
         );
     }
 
-    fn terms_of_with<'s>(expr: &Expr, by_ref: &dyn Fn(&str) -> Option<&'s [usize]>) -> Vec<String> {
+    fn terms_of_with<'s>(expr: &Expr, by_ref: &ByRefArgs<'_, 's>) -> Vec<String> {
         statement_terms_with(expr, by_ref)
             .into_iter()
             .map(|t| format!("{:?} {}", t.kind, t.text))
