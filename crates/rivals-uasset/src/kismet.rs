@@ -2454,26 +2454,79 @@ pub struct Term {
     /// struct, or the function owning a local or parameter. The name alone cannot say which.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
+    /// For a read or write: whose variable it is, as the opcode reaching it says.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<Scope>,
+}
+
+/// Whose variable a read or write is, by the opcode naming it. The owner's path cannot always
+/// say: a native struct's member names a struct its package never imports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Scope {
+    /// A function's local or parameter (`LocalVariable`, `LocalOutVariable`), an event graph's
+    /// frame (`LetValueOnPersistentFrame`), a call's output pin among them.
+    Local,
+    /// The object's variable (`InstanceVariable`), reached through a context for another object.
+    Instance,
+    /// The class default object's (`DefaultVariable`).
+    Default,
+    /// The class's sparse data (`ClassSparseDataVariable`).
+    SparseData,
+    /// A struct's member (`StructMemberContext`).
+    Member,
+}
+
+impl Scope {
+    fn of(opcode: &str) -> Option<Scope> {
+        Some(match opcode {
+            "LocalVariable" | "LocalOutVariable" | "LetValueOnPersistentFrame" => Scope::Local,
+            "InstanceVariable" => Scope::Instance,
+            "DefaultVariable" => Scope::Default,
+            "ClassSparseDataVariable" => Scope::SparseData,
+            "StructMemberContext" => Scope::Member,
+            _ => return None,
+        })
+    }
 }
 
 /// Everything `expr` names that can be searched for, in bytecode order.
 pub fn statement_terms(expr: &Expr) -> Vec<Term> {
+    statement_terms_with(expr, &|_| None)
+}
+
+/// As [`statement_terms`], told which arguments each callee takes by reference and may change:
+/// `by_ref` maps a callee, as a call names it (an object path, or a virtual call's bare name),
+/// to those arguments' positions. Bytecode marks no argument as passed by reference, and a
+/// callee's signature is often in another package, so the caller supplies what it knows; the
+/// engine functions that change an argument whatever they declare are known here regardless.
+pub fn statement_terms_with<'s>(
+    expr: &Expr,
+    by_ref: &dyn Fn(&str) -> Option<&'s [usize]>,
+) -> Vec<Term> {
     let mut out = Vec::new();
-    collect_terms(expr, false, &mut out);
+    collect_terms(expr, false, by_ref, &mut out);
     out
 }
 
 /// `writing` says `expr` is where a value is stored, so the variables it names are written.
-fn collect_terms(expr: &Expr, writing: bool, out: &mut Vec<Term>) {
+fn collect_terms<'s>(
+    expr: &Expr,
+    writing: bool,
+    by_ref: &dyn Fn(&str) -> Option<&'s [usize]>,
+    out: &mut Vec<Term>,
+) {
     let term = |kind, text: &str| Term {
         kind,
         text: text.to_string(),
         owner: None,
+        scope: None,
     };
-    let field = |kind, property: &PropertyRef| Term {
+    let field = |kind, opcode: &str, property: &PropertyRef| Term {
         kind,
         text: property.path.clone(),
         owner: property.owner.path.clone(),
+        scope: Scope::of(opcode),
     };
     let variable = if writing {
         TermKind::Write
@@ -2490,7 +2543,7 @@ fn collect_terms(expr: &Expr, writing: bool, out: &mut Vec<Term>) {
             }
         }
         Expr::VirtualCall { function, .. } => out.push(term(TermKind::Call, function)),
-        Expr::Variable { property, .. } => out.push(field(variable, property)),
+        Expr::Variable { name, property } => out.push(field(variable, name, property)),
         Expr::ObjectConst { object } | Expr::Cast { class: object, .. } => {
             if let Some(path) = &object.path {
                 out.push(term(TermKind::Object, path));
@@ -2499,11 +2552,11 @@ fn collect_terms(expr: &Expr, writing: bool, out: &mut Vec<Term>) {
         // An event's parameter copied onto the event graph's frame: the property is where the
         // value goes, and what it holds is the value.
         Expr::Member {
-            name: "LetValueOnPersistentFrame",
+            name: name @ "LetValueOnPersistentFrame",
             property,
             ..
-        } => out.push(field(TermKind::Write, property)),
-        Expr::Member { property, .. } => out.push(field(variable, property)),
+        } => out.push(field(TermKind::Write, name, property)),
+        Expr::Member { name, property, .. } => out.push(field(variable, name, property)),
         // An instance delegate reads as the function it names.
         Expr::NameConst {
             name: "InstanceDelegate",
@@ -2535,10 +2588,23 @@ fn collect_terms(expr: &Expr, writing: bool, out: &mut Vec<Term>) {
     }
     let written = written_child(expr, writing);
     let called = called_name(expr);
-    for child in children(expr) {
+    // A call's children are its arguments, in order.
+    let referenced = call_target(expr).and_then(by_ref).unwrap_or_default();
+    for (at, child) in children(expr).into_iter().enumerate() {
         let writes = written.is_some_and(|w| std::ptr::eq(w, child))
-            || called.is_some_and(|function| is_output_pin(function, child));
-        collect_terms(child, writes, out);
+            || called.is_some_and(|function| is_output_pin(function, child))
+            || referenced.contains(&at);
+        collect_terms(child, writes, by_ref, out);
+    }
+}
+
+/// The callee of a call as the call names it: a final call's object path, a virtual call's bare
+/// name.
+fn call_target(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::FinalCall { function, .. } => function.path.as_deref(),
+        Expr::VirtualCall { function, .. } => Some(function),
+        _ => None,
     }
 }
 
@@ -4430,6 +4496,127 @@ mod tests {
                 "Write CallFunc_GetActorBounds_Origin",
             ]
         );
+    }
+
+    /// Whose variable a read or write is comes from the opcode naming it, not the owner's path: a
+    /// native struct's member names a struct its package never imports, so the path alone left
+    /// `LinearColor.A` undecided.
+    #[test]
+    fn a_variable_says_whose_it_is_by_its_opcode() {
+        let color = Expr::Member {
+            name: "StructMemberContext",
+            property: PropertyRef {
+                names: Vec::new(),
+                path: "A".into(),
+                owner: object("/Script/CoreUObject.LinearColor"),
+            },
+            value: Box::new(var("InstanceVariable", "Tint")),
+        };
+        let expr = call(
+            "/Game/X.X_C:Use",
+            vec![
+                color,
+                var("LocalVariable", "Index"),
+                var("LocalOutVariable", "Result"),
+                var("DefaultVariable", "Speed"),
+                var("ClassSparseDataVariable", "Cost"),
+            ],
+        );
+        let scopes: Vec<(String, Option<Scope>)> = statement_terms(&expr)
+            .into_iter()
+            .filter(|t| t.kind == TermKind::Read)
+            .map(|t| (t.text, t.scope))
+            .collect();
+        let at = |text: &str, scope| (text.to_string(), Some(scope));
+        assert_eq!(
+            scopes,
+            [
+                at("A", Scope::Member),
+                at("Tint", Scope::Instance),
+                at("Index", Scope::Local),
+                at("Result", Scope::Local),
+                at("Speed", Scope::Default),
+                at("Cost", Scope::SparseData),
+            ]
+        );
+        let stored = member(
+            "LetValueOnPersistentFrame",
+            "K2Node_Event_Damage",
+            var("LocalVariable", "Damage"),
+        );
+        assert_eq!(
+            statement_terms(&stored)[0].scope,
+            Some(Scope::Local),
+            "the event graph's frame"
+        );
+        let named = statement_terms(&call("/Game/X.X_C:Use", vec![]));
+        assert_eq!(named[0].scope, None, "a call is no variable");
+    }
+
+    /// An argument a callee takes by reference is written by the call, by its position: here
+    /// `AbilityTraceContext_DoTrace` changes its second argument, which the bytecode passes as
+    /// the caller's own variable. Through a member, the member is written and the object it is
+    /// reached through read, as an assignment would.
+    #[test]
+    fn an_argument_taken_by_reference_is_written_by_the_call() {
+        let trace = "/Script/Marvel.MarvelBlueprintLibrary:AbilityTraceContext_DoTrace";
+        let by_ref = |callee: &str| (callee == trace).then_some(&[1usize][..]);
+        let expr = call(
+            trace,
+            vec![
+                var("InstanceVariable", "Owner"),
+                var("InstanceVariable", "Context"),
+                var("LocalVariable", "CallFunc_AbilityTraceContext_DoTrace_Hits"),
+            ],
+        );
+        assert_eq!(
+            terms_of_with(&expr, &by_ref),
+            [
+                format!("Call {trace}"),
+                "Read Owner".into(),
+                "Write Context".into(),
+                "Write CallFunc_AbilityTraceContext_DoTrace_Hits".into(),
+            ]
+        );
+        assert_eq!(
+            terms_of(&expr)[2],
+            "Read Context",
+            "told nothing, an argument is read"
+        );
+        let through = call(
+            trace,
+            vec![
+                var("InstanceVariable", "Owner"),
+                member(
+                    "StructMemberContext",
+                    "Inner",
+                    var("InstanceVariable", "Holder"),
+                ),
+            ],
+        );
+        assert_eq!(
+            terms_of_with(&through, &by_ref)[2..],
+            ["Write Inner", "Write Holder"],
+            "a struct member stored into stores into its struct"
+        );
+        let virtual_call = Expr::VirtualCall {
+            name: "VirtualFunction",
+            function: "Refill".into(),
+            params: vec![var("LocalVariable", "Stock")],
+            id: NameId::default(),
+        };
+        let by_name = |callee: &str| (callee == "Refill").then_some(&[0usize][..]);
+        assert_eq!(
+            terms_of_with(&virtual_call, &by_name),
+            ["Call Refill", "Write Stock"]
+        );
+    }
+
+    fn terms_of_with<'s>(expr: &Expr, by_ref: &dyn Fn(&str) -> Option<&'s [usize]>) -> Vec<String> {
+        statement_terms_with(expr, by_ref)
+            .into_iter()
+            .map(|t| format!("{:?} {}", t.kind, t.text))
+            .collect()
     }
 
     /// The census names a call whose object cannot be a function: a package, a type, an object at

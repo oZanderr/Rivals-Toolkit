@@ -19,7 +19,8 @@ const FUNC_NET: u32 = 0x0000_0040;
 #[cfg(test)]
 const FIELD_TAIL_BYTES: usize = 4 + 8 + 2;
 
-/// `CPF_Parm`, `CPF_OutParm`, `CPF_ReturnParm` and `CPF_ReferenceParm`.
+/// `CPF_ConstParm`, `CPF_Parm`, `CPF_OutParm`, `CPF_ReturnParm` and `CPF_ReferenceParm`.
+const CPF_CONST_PARM: u64 = 0x2;
 const CPF_PARM: u64 = 0x80;
 const CPF_OUT_PARM: u64 = 0x100;
 const CPF_RETURN_PARM: u64 = 0x400;
@@ -52,6 +53,10 @@ pub struct FunctionField {
     /// `Class<Actor>`.
     pub kind: String,
     pub role: FieldRole,
+    /// `CPF_ConstParm`: a reference the function may not change, which is an input however it
+    /// is passed.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub constant: bool,
     /// `ElementSize`: how many bytes one value takes once loaded.
     #[serde(skip)]
     pub element_size: i32,
@@ -104,6 +109,7 @@ impl FunctionSignature {
                 name: field.name.clone(),
                 kind: type_text_with(&field.inner, &mut detail.classes.iter()),
                 role,
+                constant: flag & CPF_CONST_PARM != 0,
                 element_size: detail.element_size,
             };
             if role == FieldRole::Local {
@@ -880,6 +886,42 @@ mod tests {
         assert_eq!(signature.locals[0].name, "Scratch");
     }
 
+    /// A reference parameter says whether the function may change it: `const T&` is an input
+    /// passed by reference, `UPARAM(ref) T&` the caller's variable to change.
+    #[test]
+    fn a_reference_parameter_says_whether_it_is_const() {
+        let mut out = Vec::new();
+        i32s(&mut out, &[0, 0, 2]); // no super, no children, two fields
+        plain_field(
+            &mut out,
+            "IntProperty",
+            "Index",
+            CPF_PARM | CPF_OUT_PARM | CPF_REFERENCE_PARM,
+        );
+        plain_field(
+            &mut out,
+            "StrProperty",
+            "Label",
+            CPF_PARM | CPF_REFERENCE_PARM | CPF_CONST_PARM,
+        );
+        i32s(&mut out, &[0, 0]); // no bytecode
+        i32s(&mut out, &[0, 0, 0]);
+        let mut cursor = Cursor::new(&out, 0);
+        let tail = scan_struct_tail(&mut cursor, &header(), &["Function"]).expect("tail");
+        let params = tail.signature.expect("signature").params;
+        let read: Vec<(&str, FieldRole, bool)> = params
+            .iter()
+            .map(|p| (p.name.as_str(), p.role, p.constant))
+            .collect();
+        assert_eq!(
+            read,
+            [
+                ("Index", FieldRole::Ref, false),
+                ("Label", FieldRole::Ref, true)
+            ]
+        );
+    }
+
     /// A class reference names its metaclass after its own class, and reads as a class, not as an
     /// object of the metaclass.
     #[test]
@@ -919,6 +961,7 @@ mod tests {
             name: name.into(),
             kind: "Array<Str>".into(),
             role,
+            constant: false,
             element_size: 16,
         };
         let signature = FunctionSignature {
