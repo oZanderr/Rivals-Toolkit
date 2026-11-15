@@ -9,7 +9,6 @@ authors.workspace = true
 retoc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-usmap.workspace = true
 
 [features]
 # Builders for synthetic packages, for other crates' tests.

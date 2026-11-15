@@ -2,10 +2,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::usmap::PropertyInner;
 use retoc::legacy_asset::{FLegacyPackageHeader, FPackageNameMap};
 use retoc::zen::FPackageIndex;
 use serde::Serialize;
-use usmap::PropertyInner;
 
 use crate::mappings::{Mappings, Schema, SchemaFixups, kind_name};
 use crate::reader::Cursor;
@@ -2647,7 +2647,7 @@ mod tests {
     /// the failure must say so here rather than pages later.
     #[test]
     fn a_header_covering_more_slots_than_the_schema_is_refused_at_once() {
-        use usmap::{Property, Struct};
+        use crate::usmap::{Property, Struct};
 
         let mappings = crate::mappings::Mappings::from_structs(vec![Struct {
             name: "Two".into(),

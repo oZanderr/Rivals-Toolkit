@@ -514,8 +514,8 @@ fn int(cursor: &mut Cursor<'_>, name: &str) -> Result<PropertyEntry, String> {
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
+    use crate::usmap::{Property, PropertyInner, Struct};
     use retoc::legacy_asset::FLegacyPackageHeader;
-    use usmap::{Property, PropertyInner, Struct};
 
     use super::*;
     use crate::mappings::Mappings;

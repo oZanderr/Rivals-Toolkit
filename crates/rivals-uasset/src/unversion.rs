@@ -6,8 +6,8 @@
 //! structs opens with a tag for its elements. Everything else is copied byte for byte. The result
 //! is read back against the game's schema and must hold every value the tagged package held.
 
+use crate::usmap::PropertyInner;
 use retoc::legacy_asset::{EPackageFlags, FPackageNameMap};
-use usmap::PropertyInner;
 
 use crate::mappings::{Mappings, Schema, kind_name};
 use crate::package::{
@@ -417,11 +417,11 @@ fn leaf(path: &str, value: &PropertyValue, out: &mut Vec<(String, String)>) {
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
+    use crate::usmap::{Enum, Property, Struct};
     use retoc::legacy_asset::{
         FLegacyPackageFileSummary, FLegacyPackageHeader, FMinimalName, FObjectExport, FObjectImport,
     };
     use retoc::zen::FPackageIndex;
-    use usmap::{Enum, Property, Struct};
 
     use super::*;
     use crate::package::FALLBACK_ENGINE_VERSION;

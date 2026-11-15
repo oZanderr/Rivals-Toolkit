@@ -1352,10 +1352,10 @@ fn read_scope(
                 .map(|slot| slot.property.inner.clone())
         });
         let children = match inner {
-            Some(usmap::PropertyInner::Struct { name }) if depth < MAX_LISTED_DEPTH => {
+            Some(crate::usmap::PropertyInner::Struct { name }) if depth < MAX_LISTED_DEPTH => {
                 read_scope(entries, at, &Level::Struct(name), ctx, depth + 1)
             }
-            Some(usmap::PropertyInner::Array { inner }) => {
+            Some(crate::usmap::PropertyInner::Array { inner }) => {
                 read_elements(entries, at, level, &entry.name, &inner, ctx, depth)
             }
             _ => Vec::new(),
@@ -1370,7 +1370,7 @@ fn read_elements(
     at: &mut usize,
     owner: &Level,
     array: &str,
-    inner: &usmap::PropertyInner,
+    inner: &crate::usmap::PropertyInner,
     ctx: &ListContext<'_>,
     depth: usize,
 ) -> Vec<ListNode> {
@@ -1389,7 +1389,7 @@ fn read_elements(
             break;
         }
         let children = match inner {
-            usmap::PropertyInner::Struct { name } if depth < MAX_LISTED_DEPTH => {
+            crate::usmap::PropertyInner::Struct { name } if depth < MAX_LISTED_DEPTH => {
                 read_scope(entries, at, &Level::Struct(name.clone()), ctx, depth + 1)
             }
             _ => Vec::new(),
@@ -1441,7 +1441,7 @@ fn touch_in(
         }
     };
     match &inner {
-        usmap::PropertyInner::Struct { name } => {
+        crate::usmap::PropertyInner::Struct { name } => {
             let struct_level = Level::Struct(name.clone());
             match fields {
                 None => {
@@ -1468,10 +1468,10 @@ fn touch_in(
                 }
             }
         }
-        usmap::PropertyInner::Array { inner } => {
+        crate::usmap::PropertyInner::Array { inner } => {
             nodes[at].children = element_listing(level, property, inner, value, ctx, depth)?;
         }
-        usmap::PropertyInner::Set { .. } | usmap::PropertyInner::Map { .. } => {
+        crate::usmap::PropertyInner::Set { .. } | crate::usmap::PropertyInner::Map { .. } => {
             nodes[at].children.clear();
         }
         _ => {}
@@ -1556,10 +1556,10 @@ fn full_listing(
             continue;
         }
         let children = match &slot.property.inner {
-            usmap::PropertyInner::Struct { name } => {
+            crate::usmap::PropertyInner::Struct { name } => {
                 full_listing(name, field_value, ctx, depth + 1)?
             }
-            usmap::PropertyInner::Array { inner } => {
+            crate::usmap::PropertyInner::Array { inner } => {
                 element_listing(&level, &slot.property.name, inner, field_value, ctx, depth)?
             }
             _ => Vec::new(),
@@ -1581,7 +1581,7 @@ fn full_listing(
 fn element_listing(
     owner: &Level,
     array: &str,
-    inner: &usmap::PropertyInner,
+    inner: &crate::usmap::PropertyInner,
     value: Option<&PropertyValue>,
     ctx: &ListContext<'_>,
     depth: usize,
@@ -1593,7 +1593,7 @@ fn element_listing(
     let mut nodes = Vec::new();
     for (index, item) in items.iter().enumerate() {
         let children = match inner {
-            usmap::PropertyInner::Struct { name } => {
+            crate::usmap::PropertyInner::Struct { name } => {
                 full_listing(name, Some(item), ctx, depth + 1)?
             }
             _ => Vec::new(),

@@ -787,7 +787,7 @@ fn components_of(
 
 /// A struct's components from its schema, for a type the known list leaves out.
 fn schema_components(name: &str, mappings: &Mappings, depth: u32) -> Option<Vec<Component>> {
-    use usmap::PropertyInner as P;
+    use crate::usmap::PropertyInner as P;
     if depth > 8 {
         return None;
     }

@@ -298,24 +298,18 @@ mod tests {
 
     /// A mappings file of empty structs with these names, written at `path`.
     fn write_usmap(path: &Path, structs: &[&str]) {
-        let usmap = usmap::Usmap {
+        let usmap = rivals_uasset::usmap::Usmap {
             enums: Vec::new(),
             structs: structs
                 .iter()
-                .map(|name| usmap::Struct {
+                .map(|name| rivals_uasset::usmap::Struct {
                     name: name.to_string(),
                     super_struct: None,
                     properties: Vec::new(),
                 })
                 .collect(),
-            cext: None,
-            ppth: None,
-            eatr: None,
-            envp: None,
         };
-        let mut bytes = Vec::new();
-        usmap.write(&mut bytes).expect("write the usmap");
-        std::fs::write(path, bytes).expect("write");
+        std::fs::write(path, usmap.write()).expect("write");
     }
 
     /// The same file is parsed once however often it is asked for. Rewritten, it is parsed again,

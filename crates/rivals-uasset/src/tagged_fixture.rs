@@ -426,7 +426,7 @@ pub fn sparse_package() -> (Vec<u8>, Vec<u8>) {
 
 /// The schema [`sparse_package`] was cooked against.
 pub fn sparse_mappings() -> Mappings {
-    use usmap::{Property, PropertyInner, Struct};
+    use crate::usmap::{Property, PropertyInner, Struct};
     let struct_named = |name: &str| PropertyInner::Struct { name: name.into() };
     let my_struct = || struct_named("MyStruct");
     let property = |name: &str, index: u16, inner: PropertyInner| Property {

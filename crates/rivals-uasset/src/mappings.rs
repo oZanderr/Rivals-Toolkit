@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
-use usmap::{Property, PropertyInner, Struct, Usmap};
+use crate::usmap::{Property, PropertyInner, Struct, Usmap};
 
 /// Guards against a cyclic super-struct chain in a malformed mappings file.
 const MAX_INHERITANCE_DEPTH: u32 = 128;
@@ -39,30 +39,21 @@ pub struct Mappings {
 
 impl Mappings {
     pub fn load(bytes: &[u8]) -> Result<Self, String> {
-        check_supported_compression(bytes)?;
-        let inner = Usmap::read(&mut std::io::Cursor::new(bytes))
-            .map_err(|e| format!("parse usmap: {e:#}"))?;
+        let inner = Usmap::read(bytes).map_err(|e| format!("parse usmap: {e}"))?;
         Ok(Self::from_usmap(inner))
     }
 
     /// A schema source built from structs recovered out of the game's own packages rather than a
     /// mappings file. See [`crate::ustruct`].
-    pub(crate) fn from_structs(structs: Vec<usmap::Struct>) -> Self {
+    pub(crate) fn from_structs(structs: Vec<crate::usmap::Struct>) -> Self {
         Self::from_structs_and_enums(structs, Vec::new())
     }
 
     pub(crate) fn from_structs_and_enums(
-        structs: Vec<usmap::Struct>,
-        enums: Vec<usmap::Enum>,
+        structs: Vec<crate::usmap::Struct>,
+        enums: Vec<crate::usmap::Enum>,
     ) -> Self {
-        Self::from_usmap(Usmap {
-            enums,
-            structs,
-            cext: None,
-            ppth: None,
-            eatr: None,
-            envp: None,
-        })
+        Self::from_usmap(Usmap { enums, structs })
     }
 
     fn from_usmap(inner: Usmap) -> Self {
@@ -301,7 +292,7 @@ impl Mappings {
 
     /// Copies of the entries from `name` up to its root, for a mappings that has to carry a
     /// class's whole chain on its own.
-    pub fn chain_entries(&self, name: &str) -> Vec<usmap::Struct> {
+    pub fn chain_entries(&self, name: &str) -> Vec<crate::usmap::Struct> {
         self.ancestry(name)
             .into_iter()
             .filter_map(|step| {
@@ -595,44 +586,11 @@ fn flatten_one(
     }
 }
 
-/// The Oodle and Brotli paths in the usmap crate are unimplemented and panic, so reject those
-/// before parsing. Mirrors the private header layout in that crate.
-fn check_supported_compression(bytes: &[u8]) -> Result<(), String> {
-    let mut cursor = crate::reader::Cursor::new(bytes, 0);
-    let magic = cursor
-        .read_u16()
-        .map_err(|_| "file is too short to be a .usmap".to_string())?;
-    if magic != 0x30C4 {
-        return Err(format!("not a .usmap file (magic 0x{magic:04X})"));
-    }
-    let version = cursor.read_u8()?;
-    if version >= 1 && cursor.read_i32()? > 0 {
-        cursor.skip(8)?;
-        let custom_versions = cursor.read_u32()?;
-        for _ in 0..custom_versions {
-            cursor.skip(24)?;
-        }
-        cursor.skip(4)?;
-    }
-    match cursor.read_u8()? {
-        0 | 3 => Ok(()),
-        1 => Err(oodle_or_brotli("Oodle")),
-        2 => Err(oodle_or_brotli("Brotli")),
-        other => Err(format!("unknown .usmap compression method {other}")),
-    }
-}
-
-fn oodle_or_brotli(method: &str) -> String {
-    format!(
-        "this .usmap is {method} compressed, which is not supported. Re-save it uncompressed or zstd compressed."
-    )
-}
-
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use usmap::{PropertyInner, Struct};
+    use crate::usmap::{PropertyInner, Struct};
 
     fn property(name: &str, index: u16, array_dim: u8) -> Property {
         Property {
@@ -647,10 +605,6 @@ mod tests {
         Mappings::from_usmap(Usmap {
             enums: Vec::new(),
             structs,
-            cext: None,
-            ppth: None,
-            eatr: None,
-            envp: None,
         })
     }
 
@@ -944,24 +898,6 @@ mod tests {
         ]);
         assert!(!m.schema("A").expect("schema").is_empty());
     }
-
-    #[test]
-    fn an_oodle_compressed_mappings_file_is_rejected_with_a_readable_message() {
-        let mut bytes = 0x30C4u16.to_le_bytes().to_vec();
-        bytes.push(0);
-        bytes.push(1);
-        let err = check_supported_compression(&bytes).expect_err("should reject");
-        assert!(err.contains("Oodle"), "{err}");
-    }
-
-    #[test]
-    fn a_version_four_header_with_no_package_versioning_finds_the_compression_byte() {
-        let mut bytes = 0x30C4u16.to_le_bytes().to_vec();
-        bytes.push(4);
-        bytes.extend_from_slice(&0i32.to_le_bytes());
-        bytes.push(3);
-        assert!(check_supported_compression(&bytes).is_ok());
-    }
 }
 
 /// Set `RIVALS_USMAP` to a real mappings file to run these. They are skipped otherwise because
@@ -1121,11 +1057,7 @@ mod real_mappings_tests {
         );
     }
 
-    /// Prints the flattened schema for the struct named by `RIVALS_STRUCT`. Not an assertion:
-    /// this is the tool for lining a schema up against a byte stream when an export desyncs.
-    /// Prints what the loaded mappings file actually contains. `.usmap` can carry optional
-    /// extension blocks, and property flags in particular would settle cases the reader currently
-    /// has to infer from the bytes, so it is worth knowing whether a dump includes them.
+    /// Prints how much the loaded mappings file holds.
     #[test]
     fn dump_mappings_summary() {
         let (Some(m), Ok(_)) = (load_real(), std::env::var("RIVALS_SUMMARY")) else {
@@ -1133,10 +1065,6 @@ mod real_mappings_tests {
         };
         println!("structs {}", m.struct_count());
         println!("enums {}", m.enum_count());
-        println!("cext (class extensions) {}", m.inner.cext.is_some());
-        println!("ppth (property paths)   {}", m.inner.ppth.is_some());
-        println!("eatr (property flags)   {}", m.inner.eatr.is_some());
-        println!("envp (enum value pairs) {}", m.inner.envp.is_some());
         let rooted = m
             .inner
             .structs
@@ -1170,6 +1098,8 @@ mod real_mappings_tests {
         }
     }
 
+    /// Prints the flattened schema for the struct named by `RIVALS_STRUCT`. Not an assertion:
+    /// this is the tool for lining a schema up against a byte stream when an export desyncs.
     #[test]
     fn dump_schema() {
         let (Some(m), Ok(name)) = (load_real(), std::env::var("RIVALS_STRUCT")) else {
@@ -1182,21 +1112,6 @@ mod real_mappings_tests {
                     entry.super_struct,
                     entry.properties.len()
                 );
-                let flags = m
-                    .inner
-                    .eatr
-                    .as_ref()
-                    .and_then(|e| e.struct_flags.get(index));
-                if let Some(flags) = flags {
-                    for (i, property) in entry.properties.iter().enumerate() {
-                        println!(
-                            "FLAGS idx={:<4} {:<46} {:#018x}",
-                            property.index,
-                            property.name,
-                            flags.prop_flags.get(i).copied().unwrap_or_default()
-                        );
-                    }
-                }
             }
         }
         let Some(schema) = m.schema(&name) else {

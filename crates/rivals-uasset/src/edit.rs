@@ -1886,7 +1886,7 @@ pub fn patch_package_with(
                     if let Some(target) = declared_reference(declared, &value) {
                         object_links.push((start, target));
                     }
-                    if matches!(absent.inner, usmap::PropertyInner::Text) {
+                    if matches!(absent.inner, crate::usmap::PropertyInner::Text) {
                         link_text_tables(&value, start, &mut tables, &mut object_links)?;
                     }
                     let (bytes, value_at) = tag_bytes(
@@ -4899,8 +4899,8 @@ fn index_after(edits: &PackageEdits, offset: u64, index: u32, keyed: bool) -> us
 }
 
 /// The type a tag names for a property of this kind.
-fn tag_type(inner: &usmap::PropertyInner) -> Result<&'static str, String> {
-    use usmap::PropertyInner as P;
+fn tag_type(inner: &crate::usmap::PropertyInner) -> Result<&'static str, String> {
+    use crate::usmap::PropertyInner as P;
     Ok(match inner {
         P::Byte => "ByteProperty",
         P::Bool => "BoolProperty",
@@ -4946,12 +4946,12 @@ fn tag_type(inner: &usmap::PropertyInner) -> Result<&'static str, String> {
 pub(crate) fn tag_bytes(
     name: &str,
     array_index: u32,
-    inner: &usmap::PropertyInner,
+    inner: &crate::usmap::PropertyInner,
     value: &[u8],
     flag: bool,
     names: &mut FPackageNameMap,
 ) -> Result<(Vec<u8>, u64), String> {
-    use usmap::PropertyInner as P;
+    use crate::usmap::PropertyInner as P;
     let mut out = encode_name(name, names);
     out.extend(encode_name(tag_type(inner)?, names));
     let size = i32::try_from(value.len()).map_err(|_| "the value is too large for a tag")?;
@@ -4993,7 +4993,7 @@ fn tagged_value(
     package: &retoc::legacy_asset::FLegacyPackageHeader,
     mappings: Option<&Mappings>,
 ) -> Result<(Vec<u8>, bool), String> {
-    use usmap::PropertyInner as P;
+    use crate::usmap::PropertyInner as P;
     let inner = &absent.inner;
     let Some(text) = text else {
         let empty = match inner {
@@ -8998,7 +8998,7 @@ mod tests {
     fn colours() -> Mappings {
         Mappings::from_structs_and_enums(
             Vec::new(),
-            vec![usmap::Enum {
+            vec![crate::usmap::Enum {
                 name: "EColour".into(),
                 entries: [(0, "Red".to_string()), (2, "Blue".to_string())].into(),
             }],

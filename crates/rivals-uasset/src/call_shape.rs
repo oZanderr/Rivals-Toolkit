@@ -185,9 +185,11 @@ impl<'a> Types<'a> {
 
 /// A declared type as a script reads it: a weak or lazy pointer reaches a script as the object it
 /// points at.
-fn held_as(inner: &usmap::PropertyInner) -> String {
+fn held_as(inner: &crate::usmap::PropertyInner) -> String {
     match inner {
-        usmap::PropertyInner::WeakObject | usmap::PropertyInner::LazyObject => "Object".into(),
+        crate::usmap::PropertyInner::WeakObject | crate::usmap::PropertyInner::LazyObject => {
+            "Object".into()
+        }
         _ => crate::ustruct::type_text(inner),
     }
 }
@@ -965,7 +967,7 @@ mod tests {
     }
 
     fn hierarchy() -> Mappings {
-        let class = |name: &str, parent: Option<&str>| usmap::Struct {
+        let class = |name: &str, parent: Option<&str>| crate::usmap::Struct {
             name: name.into(),
             super_struct: parent.map(str::to_string),
             properties: vec![],
@@ -979,7 +981,7 @@ mod tests {
                 class("Light", Some("Actor")),
                 class("Vector", None),
             ],
-            vec![usmap::Enum {
+            vec![crate::usmap::Enum {
                 name: "EMode".into(),
                 entries: Default::default(),
             }],
@@ -1200,7 +1202,7 @@ mod tests {
     #[test]
     fn a_member_passed_takes_the_type_its_owner_declares() {
         use crate::kismet::ObjectRef;
-        use usmap::{Property, PropertyInner, Struct};
+        use crate::usmap::{Property, PropertyInner, Struct};
 
         let field = |name: &str, inner: PropertyInner| Property {
             name: name.into(),

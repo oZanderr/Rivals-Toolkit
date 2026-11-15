@@ -79,6 +79,7 @@ mod unversioned;
 mod unversioned_edit_tests;
 #[cfg(test)]
 mod unversioned_fixture;
+pub mod usmap;
 mod ustruct;
 mod value;
 mod write;

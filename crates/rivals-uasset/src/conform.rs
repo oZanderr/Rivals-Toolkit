@@ -483,8 +483,8 @@ fn hidden_material_splices(
             let flags = &lists[lod.min(lists.len() - 1)];
             let mut value = (flags.len() as i32).to_le_bytes().to_vec();
             value.extend(flags.iter().map(|hidden| u8::from(*hidden)));
-            let inner = usmap::PropertyInner::Array {
-                inner: Box::new(usmap::PropertyInner::Bool),
+            let inner = crate::usmap::PropertyInner::Array {
+                inner: Box::new(crate::usmap::PropertyInner::Bool),
             };
             let (bytes, _) =
                 crate::edit::tag_bytes("DefaultHiddenMaterials", 0, &inner, &value, false, names)?;

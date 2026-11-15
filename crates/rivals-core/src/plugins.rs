@@ -251,6 +251,17 @@ fn companions(files: &[&Listed]) -> Vec<Companion> {
 pub fn identify(bytes: &[u8]) -> (LoaderKind, Option<String>) {
     use pelite::pe64::{Pe, PeFile};
 
+    // pelite reads the headers through 8-byte aligned pointers, and nothing aligns a byte slice:
+    // an `include_bytes!` lands wherever the linker puts it.
+    let mut copy = Vec::new();
+    let bytes = if bytes.as_ptr().align_offset(8) == 0 {
+        bytes
+    } else {
+        copy.resize(bytes.len() + 7, 0u8);
+        let at = copy.as_ptr().align_offset(8).min(7);
+        copy[at..at + bytes.len()].copy_from_slice(bytes);
+        &copy[at..at + bytes.len()]
+    };
     let Ok(file) = PeFile::from_bytes(bytes) else {
         return (LoaderKind::Unknown, None);
     };

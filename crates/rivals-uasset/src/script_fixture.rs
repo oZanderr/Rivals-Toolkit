@@ -688,7 +688,7 @@ pub fn class_on_native_parent() -> Built {
 /// The mappings [`class_on_native_parent`] reads against: `Actor`, declaring `bHidden`, under
 /// `Object`, and no entry for the Blueprint class.
 pub fn native_parent_mappings() -> crate::mappings::Mappings {
-    use usmap::{Property, PropertyInner, Struct};
+    use crate::usmap::{Property, PropertyInner, Struct};
     crate::mappings::Mappings::from_structs(vec![
         Struct {
             name: "Object".into(),

@@ -410,17 +410,17 @@ mod tests {
         export.object_name = "CardData".into();
         export.class_name = "UserDefinedStruct".into();
         export.path = "/Game/Data/CardData.CardData".into();
-        export.struct_definition = Some(usmap::Struct {
+        export.struct_definition = Some(crate::usmap::Struct {
             name: "CardData".into(),
             super_struct: None,
             properties: members
                 .iter()
                 .enumerate()
-                .map(|(at, name)| usmap::Property {
+                .map(|(at, name)| crate::usmap::Property {
                     name: (*name).into(),
                     array_dim: 1,
                     index: at as u16,
-                    inner: usmap::PropertyInner::Int,
+                    inner: crate::usmap::PropertyInner::Int,
                 })
                 .collect(),
         });

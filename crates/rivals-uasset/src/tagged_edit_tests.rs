@@ -861,7 +861,7 @@ fn holder_package() -> (Vec<u8>, Vec<u8>) {
 }
 
 fn holder_mappings() -> Mappings {
-    use usmap::{Property, PropertyInner, Struct};
+    use crate::usmap::{Property, PropertyInner, Struct};
     let my_struct = || PropertyInner::Struct {
         name: "MyStruct".into(),
     };
@@ -1696,7 +1696,7 @@ fn a_malformed_name_cannot_be_saved_as_and_a_level_can() {
 
 /// A schema with one class of objects holding one number, rooted at `Object`.
 fn thing_mappings() -> Mappings {
-    use usmap::{Property, PropertyInner, Struct};
+    use crate::usmap::{Property, PropertyInner, Struct};
     Mappings::from_structs(vec![
         Struct {
             name: "Object".into(),

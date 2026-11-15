@@ -362,7 +362,7 @@ fn event_parameters(
         ctx,
         diagnostics,
         "StructBytes",
-        &usmap::PropertyInner::Byte,
+        &crate::usmap::PropertyInner::Byte,
     )?;
     Ok(build("MovieSceneEventParameters", vec![struct_type, bytes]))
 }
@@ -467,7 +467,7 @@ fn serializable_property_soft_path(
         ctx,
         diagnostics,
         "Data",
-        &usmap::PropertyInner::Byte,
+        &crate::usmap::PropertyInner::Byte,
     )?;
     let path = byte_counted_strings(cursor, ctx, diagnostics, "PropertySoftPath")?;
     Ok(build("SerializablePropertySoftPath", vec![data, path]))
@@ -503,7 +503,7 @@ fn byte_counted_strings(
         at,
         1,
         elements,
-        &usmap::PropertyInner::Str,
+        &crate::usmap::PropertyInner::Str,
         None,
     );
     Ok(PropertyEntry {
@@ -799,14 +799,14 @@ fn weighted_sampler(
             ctx,
             diagnostics,
             "Prob",
-            &usmap::PropertyInner::Float,
+            &crate::usmap::PropertyInner::Float,
         )?,
         scalar_array(
             cursor,
             ctx,
             diagnostics,
             "Alias",
-            &usmap::PropertyInner::Int,
+            &crate::usmap::PropertyInner::Int,
         )?,
         scalar(cursor, "TotalWeight", |c| {
             Ok(PropertyValue::Float {
@@ -830,14 +830,14 @@ fn region_built_data(
         ctx,
         diagnostics,
         "TriangleIndices",
-        &usmap::PropertyInner::Int,
+        &crate::usmap::PropertyInner::Int,
     )?;
     let bones = scalar_array(
         cursor,
         ctx,
         diagnostics,
         "BoneIndices",
-        &usmap::PropertyInner::Int,
+        &crate::usmap::PropertyInner::Int,
     )?;
     let sampler = scalar(cursor, "AreaWeightedSampler", |c| {
         weighted_sampler(
@@ -852,7 +852,7 @@ fn region_built_data(
         ctx,
         diagnostics,
         "Vertices",
-        &usmap::PropertyInner::Int,
+        &crate::usmap::PropertyInner::Int,
     )?;
     Ok(build(name, vec![triangles, bones, sampler, vertices]))
 }
@@ -1049,12 +1049,12 @@ fn scalar_array(
     ctx: &Ctx<'_>,
     diagnostics: &mut Diagnostics,
     name: &str,
-    inner: &usmap::PropertyInner,
+    inner: &crate::usmap::PropertyInner,
 ) -> Result<PropertyEntry, String> {
     let at = cursor.file_offset();
     let count = cursor.read_i32()?;
     let width = match inner {
-        usmap::PropertyInner::Byte => 1,
+        crate::usmap::PropertyInner::Byte => 1,
         _ => 4,
     };
     let fits = usize::try_from(count)
@@ -1069,10 +1069,10 @@ fn scalar_array(
     for _ in 0..count {
         let start = cursor.file_offset();
         items.push(match inner {
-            usmap::PropertyInner::Float => PropertyValue::Float {
+            crate::usmap::PropertyInner::Float => PropertyValue::Float {
                 value: f64::from(cursor.read_f32()?),
             },
-            usmap::PropertyInner::Byte => PropertyValue::Byte {
+            crate::usmap::PropertyInner::Byte => PropertyValue::Byte {
                 value: cursor.read_u8()?,
             },
             _ => PropertyValue::Int {
@@ -1287,8 +1287,8 @@ mod tests {
 
     /// Each native layout's default, read back through the layout.
     fn every_native_default() -> Vec<(&'static str, PropertyValue)> {
+        use crate::usmap::{Property, PropertyInner, Struct};
         use retoc::legacy_asset::FPackageNameMap;
-        use usmap::{Property, PropertyInner, Struct};
 
         use crate::mappings::Mappings;
 
@@ -1416,8 +1416,8 @@ mod tests {
 
     /// The reflected side of the layouts that wrap a property block: the tether data declares no
     /// properties in this build, the Nanite override three.
-    fn reflected_structs() -> Vec<usmap::Struct> {
-        use usmap::{Property, PropertyInner, Struct};
+    fn reflected_structs() -> Vec<crate::usmap::Struct> {
+        use crate::usmap::{Property, PropertyInner, Struct};
         let property = |name: &str, index: u16, inner| Property {
             name: name.into(),
             array_dim: 1,

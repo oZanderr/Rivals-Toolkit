@@ -746,7 +746,7 @@ pub(crate) fn object_list(
         at,
         at,
         elements,
-        &usmap::PropertyInner::Object,
+        &crate::usmap::PropertyInner::Object,
         None,
     );
     Ok(PropertyEntry {
@@ -1085,7 +1085,7 @@ mod tests {
     /// word must not be read first; a mesh renderer still closes with the zero word alone.
     #[test]
     fn a_sprite_renderer_reads_its_cutout_geometry_where_other_renderers_read_a_zero_word() {
-        use usmap::Struct;
+        use crate::usmap::Struct;
         let class = |name: &str, base: Option<&str>| Struct {
             name: name.into(),
             super_struct: base.map(str::to_string),
@@ -1442,7 +1442,7 @@ mod tests {
     /// seven properties it writes in its own order rather than the schema's.
     #[test]
     fn wwise_cooked_data_reads_as_its_property_and_an_event_closes_with_seven_words() {
-        use usmap::{Property, PropertyInner, Struct};
+        use crate::usmap::{Property, PropertyInner, Struct};
         let property = |name: &str, index: u16, inner| Property {
             name: name.into(),
             array_dim: 1,

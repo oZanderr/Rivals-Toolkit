@@ -4,12 +4,12 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
+use crate::usmap::PropertyInner;
 use retoc::legacy_asset::{
     EPackageFlags, FLegacyPackageFileSummary, FLegacyPackageHeader, FMinimalName, FObjectExport,
     FObjectImport, FPackageNameMap,
 };
 use retoc::zen::FPackageIndex;
-use usmap::PropertyInner;
 
 use crate::mappings::Mappings;
 use crate::package::FALLBACK_ENGINE_VERSION;
@@ -465,7 +465,7 @@ pub fn unversioned_package() -> (Vec<u8>, Vec<u8>) {
 
 /// The schema [`unversioned_package`] was cooked against.
 pub fn unversioned_mappings() -> Mappings {
-    use usmap::{Property, Struct};
+    use crate::usmap::{Property, Struct};
     let property = |name: &str, index: u16, inner: PropertyInner| Property {
         name: name.into(),
         array_dim: 1,

@@ -545,6 +545,24 @@ mod tests {
         assert_eq!(kind, rivals_core::plugins::LoaderKind::MinimalAsiLoader);
     }
 
+    /// The bundled bytes sit wherever the linker puts them, so reading them cannot depend on
+    /// where that is.
+    #[test]
+    fn the_loader_reads_the_same_from_a_misaligned_slice() {
+        if !BYPASS_ASI_LOADER.starts_with(b"MZ") {
+            return;
+        }
+        let mut buffer = vec![0u8; BYPASS_ASI_LOADER.len() + 8];
+        let at = (buffer.as_ptr().align_offset(8) + 1) % 8;
+        let shifted = &mut buffer[at..at + BYPASS_ASI_LOADER.len()];
+        shifted.copy_from_slice(BYPASS_ASI_LOADER);
+        assert_ne!(shifted.as_ptr().align_offset(8), 0);
+        assert_eq!(
+            rivals_core::plugins::identify(shifted),
+            rivals_core::plugins::identify(BYPASS_ASI_LOADER)
+        );
+    }
+
     #[test]
     fn the_loader_alone_installs_beside_plugins_and_leaves_another_dsound_alone() {
         let root = scratch_game_root();

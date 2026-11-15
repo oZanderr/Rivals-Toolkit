@@ -2,9 +2,9 @@
 //! never saw can still be decoded, and walks the rest of a class or function export so the object
 //! references in its layout can be followed.
 
+use crate::usmap::{Property, PropertyInner, Struct};
 use retoc::legacy_asset::FLegacyPackageHeader;
 use serde::Serialize;
-use usmap::{Property, PropertyInner, Struct};
 
 use crate::mappings::Mappings;
 use crate::package::{AssetBundle, parse_package};

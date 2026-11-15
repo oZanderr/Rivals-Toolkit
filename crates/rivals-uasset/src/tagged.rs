@@ -7,8 +7,8 @@
 //!
 //! Because the tags carry their own type information, a tagged package needs no mappings file.
 
+use crate::usmap::PropertyInner;
 use retoc::legacy_asset::FPackageNameMap;
-use usmap::PropertyInner;
 
 use crate::props::{
     Ctx, Diagnostics, InstancedLayout, UndecodedPayload, read_value, record_container,

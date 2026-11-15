@@ -89,7 +89,7 @@ pub struct ParsedExport {
     pub string_table: Option<stringtable::StringTable>,
     /// The field records a script struct export declares, which is the schema for its own values.
     #[serde(skip)]
-    pub struct_definition: Option<usmap::Struct>,
+    pub struct_definition: Option<crate::usmap::Struct>,
     /// An enum's entries, `_MAX` last, where the export is one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enum_tail: Option<crate::tails::EnumTail>,
@@ -975,7 +975,7 @@ fn parse_chosen(
     // The package's own structs outrank the mappings file, so they are read first. Every animation
     // Blueprint generates its constant and mutable data under the same names, the file holds only
     // one of each, and the class's sparse data is read with its default object, ahead of the struct.
-    let own: Vec<usmap::Struct> = header
+    let own: Vec<crate::usmap::Struct> = header
         .exports
         .iter()
         .enumerate()
@@ -1557,7 +1557,7 @@ fn parse_one_inner(
                                 )
                             })
                             .flatten();
-                        let definition = usmap::Struct {
+                        let definition = crate::usmap::Struct {
                             name: base.object_name.clone(),
                             super_struct,
                             properties,
@@ -1639,7 +1639,7 @@ fn read_default_instance(
     cursor: &mut Cursor<'_>,
     ctx: &Ctx<'_>,
     diagnostics: &mut Diagnostics,
-    definition: &usmap::Struct,
+    definition: &crate::usmap::Struct,
     tagged: bool,
 ) -> Vec<PropertyEntry> {
     let local = Mappings::from_structs(vec![definition.clone()]);
@@ -2655,7 +2655,7 @@ mod tagged_package_tests {
 
     /// The class chain a Blueprint struct's layout walk needs to recognise it.
     fn struct_classes() -> Mappings {
-        let class = |name: &str, parent: Option<&str>| usmap::Struct {
+        let class = |name: &str, parent: Option<&str>| crate::usmap::Struct {
             name: name.into(),
             super_struct: parent.map(Into::into),
             properties: Vec::new(),

@@ -247,8 +247,8 @@ fn var_data(
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
+    use crate::usmap::{Property, PropertyInner, Struct};
     use retoc::legacy_asset::{FLegacyPackageHeader, FPackageNameMap};
-    use usmap::{Property, PropertyInner, Struct};
 
     use super::*;
     use crate::mappings::Mappings;
