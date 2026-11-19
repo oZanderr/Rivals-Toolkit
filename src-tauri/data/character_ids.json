@@ -1,6 +1,6 @@
 {
   "source": "https://raw.githubusercontent.com/donutman07/MarvelRivalsCharacterIDs/main/MarvelRivalsCharacterIDs.md",
-  "generated_at": "2026-11-12T14:55:37.465Z",
+  "generated_at": "2026-11-19T15:31:28.805Z",
   "characters": {
     "1011": {
       "name": "Hulk",
@@ -179,6 +179,9 @@
       "name": "Rocket Raccoon",
       "skins": {
         "1023001": "Default",
+        "1023002": "RETRO ROCKETEER",
+        "1023005": "GALACTIC INVADERS",
+        "1023006": "STAR RACCOON",
         "1023100": "Rocky",
         "1023101": "Will of Galacta",
         "1023300": "Bounty Hunter",
@@ -387,6 +390,7 @@
       "name": "Black Widow",
       "skins": {
         "1033001": "Default",
+        "1033006": "IGNITE · BLACK WIDOW",
         "1033100": "Lethal Toxicity",
         "1033300": "Lion's Heartbeat",
         "1033500": "Red Runway Veil",
@@ -674,6 +678,9 @@
       "name": "Jeff the Landshark",
       "skins": {
         "1047001": "Default",
+        "1047002": "NOOB NIBBLER",
+        "1047006": "DARK DEVOURER",
+        "1047007": "PINK PILLAGER",
         "1047100": "ADOPTED AVENGER",
         "1047101": "RAZOR-TOOTH",
         "1047300": "Cuddly Fuzzlefin",
@@ -962,6 +969,9 @@
       "name": "White Fox",
       "skins": {
         "1060001": "Default",
+        "1060002": "JADE MAJESTY",
+        "1060003": "WATERMELON TOURMALINE",
+        "1060004": "AQUAMARINE LUPINE",
         "1060100": "ROSY RECON",
         "1060101": "SECRET AGENT",
         "1060300": "MAGICAL MINT",
@@ -1016,12 +1026,12 @@
     "1064": {
       "name": "Jubilee",
       "skins": {
-        "1054302": "BLUE BREEZES",
         "1064001": "Default",
         "1064100": "COOL COMBUSTION",
         "1064101": "CRIMSON CROWN",
         "1064300": "VAMPY JAMMIES",
         "1064301": "VIRIDIAN VIBES",
+        "1064302": "BLUE BREEZES",
         "1064500": "MIDNIGHT MUTANT"
       }
     },
