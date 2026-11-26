@@ -1,6 +1,6 @@
 {
   "source": "https://raw.githubusercontent.com/donutman07/MarvelRivalsCharacterIDs/main/MarvelRivalsCharacterIDs.md",
-  "generated_at": "2026-11-19T15:31:28.805Z",
+  "generated_at": "2026-11-26T16:40:29.554Z",
   "characters": {
     "1011": {
       "name": "Hulk",
@@ -54,6 +54,9 @@
       "name": "Loki",
       "skins": {
         "1016001": "Default",
+        "1016002": "ENVIOUS EMERLAD",
+        "1016003": "INDIGO ILLUSION",
+        "1016004": "CRIMSON CUNNING",
         "1016100": "Frost Giant",
         "1016101": "IGNITE Loki",
         "1016300": "Shin Sagi-Shi",
@@ -225,6 +228,9 @@
       "name": "Cloak & Dagger",
       "skins": {
         "1025001": "Default",
+        "1025002": "GILDED AGATE",
+        "1025004": "GARNET GLEAM",
+        "1025005": "MALACHITE MIST",
         "1025100": "Lemon Lime",
         "1025300": "Dance Partner",
         "1025301": "Twilight Duo",
@@ -323,6 +329,7 @@
       "name": "Moon Knight",
       "skins": {
         "1030001": "Default",
+        "1030002": "MOONJACK HACKER",
         "1030100": "Golden Moonlight",
         "1030101": "Blood Moon Knight",
         "1030300": "Lunar General",
@@ -495,6 +502,7 @@
       "name": "Scarlet Witch",
       "skins": {
         "1038001": "Default",
+        "1038002": "VIRTUAL INSANITY",
         "1038100": "WHITE WITCH",
         "1038101": "NYX WEAVER",
         "1038102": "WILL OF GALACTA",
@@ -906,6 +914,9 @@
       "name": "Deadpool",
       "skins": {
         "1057001": "Default",
+        "1057002": "MOMENT STEALER",
+        "1057005": "GILDED GUNNER",
+        "1057006": "BLUE BLADES",
         "1057100": "X-FORCE?",
         "1057101": "Workwear Woes",
         "1057102": "VIRTUS.PRO",
@@ -952,6 +963,7 @@
       "name": "Elsa Bloodstone",
       "skins": {
         "1059001": "Default",
+        "1059002": "RUBY RADIANCE",
         "1059100": "APEX HUNTRESS",
         "1059101": "ICY EDGE",
         "1059102": "WILL OF GALACTA",
